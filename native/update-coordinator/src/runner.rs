@@ -1,3 +1,4 @@
+use crate::helper_ui::{Attention, Phase};
 use coordinator::protocol::{
     self, ExecutionFence, InstallationReservation, OperationLease, UpdateCommand,
     UpdateControlReply, UpdateControlRequest,
@@ -1024,12 +1025,22 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
     let (old_pid, manager_command) = match prepare(&plan, &reservation, &owner) {
         Ok(value) => value,
         Err(error) => {
-            let _ = fail(&plan, &mut record, error.clone(), false, Some(reservation));
+            let diagnostic = journal_diagnostic(
+                &error,
+                fail(&plan, &mut record, error.clone(), false, Some(reservation)),
+            );
             let _ = ack(&plan, false, false, Some(&error));
-            panel.show(&format!(
-                "Update not started: {error}. Review this operation with update-status."
-            ));
-            panel.offer_recovery();
+            panel.show(
+                if record.phase == OperationPhase::UserStopped {
+                    Phase::UserStopped
+                } else {
+                    Phase::Attention(Attention::NotStarted)
+                },
+                Some(&diagnostic),
+            );
+            if record.phase != OperationPhase::UserStopped {
+                panel.offer_recovery();
+            }
             if retain(&panel) {
                 panel.close();
                 let recovered = recover_locked(plan, true, &lease)?;
@@ -1050,11 +1061,21 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
         return Err(error);
     }
     if let Err(error) = ack(&plan, true, true, None) {
-        let _ = fail(&plan, &mut record, error.clone(), false, Some(reservation));
-        panel.show(&format!(
-            "Updater ownership ACK failed: {error}; original UI was not stopped."
-        ));
-        panel.offer_recovery();
+        let diagnostic = journal_diagnostic(
+            &error,
+            fail(&plan, &mut record, error.clone(), false, Some(reservation)),
+        );
+        panel.show(
+            if record.phase == OperationPhase::UserStopped {
+                Phase::UserStopped
+            } else {
+                Phase::Attention(Attention::Ownership)
+            },
+            Some(&diagnostic),
+        );
+        if record.phase != OperationPhase::UserStopped {
+            panel.offer_recovery();
+        }
         if retain(&panel) {
             panel.close();
             let restored = recover_locked(plan, true, &lease)?;
@@ -1076,15 +1097,28 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
     );
     match outcome {
         Ok(()) => {
+            panel.show(Phase::Finalizing, None);
             if let Err(error) = transition(
                 &plan,
                 &mut record,
                 OperationPhase::Completed,
                 "New instance and UI/control are ready on the original profile",
             ) {
-                let _ = fail(&plan, &mut record, error.clone(), true, Some(reservation));
-                panel.show(&format!("New UI is ready, but durable completion failed: {error}; reservation retained."));
-                panel.offer_recovery();
+                let diagnostic = journal_diagnostic(
+                    &error,
+                    fail(&plan, &mut record, error.clone(), true, Some(reservation)),
+                );
+                panel.show(
+                    if record.phase == OperationPhase::UserStopped {
+                        Phase::UserStopped
+                    } else {
+                        Phase::Attention(Attention::Completion)
+                    },
+                    Some(&diagnostic),
+                );
+                if record.phase != OperationPhase::UserStopped {
+                    panel.offer_recovery();
+                }
                 if retain(&panel) {
                     panel.close();
                     let reconciled = recover_locked(plan, true, &lease)?;
@@ -1097,10 +1131,8 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
                 return Err(error);
             }
             if let Err(error) = reservation.release() {
-                let _ = transition(&plan, &mut record, OperationPhase::Unknown, format!("New UI ready but installation reservation release failed: {error}; inspect/recover offline"));
-                panel.show(&format!(
-                    "Updated UI ready; reservation release failed: {error}. Recovery required."
-                ));
+                let diagnostic = journal_diagnostic(&error, transition(&plan, &mut record, OperationPhase::Unknown, format!("New UI ready but installation reservation release failed: {error}; inspect/recover offline")));
+                panel.show(Phase::Attention(Attention::Release), Some(&diagnostic));
                 panel.offer_recovery();
                 if retain(&panel) {
                     panel.close();
@@ -1113,20 +1145,31 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
                 }
                 return Err(error);
             }
-            panel.show("Update complete. Your existing profile and preferences were preserved.");
-            thread::sleep(Duration::from_secs(3));
+            panel.close();
             Ok(())
         }
         Err((error, uncertain)) => {
-            let _ = fail(
-                &plan,
-                &mut record,
-                error.clone(),
-                uncertain,
-                Some(reservation),
+            let diagnostic = journal_diagnostic(
+                &error,
+                fail(
+                    &plan,
+                    &mut record,
+                    error.clone(),
+                    uncertain,
+                    Some(reservation),
+                ),
             );
-            panel.show(&format!("Update requires attention: {error}. No automatic retry or rollback. Use update-status / recover for this operation."));
-            panel.offer_recovery();
+            panel.show(
+                if record.phase == OperationPhase::UserStopped {
+                    Phase::UserStopped
+                } else {
+                    Phase::Attention(Attention::Interrupted)
+                },
+                Some(&diagnostic),
+            );
+            if record.phase != OperationPhase::UserStopped {
+                panel.offer_recovery();
+            }
             if retain(&panel) {
                 panel.close();
                 let recovered = recover_locked(plan, true, &lease)?;
@@ -1149,7 +1192,7 @@ fn perform(
     record: &mut OperationRecord,
 ) -> Result<(), (String, bool)> {
     let step = |result: Result<(), String>, unknown: bool| result.map_err(|e| (e, unknown));
-    panel.show("Stopping only the prepared application instance…");
+    panel.show(Phase::Stopping, None);
     step(
         transition(
             plan,
@@ -1176,7 +1219,7 @@ fn perform(
             ),
             true,
         )?;
-        panel.show("Installing from the recorded installation source…");
+        panel.show(Phase::Installing, None);
         step(manager(plan, reservation, cmd, panel, record), true)?;
     }
     step(
@@ -1188,7 +1231,7 @@ fn perform(
         ),
         true,
     )?;
-    panel.show("Validating the actual installed image and recorded source…");
+    panel.show(Phase::Validating, None);
     let image = validate_new(plan, old_pid, panel).map_err(|e| (e, true))?;
     record.installed = true;
     record.candidate = Some(image.clone());
@@ -1205,7 +1248,7 @@ fn perform(
         ),
         true,
     )?;
-    panel.show("Starting the updated application with your existing profile…");
+    panel.show(Phase::Starting, None);
     let mut child = launch(plan, reservation, &image, false).map_err(|e| (e, true))?;
     step(wait_new(plan, reservation, &image, &mut child, panel), true)?;
     if reservation.user_stop_requested().map_err(|e| (e, true))? {
@@ -1217,6 +1260,14 @@ fn perform(
     record.applied = true;
     step(journal(plan, record), true)?;
     Ok(())
+}
+fn journal_diagnostic(error: &str, journal: Result<(), String>) -> String {
+    match journal {
+        Ok(()) => error.to_owned(),
+        Err(journal_error) => {
+            format!("{error}\n\nCould not save operation result: {journal_error}")
+        }
+    }
 }
 fn retain(panel: &crate::helper_ui::Panel) -> bool {
     while panel.visible() || MANAGER_DRAINING.load(std::sync::atomic::Ordering::Acquire) {
@@ -1421,8 +1472,7 @@ fn recover_locked(
     start: bool,
     _lease: &OperationLease,
 ) -> Result<OperationRecord, String> {
-    let mut start = start;
-    loop {
+    {
         verify_staged_helper(&plan)?;
         let mut record = inspect(&plan)?;
         let scoped =
@@ -1451,8 +1501,8 @@ fn recover_locked(
         )?;
         let prepared_generation = reservation.stop_generation;
         let panel = crate::helper_ui::Panel::new(&plan.context.locale)?;
-        panel.show("Reconciling manager, installed image and this profile; no installation will be repeated…");
-        let result = (|| {
+        panel.show(Phase::Reconciling, None);
+        let result: Result<(), String> = (|| {
             let owner = read_lifecycle(&plan)?;
             if owner.stop_generation != reservation.stop_generation
                 || coordinator::executable_identity(&owner.helper_image.path)? != owner.helper_image
@@ -1626,6 +1676,7 @@ fn recover_locked(
                     transition(&plan, &mut record, OperationPhase::Failed, format!("{detail}; explicit recover --start can restore the same version, NOT an upgrade"))?;
                     return Ok(());
                 }
+                panel.show(Phase::RestoringOriginal, None);
                 let mut child = launch(&plan, &reservation, &original, true)?;
                 wait_new(&plan, &reservation, &original, &mut child, &panel)?;
                 if reservation.user_stop_requested()? {
@@ -1655,6 +1706,7 @@ fn recover_locked(
                         return Err("user stop arrived while updated instance was active; wait for its shutdown".into());
                     }
                     record.applied = true;
+                    panel.show(Phase::Finalizing, None);
                     transition(
                         &plan,
                         &mut record,
@@ -1689,12 +1741,14 @@ fn recover_locked(
                 transition(&plan, &mut record, OperationPhase::Failed, "Installation verified but not applied. Explicit recover --start required to start this profile")?;
                 return Ok(());
             }
+            panel.show(Phase::Starting, None);
             let mut child = launch(&plan, &reservation, &image, true)?;
             wait_new(&plan, &reservation, &image, &mut child, &panel)?;
             if reservation.user_stop_requested()? {
                 return Err("user stop superseded recovered instance before completion".into());
             }
             record.applied = true;
+            panel.show(Phase::Finalizing, None);
             transition(
                 &plan,
                 &mut record,
@@ -1712,20 +1766,40 @@ fn recover_locked(
             } else {
                 OperationPhase::Unknown
             };
-            transition(&plan, &mut record, phase, format!("Recovery incomplete: {error}. Reservation retained; no automatic retry/rollback"))?;
+            let journal_error = transition(&plan, &mut record, phase, format!("Recovery incomplete: {error}. Reservation retained; no automatic retry/rollback")).err();
             if read_lifecycle(&plan)
                 .ok()
                 .is_some_and(|owner| stopped(&plan, owner.original_pid).unwrap_or(false))
             {
                 panel.activate();
             }
-            panel.show(&record.detail);
-            panel.offer_recovery();
-            if retain(&panel) {
-                panel.close();
-                start = true;
-                continue;
-            }
+            let diagnostic = match journal_error {
+                Some(journal_error) => {
+                    format!("{error}\n\nCould not save recovery result: {journal_error}")
+                }
+                None => error.clone(),
+            };
+            panel.show(
+                if phase == OperationPhase::UserStopped {
+                    Phase::UserStopped
+                } else {
+                    Phase::Attention(Attention::Recovery)
+                },
+                Some(&diagnostic),
+            );
+            retain(&panel);
+        } else if record.phase == OperationPhase::Completed {
+            panel.close();
+        } else {
+            let phase = if record.phase == OperationPhase::UserStopped {
+                Phase::UserStopped
+            } else if !record.installed {
+                Phase::Attention(Attention::OriginalUnchanged)
+            } else {
+                Phase::Attention(Attention::Interrupted)
+            };
+            panel.show(phase, Some(&record.detail));
+            retain(&panel);
         }
         return result.map(|()| record);
     }

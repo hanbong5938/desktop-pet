@@ -2105,6 +2105,14 @@ define_class!(
             schedule_app_update_confirmation();
         }
 
+        #[unsafe(method(toggleUpdateDiagnostics:))]
+        fn toggle_update_diagnostics(&self, _sender: Option<&AnyObject>) {
+            with_ui_internal(|ui| {
+                ui.menu_panel.toggle_update_diagnostics();
+                ui.sync_character_menu_frame();
+            });
+        }
+
         #[unsafe(method(toggleLifecycleExit:))]
         fn toggle_lifecycle_exit(&self, _sender: Option<&AnyObject>) {
             with_ui_mut(|ui| ui.save_lifecycle_setting(LifecycleSetting::ExitWithHerdr));

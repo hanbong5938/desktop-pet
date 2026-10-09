@@ -51,13 +51,18 @@ impl CardView {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct UpdateCardModel {
     pub(crate) auto_check: bool,
     pub(crate) busy: bool,
+    // Tint only; status_text carries the precise localized operation/check outcome.
     pub(crate) status: CheckStatus,
+    pub(crate) status_text: String,
     pub(crate) running_version: String,
     pub(crate) source: String,
     pub(crate) detail: String,
+    pub(crate) history: String,
+    pub(crate) diagnostics: String,
     pub(crate) last_checked: Option<u64>,
     pub(crate) action: Option<UpdateAction>,
 }
@@ -74,6 +79,10 @@ pub(crate) struct AppUpdateCard {
     detail: Retained<NSTextField>,
     running: Retained<NSTextField>,
     source: Retained<NSTextField>,
+    history: Retained<NSTextField>,
+    diagnostics_toggle: Retained<NSButton>,
+    diagnostics: Retained<NSTextField>,
+    diagnostics_expanded: bool,
     second_separator: Retained<NSBox>,
     check: Retained<NSButton>,
     apply: Retained<NSButton>,
@@ -111,6 +120,15 @@ impl AppUpdateCard {
         let detail = label(10.5, false, true, mtm);
         let running = label(10.5, false, true, mtm);
         let source = label(10.5, false, true, mtm);
+        let history = label(10.0, false, true, mtm);
+        history.setHidden(true);
+        let diagnostics_toggle = button(target, sel!(toggleUpdateDiagnostics:), mtm);
+        diagnostics_toggle.setHidden(true);
+        let diagnostics = label(10.0, false, true, mtm);
+        diagnostics.setSelectable(true);
+        diagnostics.setRefusesFirstResponder(false);
+        diagnostics.setLineBreakMode(NSLineBreakMode::ByCharWrapping);
+        diagnostics.setHidden(true);
         let second_separator = separator(mtm);
         let check = button(target, sel!(checkAppUpdate:), mtm);
         let apply = button(target, sel!(applyAppUpdate:), mtm);
@@ -127,6 +145,9 @@ impl AppUpdateCard {
             &*detail,
             &*running,
             &*source,
+            &*history,
+            &*diagnostics_toggle,
+            &*diagnostics,
             &*second_separator,
             &*check,
             &*apply,
@@ -148,6 +169,10 @@ impl AppUpdateCard {
             running,
             source,
             second_separator,
+            history,
+            diagnostics_toggle,
+            diagnostics,
+            diagnostics_expanded: false,
             check,
             apply,
             third_separator,
@@ -161,6 +186,13 @@ impl AppUpdateCard {
 
     pub(crate) fn view(&self) -> &NSView {
         &self.view
+    }
+    pub(crate) fn diagnostics_toggle(&self) -> &NSButton {
+        &self.diagnostics_toggle
+    }
+
+    pub(crate) fn diagnostics(&self) -> &NSTextField {
+        &self.diagnostics
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
@@ -182,10 +214,18 @@ impl AppUpdateCard {
             text(locale, Message::AppUpdateAutomaticHelp),
         );
         accessibility(&self.check, text(locale, Message::AppUpdateCheckNow));
-        if let Some(model) = self.model.take() {
+        if let Some(model) = self.model.clone() {
             self.refresh(&model);
         } else {
-            self.render_status(&CheckStatus::NotChecked, "", "", "", None, None);
+            self.render_status(
+                &CheckStatus::NotChecked,
+                text(self.locale, Message::AppUpdateNotChecked),
+                "",
+                "",
+                "",
+                None,
+                None,
+            );
         }
     }
 
@@ -195,60 +235,73 @@ impl AppUpdateCard {
         } else {
             NSControlStateValueOff
         });
-        let busy = model.busy || model.status == CheckStatus::Checking;
+        let busy = model.busy;
         self.auto_switch.setEnabled(!busy);
         self.check.setEnabled(!busy);
         self.render_status(
             &model.status,
+            &model.status_text,
             &model.running_version,
             &model.source,
             &model.detail,
             model.last_checked,
             model.action.as_ref(),
         );
-        self.apply.setEnabled(
-            !busy
-                && !matches!(
-                    model.status,
-                    CheckStatus::NotChecked
-                        | CheckStatus::Unsupported
-                        | CheckStatus::Failed
-                        | CheckStatus::Checking
-                ),
+        set_text(&self.history, &model.history);
+        self.history.setHidden(model.history.is_empty());
+        accessibility(&self.history, &model.history);
+        if self
+            .model
+            .as_ref()
+            .is_none_or(|old| old.diagnostics != model.diagnostics)
+        {
+            set_text(&self.diagnostics, &model.diagnostics);
+        }
+        accessibility(&self.diagnostics, &model.diagnostics);
+        self.diagnostics_toggle
+            .setHidden(model.diagnostics.is_empty());
+        self.diagnostics
+            .setHidden(model.diagnostics.is_empty() || !self.diagnostics_expanded);
+        self.localize_diagnostics_toggle();
+        self.apply.setEnabled(!busy && model.action.is_some());
+        self.model = Some(model.clone());
+    }
+
+    pub(crate) fn toggle_diagnostics(&mut self) {
+        self.diagnostics_expanded = !self.diagnostics_expanded;
+        self.diagnostics.setHidden(
+            !self.diagnostics_expanded
+                || self
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| model.diagnostics.is_empty()),
         );
-        self.model = Some(UpdateCardModel {
-            auto_check: model.auto_check,
-            busy: model.busy,
-            status: model.status.clone(),
-            running_version: model.running_version.clone(),
-            source: model.source.clone(),
-            detail: model.detail.clone(),
-            last_checked: model.last_checked,
-            action: model.action.clone(),
-        });
+        self.localize_diagnostics_toggle();
+    }
+
+    fn localize_diagnostics_toggle(&self) {
+        let title = text(
+            self.locale,
+            if self.diagnostics_expanded {
+                Message::AppUpdateHideDiagnostics
+            } else {
+                Message::AppUpdateShowDiagnostics
+            },
+        );
+        self.diagnostics_toggle.setTitle(&NSString::from_str(title));
+        accessibility(&self.diagnostics_toggle, title);
     }
 
     fn render_status(
         &self,
         status: &CheckStatus,
+        status_text: &str,
         running_version: &str,
         source: &str,
         detail: &str,
         last_checked: Option<u64>,
         action: Option<&UpdateAction>,
     ) {
-        let message = match status {
-            CheckStatus::NotChecked => Message::AppUpdateNotChecked,
-            CheckStatus::Checking => Message::AppUpdateChecking,
-            CheckStatus::Current => Message::AppUpdateCurrent,
-            CheckStatus::Applied => Message::AppUpdateApplied,
-            CheckStatus::Available => Message::AppUpdateAvailable,
-            CheckStatus::Installed => Message::AppUpdateInstalled,
-            CheckStatus::Local => Message::AppUpdateLocal,
-            CheckStatus::Unsupported => Message::AppUpdateUnsupported,
-            CheckStatus::Failed => Message::AppUpdateFailed,
-        };
-        let status_text = text(self.locale, message);
         let (symbol, tint) = match status {
             CheckStatus::Current | CheckStatus::Installed | CheckStatus::Applied => {
                 ("✓", NSColor::systemGreenColor())
@@ -396,6 +449,23 @@ impl AppUpdateCard {
         }
         y += 7.0;
         place(&self.last_checked, 14.0, full, 14.0, &mut y, apply);
+        if !self.history.isHidden() {
+            y += 5.0;
+            place(&self.history, 14.0, full, 14.0, &mut y, apply);
+        }
+        if !self.diagnostics_toggle.isHidden() {
+            y += 6.0;
+            let toggle_width = button_width(&self.diagnostics_toggle, full);
+            if apply {
+                self.diagnostics_toggle
+                    .setFrame(rect(14.0, y, toggle_width, 25.0));
+            }
+            y += 25.0;
+            if !self.diagnostics.isHidden() {
+                y += 5.0;
+                place(&self.diagnostics, 14.0, full, 14.0, &mut y, apply);
+            }
+        }
         y + 14.0
     }
 }

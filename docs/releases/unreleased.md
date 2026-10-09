@@ -4,6 +4,8 @@
 
 **Historical record, not the current release note or public v0.3.2 proof.** The v0.2.0 native promotion and v0.2.1 Arin compatibility patch remain their own frozen releases. The later session search/order, CLI automation, drafts, resizing, browser/official Download & Apply, protocol-2 updater and worker-only JIT changes are now selected in the prepared v0.3.2 stable source. Evidence below was observed in the named earlier source snapshots and isolated builds, not in a newly verified integrated/tagged/published v0.3.2 binary. Follow the [v0.3.2 note](v0.3.2.md) and [bilingual migration](0.3.md); the Release catalog owns public status.
 
+**Current unreleased source UX correction / 현재 미출시 소스 UX 수정:** The app update card now separates live read-only check/activity from retained last-operation history, shows concise localized version/source/status text, and initially collapses selectable raw paths, SHA, journal and errors into diagnostics. The Korean/English helper shows indeterminate phase progress, Finalizing before Completed, and closes success only after ready replacement, durable outcome and released reservation; failures/unknown remain for attention. Dismissal does not cancel, and unchanged-original recovery is not an upgrade or installer replay. 앱 업데이트 카드의 현재 확인/진행 상태와 마지막 작업 이력을 분리하고 간결한 한국어/영어 안내와 처음 접힌 원본 진단을 제공합니다. 도우미는 불확정 진행·완료 처리 단계를 표시하고 준비·결과 기록·예약 해제 후에만 성공 창을 닫으며 실패/불명은 남깁니다. 닫기는 취소가 아니고 변경 없는 원본 복구는 업그레이드나 설치 재실행이 아닙니다. **This records a source change only, not a published or installed release, production upgrade, official signing, or new end-to-end gate evidence.**
+
 | Source | What it provides |
 | --- | --- |
 | Historical public v0.1.11 binary | Previous stable app without the promoted native groups; old assets remain unchanged |

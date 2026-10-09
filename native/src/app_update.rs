@@ -1,6 +1,6 @@
 //! App-side, read-only update discovery and explicit helper handoff.
 //! AppKit never waits for a manager, hash, source probe, or helper stdout.
-use crate::i18n::UiLocale;
+use crate::i18n::{text, Message, UiLocale};
 use crate::update_card::UpdateCardModel;
 use herdr_update_coordinator::protocol::{
     latest_operation, lock_operation, private_updates, start_allowed, ExecutionFence,
@@ -11,6 +11,7 @@ use herdr_update_coordinator::{
     CheckStatus, InstallOrigin, UpdateContext, UpdatePlan,
 };
 use serde::Deserialize;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -72,6 +73,7 @@ pub(super) struct AppUpdateService {
     launch_plan: Option<UpdatePlan>,
     prepared_plan: Option<UpdatePlan>,
     operation: Option<OperationRecord>,
+    previous_outcome: Option<OperationRecord>,
     observed_operation_id: Option<String>,
     retired_operation_id: Option<String>,
     next_journal_poll: Instant,
@@ -107,6 +109,7 @@ impl AppUpdateService {
             launching: None,
             launch_plan: None,
             prepared_plan: None,
+            previous_outcome: None,
             operation: None,
             observed_operation_id: None,
             retired_operation_id: None,
@@ -224,6 +227,9 @@ impl AppUpdateService {
                         && self.journal_error.is_none()
                         && (matching_observation || not_yet_observed)
                     {
+                        // Keep the proven outcome for presentation even after the runtime
+                        // observation retires; never delete or alter the durable journal.
+                        self.previous_outcome = Some(record.clone());
                         changed = true;
                         self.observed_operation_id = None;
                         self.operation = None;
@@ -432,6 +438,14 @@ impl AppUpdateService {
                 self.journal_error_operation_id = Some(operation_id.into());
             }
         }
+        if terminal {
+            if let Some(record) = self.operation.as_ref() {
+                if self.previous_outcome.as_ref() != Some(record) {
+                    self.previous_outcome = Some(record.clone());
+                    changed = true;
+                }
+            }
+        }
         if terminal && self.launching.as_deref() == Some(operation_id) {
             self.launching = None;
             if let Some(plan) = self.launch_plan.take() {
@@ -491,6 +505,9 @@ impl AppUpdateService {
                 self.journal_error = None;
                 self.journal_error_operation_id = None;
                 self.observed_operation_id = Some(record.operation_id.clone());
+                if terminal_phase(record.phase) && self.previous_outcome.as_ref() != Some(&record) {
+                    self.previous_outcome = Some(record.clone());
+                }
                 self.operation = Some(record);
             }
             Ok(_) => {}
@@ -534,90 +551,160 @@ impl AppUpdateService {
             .as_ref()
             .map(|snapshot| &snapshot.origin)
             .or_else(|| self.context.as_ref()?.running_origin.as_deref());
-        let source = origin
-            .map(source_description)
-            .unwrap_or_else(|| "Unknown running source".into());
-        let diagnostic = self
-            .journal_error
-            .as_deref()
-            .or(self.problem.as_deref())
-            .or_else(|| self.operation.as_ref().map(|record| record.detail.as_str()))
-            .or_else(|| {
-                self.snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.detail.as_str())
-            })
-            .unwrap_or("Running executable has not been checked");
-        let detail = if let Some(record) = self.operation.as_ref() {
-            let phase = operation_phase(locale, record.phase);
-            let historical = matches!(
-                record.phase,
-                OperationPhase::Completed
-                    | OperationPhase::Failed
-                    | OperationPhase::Unknown
-                    | OperationPhase::UserStopped
-            );
-            let label = if locale == UiLocale::Ko {
-                format!(
-                    "{}단계: {phase} · 설치됨: {} · 적용됨: {}",
-                    if historical {
-                        "마지막 작업 · "
-                    } else {
-                        ""
-                    },
-                    if record.installed { "예" } else { "아니요" },
-                    if record.applied { "예" } else { "아니요" }
-                )
-            } else {
-                format!(
-                    "{}Phase: {phase} · Installed: {} · Applied: {}",
-                    if historical { "Last operation · " } else { "" },
-                    record.installed,
-                    record.applied
-                )
-            };
-            format!("{label}\n{diagnostic}")
-        } else if let Some(version) = self
-            .snapshot
+        let active = self
+            .operation
             .as_ref()
-            .and_then(|snapshot| snapshot.installed_version.as_ref())
-        {
-            if locale == UiLocale::Ko {
-                format!("설치된 패키지: {version}\n{diagnostic}")
-            } else {
-                format!("Installed package: {version}\n{diagnostic}")
-            }
-        } else {
-            diagnostic.to_owned()
-        };
-        let status = if self.journal_error.is_some() || self.problem.is_some() {
-            CheckStatus::Failed
-        } else if let Some(record) = self.operation.as_ref() {
-            match record.phase {
-                OperationPhase::Completed if record.applied => CheckStatus::Applied,
-                OperationPhase::Completed if record.installed => CheckStatus::Installed,
-                OperationPhase::Failed | OperationPhase::Unknown | OperationPhase::UserStopped => {
-                    CheckStatus::Failed
-                }
-                _ => CheckStatus::Checking,
-            }
+            .filter(|record| !terminal_phase(record.phase));
+        let outcome = self
+            .operation
+            .as_ref()
+            .filter(|record| terminal_phase(record.phase))
+            .or(self.previous_outcome.as_ref());
+        let history = outcome.map_or_else(String::new, |record| {
+            format!(
+                "{}: {}",
+                text(locale, Message::AppUpdatePreviousOperation),
+                text(locale, outcome_message(record))
+            )
+        });
+        let (status, status_message, detail_message) = if self.journal_error.is_some() {
+            (
+                CheckStatus::Failed,
+                Message::AppUpdateOutcomeUnknown,
+                Message::AppUpdateJournalHelp,
+            )
+        } else if self.problem.is_some() && !self.check_busy {
+            (
+                CheckStatus::Failed,
+                Message::AppUpdateFailed,
+                Message::AppUpdateFailedHelp,
+            )
+        } else if let Some(record) = active {
+            (
+                CheckStatus::Checking,
+                phase_message(record.phase),
+                if record.phase == OperationPhase::Starting {
+                    Message::AppUpdateStartingHelp
+                } else {
+                    Message::AppUpdateActiveHelp
+                },
+            )
+        } else if self.launching.is_some() {
+            (
+                CheckStatus::Checking,
+                Message::AppUpdateLaunchPending,
+                Message::AppUpdateActiveHelp,
+            )
         } else if self.check_busy {
-            CheckStatus::Checking
+            (
+                CheckStatus::Checking,
+                Message::AppUpdateChecking,
+                Message::AppUpdateCheckingHelp,
+            )
+        } else if self.operation.as_ref().is_some_and(|record| {
+            matches!(
+                record.phase,
+                OperationPhase::Unknown | OperationPhase::Failed | OperationPhase::UserStopped
+            )
+        }) {
+            let record = self.operation.as_ref().expect("terminal operation");
+            (
+                CheckStatus::Failed,
+                outcome_message(record),
+                match record.phase {
+                    OperationPhase::Unknown => Message::AppUpdateUnknownHelp,
+                    OperationPhase::UserStopped => Message::AppUpdateStoppedHelp,
+                    _ => Message::AppUpdateBlockedHelp,
+                },
+            )
         } else {
-            self.snapshot
+            let status = self
+                .snapshot
                 .as_ref()
-                .map_or(CheckStatus::NotChecked, |snapshot| snapshot.status)
+                .map_or(CheckStatus::NotChecked, |snapshot| snapshot.status);
+            let detail = if self.observed_operation_id.is_some() || self.prepared_plan.is_some() {
+                Message::AppUpdateBlockedHelp
+            } else {
+                check_detail_message(status)
+            };
+            (status, check_status_message(status), detail)
         };
+        let mut diagnostics = String::new();
+        if let Some(context) = self.context.as_ref() {
+            let _ = writeln!(
+                diagnostics,
+                "Running executable: {}",
+                context.running.path.display()
+            );
+            let _ = writeln!(diagnostics, "Running SHA-256: {}", context.running.sha256);
+        }
+        if let Some(origin) = origin {
+            let _ = writeln!(
+                diagnostics,
+                "Running source: {}",
+                source_description(origin)
+            );
+        }
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            let _ = writeln!(
+                diagnostics,
+                "Check: {:?} · {}",
+                snapshot.status, snapshot.detail
+            );
+            if let Some(version) = snapshot.installed_version.as_ref() {
+                let _ = writeln!(diagnostics, "Installed package: {version}");
+            }
+            if let Some(plan) = snapshot.plan.as_ref() {
+                let _ = writeln!(diagnostics, "Candidate operation: {}", plan.operation_id);
+                if let Some(candidate) = plan.candidate.as_ref() {
+                    let _ = writeln!(
+                        diagnostics,
+                        "Candidate: {} · SHA-256 {}",
+                        candidate.path.display(),
+                        candidate.sha256
+                    );
+                }
+            }
+        }
+        if let Some(record) = self.operation.as_ref() {
+            append_operation_diagnostics(&mut diagnostics, "Observed operation", record);
+        }
+        if let Some(record) = self.previous_outcome.as_ref() {
+            if self.operation.as_ref() != Some(record) {
+                append_operation_diagnostics(&mut diagnostics, "Previous operation", record);
+            }
+        }
+        if let Some(error) = self.problem.as_ref() {
+            let _ = writeln!(diagnostics, "Check or launch error: {error}");
+        }
+        if let Some(error) = self.journal_error.as_ref() {
+            let _ = writeln!(diagnostics, "Journal error: {error}");
+        }
         UpdateCardModel {
             auto_check: self.auto_check,
-            busy: self.launching.is_some(),
+            busy: self.check_busy || self.launching.is_some() || active.is_some(),
             status,
-            running_version: self.context.as_ref().map_or_else(
-                || "Unknown".into(),
-                |context| format!("{} · {}", context.version, context.running.path.display()),
-            ),
-            source,
-            detail,
+            status_text: text(locale, status_message).into(),
+            running_version: self
+                .context
+                .as_ref()
+                .map_or_else(String::new, |context| context.version.clone()),
+            source: match origin {
+                Some(InstallOrigin::Homebrew { formula, .. }) => {
+                    format!(
+                        "{} · {formula}",
+                        text(locale, Message::AppUpdateSourceHomebrew)
+                    )
+                }
+                _ => text(
+                    locale,
+                    origin.map_or(Message::AppUpdateSourceUnknown, source_message),
+                )
+                .into(),
+            },
+            detail: text(locale, detail_message).into(),
+            history,
+            diagnostics,
             last_checked: self.last_checked,
             action: self.plan().map(|plan| plan.action.clone()),
         }
@@ -711,26 +798,92 @@ fn settled_terminal(record: &OperationRecord) -> bool {
         }
 }
 
-fn operation_phase(locale: UiLocale, phase: OperationPhase) -> &'static str {
-    match (locale, phase) {
-        (UiLocale::Ko, OperationPhase::Preparing) => "준비 중",
-        (UiLocale::Ko, OperationPhase::Stopping) => "이전 실행 종료 중",
-        (UiLocale::Ko, OperationPhase::Installing) => "설치/빌드 중",
-        (UiLocale::Ko, OperationPhase::Validating) => "새 설치 검증 중",
-        (UiLocale::Ko, OperationPhase::Starting) => "새 실행 확인 중",
-        (UiLocale::Ko, OperationPhase::Completed) => "확인 완료",
-        (UiLocale::Ko, OperationPhase::Failed) => "실패",
-        (UiLocale::Ko, OperationPhase::Unknown) => "결과 확인 불가",
-        (UiLocale::Ko, OperationPhase::UserStopped) => "사용자가 중지함",
-        (UiLocale::En, OperationPhase::Preparing) => "Preparing",
-        (UiLocale::En, OperationPhase::Stopping) => "Stopping old instance",
-        (UiLocale::En, OperationPhase::Installing) => "Installing/building",
-        (UiLocale::En, OperationPhase::Validating) => "Validating installation",
-        (UiLocale::En, OperationPhase::Starting) => "Verifying new instance",
-        (UiLocale::En, OperationPhase::Completed) => "Verified",
-        (UiLocale::En, OperationPhase::Failed) => "Failed",
-        (UiLocale::En, OperationPhase::Unknown) => "Outcome unknown",
-        (UiLocale::En, OperationPhase::UserStopped) => "Stopped by user",
+fn terminal_phase(phase: OperationPhase) -> bool {
+    matches!(
+        phase,
+        OperationPhase::Completed
+            | OperationPhase::Failed
+            | OperationPhase::Unknown
+            | OperationPhase::UserStopped
+    )
+}
+
+fn phase_message(phase: OperationPhase) -> Message {
+    match phase {
+        OperationPhase::Preparing => Message::AppUpdatePreparing,
+        OperationPhase::Stopping => Message::AppUpdateStopping,
+        OperationPhase::Installing => Message::AppUpdateInstalling,
+        OperationPhase::Validating => Message::AppUpdateValidating,
+        OperationPhase::Starting => Message::AppUpdateStarting,
+        OperationPhase::Completed => Message::AppUpdateApplied,
+        OperationPhase::Failed => Message::AppUpdateFailed,
+        OperationPhase::Unknown => Message::AppUpdateOutcomeUnknown,
+        OperationPhase::UserStopped => Message::AppUpdateUserStopped,
+    }
+}
+
+fn outcome_message(record: &OperationRecord) -> Message {
+    match record.phase {
+        OperationPhase::Completed if record.installed && record.applied => {
+            Message::AppUpdateApplied
+        }
+        OperationPhase::Failed => Message::AppUpdateFailed,
+        OperationPhase::UserStopped => Message::AppUpdateUserStopped,
+        _ => Message::AppUpdateOutcomeUnknown,
+    }
+}
+
+fn source_message(origin: &InstallOrigin) -> Message {
+    match origin {
+        InstallOrigin::Herdr { .. } => Message::AppUpdateSourceHerdr,
+        InstallOrigin::Local { .. } => Message::AppUpdateSourceLocal,
+        InstallOrigin::Homebrew { .. } => Message::AppUpdateSourceHomebrew,
+        InstallOrigin::Manual { .. } => Message::AppUpdateSourceManual,
+        InstallOrigin::Unknown { .. } => Message::AppUpdateSourceUnknown,
+    }
+}
+
+fn check_status_message(status: CheckStatus) -> Message {
+    match status {
+        CheckStatus::NotChecked => Message::AppUpdateNotChecked,
+        CheckStatus::Checking => Message::AppUpdateChecking,
+        CheckStatus::Current => Message::AppUpdateCurrent,
+        CheckStatus::Applied => Message::AppUpdateApplied,
+        CheckStatus::Available => Message::AppUpdateAvailable,
+        CheckStatus::Installed => Message::AppUpdateInstalled,
+        CheckStatus::Local => Message::AppUpdateLocal,
+        CheckStatus::Unsupported => Message::AppUpdateUnsupported,
+        CheckStatus::Failed => Message::AppUpdateFailed,
+    }
+}
+
+fn check_detail_message(status: CheckStatus) -> Message {
+    match status {
+        CheckStatus::NotChecked => Message::AppUpdateNotCheckedHelp,
+        CheckStatus::Checking => Message::AppUpdateCheckingHelp,
+        CheckStatus::Current | CheckStatus::Applied => Message::AppUpdateCurrentHelp,
+        CheckStatus::Available => Message::AppUpdateAvailableHelp,
+        CheckStatus::Installed => Message::AppUpdateInstalledHelp,
+        CheckStatus::Local => Message::AppUpdateLocalHelp,
+        CheckStatus::Unsupported => Message::AppUpdateUnsupportedHelp,
+        CheckStatus::Failed => Message::AppUpdateFailedHelp,
+    }
+}
+
+fn append_operation_diagnostics(diagnostics: &mut String, label: &str, record: &OperationRecord) {
+    let _ = writeln!(
+        diagnostics,
+        "{label}: {} · phase {:?} · installed {} · applied {} · fence {:?}",
+        record.operation_id, record.phase, record.installed, record.applied, record.execution_fence
+    );
+    let _ = writeln!(diagnostics, "Operation detail: {}", record.detail);
+    if let Some(candidate) = record.candidate.as_ref() {
+        let _ = writeln!(
+            diagnostics,
+            "Candidate: {} · SHA-256 {}",
+            candidate.path.display(),
+            candidate.sha256
+        );
     }
 }
 
@@ -1027,6 +1180,8 @@ mod tests {
             Some(&UpdateAction::LocalRebuild)
         );
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
+        let history = service.model(UiLocale::En).history;
+        assert!(!service.model(UiLocale::En).busy);
         assert_eq!(
             service.model(UiLocale::En).action,
             Some(UpdateAction::LocalRebuild)
@@ -1035,6 +1190,7 @@ mod tests {
         let prior_id = prior.operation_id.clone();
         service.journal(&prior_id, Ok(Some(prior)), None);
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
+        assert_eq!(service.model(UiLocale::En).history, history);
         assert!(service.plan().is_some());
     }
 
@@ -1204,9 +1360,18 @@ mod tests {
     #[test]
     fn failed_check_does_not_advance_successful_check_time() {
         let mut service = AppUpdateService::new(None, false, Some(11));
-        assert_eq!(service.checked(Err("offline".into()), None), None);
-        assert_eq!(service.model(UiLocale::En).last_checked, Some(11));
-        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Failed);
+        assert_eq!(
+            service.checked(Err("untranslated /isolated/check-failure".into()), None),
+            None
+        );
+        let ko = service.model(UiLocale::Ko);
+        assert_eq!(ko.last_checked, Some(11));
+        assert_eq!(ko.status, CheckStatus::Failed);
+        assert!(!ko.detail.contains("untranslated"));
+        assert!(!ko.status_text.contains("/isolated/"));
+        assert!(ko
+            .diagnostics
+            .contains("untranslated /isolated/check-failure"));
     }
 
     #[test]
@@ -1214,11 +1379,12 @@ mod tests {
         let mut service = AppUpdateService::new(None, false, Some(11));
         service.latest_journal(Err("reserved operation has no valid journal".into()));
         service.checked(Ok(local_check()), None);
-        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Failed);
-        assert!(service
-            .model(UiLocale::En)
-            .detail
-            .contains("reserved operation"));
+        let model = service.model(UiLocale::En);
+        assert_eq!(model.status, CheckStatus::Failed);
+        assert!(model
+            .diagnostics
+            .contains("reserved operation has no valid journal"));
+        assert!(!model.detail.contains("reserved operation"));
         assert!(service.plan().is_none());
     }
 
@@ -1235,7 +1401,13 @@ mod tests {
             applied: false,
             candidate: None,
         })));
-        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Checking);
+        let model = service.model(UiLocale::En);
+        assert_eq!(model.status, CheckStatus::Checking);
+        assert!(model.busy);
+        assert!(model.action.is_none());
+        assert!(model.history.is_empty());
+        assert!(!model.detail.contains("new instance not yet verified"));
+        assert!(model.diagnostics.contains("new instance not yet verified"));
     }
 
     #[test]
@@ -1255,10 +1427,169 @@ mod tests {
         service.latest_journal(Ok(Some(record.clone())));
         let revision = service.revision();
         let model = service.model(UiLocale::En);
-        assert_eq!(model.status, CheckStatus::Applied);
+        assert_eq!(model.status, CheckStatus::NotChecked);
+        assert!(!model.busy);
         assert!(model.action.is_none());
         service.journal(operation_id, Ok(Some(record)), None);
         assert_eq!(service.revision(), revision);
+    }
+
+    #[test]
+    fn completed_history_survives_check_retirement_and_never_replaces_current_discovery() {
+        let snapshot = local_check();
+        let context = snapshot.plan.as_ref().unwrap().context.clone();
+        let mut service = AppUpdateService::new(None, false, None);
+        service.context = Some(context);
+        let mut completed = failed_record('b');
+        completed.phase = OperationPhase::Completed;
+        completed.execution_fence = ExecutionFence::ManagerExited;
+        completed.installed = true;
+        completed.applied = true;
+        completed.detail = "private /isolated/operation/result".into();
+        completed.candidate = Some(ExecutableIdentity {
+            path: PathBuf::from("/isolated/secret/new-app"),
+            sha256: "private candidate sha".into(),
+        });
+        service.latest_journal(Ok(Some(completed.clone())));
+        service.check_busy = true;
+        let checking = service.model(UiLocale::Ko);
+        assert!(checking.busy);
+        assert_eq!(checking.status, CheckStatus::Checking);
+        assert!(checking.action.is_none());
+        let history = checking.history;
+
+        service.checked(Ok(snapshot), Some(SettledOperationProof(completed.clone())));
+        let discovered = service.model(UiLocale::Ko);
+        assert!(!discovered.busy);
+        assert_eq!(discovered.status, CheckStatus::Local);
+        assert_eq!(discovered.action, Some(UpdateAction::LocalRebuild));
+        assert_eq!(discovered.history, history);
+        assert_eq!(
+            discovered.running_version,
+            service.context.as_ref().unwrap().version
+        );
+        for summary in [
+            &discovered.status_text,
+            &discovered.source,
+            &discovered.detail,
+            &discovered.history,
+        ] {
+            assert!(!summary.contains("/isolated/"));
+            assert!(!summary.contains("private"));
+        }
+        assert!(discovered
+            .diagnostics
+            .contains("/isolated/local-source/app"));
+        assert!(discovered.diagnostics.contains("/isolated/secret/new-app"));
+        assert!(discovered.diagnostics.contains("private candidate sha"));
+        assert!(discovered
+            .diagnostics
+            .contains("private /isolated/operation/result"));
+        service.latest_journal(Ok(Some(completed)));
+        assert!(service.plan().is_some());
+        assert_eq!(service.model(UiLocale::Ko).history, history);
+
+        let mut current = local_check();
+        current.status = CheckStatus::Current;
+        current.plan = None;
+        service.checked(Ok(current), None);
+        let current = service.model(UiLocale::Ko);
+        assert_eq!(current.status, CheckStatus::Current);
+        assert!(!current.busy);
+        assert!(current.action.is_none());
+        assert_eq!(current.history, history);
+    }
+
+    #[test]
+    fn homebrew_source_shows_formula_without_exposing_install_paths() {
+        let mut snapshot = local_check();
+        let origin = InstallOrigin::Homebrew {
+            brew: PathBuf::from("/isolated/private/bin/brew"),
+            formula: "example/tap/herdr-pet".into(),
+            cellar_formula_root: PathBuf::from("/isolated/private/Cellar/herdr-pet"),
+            prefix: PathBuf::from("/isolated/private/prefix"),
+            locator: PathBuf::from("/isolated/private/app"),
+        };
+        snapshot.origin = origin.clone();
+        snapshot.plan = None;
+        let mut service = AppUpdateService::new(None, false, None);
+        service.checked(Ok(snapshot), None);
+        for locale in [UiLocale::En, UiLocale::Ko] {
+            let model = service.model(locale);
+            assert_eq!(model.source, "Homebrew · example/tap/herdr-pet");
+            assert!(!model.source.contains("/isolated/"));
+            assert!(model.diagnostics.contains("/isolated/private/bin/brew"));
+            assert!(model.diagnostics.contains("/isolated/private/app"));
+        }
+        assert!(source_description(&origin).contains("/isolated/private/bin/brew"));
+        assert!(source_description(&origin).contains("/isolated/private/app"));
+    }
+
+    #[test]
+    fn newer_completed_operation_replaces_retained_history() {
+        let mut service = AppUpdateService::new(None, false, None);
+        let prior = failed_record('a');
+        service.latest_journal(Ok(Some(prior.clone())));
+        service.checked(Ok(local_check()), Some(SettledOperationProof(prior)));
+        let prior_history = service.model(UiLocale::En).history;
+
+        let mut newer = failed_record('b');
+        newer.phase = OperationPhase::Starting;
+        newer.execution_fence = ExecutionFence::ManagerIntent;
+        service.latest_journal(Ok(Some(newer.clone())));
+        let active = service.model(UiLocale::En);
+        assert_eq!(active.status, CheckStatus::Checking);
+        assert!(active.busy);
+        assert!(active.action.is_none());
+        assert_eq!(active.history, prior_history);
+
+        newer.phase = OperationPhase::Completed;
+        newer.execution_fence = ExecutionFence::ManagerExited;
+        newer.installed = true;
+        newer.applied = true;
+        service.latest_journal(Ok(Some(newer.clone())));
+        let completed = service.model(UiLocale::En);
+        assert_eq!(completed.status, CheckStatus::Local);
+        assert!(!completed.busy);
+        assert!(completed.action.is_none());
+        assert_ne!(completed.history, prior_history);
+
+        service.checked(Ok(local_check()), Some(SettledOperationProof(newer)));
+        let retired = service.model(UiLocale::En);
+        assert_eq!(retired.status, CheckStatus::Local);
+        assert_eq!(retired.action, Some(UpdateAction::LocalRebuild));
+        assert_eq!(retired.history, completed.history);
+    }
+
+    #[test]
+    fn unresolved_outcomes_remain_blocked_without_admission() {
+        let mut service = AppUpdateService::new(None, false, None);
+        let mut record = failed_record('a');
+        record.phase = OperationPhase::Unknown;
+        record.detail = "raw /isolated/uncertain".into();
+        service.latest_journal(Ok(Some(record.clone())));
+        service.checked(Ok(local_check()), None);
+        let unknown = service.model(UiLocale::Ko);
+        assert_eq!(unknown.status, CheckStatus::Failed);
+        assert!(!unknown.busy);
+        assert!(unknown.action.is_none());
+        assert!(unknown.diagnostics.contains("raw /isolated/uncertain"));
+        assert!(!unknown.detail.contains("/isolated/"));
+
+        record.phase = OperationPhase::UserStopped;
+        service.latest_journal(Ok(Some(record.clone())));
+        service.checked(Ok(local_check()), None);
+        let stopped = service.model(UiLocale::Ko);
+        assert_eq!(stopped.status, CheckStatus::Failed);
+        assert!(stopped.action.is_none());
+        assert!(!stopped.detail.contains("/isolated/"));
+
+        record.phase = OperationPhase::Failed;
+        service.latest_journal(Ok(Some(record)));
+        service.checked(Ok(local_check()), None);
+        let failed = service.model(UiLocale::Ko);
+        assert_eq!(failed.status, CheckStatus::Failed);
+        assert!(failed.action.is_none());
     }
 
     #[test]
@@ -1307,14 +1638,16 @@ mod tests {
         let card = service.model(UiLocale::En);
         assert!(card.busy);
         assert_eq!(card.status, CheckStatus::Checking);
-        assert!(card.detail.contains("awaiting original Stop"));
+        assert!(card.diagnostics.contains("awaiting original Stop"));
+        assert!(!card.detail.contains("awaiting original Stop"));
         record.phase = OperationPhase::Failed;
         record.detail = "Stop reply failed".into();
         service.journal(operation_id, Ok(Some(record)), None);
         let failed = service.model(UiLocale::En);
         assert!(!failed.busy);
         assert_eq!(failed.status, CheckStatus::Failed);
-        assert!(failed.detail.contains("Stop reply failed"));
+        assert!(failed.diagnostics.contains("Stop reply failed"));
+        assert!(!failed.detail.contains("Stop reply failed"));
     }
     fn pending_local_launch() -> (AppUpdateService, UpdatePlan) {
         let snapshot = local_check();
@@ -1390,10 +1723,12 @@ mod tests {
         ));
         service.checked(Ok(local_check()), None);
         assert!(service.plan().is_none());
-        assert!(service
-            .model(UiLocale::En)
-            .detail
+        let model = service.model(UiLocale::En);
+        assert_eq!(model.status, CheckStatus::Failed);
+        assert!(model
+            .diagnostics
             .contains("other operation cannot be verified"));
+        assert!(!model.detail.contains("other operation cannot be verified"));
     }
 
     #[test]
