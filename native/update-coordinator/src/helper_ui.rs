@@ -1,6 +1,58 @@
 //! The coordinator is outside the replaceable app and owns its own native window.
+use herdr_update_coordinator::{InstallOrigin, UpdatePlan};
+
+fn source_label(origin: &InstallOrigin) -> String {
+    match origin {
+        InstallOrigin::Herdr { requested_ref, .. } => format!(
+            "Herdr ref {}",
+            requested_ref.as_deref().unwrap_or("(default)")
+        ),
+        InstallOrigin::Homebrew { formula, .. } => format!("Homebrew {formula}"),
+        InstallOrigin::Local { .. } => "local source".into(),
+        InstallOrigin::Manual { .. } => "manual installation".into(),
+        InstallOrigin::Unknown { .. } => "unknown source".into(),
+    }
+}
+
+fn release_summary(plan: &UpdatePlan, korean: bool) -> String {
+    let Some(target) = &plan.target else {
+        return if korean {
+            "창을 닫아도 취소되지 않으며 프로필은 유지됩니다.".into()
+        } else {
+            "Closing only hides this window; your profile is preserved.".into()
+        };
+    };
+    let original = source_label(&plan.origin);
+    let destination = match &target.origin {
+        InstallOrigin::Herdr { requested_ref, .. } => {
+            format!(
+                "{} ({}; pinned {})",
+                source_label(&target.origin),
+                target.release.tag,
+                target
+                    .resolved_commit
+                    .as_deref()
+                    .or(requested_ref.as_deref())
+                    .unwrap_or("unknown")
+            )
+        }
+        _ => source_label(&target.origin),
+    };
+    if korean {
+        format!(
+            "{original} → {destination}\n출시 {} ({}) · 기존 프로필 유지",
+            target.release.version, target.release.tag
+        )
+    } else {
+        format!(
+            "{original} → {destination}\nRelease {} ({}) · existing profile preserved",
+            target.release.version, target.release.tag
+        )
+    }
+}
 #[cfg(target_os = "macos")]
 mod mac {
+    use super::UpdatePlan;
     use std::ffi::{c_char, c_void, CString};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -152,21 +204,26 @@ mod mac {
     impl Phase {
         fn text(self, korean: bool) -> (&'static str, &'static str) {
             match (self, korean) {
-                (Self::Preparing, true) => ("업데이트 준비 중", "기존 프로필과 설정은 유지됩니다."),
+                (Self::Preparing, true) => (
+                    "업데이트 준비 중",
+                    "기존 앱을 실행한 채 릴리스를 확인하고 준비합니다.",
+                ),
                 (Self::Preparing, false) => (
                     "Preparing update",
-                    "Your existing profile and preferences are preserved.",
+                    "Checking and staging the release while the original app stays running.",
                 ),
                 (Self::Stopping, true) => ("앱 종료 중", "준비된 앱 인스턴스만 종료합니다."),
                 (Self::Stopping, false) => {
                     ("Stopping app", "Only the prepared app instance is stopped.")
                 }
-                (Self::Installing, true) => {
-                    ("업데이트 설치 중", "기록된 설치 원본에서 설치합니다.")
-                }
-                (Self::Installing, false) => {
-                    ("Installing update", "Installing from the recorded source.")
-                }
+                (Self::Installing, true) => (
+                    "업데이트 설치 중",
+                    "승인한 대상 버전과 설치 원본으로 설치합니다.",
+                ),
+                (Self::Installing, false) => (
+                    "Installing update",
+                    "Installing the approved target version and source.",
+                ),
                 (Self::Validating, true) => ("설치 확인 중", "실제 설치된 앱과 원본을 확인합니다."),
                 (Self::Validating, false) => (
                     "Verifying installation",
@@ -299,7 +356,7 @@ mod mac {
         expanded: std::cell::Cell<bool>,
     }
     impl Panel {
-        pub fn new(locale: &str) -> Result<Self, String> {
+        pub fn new(locale: &str, plan: &UpdatePlan) -> Result<Self, String> {
             unsafe {
                 let _pool = AutoreleasePool::new();
                 let korean = locale.starts_with("ko");
@@ -319,8 +376,8 @@ mod mac {
                     Rect {
                         origin: Point { x: 0., y: 0. },
                         size: Size {
-                            width: 510.,
-                            height: 170.,
+                            width: 700.,
+                            height: 230.,
                         },
                     },
                     1 | 2 | 128,
@@ -350,7 +407,7 @@ mod mac {
                         Rect {
                             origin: Point { x: 22., y },
                             size: Size {
-                                width: 465.,
+                                width: 655.,
                                 height,
                             },
                         },
@@ -362,23 +419,19 @@ mod mac {
                     send_object(content, "addSubview:", view);
                     view
                 };
-                let heading = field(119., 27.);
-                let explanation = field(89., 25.);
-                let footer = field(51., 16.);
+                let heading = field(179., 27.);
+                let explanation = field(149., 25.);
+                let footer = field(52., 68.);
                 send_object(
                     footer,
                     "setStringValue:",
-                    string(if korean {
-                        "창을 닫아도 취소되지 않으며 프로필은 유지됩니다."
-                    } else {
-                        "Closing only hides this window; your profile is preserved."
-                    }),
+                    string(&super::release_summary(plan, korean)),
                 );
                 let progress = init_view(
                     object(class("NSProgressIndicator"), "alloc"),
                     selector("initWithFrame:"),
                     Rect {
-                        origin: Point { x: 22., y: 68. },
+                        origin: Point { x: 22., y: 128. },
                         size: Size {
                             width: 14.,
                             height: 14.,
@@ -420,7 +473,7 @@ mod mac {
                     },
                 );
                 let recovery_button = button(
-                    286.,
+                    476.,
                     200.,
                     "recoverUpdate:",
                     if korean {
@@ -433,9 +486,9 @@ mod mac {
                     object(class("NSScrollView"), "alloc"),
                     selector("initWithFrame:"),
                     Rect {
-                        origin: Point { x: 22., y: 89. },
+                        origin: Point { x: 22., y: 149. },
                         size: Size {
-                            width: 465.,
+                            width: 655.,
                             height: 170.,
                         },
                     },
@@ -446,7 +499,7 @@ mod mac {
                     Rect {
                         origin: Point { x: 0., y: 0. },
                         size: Size {
-                            width: 465.,
+                            width: 655.,
                             height: 170.,
                         },
                     },
@@ -522,8 +575,8 @@ mod mac {
                     self.window,
                     selector("setContentSize:"),
                     Size {
-                        width: 510.,
-                        height: if expanded { 365. } else { 170. },
+                        width: 700.,
+                        height: if expanded { 425. } else { 230. },
                     },
                 );
                 let move_view: unsafe extern "C" fn(Obj, Obj, Point) =
@@ -534,7 +587,7 @@ mod mac {
                     selector("setFrameOrigin:"),
                     Point {
                         x: 22.,
-                        y: 119. + offset,
+                        y: 179. + offset,
                     },
                 );
                 move_view(
@@ -542,7 +595,7 @@ mod mac {
                     selector("setFrameOrigin:"),
                     Point {
                         x: 22.,
-                        y: 89. + offset,
+                        y: 149. + offset,
                     },
                 );
                 send_bool(self.diagnostics, "setHidden:", !expanded);
@@ -667,7 +720,7 @@ pub enum Phase {
 pub struct Panel;
 #[cfg(not(target_os = "macos"))]
 impl Panel {
-    pub fn new(_: &str) -> Result<Self, String> {
+    pub fn new(_: &str, _: &UpdatePlan) -> Result<Self, String> {
         Err("native updater requires macOS AppKit".into())
     }
     pub fn activate(&self) {}

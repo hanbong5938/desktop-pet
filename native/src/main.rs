@@ -892,6 +892,22 @@ fn updater_start_authorization() -> Result<(Option<u64>, Option<String>), String
     Ok((generation, token))
 }
 
+fn admit_startup(
+    paths: &Paths,
+    herdr_socket: &Path,
+    host_plugin_config_dir: Option<&Path>,
+    expected_generation: Option<u64>,
+    updater_token: Option<&str>,
+) -> Result<(), String> {
+    let origin = startup_origin(paths, herdr_socket, host_plugin_config_dir)?;
+    start_allowed(
+        &origin,
+        &paths.state_dir,
+        expected_generation,
+        updater_token,
+    )
+}
+
 fn ensure(
     paths: Paths,
     herdr_socket: PathBuf,
@@ -901,28 +917,30 @@ fn ensure(
     host_plugin_config_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     let (expected_generation, updater_token) = updater_start_authorization()?;
-    let origin = startup_origin(&paths, &herdr_socket, host_plugin_config_dir.as_deref())?;
-    start_allowed(
-        &origin,
-        &paths.state_dir,
+    admit_startup(
+        &paths,
+        &herdr_socket,
+        host_plugin_config_dir.as_deref(),
         expected_generation,
         updater_token.as_deref(),
     )?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let mut last_error = None;
     while Instant::now() < deadline {
-        start_allowed(
-            &origin,
-            &paths.state_dir,
+        admit_startup(
+            &paths,
+            &herdr_socket,
+            host_plugin_config_dir.as_deref(),
             expected_generation,
             updater_token.as_deref(),
         )?;
         if control::control_socket_is_live(&paths.control_socket, Duration::from_millis(150)) {
             match wait_for_ready(&paths, &herdr_socket, deadline) {
                 Ok(response) => {
-                    start_allowed(
-                        &origin,
-                        &paths.state_dir,
+                    admit_startup(
+                        &paths,
+                        &herdr_socket,
+                        host_plugin_config_dir.as_deref(),
                         expected_generation,
                         updater_token.as_deref(),
                     )?;
@@ -969,9 +987,10 @@ fn ensure(
             drop(lock);
             continue;
         }
-        start_allowed(
-            &origin,
-            &paths.state_dir,
+        admit_startup(
+            &paths,
+            &herdr_socket,
+            host_plugin_config_dir.as_deref(),
             expected_generation,
             updater_token.as_deref(),
         )?;
@@ -989,9 +1008,10 @@ fn ensure(
             }));
         }
         let assets = resolve_assets(assets.as_deref())?;
-        start_allowed(
-            &origin,
-            &paths.state_dir,
+        admit_startup(
+            &paths,
+            &herdr_socket,
+            host_plugin_config_dir.as_deref(),
             expected_generation,
             updater_token.as_deref(),
         )?;
@@ -1003,6 +1023,16 @@ fn ensure(
                 continue;
             }
         };
+        if let Err(error) = admit_startup(
+            &paths,
+            &herdr_socket,
+            host_plugin_config_dir.as_deref(),
+            expected_generation,
+            updater_token.as_deref(),
+        ) {
+            let _ = lifecycle::abandon_startup(&paths.config_dir, &lease.token);
+            return Err(error);
+        }
         let child_pid = match spawn_daemon(
             &paths,
             &herdr_socket,
@@ -1022,12 +1052,16 @@ fn ensure(
         drop(lock);
         match wait_for_ready(&paths, &herdr_socket, deadline) {
             Ok(response) => {
-                start_allowed(
-                    &origin,
-                    &paths.state_dir,
+                if let Err(error) = admit_startup(
+                    &paths,
+                    &herdr_socket,
+                    host_plugin_config_dir.as_deref(),
                     expected_generation,
                     updater_token.as_deref(),
-                )?;
+                ) {
+                    let _ = lifecycle::abandon_startup(&paths.config_dir, &lease.token);
+                    return Err(error);
+                }
                 return print_response(&response);
             }
             Err(failure) => {
