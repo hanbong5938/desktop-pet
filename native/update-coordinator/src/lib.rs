@@ -2,6 +2,7 @@
 //! This crate deliberately has no dependency on the desktop app's build script or rig.
 mod origin;
 pub mod protocol;
+pub mod releases;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,10 +14,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use origin::{
-    check, detect_origin, installed_candidate, manager_command, recheck_plan, restored_original,
-    ManagerCommand,
+    check, detect_origin, installed_candidate, manager_command, recheck_plan,
+    refresh_release_target, restored_original, validate_plan_target, ManagerCommand,
 };
 pub use protocol::{read_operation, write_operation, OperationPhase, OperationRecord};
+pub use releases::{ReleaseCandidate, ReleaseChannel, ReleaseTarget, UpdatePolicy};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +46,14 @@ pub struct UpdateContext {
 pub struct ExecutableIdentity {
     pub path: PathBuf,
     pub sha256: String,
+}
+
+/// Freshly verified installed executable and its actual installation registration.
+/// This in-memory proof is not part of the plan, journal or wire protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedInstallation {
+    pub image: ExecutableIdentity,
+    pub origin: InstallOrigin,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -114,6 +124,16 @@ pub struct UpdatePlan {
     pub action: UpdateAction,
     pub running: ExecutableIdentity,
     pub candidate: Option<ExecutableIdentity>,
+    pub target: Option<ReleaseTarget>,
+}
+
+impl UpdatePlan {
+    /// The original origin remains immutable; this is the verified prospective installation.
+    pub fn target_origin(&self) -> &InstallOrigin {
+        self.target
+            .as_ref()
+            .map_or(&self.origin, |target| &target.origin)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -139,6 +159,8 @@ pub struct CheckSnapshot {
     pub observed_revision: Option<String>,
     pub detail: String,
     pub plan: Option<UpdatePlan>,
+    pub policy: UpdatePolicy,
+    pub release: Option<ReleaseCandidate>,
     pub checked_at: Option<u64>,
 }
 
@@ -275,7 +297,7 @@ pub fn validate_candidate(path: &Path) -> Result<ExecutableIdentity, String> {
         .and_then(serde_json::Value::as_u64)
         != Some(protocol::UPDATER_PROTOCOL.into())
     {
-        return Err("candidate does not support updater protocol 2".into());
+        return Err("candidate does not support updater protocol 3".into());
     }
     Ok(image)
 }
@@ -401,7 +423,7 @@ mod plan_protocol_tests {
     use super::*;
 
     #[test]
-    fn old_private_plan_cannot_enter_protocol_two_and_retains_original_bytes() {
+    fn old_private_plan_cannot_enter_protocol_three_and_retains_original_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("profile");
         fs::create_dir(&state).unwrap();
@@ -430,22 +452,27 @@ mod plan_protocol_tests {
             environment: BTreeMap::new(),
             locale: "en".into(),
         };
-        let id = "0123456789abcdef0123456789abcdef";
-        let old = UpdatePlan {
-            version: 1,
-            operation_id: id.into(),
-            context,
-            origin,
-            action: UpdateAction::ApplyInstalled,
-            running: identity,
-            candidate: None,
-        };
-        let bytes = serde_json::to_vec(&old).unwrap();
-        let path = protocol::private_updates(&state)
-            .unwrap()
-            .join(format!("{id}.plan.json"));
-        protocol::write_private_new(&path, &bytes, 0o600).unwrap();
-        assert!(read_plan(&state, id).is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
+        for version in [1, 2] {
+            let id = format!("{version:032x}");
+            let old = UpdatePlan {
+                version,
+                operation_id: id.clone(),
+                context: context.clone(),
+                origin: origin.clone(),
+                action: UpdateAction::ApplyInstalled,
+                running: identity.clone(),
+                candidate: None,
+                target: None,
+            };
+            let mut record = serde_json::to_value(&old).unwrap();
+            record.as_object_mut().unwrap().remove("target");
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let path = protocol::private_updates(&state)
+                .unwrap()
+                .join(format!("{id}.plan.json"));
+            protocol::write_private_new(&path, &bytes, 0o600).unwrap();
+            assert!(read_plan(&state, &id).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 }

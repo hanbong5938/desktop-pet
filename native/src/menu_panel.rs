@@ -2415,6 +2415,10 @@ impl MenuPanel {
             self.set_update_frozen(true);
         }
     }
+    pub(crate) fn toggle_update_diagnostics(&mut self) {
+        self.update_card.toggle_diagnostics();
+        self.layout_documents();
+    }
     pub(crate) fn set_update_frozen(&mut self, frozen: bool) {
         for field in &self.bubble_color_fields {
             field.setEditable(!frozen);
@@ -2437,19 +2441,30 @@ impl MenuPanel {
             fn disable(
                 view: &NSView,
                 quit: &NSButton,
+                diagnostics_toggle: &NSButton,
+                diagnostics: &NSTextField,
                 controls: &mut Vec<(Retained<NSControl>, bool)>,
             ) {
                 for child in view.subviews().iter() {
                     if let Some(control) = child.downcast_ref::<NSControl>() {
-                        if !std::ptr::eq(&*child, quit as &NSView) {
+                        if !std::ptr::eq(&*child, quit as &NSView)
+                            && !std::ptr::eq(&*child, diagnostics_toggle as &NSView)
+                            && !std::ptr::eq(&*child, diagnostics as &NSView)
+                        {
                             controls.push((control.retain(), control.isEnabled()));
                             control.setEnabled(false);
                         }
                     }
-                    disable(&child, quit, controls);
+                    disable(&child, quit, diagnostics_toggle, diagnostics, controls);
                 }
             }
-            disable(&self.root, &self.quit, &mut self.frozen_controls);
+            disable(
+                &self.root,
+                &self.quit,
+                self.update_card.diagnostics_toggle(),
+                self.update_card.diagnostics(),
+                &mut self.frozen_controls,
+            );
         } else {
             for (control, enabled) in self.frozen_controls.drain(..) {
                 control.setEnabled(enabled);
