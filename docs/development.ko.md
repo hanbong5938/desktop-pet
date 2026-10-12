@@ -2,7 +2,7 @@
 
 [English](development.md) · **한국어** · [설치와 개요](../readme.ko.md)
 
-아래 명령은 저장소 루트에서 실행합니다. 이 체크아웃의 대상 버전은 v0.3.5이지만 소스 버전만으로 비초안 Release·완전한 자산·갱신된 설치기/Homebrew 포뮬러를 증명하지 않습니다. 사전 빌드 설치 전 [실제 Release 목록](https://github.com/hanbong5938/herdr-desktop-pet/releases)을 확인하세요. 네이티브 지원 플랫폼은 Apple Silicon macOS 13 이상이며 Intel Mac·Windows·Linux용 네이티브 배포는 없습니다.
+아래 명령은 저장소 루트에서 실행합니다. 이 체크아웃의 대상 버전은 v0.3.6이지만 소스 버전만으로 비초안 Release·완전한 자산·갱신된 설치기/Homebrew 포뮬러를 증명하지 않습니다. 사전 빌드 설치 전 [실제 Release 목록](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 [v0.3.6 노트](releases/v0.3.6.md#한국어)를 확인하세요. 네이티브 지원 플랫폼은 Apple Silicon macOS 13 이상이며 Intel Mac·Windows·Linux용 네이티브 배포는 없습니다.
 
 ## 소스 개발
 
@@ -16,9 +16,9 @@ bash scripts/install.sh --source
 
 기존 로컬 Herdr 서버가 있다면 수동 `start`로 플러그인·호스트 패치 없이 로컬 세션 스냅샷(Herdr 0.9.0 이상)을 볼 수 있습니다. 답장에는 해당 서버의 `agent.prompt` 지원이 별도로 필요합니다. 소켓 지정과 데몬 확인은 Homebrew 명령 대신 위 패키지 CLI를 사용해 [첫 연결 안내](../readme.ko.md#homebrew로-설치-첫-연결)를 따르세요. 정상 Herdr 서버 없이 캐릭터만 실행한다면 [Herdr 없이 캐릭터만 실행](../readme.ko.md#herdr-없이-캐릭터만-실행)처럼 **시작 전에** 해당 CLI에서 `exit_with_herdr off`를 설정하세요. 기본 단절 종료 동작은 바뀌지 않습니다. 아래 별도 호스트 절차는 **선택형** 관리형 플러그인 실행 관리·client-attach 자동 시작 전용이며 앱만 빌드해도 순정 호스트에 `client.attached` 훅이 생기지는 않습니다.
 
-### 로컬 Tern 소스 연동 (공개 플러그인, 미병합 네이티브 소스)
+### 로컬 Tern 연동 (사전 빌드 소비자 경로 또는 선택형 소스 개발)
 
-별도 공개 플러그인 [tern-desktop-pet](https://github.com/hanbong5938/tern-desktop-pet)은 `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`으로 설치합니다. 네이티브 연동은 아직 `origin/tern-desktop-pet-integration`의 미병합 소스이며 새 바이너리 릴리스나 Homebrew 빌드에 포함됐다는 뜻이 아닙니다. 위 소스 빌드 절차 전에 명시적으로 `git fetch origin tern-desktop-pet-integration`, `git switch --track origin/tern-desktop-pet-integration`을 실행하세요(로컬 추적 브랜치가 이미 있으면 `git switch tern-desktop-pet-integration`). 개발자는 대신 `tern plugin link "$PWD/../tern-desktop-pet"`으로 형제 체크아웃을 연결할 수 있습니다. 플러그인 설치·링크는 네이티브 앱을 빌드하지 않습니다.
+정확한 비초안 v0.3.6 자산과 안정판 포뮬러가 게시된 뒤에는 `brew install hanbong5938/tap/herdr-desktop-pet`으로 공통 네이티브 앱을 설치하고 별도 공개 [tern-desktop-pet 플러그인](https://github.com/hanbong5938/tern-desktop-pet)을 `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`으로 명시적으로 설치합니다. 이 사전 빌드 경로에는 Rust/Cargo·Bun·Node.js·소스 체크아웃이 필요 없습니다. 플러그인 설치는 앱을 몰래 내려받거나 빌드·실행하지 않습니다. 소스 개발은 위 절차로 현재 체크아웃을 빌드하며 별도 연동 브랜치 전환은 필요하지 않습니다. 개발자는 `tern plugin link "$PWD/../tern-desktop-pet"`으로 형제 플러그인 체크아웃을 연결할 수 있습니다. 두 실행 파일 모두 [Tern 시작·별도 설정/상태 프로필 안내](usage.ko.md)를 따르세요.
 
 이 체크아웃의 동일한 네이티브 앱은 Herdr 서버나 별도 앱 ID 없이 Tern을 직접 지원합니다. 위 소스 패키지 실행 파일에서 한 프로필을 유지하며 `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet --host tern start`, `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet --host tern status`를 사용하고 `status.observation_mode`가 `tern`인지 확인하세요. `--host both`는 Herdr와 **로컬** Tern을 함께 사용하며 `--socket`은 Herdr 소켓 전용입니다. 명시적 `--host`가 정확한 `HERDR_PET_OBSERVATION_MODE=herdr|tern|both`보다 우선하고, 둘 다 없으면 `herdr`입니다. 실행 중인 데몬에 접속해 모드를 바꿀 수 없습니다. Tern 전용 시작은 Herdr 없이 준비되고 `exit_with_herdr`가 켜져도 Herdr 부재만으로 종료하지 않습니다. 별도 Tern 플러그인은 이 앱의 Herdr 플러그인이 아니며 Tern 그림 제공을 뜻하지 않습니다.
 
@@ -60,7 +60,7 @@ bash scripts/install.sh --source
 
 소스 설치기는 고정된 Bun·npm 의존성을 설치하고 Rust 실행 파일·업데이트 코디네이터를 빌드한 뒤 네이티브 rig 런타임·캐릭터 제작 리소스를 패키징하고 앱을 검증합니다. Rust/Cargo·Bun·Node.js/npm·Xcode Command Line Tools·`codesign`이 필요하며 별도 호스트 빌드 조건은 연동 안내를 따릅니다. 이미 실행 중인 서버에서 연결·활성화만 해도 캐릭터가 시작되는 것은 아닙니다. `start`를 한 번 실행하거나 `auto_start`가 켜졌다면 이후 정상적인 shell/terminal 클라이언트 attach를 기다리세요. 서버 시작 시에도 `ensure`가 자동으로 실행됩니다. 플러그인 액션에는 실행 중인 활성 호스트가 필요하지만 패키지 네이티브 바이너리의 오프라인 설정 명령에는 필요하지 않습니다. 소스 자동화에는 `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`을 사용하세요. 기존 데몬을 종료하거나 `start`·명령·`stop` 모두에 일관된 **설정과 상태** 격리 경로를 사용하세요. 소스 CLI 버전만으로 자산 게시나 구형 실행 데몬의 교체를 증명하지 못하므로 `status`의 실제 실행 파일을 확인하세요.
 
-공통 [설치기](../scripts/install.sh)는 세 모드를 제공합니다. 옵션이 없으면 매니페스트에 고정된 사전 빌드를 시도하고 **없거나 검증 실패한 경우에만** 소스 빌드로 전환합니다. `--prebuilt`는 실패하고 `--source`는 이 체크아웃을 빌드합니다(Bun/npm 의존성은 내려받을 수 있음). 관리형 Herdr 플러그인 설치는 `[[build]]`를 통해 설치기 실행 후 플러그인 디렉터리의 `dist/`에 앱을 둡니다. 매니페스트 대상 `0.3.5` 또는 소스 빌드만으로 공개 사전 빌드가 증명되지 않습니다. 설치기는 기존처럼 `HerdrDesktopPet.app/`만 포함한 압축 파일을 받아 체크섬·네이티브 서명을 검증하고 별도 rig 출처 기록을 설치 입력으로 사용하지 않습니다. client-attach 자동 시작에는 여전히 기능이 있는 패치 호스트가 필요합니다.
+공통 [설치기](../scripts/install.sh)는 세 모드를 제공합니다. 옵션이 없으면 매니페스트에 고정된 사전 빌드를 시도하고 **없거나 검증 실패한 경우에만** 소스 빌드로 전환합니다. `--prebuilt`는 실패하고 `--source`는 이 체크아웃을 빌드합니다(Bun/npm 의존성은 내려받을 수 있음). 관리형 Herdr 플러그인 설치는 `[[build]]`를 통해 설치기 실행 후 플러그인 디렉터리의 `dist/`에 앱을 둡니다. 매니페스트 대상 `0.3.6` 또는 소스 빌드만으로 공개 사전 빌드가 증명되지 않습니다. 성공한 사전 빌드 설치에는 소스 빌드 도구가 필요 없습니다. 설치기는 기존처럼 `HerdrDesktopPet.app/`만 포함한 압축 파일을 받아 체크섬·네이티브 서명을 검증하고 별도 rig 출처 기록을 설치 입력으로 사용하지 않습니다. client-attach 자동 시작에는 여전히 기능이 있는 패치 호스트가 필요합니다.
 
 저장소의 `herdr-plugin` 토픽으로 [Herdr 마켓](https://herdr.dev/plugins/) 자동 수집 대상에 등록됩니다. 인덱스는 30분마다 갱신되며 **심사받지 않은 커뮤니티 목록**이지 호스트 호환성 검토가 아닙니다. Homebrew [개인 tap](https://github.com/hanbong5938/homebrew-tap) 포뮬러는 `HerdrDesktopPet.app`을 `/Applications`가 아닌 Homebrew prefix에 설치하고 CLI를 `PATH`에 놓습니다. Herdr 플러그인이나 패치 호스트는 설치하지 않으므로 실행 관리 훅에는 플러그인, client-attach 자동 실행에는 호스트 패치가 별도로 필요합니다. 포뮬러 로딩이 거부된 경우에만 `brew trust --formula hanbong5938/tap/herdr-desktop-pet`으로 이 포뮬러만 신뢰하세요. 업그레이드 전 데몬을 종료하세요. `start`는 기존 데몬을 재사용하므로 CLI `--version`과 재시작 후 `status`의 `app_version` 및 실행 파일을 함께 확인하세요. 옛 cask는 `/Applications`에 앱을 복사했습니다. `brew uninstall --cask herdr-desktop-pet` 후 `brew install hanbong5938/tap/herdr-desktop-pet`으로 포뮬러에 이전할 수 있으며 사용자 데이터는 유지됩니다. 안정판·베타 프로필 격리와 이전은 [한영 0.3 이전 안내](releases/0.3.md#한국어--v03-계열)를 참고하세요. 소스 버전만으로 공개 자산이 존재한다고 추정하지 마세요.
 
@@ -79,7 +79,7 @@ debug·release 네이티브 빌드는 `codesign`을 필요로 하며 [`native/ri
 
 Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI 버전과 C 구조체 일곱 개의 크기를 확인합니다. 초기 motion은 네이티브 호스트가 복사하는 봉인된 바이트이며 옛 경로 조회 방식으로 돌아가지 않습니다. Metal은 같은 인코더의 색상 그리기 전에 실제 흰자 구멍을 L/R/무방향 stencil로 준비하고 CPU 의미론적 hit·참조 래스터도 같은 소유권 규칙을 적용합니다. 흰자가 없는 rig의 기존 홍채 표시 동작은 유지합니다. `RIG_PROBE_FAULTS` probe의 `--eye-stencil-checks --output ABS`는 실제 픽셀·의미론적 fixture를 저장하지만 과거 취소/연결 해제 상황의 시각 현상 원인을 입증하지 않습니다.
 
-`scripts/build-rig-native.mjs`는 범위 제한된 소스/컴파일러/출력 해시를 `native/target/rig-native/release/rig-native.json`에 기록합니다. 패키징은 소스·생성 출력의 해시를 확인하고 원본 기록을 `Contents/Resources/rig-native-build.json`에 포함하며 독립 업데이트 코디네이터와 protocol/서명 검사도 유지합니다. 앱 서명 **이후** 코디네이터를 포함한 `Contents`의 모든 배포 파일 해시를 외부 `dist/HerdrDesktopPet.app.rig-native.json`에 기록해 서명 번들 안의 자체 해시 순환을 피합니다. 릴리스 워크플로는 기존 앱 전용 압축 파일·체크섬 두 파일 외에 별도 `HerdrDesktopPet-v0.3.5-rig-native.json` 자산을 게시합니다. 설치기/업데이터의 아카이브 입력 형식은 바꾸지 않으며 실제 추출된 서명 후 파일과 사이드카의 해시를 비교해야 배포 바이트 출처를 주장할 수 있습니다.
+`scripts/build-rig-native.mjs`는 범위 제한된 소스/컴파일러/출력 해시를 `native/target/rig-native/release/rig-native.json`에 기록합니다. 패키징은 소스·생성 출력의 해시를 확인하고 원본 기록을 `Contents/Resources/rig-native-build.json`에 포함하며 독립 업데이트 코디네이터와 protocol/서명 검사도 유지합니다. 앱 서명 **이후** 코디네이터를 포함한 `Contents`의 모든 배포 파일 해시를 외부 `dist/HerdrDesktopPet.app.rig-native.json`에 기록해 서명 번들 안의 자체 해시 순환을 피합니다. 릴리스 워크플로는 기존 앱 전용 압축 파일·체크섬 두 파일 외에 별도 `HerdrDesktopPet-v0.3.6-rig-native.json` 자산을 게시합니다. 설치기/업데이터의 아카이브 입력 형식은 바꾸지 않으며 실제 추출된 서명 후 파일과 사이드카의 해시를 비교해야 배포 바이트 출처를 주장할 수 있습니다.
 
 ## 저장소 구조
 
@@ -93,6 +93,12 @@ Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI �
 | [`scripts/`](../scripts/) | 설치·네이티브 빌드·앱 패키징 |
 | [`.github/workflows/release.yml`](../.github/workflows/release.yml) | 릴리스 패키징 워크플로 |
 
+## 네이티브 현지화
+
+네이티브 UI 문구는 정적 카탈로그 [`native/src/i18n.rs`](../native/src/i18n.rs)에 있으며 중국어 간체와 일본어 카탈로그는 각각 [`native/src/i18n/zh_hans.rs`](../native/src/i18n/zh_hans.rs), [`native/src/i18n/ja.rs`](../native/src/i18n/ja.rs)입니다. UI 메시지를 추가할 때는 모든 카탈로그를 갱신하고 런타임 값·경로·ID·팩 소유 메타데이터는 번역하지 마세요. 환경 설정의 정규 저장 토큰은 `system|ko|en|zh-Hans|ja`, 대화문 override 토큰은 `ko|en|zh-Hans|ja`이며 언어별 초안은 독립적입니다. CLI/패치 검사는 엄격하게 유지하고 기존 저장 설정의 알 수 없는 값에는 관대한 fallback을 유지하세요. `system`은 OS 선호 언어를 순서대로 검사합니다. 일본어 태그는 대소문자와 무관하며 중국어 `zh`·명시적 Hans·CN/SG 지역은 간체로 해석합니다. 명시적 Hant 또는 Hans가 없는 TW/HK/MO는 다음 지원 언어로 넘기고 없으면 영어를 사용합니다. 외부 카탈로그 메타데이터는 `ko`에 한국어, `en`·`zh-Hans`·`ja`에 영어 fallback을 사용하고 작성된 대화문과 fallback은 팩 소유를 유지합니다.
+
+네이티브 문구나 CLI 언어 계약을 바꿀 때 [CLI 계약](cli.md), README [English](../readme.md)·[한국어](../readme.ko.md)·[简体中文](../readme.zh-Hans.md)·[日本語](../readme.ja.md), 사용 안내 [English](usage.md)·[한국어](usage.ko.md)·[简体中文](usage.zh-Hans.md)·[日本語](usage.ja.md)를 함께 갱신하세요. 이 문서들은 네이티브 앱에 관한 것이며 홍보 웹사이트의 네 언어 번역은 별도로 관리하세요.
+
 ## 캐릭터 제작
 
 팩 제작·검증은 [캐릭터 제작 가이드](../.agents/skills/character-creator/SKILL.md)와 [`tools/character-pack.py`](../tools/character-pack.py)를 참고하세요. 배포 앱에도 `Contents/Resources/creator/SKILL.md`·`Contents/Resources/creator/character-pack.py`가 포함됩니다. 소스 체크아웃의 [로컬 Qwen + See-through 제작 스킬](../.agents/skills/create-pet-character/SKILL.md)은 **승인된 그림에서** 독립된 10포즈를 만듭니다. 외부 엔진·모델 가중치는 번들에 포함하지 않습니다. 루벨리아가 기본 rig 템플릿입니다. PNG 템플릿·Aurora·Coding Cat·선택형 루벨리아 의상과 각각의 그림 생성기는 별도 [herdr-characters](https://github.com/hanbong5938/herdr-characters)에서 관리합니다. 외부 템플릿은 `--templates-root PATH`로 지정해야 하며 번들에 있다고 가정하지 마세요.
@@ -105,13 +111,13 @@ Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI �
 
 캡처를 게시하기 전에 화면 내용을 직접 확인하세요. 격리된 시연 프로필에서 앱만 담고 실제 세션 내용·계정명·로컬 경로·호스트명·이메일·인증 정보를 포함하지 마세요. 공개 PNG에는 이미지·색상 청크만 허용하며 `check`와 `stage`는 EXIF·텍스트·프로필 등 메타데이터를 거부합니다. 이 검사는 화면에 보이는 글자를 판별하지 않으므로 개인정보 수동 검토도 반드시 필요합니다.
 
-한국어 기본·영어 홍보 웹사이트는 [`site/`](../site/)에 있습니다. 네이티브 macOS 앱을 설명하는 사이트이며 브라우저에서 앱을 실행하지 않습니다. Pages 주소: [한국어](https://hanbong5938.github.io/herdr-desktop-pet/) · [영어](https://hanbong5938.github.io/herdr-desktop-pet/en/). 제목은 화면 폭에 맞춘 간결한 크기와 좁은 주변 여백을 사용하며 본문·터미널 명령어·버튼 크기는 제목과 독립적으로 유지합니다. 저장소 루트에서 실행하세요.
+한국어 기본 홍보 웹사이트는 [`site/`](../site/)에 있습니다. 네이티브 macOS 앱을 설명하는 사이트이며 브라우저에서 앱을 실행하지 않습니다. Pages 주소: [한국어](https://hanbong5938.github.io/herdr-desktop-pet/) · [영어](https://hanbong5938.github.io/herdr-desktop-pet/en/) · [중국어 간체](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/) · [일본어](https://hanbong5938.github.io/herdr-desktop-pet/ja/). 제품 문구를 바꿀 때 네 페이지의 번역과 언어 전환 링크를 함께 갱신하고 `ko`·`en`·`zh-Hans`·`ja`의 상호 `hreflang` 및 한국어 루트를 가리키는 `x-default`를 유지하세요. 각 페이지의 canonical URL과 Open Graph 언어도 해당 페이지에 맞춰야 합니다. 외부 [캐릭터 갤러리](https://github.com/hanbong5938/herdr-characters)는 별도로 유지되며 한국어·영어만 제공합니다. 과거 v0.3.2 스크린샷을 최신 화면이나 번역된 스크린샷처럼 소개하지 마세요. 영어 소셜 미리보기 이미지를 공유해도 페이지 언어는 바뀌지 않습니다. 제목은 화면 폭에 맞춘 간결한 크기와 좁은 주변 여백을 사용하며 본문·터미널 명령어·버튼 크기는 제목과 독립적으로 유지합니다. 저장소 루트에서 실행하세요.
 
 ```sh
 bun test tools/pages.test.ts
 node tools/pages.mjs check
 node tools/pages.mjs serve --port 4173
-# http://127.0.0.1:4173/herdr-desktop-pet/ 접속 (영어: /herdr-desktop-pet/en/)
+# http://127.0.0.1:4173/herdr-desktop-pet/ 접속 (영어: /herdr-desktop-pet/en/; 중국어 간체: /herdr-desktop-pet/zh-Hans/; 일본어: /herdr-desktop-pet/ja/)
 node tools/pages.mjs stage /tmp/herdr-pages
 ```
 

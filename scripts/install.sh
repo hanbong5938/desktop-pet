@@ -186,7 +186,7 @@ validate_native_pack() {
 
 
 validate_app() {
-  local app="$1" allow_legacy="${2:-0}" archs binary helper main_capabilities helper_capabilities commands dependencies library line bundle_id
+  local app="$1" allow_legacy="${2:-0}" archs binary helper main_capabilities helper_capabilities main_protocol="" helper_protocol main_observation="" helper_observation="" commands dependencies library line bundle_id
   [[ -d "$app" ]] || fail "packaged app is missing: $app"
   binary="$app/Contents/MacOS/herdr-desktop-pet"
   [[ -x "$binary" ]] ||
@@ -205,7 +205,9 @@ validate_app() {
   bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist" 2>/dev/null)" ||
     fail "packaged app has no bundle identifier"
   if main_capabilities="$("$binary" update-capabilities 2>/dev/null)"; then
-    [[ "$main_capabilities" == '{"protocol":2}' || "$main_capabilities" == '{"protocol":3}' ]] ||
+    main_protocol="$(plutil -extract protocol raw -expect integer -o - - <<< "$main_capabilities" 2>/dev/null)" ||
+      fail "packaged app does not advertise a numeric updater protocol"
+    [[ "$main_protocol" == 2 || "$main_protocol" == 3 ]] ||
       fail "packaged app does not advertise supported updater protocol 2 or 3"
     helper="$app/Contents/MacOS/herdr-update-coordinator"
     [[ -x "$helper" && -f "$helper" && ! -L "$helper" ]] ||
@@ -218,8 +220,24 @@ validate_app() {
       fail "packaged update coordinator has an invalid or missing code signature"
     helper_capabilities="$("$helper" update-capabilities 2>/dev/null)" ||
       fail "packaged update coordinator cannot advertise updater capabilities"
-    [[ "$helper_capabilities" == "$main_capabilities" ]] ||
+    helper_protocol="$(plutil -extract protocol raw -expect integer -o - - <<< "$helper_capabilities" 2>/dev/null)" ||
+      fail "packaged update coordinator does not advertise a numeric updater protocol"
+    [[ "$helper_protocol" == "$main_protocol" ]] ||
       fail "packaged update coordinator protocol does not match packaged app"
+    if plutil -type observation_mode - <<< "$main_capabilities" >/dev/null 2>&1; then
+      main_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$main_capabilities" 2>/dev/null)" ||
+        fail "packaged app does not advertise numeric observation-mode support"
+      [[ "$main_observation" == 1 ]] ||
+        fail "packaged app advertises unsupported observation-mode support"
+    fi
+    if plutil -type observation_mode - <<< "$helper_capabilities" >/dev/null 2>&1; then
+      helper_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$helper_capabilities" 2>/dev/null)" ||
+        fail "packaged update coordinator does not advertise numeric observation-mode support"
+      [[ "$helper_observation" == 1 ]] ||
+        fail "packaged update coordinator advertises unsupported observation-mode support"
+    fi
+    [[ "$helper_observation" == "$main_observation" ]] ||
+      fail "packaged update coordinator observation-mode support does not match packaged app"
     commands="$(otool -l "$helper")" ||
       fail "unable to inspect packaged update coordinator loader paths"
     [[ "$commands" != *"cmd LC_RPATH"* ]] ||
@@ -239,7 +257,7 @@ validate_app() {
   elif [[ "$allow_legacy" != 1 || "$SELECTED_VERSION" != "0.2.0" || "$APP_NAME" != "HerdrDesktopPet.app" ]]; then
     fail "packaged app does not support updater protocol 2 or 3"
   fi
-  if [[ "$main_capabilities" == '{"protocol":2}' && "$APP_NAME" == "HerdrDesktopPetBeta.app" ]]; then
+  if [[ "$main_protocol" == 2 && "$APP_NAME" == "HerdrDesktopPetBeta.app" ]]; then
     # Published protocol-2 beta bundles predate the separate beta identifier.
     [[ "$bundle_id" == "dev.herdr.desktop-pet" || "$bundle_id" == "$BUNDLE_ID" ]] ||
       fail "packaged beta app has an unexpected bundle identifier"

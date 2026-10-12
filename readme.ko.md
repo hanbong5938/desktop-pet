@@ -2,17 +2,17 @@
 
 [Herdr](https://herdr.dev)용 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아가 터치에 반응하고 관측한 세션 상태를 말풍선에 표시하며 선택한 로컬 에이전트에게 메시지를 제출할 수 있습니다.
 
-[English](readme.md) · **한국어** · [버전 문서](docs/releases/README.ko.md) · [릴리스](https://github.com/hanbong5938/herdr-desktop-pet/releases)
+[English](readme.md) · **한국어** · [简体中文](readme.zh-Hans.md) · [日本語](readme.ja.md) · [버전 문서](docs/releases/README.ko.md) · [릴리스](https://github.com/hanbong5938/herdr-desktop-pet/releases)
 
 <img src="assets/rubelia-thumbnail.png" alt="기본 데스크톱 캐릭터 루벨리아" width="220">
 
 [선택 캐릭터·의상 갤러리](https://hanbong5938.github.io/herdr-characters/) (처음에는 영어; **KO** 버튼 선택) · [캐릭터 저장소·출처](https://github.com/hanbong5938/herdr-characters). 기본 번들은 **루벨리아 `default@0` 하나뿐**이며 갤러리의 팩은 별도로 설치합니다.
 
-이 체크아웃의 안정판 **v0.3.5는 소스 및 기본/사전 빌드 대상**입니다. 소스 버전만으로 공개 바이너리·설치기·Homebrew 포뮬러 게시를 주장하지 않습니다. 사전 빌드 전 실제 [Release 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 설치 경로를 확인하세요. [v0.3.5 한영 노트](docs/releases/v0.3.5.md#한국어). 채린은 선택형 팩이며 내장 루벨리아의 대체물이 아닙니다.
+v0.3.6은 새 안정판 소스·사전 빌드 대상이며 게시 완료를 뜻하지 않습니다. 정확한 비초안 v0.3.6 arm64 자산·체크섬과 안정판 Homebrew 포뮬러가 게시된 뒤에는 Rust·소스 빌드 도구 없이 설치할 수 있습니다. 실제 [Release 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)이 기준이며 [v0.3.6 릴리스 노트](docs/releases/v0.3.6.md)를 확인하세요. 과거 v0.3.5와 베타 자산은 변경하지 않습니다.
 
 ## 주요 기능
 
-- 메뉴 막대에서 제어하는 네이티브 캐릭터: 터치·쓰다듬기·이동·크기 변경, 한국어/영어 UI.
+- 메뉴 막대에서 제어하는 네이티브 캐릭터: 터치·쓰다듬기·이동·크기 변경, 시스템 언어 또는 한국어/영어/중국어 간체/일본어 UI.
 - 관측한 로컬·원격 세션의 상태 카드와 검색·정렬; 원격 카드는 읽기 전용.
 - 로컬 에이전트 카드의 한 줄 답장과 별도 말풍선 표시·크기·대사 설정.
 - 공식 캐릭터 브라우저의 선택형 팩 다운로드·적용 및 로컬 팩 가져오기.
@@ -26,7 +26,7 @@
 
 ## Homebrew로 설치: 첫 연결
 
-[개인 tap](https://github.com/hanbong5938/homebrew-tap)과 비초안 v0.3.5 arm64 압축 파일·체크섬이 공개되어 있습니다. 설치 전 실제 [릴리스 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 포뮬러를 확인하세요. 캐릭터를 표시할 Mac에서 기존 로컬 Herdr 서버를 실행한 상태로:
+v0.3.6은 새 안정판 소스·사전 빌드 대상이며 게시 완료를 뜻하지 않습니다. 정확한 비초안 v0.3.6 arm64 자산·체크섬과 안정판 Homebrew 포뮬러가 게시된 뒤에는 Rust·소스 빌드 도구 없이 설치할 수 있습니다. 실제 [Release 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)이 기준이며 [v0.3.6 릴리스 노트](docs/releases/v0.3.6.md)를 확인하세요. 과거 v0.3.5와 베타 자산은 변경하지 않습니다.
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -78,7 +78,7 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 herdr plugin action invoke start --plugin desktop-pet
 ```
 
-관리형 설치는 플러그인을 클론해 `scripts/install.sh`를 실행합니다. 기본 모드는 매니페스트에 고정된 v0.3.5 앱 전용 압축 파일을 시도하고 자산 부재·검증 실패 시 안내 후 소스를 빌드합니다. `--prebuilt`는 실패해도 소스로 전환하지 않고 `--source`는 현재 체크아웃을 빌드합니다. **기본 fallback은 공개 사전 빌드의 증거가 아닙니다.** 실제 압축 파일·체크섬·설치기 일치를 확인하세요. 별도 출처 사이드카는 설치기 압축 파일에 넣지 않습니다. 사전 빌드는 SHA-256·아카이브·arm64·서명을 검사하지만 앱은 **ad-hoc 서명·미공증**입니다. attach 자동 시작을 원하면 [패치 호스트 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)를 따르세요. 위 네이티브 수동 관찰에는 둘 다 필요 없습니다. [설치기·서명 상세](docs/development.ko.md#소스-개발).
+관리형 설치는 플러그인을 클론해 `scripts/install.sh`를 실행합니다. 기본 모드는 매니페스트에 고정된 v0.3.6 앱 전용 압축 파일을 시도하고 자산 부재·검증 실패 시 안내 후 소스를 빌드합니다. `--prebuilt`는 실패해도 소스로 전환하지 않고 `--source`는 현재 체크아웃을 빌드합니다. **기본 fallback은 공개 사전 빌드의 증거가 아닙니다.** 실제 압축 파일·체크섬·설치기 일치를 확인하세요. 별도 출처 사이드카는 설치기 압축 파일에 넣지 않습니다. 사전 빌드는 SHA-256·아카이브·arm64·서명을 검사하지만 앱은 **ad-hoc 서명·미공증**입니다. attach 자동 시작을 원하면 [패치 호스트 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)를 따르세요. 위 네이티브 수동 관찰에는 둘 다 필요 없습니다. [설치기·서명 상세](docs/development.ko.md#소스-개발).
 
 ## 이 체크아웃 소스 빌드: 관리형 연동
 
@@ -94,13 +94,27 @@ bash scripts/install.sh --source
 
 이 소스의 매니페스트 수명주기·액션은 `scripts/run-native.sh`로 실행되며, 매니페스트의 안정판 또는 `-beta.N` 버전에 맞는 `HerdrDesktopPet.app`/`HerdrDesktopPetBeta.app`을 선택합니다. 해당 번들이 없으면 다른 채널을 대신 실행하지 않습니다. 직접 자동화할 때는 안정판 소스의 `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`을 사용하고, 기존 데몬을 종료하거나 설정·상태 경로 **둘 다** 격리한 뒤 `status`로 실제 실행 파일과 버전을 확인하세요.
 
-## 이 소스 체크아웃의 Tern 연동 (공개 Homebrew v0.3.5 기능 아님)
+## Tern 설치와 분리 프로필
 
-이 체크아웃의 네이티브 앱은 별도 공개 [tern-desktop-pet 플러그인](https://github.com/hanbong5938/tern-desktop-pet)으로 **로컬 Tern 관찰**을 구현합니다. `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`으로 플러그인을 설치하세요. 네이티브 연동은 아직 **병합되지 않은 소스** `origin/tern-desktop-pet-integration`에 있으므로 빌드 전에 명시적으로 `git fetch origin tern-desktop-pet-integration`, `git switch --track origin/tern-desktop-pet-integration`을 실행하세요(이미 로컬 추적 브랜치가 있다면 그 브랜치로 전환). `bash scripts/install.sh --source`로 빌드한 뒤 Homebrew CLI 대신 `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`을 사용하세요. 위 Homebrew 안내는 여전히 Herdr용이며 플러그인 공개는 새 네이티브 바이너리 릴리스가 아닙니다. 공개 v0.3.5 포뮬러나 구형 데몬에는 이 소스 전용 기능이 추가되지 않습니다. 같은 프로필 설정과 선택적인 형제 체크아웃 개발용 링크는 [Tern 소스 설정·제한](docs/usage.ko.md#tern-로컬-소스-연동)을 참고하세요.
+위 게시 조건을 충족한 뒤 네이티브 앱을 먼저 설치하고 별도 공개 플러그인을 명시적으로 설치하세요. 플러그인은 앱을 몰래 다운로드·빌드·시작하지 않습니다.
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+PET="$(command -v herdr-desktop-pet)"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
+"$PET" --version
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+```
+
+기본 호스트는 Herdr입니다. `--host tern`에는 Herdr 서버·소켓·플러그인이 필요 없습니다. 실제 Tern 창의 **Configure desktop pet connection**에서 절대 실행 파일 `PET`와 위의 설정 및 상태 경로를 모두 지정한 뒤 **Connect to desktop pet**을 실행하세요. 변수 이름이 아닌 실제 경로를 입력하세요. 창 연결과 같은 프로필의 네이티브 `status`를 확인하세요. 목록 발견만으로 연결을 입증하지 않습니다. 바이너리·모드를 바꾸기 전에 같은 프로필을 종료하세요. 소스 개발은 선택 사항이며 현재 체크아웃에서 `bash scripts/install.sh --source`로 빌드하고 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`로 지정합니다. 특별한 브랜치는 필요 없습니다. 앱·도우미는 일치하는 프로토콜 3 쌍이며 추가 JSON 기능은 `protocol: 3`, `observation_mode: 1`입니다. 영어·한국어·중국어 간체·일본어를 유지합니다. **베타 업데이트 받기**는 기본 꺼짐이며 직접 선택해야 합니다. 확인만으로 설치·재시작하지 않습니다.
 
 `--host tern`은 Tern만 관찰하므로 **Herdr 서버·플러그인·소켓이 필요 없습니다**. `--host both`는 Herdr도 함께 관찰합니다. 기본값은 계속 `herdr`이고 명시적 플래그가 엄격하게 해석되는 `HERDR_PET_OBSERVATION_MODE` 환경변수보다 우선합니다. 시작·상태·종료·플러그인 연결에 실제 설정 **및** 상태 프로필을 똑같이 지정하고 모드를 바꾸기 전에 기존 데몬을 종료하세요. 모드가 다른 실행 중 데몬을 조용히 재사용하지 않습니다. `--socket`은 Herdr 백엔드 전용입니다. Tern 전용 모드에서 Tern 창이 없으면 해당 출처는 오프라인으로 바뀌지만 Herdr 단절 종료 타이머 때문에 캐릭터가 종료되지는 않습니다. Tern 자동 시작을 뜻하지 않습니다.
 
-연결 설정은 전체를 검증한 하나의 프로필로 저장하며 취소·실패하면 이전 연결을 유지합니다. 기존 설정은 새 프로필이 없을 때만 한 번 이전합니다. 재연결은 `agents:ask`를 반복하지 않고 창의 연결 식별을 복구합니다. 새 스냅샷 없이 5초가 지나면 Tern 출처는 오프라인이 되며 Herdr/Tern 공용 출처 한도 64개에서도 살아 있는 출처나 Herdr 출처를 밀어내지 않습니다. `status.herdr_socket`은 설정된 Herdr 경로이지 Tern 전용 모드의 의존성이나 서버가 수신 중이라는 증거가 아닙니다. 링크만으로 창의 동작을 확인할 수 없습니다. 실제 Tern 창의 연결 상태를 확인하세요. 이전 코드나 잘못된/기본 연결 경로로 Tern 콜백 시간 한도를 초과한 적이 있다면 빌드한 실행 파일과 동일한 설정·상태 프로필을 지정한 뒤 그 창에서 플러그인을 명시적으로 다시 로드하세요. 비활성화된 훅은 다시 로드하기 전까지 비활성 상태로 남을 수 있습니다. 연결 복구는 [사용 안내](docs/usage.ko.md#tern-로컬-소스-연동)를 참고하세요.
+연결 설정은 전체를 검증한 하나의 프로필로 저장하며 취소·실패하면 이전 연결을 유지합니다. 기존 설정은 새 프로필이 없을 때만 한 번 이전합니다. 재연결은 `agents:ask`를 반복하지 않고 창의 연결 식별을 복구합니다. 새 스냅샷 없이 5초가 지나면 Tern 출처는 오프라인이 되며 Herdr/Tern 공용 출처 한도 64개에서도 살아 있는 출처나 Herdr 출처를 밀어내지 않습니다. `status.herdr_socket`은 설정된 Herdr 경로이지 Tern 전용 모드의 의존성이나 서버가 수신 중이라는 증거가 아닙니다. 링크만으로 창의 동작을 확인할 수 없습니다. 실제 Tern 창의 연결 상태를 확인하세요. 이전 코드나 잘못된/기본 연결 경로로 Tern 콜백 시간 한도를 초과한 적이 있다면 빌드한 실행 파일과 동일한 설정·상태 프로필을 지정한 뒤 그 창에서 플러그인을 명시적으로 다시 로드하세요. 비활성화된 훅은 다시 로드하기 전까지 비활성 상태로 남을 수 있습니다. 연결 복구는 [사용 안내](docs/usage.ko.md#tern-설치와-분리-프로필)를 참고하세요.
 
 연속 조회는 이제 목록 수집을 네 개의 협력적·지연 시간 0인 콜백으로 나누어 Tern 콜백 시간 한도 안에서 수행하는 작업량을 줄입니다. 한 번만 호출하는 `agents:ask`의 성공·실패 결과가 나오면 다음 주기 조회를 기다리지 않고 새 목록 교환을 즉시 시작해 결과를 보고하며 ask를 재시도하지 않습니다. SDK 호출 하나가 느리거나 OS 스케줄링·선점이 발생하면 여전히 한도를 초과하거나 전달이 늦어질 수 있어 지연 시간이나 무기한 안정성을 보장하지 않습니다. 접수 수락은 여전히 에이전트 완료가 아닙니다. 시간 한도와 접수 상세는 [개발 안내](docs/development.ko.md)와 [CLI 규약](docs/cli.md)을 참고하세요.
 
@@ -145,9 +159,9 @@ bash scripts/install.sh --source
 
 ## 문서 및 웹사이트
 
-[사용 안내](docs/usage.ko.md) · [개발 안내](docs/development.ko.md) · [v0.3.5 한영 노트](docs/releases/v0.3.5.md) · [CLI 계약](docs/cli.md#한국어) · [호스트 연동 (English)](integrations/herdr/README.md) · [릴리스 기록](docs/releases/README.ko.md) · [0.3 업그레이드/대응 베타](docs/releases/0.3.md#한국어--v03-계열) · [과거 베타·프리뷰](docs/migrations/unreleased.ko.md).
+[사용 안내](docs/usage.ko.md) · [개발 안내](docs/development.ko.md) · [v0.3.6 한영 노트](docs/releases/v0.3.6.md) · [CLI 계약](docs/cli.md#한국어) · [호스트 연동 (English)](integrations/herdr/README.md) · [릴리스 기록](docs/releases/README.ko.md) · [0.3 업그레이드/대응 베타](docs/releases/0.3.md#한국어--v03-계열) · [과거 베타·프리뷰](docs/migrations/unreleased.ko.md).
 
-[한국어 웹사이트](https://hanbong5938.github.io/herdr-desktop-pet/) · [English website](https://hanbong5938.github.io/herdr-desktop-pet/en/): 네이티브 앱 소개 페이지이며 브라우저에서 앱을 실행하지 않습니다. 웹사이트 개발·배포는 [개발 안내](docs/development.ko.md#웹사이트-github-pages)에 있습니다.
+[한국어 웹사이트](https://hanbong5938.github.io/herdr-desktop-pet/) · [영어 웹사이트](https://hanbong5938.github.io/herdr-desktop-pet/en/) · [중국어 간체 웹사이트](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/) · [일본어 웹사이트](https://hanbong5938.github.io/herdr-desktop-pet/ja/): 네이티브 앱 소개 페이지이며 브라우저에서 앱을 실행하지 않습니다. 별도 캐릭터 갤러리는 영어·한국어만 제공합니다. 웹사이트 개발·배포는 [개발 안내](docs/development.ko.md#웹사이트-github-pages)에 있습니다.
 
 ## 그림 및 라이선스
 
