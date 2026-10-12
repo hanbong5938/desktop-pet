@@ -169,6 +169,7 @@ pub(crate) const fn cli_preference_feedback(locale: UiLocale, saved: bool) -> &'
 pub(crate) enum CliPromptFeedback {
     Sending,
     Acknowledged,
+    Accepted,
     Failed,
     UnknownDelivery,
 }
@@ -178,10 +179,14 @@ pub(crate) const fn cli_prompt_feedback(
     feedback: CliPromptFeedback,
 ) -> &'static str {
     match (locale, feedback) {
-        (UiLocale::Ko, CliPromptFeedback::Sending) => "Herdr에 프롬프트 전송 중",
-        (UiLocale::En, CliPromptFeedback::Sending) => "Sending prompt to Herdr",
-        (UiLocale::Ko, CliPromptFeedback::Acknowledged) => "Herdr가 프롬프트를 수락함",
-        (UiLocale::En, CliPromptFeedback::Acknowledged) => "Herdr acknowledged prompt",
+        (UiLocale::Ko, CliPromptFeedback::Sending) => "로컬 에이전트에 프롬프트 전송 중",
+        (UiLocale::En, CliPromptFeedback::Sending) => "Sending prompt to local agent",
+        (UiLocale::Ko, CliPromptFeedback::Acknowledged) => "Herdr가 프롬프트 전달을 확인함",
+        (UiLocale::En, CliPromptFeedback::Acknowledged) => "Herdr acknowledged prompt delivery",
+        (UiLocale::Ko, CliPromptFeedback::Accepted) => {
+            "프롬프트 수락됨 · 아직 전달되지 않았을 수 있음"
+        }
+        (UiLocale::En, CliPromptFeedback::Accepted) => "Prompt accepted · may still be queued",
         (UiLocale::Ko, CliPromptFeedback::Failed) => "프롬프트 전송 실패",
         (UiLocale::En, CliPromptFeedback::Failed) => "Prompt delivery failed",
         (UiLocale::Ko, CliPromptFeedback::UnknownDelivery) => "프롬프트 전달 여부 불확실",
@@ -497,6 +502,7 @@ pub(crate) enum Message {
     ComposerSend,
     ComposerSending,
     ComposerSent,
+    ComposerAccepted,
     ComposerEmpty,
     ComposerTooLarge,
     ComposerBusy,
@@ -665,7 +671,7 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::MenuBarModeSaveFailure => "메뉴 막대 아이콘 설정 저장 실패",
             Message::ObservationTitle => "관찰 대상",
             Message::ObservationLocal => "이 Mac",
-            Message::ObservationLocalHelp => "이 Mac의 Herdr 세션을 관찰합니다.",
+            Message::ObservationLocalHelp => "이 Mac의 로컬 Herdr 또는 Tern 세션을 관찰합니다.",
             Message::ObservationRemote => "원격 머신",
             Message::ObservationMachines => "관찰할 머신",
             Message::ObservationSession => "세션",
@@ -881,7 +887,8 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::ComposerInput => "선택한 세션에 보낼 한 줄 답장",
             Message::ComposerSend => "보내기",
             Message::ComposerSending => "보내는 중…",
-            Message::ComposerSent => "메시지 제출됨 (처리 완료는 아님)",
+            Message::ComposerSent => "Herdr가 메시지 전달을 확인함 (처리 완료는 아님)",
+            Message::ComposerAccepted => "메시지 수락됨 · 아직 전달되지 않았을 수 있음",
             Message::ComposerEmpty => "메시지를 입력하세요",
             Message::ComposerTooLarge => "메시지가 너무 깁니다",
             Message::ComposerBusy => "이전 메시지를 보내는 중입니다",
@@ -892,7 +899,7 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::ComposerStaleTarget => "선택한 세션이 더 이상 현재 세션이 아닙니다",
             Message::ComposerBlocked => "승인 또는 질문 응답은 실제 터미널에서 처리하세요",
             Message::ComposerNotReady => "선택한 세션에 지금은 메시지를 보낼 수 없습니다",
-            Message::ComposerUnsupported => "Herdr 서버가 agent.prompt를 지원하지 않습니다",
+            Message::ComposerUnsupported => "선택한 로컬 에이전트가 프롬프트 전송을 지원하지 않습니다",
             Message::ComposerUnknownDelivery => {
                 "전달 여부를 확인할 수 없습니다. 확인 없이 다시 보내지 마세요"
             }
@@ -1112,7 +1119,7 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::AppUpdateBlockedHelp => "The previous operation has not been safely cleared; no new update can start.",
             Message::ObservationTitle => "Observation sources",
             Message::ObservationLocal => "This Mac",
-            Message::ObservationLocalHelp => "Observe Herdr sessions on this Mac.",
+            Message::ObservationLocalHelp => "Observe local Herdr or Tern sessions on this Mac.",
             Message::ObservationRemote => "Remote machines",
             Message::ObservationMachines => "Machines to observe",
             Message::ObservationSession => "Session",
@@ -1254,7 +1261,8 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::ComposerInput => "One-line reply to selected session",
             Message::ComposerSend => "Send",
             Message::ComposerSending => "Sending…",
-            Message::ComposerSent => "Message submitted (not yet processed)",
+            Message::ComposerSent => "Herdr acknowledged message delivery (not yet processed)",
+            Message::ComposerAccepted => "Message accepted · may still be queued",
             Message::ComposerEmpty => "Enter a message",
             Message::ComposerTooLarge => "Message is too long",
             Message::ComposerBusy => "A message is already being sent",
@@ -1265,7 +1273,7 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::ComposerStaleTarget => "The selected session is no longer current",
             Message::ComposerBlocked => "Handle approvals or questions in the actual terminal",
             Message::ComposerNotReady => "Cannot message the selected session right now",
-            Message::ComposerUnsupported => "This Herdr server does not support agent.prompt",
+            Message::ComposerUnsupported => "The selected local agent does not support prompts",
             Message::ComposerUnknownDelivery => "Delivery is uncertain. Check before sending again",
             Message::ComposerFailed => "Could not send message",
             Message::ComposerShortcut => "Enter to send · Esc to close",

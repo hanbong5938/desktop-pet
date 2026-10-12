@@ -116,7 +116,8 @@ async function runTool(command: string[], label: string, input?: string): Promis
 
 async function requireProtocolThree(binary: string, label: string): Promise<void> {
   const output = await runTool([binary, "update-capabilities"], `${label} update capabilities`);
-  if (output.trim() !== '{"protocol":3}') {
+  const capabilities: unknown = JSON.parse(output);
+  if (typeof capabilities !== "object" || capabilities === null || !("protocol" in capabilities) || capabilities.protocol !== 3) {
     fail(`${label} does not support updater protocol 3`);
   }
 }

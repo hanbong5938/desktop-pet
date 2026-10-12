@@ -33,6 +33,41 @@ herdr-desktop-pet status
 
 시작 **후** `herdr-desktop-pet hide_bubble`로 빈 말풍선만 선택적으로 숨길 수 있습니다. Herdr 설치·플러그인은 필요 없습니다. 약 30초 후 캐릭터가 사라지면 `settings get`과 `status`를 확인하세요. 새 프로필의 `exit_with_herdr`는 기본 켜짐이어서 정상 서버가 없으면 유예 후 종료합니다. 같은 설정/상태 프로필에서 끈 다음 다시 시작하세요. 등록된 모든 로컬 플러그인 endpoint의 확인된 비활성화/연결 해제는 꺼진 스위치와 무관하게 종료합니다. 원격 관찰은 [별도 선택 경로](#관찰-대상-설정)이고 관리형 attach 자동 시작에는 [패치 호스트 연동](../integrations/herdr/README.md#build-in-separate-checkouts)이 필요합니다.
 
+## Tern 로컬 소스 연동
+
+**네이티브 연동은 병합되지 않은 소스 전용이며 Homebrew v0.3.5 설치 경로가 아닙니다.** 별도 공개 [Tern 플러그인](https://github.com/hanbong5938/tern-desktop-pet)은 Herdr 플러그인의 확장이 아닙니다. 플러그인 공개는 새 네이티브 바이너리·tap·웹사이트 게시를 뜻하지 않습니다. Apple Silicon Mac에서 위 소스 빌드 도구를 준비하고 명시적으로 `origin/tern-desktop-pet-integration`을 가져와 체크아웃한 뒤 이 저장소 루트에서 네이티브 앱을 빌드하고 분리 프로필로 수동 시작하세요:
+
+```sh
+git fetch origin tern-desktop-pet-integration
+git switch --track origin/tern-desktop-pet-integration
+bash scripts/install.sh --source
+PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+tern plugin list
+```
+
+로컬 추적 브랜치가 이미 있다면 `git switch tern-desktop-pet-integration`을 사용하세요. 개발자는 설치 줄 대신 `tern plugin link "$PWD/../tern-desktop-pet"`으로 `plugin.toml`·`window.luau`가 있는 형제 체크아웃을 연결할 수 있습니다. 현재 Herdr 앱 저장소가 대상은 아닙니다. 플러그인 설치·링크는 네이티브 앱을 빌드하거나 시작하지 않습니다.
+
+마지막 두 줄은 **실제 로컬 Tern CLI**로 실행하고 목록에 `tern-desktop-pet`이 있는지 확인하세요. `plugin link`의 대상은 `plugin.toml`·`window.luau`가 있는 형제 저장소이지 현재 Herdr 앱 저장소가 아닙니다. 연결만으로 앱이 빌드되거나 시작되지 않습니다. 실제 Tern 창의 명령 팔레트에서 **Configure desktop pet connection**을 열어 *실행 파일*은 절대 `PET` 경로, *설정 디렉터리*와 *상태 디렉터리*는 각각 절대 `PET_CONFIG`·`PET_STATE` 경로로 설정하세요. 팔레트에는 변수 이름을 그대로 입력하지 말고 실제 절대 경로 값을 입력해야 합니다. **Connect to desktop pet**은 교환을 요청하며 창 VM은 실행 중 주기적으로 조회합니다. 어느 명령도 앱/호스트 자동 시작을 약속하지 않습니다. `window.luau` 기본값은 `PATH`의 `herdr-desktop-pet`과 Herdr XDG 플러그인 경로이므로 위 분리 프로필에서는 빌드한 앱과 동일 프로필로 실제 연결되는 경우에만 사용하세요. 플러그인 교환은 상속된 Herdr 주입 경로보다 명시적 프로필 환경 경로를 우선하도록 지정합니다. 구형 설치 실행 파일에 `tern-exchange`가 없으면 연결할 수 없습니다.
+
+설치·링크·목록은 플러그인 발견만 확인하며 기존 창이 최신 코드를 로드했다는 증거가 아닙니다. **실제 Tern 창의 연결 상태**와 같은 프로필의 네이티브 `status`를 확인하세요. 설치·링크·변경 뒤 명령이 없거나 창이 이전 코드를 사용한다면 그 창에서 플러그인을 명시적으로 다시 로드하고 재확인하세요. 이전의 잘못된/기본 연결 경로로 Tern의 50ms 콜백 시간 한도가 초과됐다면 **Configure desktop pet connection**에서 빌드한 실행 파일과 동일한 설정·상태 프로필을 지정한 뒤 플러그인을 명시적으로 다시 로드하세요. 경로를 고쳐도 다시 로드하기 전까지 훅은 비활성 상태로 남을 수 있습니다. 별도로 CLI에서 시작한 창의 로그인·Keychain 오류는 이미 실행 중인 창의 상태를 설명하지 않습니다.
+
+**연결 저장과 복구:** 실행 파일·설정·상태 경로를 함께 검증하고 버전이 있는 하나의 연결 프로필로 커밋한 뒤 활성 연결·창 식별을 전환합니다. 취소·검증 실패·저장 실패 시 이전 프로필을 유지합니다. 기존 세 키는 정식 프로필이 없을 때만 한 번 이전하며 성공적으로 커밋한 뒤에만 삭제합니다. 정식 프로필이 잘못되어도 기존 키의 기본값으로 대체하지 않습니다. 다른 창이 프로필을 커밋한 경우에도 이전 연결의 지연된 콜백이 새 연결에 적용되지 않습니다. 데몬 재시작·첫 등록 응답 유실·출처 회수 시 일반 주기 조회가 새 연결 식별을 얻으며 이전 `agents:ask`를 재실행하지 않습니다. 현재 연결의 접수가 거부되면 해당 교환에 담긴 보고만 버리고 이후 보고는 유지합니다. 전달 여부가 불확실하면 수동 재전송 전에 실제 에이전트 대화 기록을 확인하세요.
+
+**연속 조회와 프롬프트 접수:** 목록 수집을 네 개의 협력적·지연 시간 0인 콜백으로 나누어 콜백마다 수행하는 작업량을 줄입니다. 한 콜백에서 모든 목록을 동기적으로 수집하거나 단계 사이에 큰 타이머 지연을 두지 않으며 주기 조회 간격은 그대로입니다. 한 번만 호출하는 `agents:ask`의 성공·실패 결과가 나오면 기존의 새 전체 목록 교환을 즉시 시작해 결과를 보고합니다. 다음 주기 조회를 기다리거나 ask를 재실행하거나 캐시된 스냅샷을 사용하지 않습니다. SDK 호출 하나가 느리거나 OS 스케줄링·선점이 발생하면 여전히 Tern 콜백 시간 한도를 초과하거나 전달이 늦어질 수 있으며 지연 시간이나 무기한 안정성을 보장하지 않습니다. 콜백 시간 한도 수정은 [개발 안내](development.ko.md), 접수 의미와 기한은 [CLI 규약](cli.md)을 참고하세요.
+
+**최신 상태와 용량:** 새 스냅샷 없이 5초가 지나면 Herdr 조회나 느린 클라이언트 입출력과 독립적으로 Tern 출처가 오프라인이 됩니다. Herdr와 Tern은 출처 한도 64개를 공유합니다. 새 Tern 창은 대기 작업이 마무리된 만료·오프라인 Tern 출처만 회수할 수 있습니다. 살아 있는 출처·Herdr 출처는 밀어내지 않고 회수한 출처 ID를 재사용하지 않습니다. 따라서 한도가 찼다면 활성 창 대신 새 창의 연결을 거부할 수 있습니다. 네이티브 `status.herdr_socket`은 Tern 전용 모드에서도 설정된 Herdr 경로를 표시합니다. 실제 수신 엔드포인트의 증거나 Herdr 소켓을 만들어야 한다는 뜻이 아닙니다. 크기 제한과 교환 상세는 [CLI 규약](cli.md)과 [개발 안내](development.ko.md)를 참고하세요. 접수 수락을 에이전트 완료로 해석하지 마세요.
+
+Herdr와 Tern을 **함께** 관찰하려면 이 프로필을 종료한 뒤 같은 설정·상태 경로의 *소스* 실행 파일을 `--host both`로 다시 시작하세요. 이 모드에서 Herdr 카드를 보려면 로컬 Herdr 서버가 필요합니다. `--socket PATH`는 그 Herdr 백엔드만 선택합니다. Tern 전용 모드는 **Herdr 서버·플러그인·패치 호스트·소켓이 필요 없고**, Herdr 등록이나 단절 종료 타이머도 실행하지 않습니다. 해당 프로필의 네이티브 명령은 동일한 `--host`를 사용하고 Herdr로 돌아가려면 종료 뒤 `--host herdr`로 시작하세요. 기본값은 계속 `herdr`이고 엄격히 해석되는 `HERDR_PET_OBSERVATION_MODE=herdr|tern|both` 환경변수를 사용하지 않는 한 바뀌지 않습니다. 명시적 `--host`가 우선하며 다른 모드로 실행 중인 데몬은 조용히 재사용하지 않고 거부합니다. `"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop`으로 종료하세요(`both`라면 바꾸어 입력). 모드·바이너리를 바꾸기 전후 `status`와 실제 실행 파일을 확인하세요. 주입된 `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`는 CLI 경로 플래그보다 우선하므로 수동 명령에서 해제하거나 맞추세요. 설정·상태 **두 경로 모두** 교체할 앱 설치 경로 밖에 두고 CLI·Tern 창에 똑같이 지정하세요.
+
+창 VM은 자신의 로컬 호스트 에이전트 목록만 읽습니다. 각 창 VM의 실행 세대는 별도 출처로 취급하며 오래되거나 닫힌 창은 마지막 카드가 남아도 **오프라인**이 됩니다. 플러그인은 `tern.process.run`을 통해 크기 제한 스냅샷을 로컬 `tern-exchange`에 전달하고 비공개 제어 소켓을 사용합니다. `--socket`으로 이를 지정하거나 원격 Tern 호스트를 조회하지 않습니다. 에이전트 상태는 Tern 관찰 결과이며 제공자 완료 결과를 추측하지 않습니다. `idle`은 완료/성공 증거가 아닙니다. 선택한 로컬 Tern 카드의 답장은 한 번만 제안하고 플러그인이 패널을 재검증한 뒤 Tern의 의미 기반 `agents:ask`를 호출합니다. 셸·PTY 입력·몰래 재시도·Tern 워크트리 삭제는 없습니다. 네이티브 제출 ACK와 뒤따르는 `prompt_accepted` 접수는 별개입니다. 수락된 전달도 **대기열에 있을 수 있고** `committed: false`이며 에이전트 완료가 아닙니다. 교환이 만료·실패하거나 결과가 없다면 성공으로 단정하거나 무작정 재전송하지 마세요. Herdr 원격 카드는 계속 읽기 전용이고 Tern 카드에는 워크트리 삭제가 없습니다.
+
+앞서 일반 설치 Tern 0.6.1의 로그아웃 창은 연결된 플러그인을 로딩했고 프로필을 맞춘 서명·패키징 소스 앱과 `agents:list` / `process.run`으로 실제 연결됐습니다. `data_connected: true`, 정상적인 **빈** 출처 하나, 세션 0개를 확인했고 창을 닫자 약 6초 뒤 출처는 오프라인이 되었지만 캐릭터는 계속 실행됐습니다. 설치된 구형 앱은 `tern-exchange`가 없다고 보고했습니다. 주입된 브리지 교환으로 네이티브 표시 창·접수 처리·만료·오래된/다른 호스트 거부도 별도로 확인했습니다. 이후 사용자의 기존 Tern 창에서 명시적인 분리 앱 프로필·플러그인 연결과 Tern CLI로 만든 임시 OMP 탭을 사용해 실검증했습니다. 플러그인은 실제 로컬 에이전트를 관찰했고 네이티브 의미 기반 프롬프트는 `prompt_accepted`와 전달 상태 `accepted_may_be_queued`를 반환했습니다. 별도로 Tern 에이전트 대화 기록에는 `TERN_PET_SMOKE_OK`라고 정확히 답하라는 사용자 요청과 어시스턴트의 `TERN_PET_SMOKE_OK` 답장이 기록됐습니다. 관찰된 `idle` 상태와 일치하는 마지막 메시지는 권위 있는 완료·성공 이벤트가 아닙니다. 일반적인 베타 사용에는 로그인이 필요합니다. 테스트할 때 사용자의 실행 중인 Tern 창을 재사용하고, 별도로 시작한 CLI 창의 Keychain 접근 오류를 기존 로그인 고장의 증거로 해석하지 마세요. 원격 호스트 지원이나 공개 플러그인·아티팩트·Tern 최소 공개 버전을 입증하지 않습니다.
+
 ## 조작
 
 | 조작 | 동작 |

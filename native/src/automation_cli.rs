@@ -1319,7 +1319,7 @@ fn domain_mutation(
     loop {
         if operation.state.terminal() || deadline.is_none() {
             super::print_json(
-                &serde_json::json!({"ok": !operation.state.terminal() || matches!(operation.state,DomainOperationState::Applied|DomainOperationState::AgentPrompted), "operation":operation}),
+                &serde_json::json!({"ok": !operation.state.terminal() || matches!(operation.state,DomainOperationState::Applied|DomainOperationState::AgentPrompted|DomainOperationState::PromptAccepted), "operation":operation}),
             )?;
             return if matches!(
                 operation.state,
@@ -1634,7 +1634,7 @@ pub(crate) fn execute_domain(command: DomainCommand, socket: &Path) -> Result<()
                 ));
             }
             super::print_json(
-                &serde_json::json!({"ok":matches!(operation.state,DomainOperationState::Accepted|DomainOperationState::Pending|DomainOperationState::Applied|DomainOperationState::AgentPrompted),"operation":operation}),
+                &serde_json::json!({"ok":matches!(operation.state,DomainOperationState::Accepted|DomainOperationState::Pending|DomainOperationState::Applied|DomainOperationState::AgentPrompted|DomainOperationState::PromptAccepted),"operation":operation}),
             )?;
             if matches!(
                 operation.state,
@@ -2123,12 +2123,8 @@ mod domain_tests {
             }
             seen
         });
-        let result = domain_read_with_wait(
-            &socket,
-            "daemon_read",
-            DomainAction::DialogueList {},
-            wait,
-        );
+        let result =
+            domain_read_with_wait(&socket, "daemon_read", DomainAction::DialogueList {}, wait);
         assert!(
             result.is_err(),
             "a terminal read reply after the deadline must not be accepted"

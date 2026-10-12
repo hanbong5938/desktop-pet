@@ -1,5 +1,6 @@
 //! Read-only installation discovery and durable, explicitly consented update plans.
 //! This crate deliberately has no dependency on the desktop app's build script or rig.
+mod observation;
 mod origin;
 pub mod protocol;
 pub mod releases;
@@ -13,6 +14,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use observation::{ObservationMode, OBSERVATION_MODE_ENV};
 pub use origin::{
     check, detect_origin, installed_candidate, manager_command, recheck_plan,
     refresh_release_target, restored_original, validate_plan_target, ManagerCommand,
@@ -39,6 +41,13 @@ pub struct UpdateContext {
     pub assets_override: Option<PathBuf>,
     pub environment: BTreeMap<String, String>,
     pub locale: String,
+}
+
+impl UpdateContext {
+    /// Use only the selection captured with this context, never the process environment.
+    pub fn observation_mode(&self) -> Result<ObservationMode, String> {
+        ObservationMode::from_environment(&self.environment)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -254,6 +263,21 @@ pub fn executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
 
 /// Require the actual bundle and updater capability, not merely a changed hash/version.
 pub fn validate_candidate(path: &Path) -> Result<ExecutableIdentity, String> {
+    validate_candidate_mode(path, ObservationMode::Herdr)
+}
+
+/// Reject a candidate that cannot preserve the captured observation selection.
+pub fn validate_candidate_for_context(
+    path: &Path,
+    context: &UpdateContext,
+) -> Result<ExecutableIdentity, String> {
+    validate_candidate_mode(path, context.observation_mode()?)
+}
+
+fn validate_candidate_mode(
+    path: &Path,
+    mode: ObservationMode,
+) -> Result<ExecutableIdentity, String> {
     let image = executable_identity(path)?;
     let macos = image.path.parent().ok_or("candidate has no parent")?;
     let binary = image.path.file_name().ok_or("candidate has no name")?;
@@ -292,6 +316,14 @@ pub fn validate_candidate(path: &Path) -> Result<ExecutableIdentity, String> {
     let response = origin::command_output(&image.path, &["update-capabilities"], 4096, 5)?;
     let capabilities: serde_json::Value =
         serde_json::from_str(&response).map_err(|e| e.to_string())?;
+    validate_capabilities(&capabilities, mode)?;
+    Ok(image)
+}
+
+fn validate_capabilities(
+    capabilities: &serde_json::Value,
+    mode: ObservationMode,
+) -> Result<(), String> {
     if capabilities
         .get("protocol")
         .and_then(serde_json::Value::as_u64)
@@ -299,11 +331,42 @@ pub fn validate_candidate(path: &Path) -> Result<ExecutableIdentity, String> {
     {
         return Err("candidate does not support updater protocol 3".into());
     }
-    Ok(image)
+    if mode.supports_tern()
+        && capabilities
+            .get("observation_mode")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        return Err("candidate does not support observation mode capability 1".into());
+    }
+    Ok(())
 }
 
-pub fn helper_path(executable: &Path) -> Result<PathBuf, String> {
-    let image = validate_candidate(executable)?;
+/// Require the signed helper to understand explicit captured mode keys, including Herdr.
+pub fn validate_helper_capabilities(response: &str, context: &UpdateContext) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(response).map_err(|e| e.to_string())?;
+    if parsed.get("protocol").and_then(serde_json::Value::as_u64)
+        != Some(protocol::UPDATER_PROTOCOL.into())
+    {
+        return Err("release helper does not match updater protocol 3".into());
+    }
+    context.observation_mode()?;
+    if context.environment.contains_key(OBSERVATION_MODE_ENV)
+        && parsed
+            .get("observation_mode")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        return Err("release helper does not support observation mode capability 1".into());
+    }
+    Ok(())
+}
+
+pub fn helper_path_for_context(
+    executable: &Path,
+    context: &UpdateContext,
+) -> Result<PathBuf, String> {
+    let image = validate_candidate_for_context(executable, context)?;
     let path = image.path.with_file_name("herdr-update-coordinator");
     executable_identity(&path)?;
     Ok(path)
@@ -316,7 +379,7 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         (UpdateAction::ApplyInstalled, Some(candidate)) => &candidate.path,
         _ => &plan.running.path,
     };
-    let source = helper_path(executable)?;
+    let source = helper_path_for_context(executable, &plan.context)?;
     #[cfg(target_os = "macos")]
     origin::command_output(
         Path::new("/usr/bin/codesign"),
@@ -327,6 +390,10 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         ],
         4096,
         10,
+    )?;
+    validate_helper_capabilities(
+        &origin::command_output(&source, &["update-capabilities"], 4096, 5)?,
+        &plan.context,
     )?;
     let source_id = executable_identity(&source)?;
     let bytes = owned_file(&source, 64 * 1024 * 1024)?;
@@ -358,6 +425,7 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
 }
 
 pub fn write_plan(plan: &UpdatePlan) -> Result<PathBuf, String> {
+    plan.context.observation_mode()?;
     recheck_plan(plan)?;
     let base = protocol::private_updates(&plan.context.state_dir)?;
     let path = base.join(format!("{}.plan.json", plan.operation_id));
@@ -376,6 +444,7 @@ pub fn read_plan(state_dir: &Path, operation_id: &str) -> Result<UpdatePlan, Str
         65536,
     )?;
     let plan: UpdatePlan = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    plan.context.observation_mode()?;
     if plan.version != protocol::UPDATER_PROTOCOL
         || plan.operation_id != operation_id
         || plan.context.state_dir != state_dir
@@ -415,6 +484,37 @@ mod candidate_tests {
             !canary.exists(),
             "checking an unsigned update executed its code"
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_capability_tests {
+    use super::*;
+
+    #[test]
+    fn old_protocol_three_candidate_remains_herdr_only() {
+        let legacy = serde_json::json!({"protocol": 3});
+        assert!(validate_capabilities(&legacy, ObservationMode::Herdr).is_ok());
+        for mode in [ObservationMode::Tern, ObservationMode::Both] {
+            assert!(validate_capabilities(&legacy, mode).is_err());
+            for value in [serde_json::json!(0), serde_json::json!("1")] {
+                assert!(validate_capabilities(
+                    &serde_json::json!({"protocol": 3, "observation_mode": value}),
+                    mode
+                )
+                .is_err());
+            }
+            assert!(validate_capabilities(
+                &serde_json::json!({"protocol": 3, "observation_mode": 1}),
+                mode
+            )
+            .is_ok());
+        }
+        assert!(validate_capabilities(
+            &serde_json::json!({"protocol": 2, "observation_mode": 1}),
+            ObservationMode::Tern
+        )
+        .is_err());
     }
 }
 
