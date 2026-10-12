@@ -4,6 +4,35 @@
 
 This guide describes the v0.3.5 stable **source checkout and default/prebuilt target**. It retains v0.3.4's eye-side masking, ABI identity and provenance, v0.3.3's official-browser/card, remote portrait and busy → idle management fixes, and v0.3.2's search, resizing, dialogue draft, native automation and protocol-2 updater capabilities. v0.3.5 improves pointer capture recovery, attached bubble placement and composing reply visibility; character selection remains unchanged. Source facts do **not** establish publication. Confirm the non-draft [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases), complete arm64 archive/checksums, separate rig provenance sidecar and installer/formula cutover before using a prebuilt; see the [bilingual release note](releases/v0.3.5.md) and [upgrade guidance](releases/0.3.md#upgrade-from-v021-or-beta). An older installed binary does not gain these changes from documentation, and scripted checks do not certify physical GUI/IME/accessibility input.
 
+## First run: local host or independent pet
+
+On an Apple Silicon Mac (macOS 13+), install the published Homebrew formula and manually start the native pet against an **already running local Herdr server**:
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+herdr-desktop-pet --version
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+Check actual [v0.3.5 Release assets](https://github.com/hanbong5938/herdr-desktop-pet/releases) and tap formula independently of this source checkout. `--version` identifies the installed CLI; `status` identifies the running daemon's `app_version` and executable. `start` can reuse an older daemon, so stop it before an upgrade or backend change. Open the bubble for local cards: a real agent session on Herdr 0.9.0+ supplies observable snapshots. No plugin, patch or `client.attached` hook is needed for native manual observation. Local replies separately need the server's `agent.prompt`; its ACK means submission, not completion. If the server's backend socket differs from the pet's inherited environment/default, inspect that server's **actual** socket path, then start against it instead (replace the example path; never guess it):
+
+```sh
+herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
+herdr-desktop-pet status
+```
+
+`--socket` selects the Herdr backend, **not** `<state-dir>/control.sock`; check `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`, the Herdr CLI on `PATH`, and the server owning that socket. Stop a pre-existing pet daemon first if changing the backend. For an independent character with **no healthy Herdr server**, set the lifecycle switch before starting, then check it:
+
+```sh
+herdr-desktop-pet settings set exit_with_herdr off
+herdr-desktop-pet settings get
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+Optionally run `herdr-desktop-pet hide_bubble` **after** start to retain the character without an empty bubble. No Herdr install/plugin is needed. If the pet disappears after about 30 seconds, check `settings get` and `status`: a new profile defaults `exit_with_herdr` on, and without a healthy server it exits after the grace period. Set it off before restarting in the same config/state profile. Confirmed disable/unlink of all registered local plugin endpoints still shuts it down even with the switch off. Remote observation is an [optional separate path](#observation-sources); managed attach auto-start requires [patched host integration](../integrations/herdr/README.md#build-in-separate-checkouts).
+
 ## Controls
 
 | Interaction | Effect |
@@ -127,6 +156,7 @@ A standalone **signed helper**, selected config/state and custom assets must lie
 ## Configuration and troubleshooting
 
 - `HERDR_PLUGIN_CONFIG_DIR` selects `lifecycle.json` (two lifecycle switches), `preferences.json` (other settings/dialogue), managed `characters/` and `menu-bar-icons/`; `HERDR_PLUGIN_STATE_DIR` selects process lock, `<state-dir>/control.sock`, daemon `desktop-pet.log`, and updater state. Without injected paths, use Herdr's XDG plugin config/state directories. Native `--config-dir`/`--state-dir` isolate a profile, but injected environment paths take precedence; use **both matching actual paths** for start, commands, stop and backup, especially stable/beta side by side. `--socket PATH` points to a Herdr backend, **not** the private CLI control socket. See [CLI connections](cli.md#connection-identity-and-operations).
+- For standalone use, if the pet disappears after about 30 seconds without a healthy server, inspect `settings get` and `status`, set `exit_with_herdr off` before restarting in the same config/state profile, and distinguish hidden windows from an exited daemon. Explicit disable/unlink of all registered local endpoints is a separate immediate shutdown, not overridden by that switch.
 - Hidden windows or full-window click-through do not mean startup failed: use menu-bar recovery above. If not running after `plugin link`, inspect `client.attached` warnings, invoke manual `start`, inspect daemon `status`/log; `auto_start` off intentionally skips automatic startup. Linking a running host does not itself launch the pet. For client-attach host patch, isolated deployment and actual hook confirmation follow [integrations/herdr/README.md](../integrations/herdr/README.md).
 - On `Herdr watchers are shutting down`, inspect inherited `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`, actual CLI executable/version on `PATH` and server owning that socket. `herdr plugin list` against a **different server** does not diagnose the daemon's endpoint. Target the same CLI/socket/session; for remote errors also check saved-machine forwarding/version/selected profile. The patched host enables auto-start but does not install this plugin on every server.
 - For remote errors see [Observation sources](#observation-sources): profile status, interactive authentication/reconnect and compatible forwarding CLI. Launch the GUI on the local Mac, not over SSH on a remote host expecting local windows. `agent.prompt` limitations and remote read-only behavior are [above](#inline-replies-and-message-delivery).

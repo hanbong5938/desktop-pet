@@ -4,6 +4,35 @@
 
 이 안내는 v0.3.5 **안정판 소스 체크아웃·기본/사전 빌드 대상**을 설명합니다. v0.3.4의 눈 소유권·ABI 일치·출처 기록, v0.3.3의 공식 브라우저/카드·원격 초상화·작업 중 → 유휴 관리 수정과 v0.3.2의 검색·말풍선 크기·대사 초안·네이티브 자동화·protocol-2 업데이트를 유지합니다. v0.3.5는 포인터 캡처 복구·부착 말풍선 배치·IME 답장 표시를 개선하며 캐릭터 선택은 바꾸지 않습니다. 소스와 이 문서만으로 **공개 바이너리나 설치기/포뮬러 게시가 증명되지 않습니다**. 사전 빌드 사용 전 비초안 [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases)의 arm64 압축 파일·체크섬·별도 rig 출처 사이드카와 설치기/포뮬러 갱신을 확인하세요([한영 노트](releases/v0.3.5.md#한국어), [업그레이드](releases/0.3.md#한국어--v03-계열)). 이전 바이너리는 문서 변경으로 새 기능을 얻지 않으며 프로그램 확인만으로 물리 GUI·IME·접근성을 인증하지 않습니다.
 
+## 첫 실행: 로컬 호스트 또는 독립 캐릭터
+
+Apple Silicon Mac(macOS 13 이상)에 공개 Homebrew 포뮬러를 설치하고 **이미 실행 중인 로컬 Herdr 서버**를 대상으로 네이티브 앱을 수동 시작합니다:
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+herdr-desktop-pet --version
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+이 소스 체크아웃과 별도로 실제 [v0.3.5 릴리스 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 tap 포뮬러를 확인하세요. `--version`은 설치된 CLI, `status`의 `app_version`·실행 파일은 **실행 중인 데몬**을 식별합니다. `start`가 이전 데몬을 재사용할 수 있으므로 업그레이드·백엔드 변경 전 종료하세요. 말풍선을 열면 Herdr 0.9.0 이상 서버의 실제 에이전트 세션 스냅샷이 로컬 카드로 표시됩니다. 네이티브 수동 관찰에는 플러그인·패치·`client.attached` 훅이 필요하지 않습니다. 로컬 답장은 해당 서버의 `agent.prompt` 지원이 별도로 필요하며 ACK는 제출이지 완료가 아닙니다. 서버의 백엔드 소켓이 앱이 물려받은 환경/기본값과 다르면 서버의 **실제 소켓 경로**를 확인해 지정하세요(예시 경로를 실제 경로로 바꾸고 추측하지 마세요):
+
+```sh
+herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
+herdr-desktop-pet status
+```
+
+`--socket`은 `<state-dir>/control.sock`이 아닌 Herdr 백엔드를 지정합니다. `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`, `PATH`의 Herdr CLI와 실제 소켓을 소유한 서버를 확인하세요. 백엔드를 바꾸려면 기존 앱 데몬부터 종료하세요. **정상 Herdr 서버 없이** 캐릭터만 실행하려면 시작 전에 종료 스위치를 끄고 확인합니다:
+
+```sh
+herdr-desktop-pet settings set exit_with_herdr off
+herdr-desktop-pet settings get
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+시작 **후** `herdr-desktop-pet hide_bubble`로 빈 말풍선만 선택적으로 숨길 수 있습니다. Herdr 설치·플러그인은 필요 없습니다. 약 30초 후 캐릭터가 사라지면 `settings get`과 `status`를 확인하세요. 새 프로필의 `exit_with_herdr`는 기본 켜짐이어서 정상 서버가 없으면 유예 후 종료합니다. 같은 설정/상태 프로필에서 끈 다음 다시 시작하세요. 등록된 모든 로컬 플러그인 endpoint의 확인된 비활성화/연결 해제는 꺼진 스위치와 무관하게 종료합니다. 원격 관찰은 [별도 선택 경로](#관찰-대상-설정)이고 관리형 attach 자동 시작에는 [패치 호스트 연동](../integrations/herdr/README.md#build-in-separate-checkouts)이 필요합니다.
+
 ## 조작
 
 | 조작 | 동작 |
@@ -127,6 +156,7 @@
 ## 설정과 문제 해결
 
 - `HERDR_PLUGIN_CONFIG_DIR`에는 `lifecycle.json`(두 실행 관리 스위치), `preferences.json`(기타 설정·대사), 관리 `characters/`·`menu-bar-icons/`가 있고 `HERDR_PLUGIN_STATE_DIR`에는 프로세스 잠금·`<state-dir>/control.sock`·데몬 `desktop-pet.log`와 업데이트 상태가 있습니다. 주입되지 않으면 Herdr XDG 플러그인 설정/상태 디렉터리를 사용합니다. 네이티브 `--config-dir`·`--state-dir`로 프로필을 격리할 수 있지만 주입된 환경변수가 우선합니다. 특히 안정판/베타 동시 사용은 시작·명령·종료·백업에 실제 설정 **및 상태** 두 경로를 맞추세요. `--socket PATH`는 네이티브 CLI 제어 소켓이 아닌 Herdr 백엔드 지정입니다([CLI 연결 계약](cli.md#연결-식별자-작업-상태)).
+- 독립 실행 중 정상 서버 없이 약 30초 뒤 사라지면 `settings get`과 `status`를 확인하고 같은 설정/상태 프로필의 `exit_with_herdr`를 끈 뒤 다시 시작하세요. 창을 숨긴 경우와 데몬 종료를 구별하세요. 등록된 모든 로컬 endpoint의 명시적 비활성화/연결 해제에 따른 즉시 종료는 이 스위치로 막지 못합니다.
 - 창 숨김이나 전체 클릭 통과는 시작 실패가 아닙니다. 위의 메뉴 막대 복구를 사용하세요. `plugin link` 후 실행되지 않았다면 `client.attached` 경고를 확인하고 수동 `start`, 데몬 `status`·로그를 확인하세요. 꺼진 `auto_start`는 의도적인 자동 시작 건너뜀이고 실행 중 호스트에 연결만 해서는 바로 실행되지 않습니다. 패치 호스트 격리 설치와 훅 확인은 [호스트 안내](../integrations/herdr/README.md)에 있습니다.
 - `Herdr watchers are shutting down`이 나오면 상속된 `HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`, `PATH`의 실제 Herdr CLI 실행 파일/버전, 그 소켓을 소유한 서버를 확인하세요. **다른 서버**의 `herdr plugin list`로 데몬의 endpoint를 판정할 수 없습니다. 같은 CLI·소켓·세션을 대상으로 조사하고 원격이면 저장 머신 전달 지원 버전/선택 프로필도 검사하세요. 패치 호스트는 자동 실행 훅을 제공할 뿐 모든 서버에 플러그인을 설치하지 않습니다.
 - 원격 오류는 [관찰 대상 설정](#관찰-대상-설정)의 프로필 상태·대화형 재인증·API 전달 CLI를 확인하세요. 로컬 화면을 원하면 원격 호스트에서 SSH로 GUI를 실행하지 마세요. `agent.prompt` 제한과 원격 읽기 전용은 [메시지 전달](#인라인-답장과-메시지-전달)을 참고하세요.

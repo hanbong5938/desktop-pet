@@ -21,23 +21,12 @@ A native macOS companion for [Herdr](https://herdr.dev). Rubelia reacts to touch
 ## Requirements
 
 - **Apple Silicon Mac with macOS 13 or later.** Intel Macs, Windows, and Linux are not supported native targets.
-- Client-attach auto-start requires official **Herdr 0.9.3 source built with the supplied [`client.attached` patch](integrations/herdr/client-attached.patch)**, or a future actual host release advertising that hook. Stock Herdr 0.9.0 and 0.9.3 lack it; the manifest version floor does not supply the hook. Follow the [host integration guide](integrations/herdr/README.md) and reject unknown-hook warnings. Local observation's Herdr 0.9.0 floor is a different capability.
+- For local observation, use an existing local Herdr server (0.9.0 or later for snapshots); no plugin or host patch is needed. Replies separately require that server's `agent.prompt`. **Only optional client-attach auto-start** requires official Herdr 0.9.3 source built with the supplied [`client.attached` patch](integrations/herdr/client-attached.patch), or a future actual host release advertising that hook. Stock Herdr 0.9.0 and 0.9.3 lack it; the manifest version floor does not supply the hook. Follow the [host integration guide](integrations/herdr/README.md) and reject unknown-hook warnings in that managed setup.
 - Source builds require Rust/Cargo, Bun, Node.js/npm, and Xcode Command Line Tools; a prebuilt needs no source toolchain. This app is **ad-hoc signed, not Developer ID signed or notarized**; macOS Gatekeeper may require explicit local approval. Signature checks do not imply notarization.
 
-## Install as a Herdr plugin (recommended)
+## Install with Homebrew: first connection
 
-On the intended compatible Herdr host, install the [plugin repository](https://github.com/hanbong5938/herdr-desktop-pet) and explicitly start the pet:
-
-```sh
-herdr plugin install hanbong5938/herdr-desktop-pet
-herdr plugin action invoke start --plugin desktop-pet
-```
-
-Managed installation runs `bash scripts/install.sh`: it tries the manifest-pinned v0.3.5 `.app`-only archive, validating checksums, archive entries, arm64 signature and bundled character. Require a **non-draft v0.3.5 Release with complete archive/checksums and updated installer**; the separately uploaded provenance sidecar does not enter the installer archive. If prebuilt assets are unavailable or invalid, the default installer reports this and builds the checkout from source. Explicit `--prebuilt` fails instead of falling back; `--source` builds the checkout. Plugin installation does not patch or build Herdr. See [installation details](docs/development.md#source-development).
-
-## Install with Homebrew
-
-Use the [personal tap](https://github.com/hanbong5938/homebrew-tap) only after confirming its formula and the complete public v0.3.5 archive/checksums in [Releases](https://github.com/hanbong5938/herdr-desktop-pet/releases):
+The [personal tap](https://github.com/hanbong5938/homebrew-tap) and non-draft v0.3.5 arm64 archive/checksums are publicly available; check the actual [Release assets](https://github.com/hanbong5938/herdr-desktop-pet/releases) and formula before installing. On the Mac displaying the pet, with an existing local Herdr server running:
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -45,6 +34,15 @@ herdr-desktop-pet --version
 herdr-desktop-pet start
 herdr-desktop-pet status
 ```
+
+The native `start` is manual: it does not require `herdr plugin install`, `plugin link` or a patched host. Expand the bubble to see local session cards from that server (Herdr 0.9.0+ for snapshots); a live agent session is needed for a live card. Sending a reply additionally requires that server's `agent.prompt`; submission ACK is not completion. If cards do not appear, check the actual running Herdr CLI/server and `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`. If its backend socket differs from the pet's environment/default, use the **actual socket path printed by that server**, not a guessed path:
+
+```sh
+herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
+herdr-desktop-pet status
+```
+
+Replace `/actual/path/to/herdr-api.sock` with the verified Herdr **backend** socket; `--socket` is not the pet's private control socket. `start` reuses an already-running daemon, so stop it before changing the selected backend; check `status` for the actual daemon version/executable, not just `--version`. See [connection troubleshooting](docs/usage.md#configuration-and-troubleshooting).
 
 Before upgrading an existing installation, **stop the old daemon**: `start` reuses a running one.
 
@@ -58,9 +56,33 @@ herdr-desktop-pet status
 
 Verify the CLI reports `0.3.5` and, after restart, `status` shows `app_version: 0.3.5` **and the expected running executable**. The formula puts the app under Homebrew's prefix, **not** `/Applications`, and the CLI on `PATH`; it installs neither Herdr plugin nor patched host. Stop older daemons first; `start` otherwise reuses one. See [0.3 upgrade guidance](docs/releases/0.3.md#upgrade-from-v021-or-beta) for profile isolation and older cask migration. Formula availability depends on actual publication, not this source target.
 
-## Install this checkout from source
+### Pet without Herdr
 
-**From this repository root**, first follow the [host build procedure](integrations/herdr/README.md#build-in-separate-checkouts) to patch/build official Herdr 0.9.3 in a separate checkout, run its isolated server, and set `PATCHED_HERDR` to that **built host executable** (for example, `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`). Keep the same intended host/profile/socket for the commands below; an unpatched binary on `PATH` is not a substitute.
+For a continuously visible independent pet without a healthy local Herdr server, turn off the new profile's default 30-second disconnect exit **before** starting:
+
+```sh
+herdr-desktop-pet settings set exit_with_herdr off
+herdr-desktop-pet settings get
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+No Herdr installation, plugin or patch is needed. After starting, `herdr-desktop-pet hide_bubble` optionally hides the empty bubble while retaining the character. If the pet disappears after about 30 seconds, inspect `settings get` and `status`: with `exit_with_herdr` on and no healthy server, it exits after the grace period. Set it off before restarting (using the same actual config/state profile). This switch does **not** override confirmed disable/unlink of all registered local plugin endpoints. [Lifecycle details](docs/usage.md#lifecycle-and-plugin-actions).
+
+### Optional advanced: managed Herdr plugin and attach auto-start
+
+On the intended compatible Herdr host, install the [plugin repository](https://github.com/hanbong5938/herdr-desktop-pet) and explicitly start the pet:
+
+```sh
+herdr plugin install hanbong5938/herdr-desktop-pet
+herdr plugin action invoke start --plugin desktop-pet
+```
+
+Managed installation runs `bash scripts/install.sh`: it tries the manifest-pinned v0.3.5 `.app`-only archive, validating checksums, archive entries, arm64 signature and bundled character. Require a **non-draft v0.3.5 Release with complete archive/checksums and updated installer**; the separately uploaded provenance sidecar does not enter the installer archive. If prebuilt assets are unavailable or invalid, the default installer reports this and builds the checkout from source. Explicit `--prebuilt` fails instead of falling back; `--source` builds the checkout. Plugin installation does not patch or build Herdr. For attach auto-start, prepare the patched host described [here](integrations/herdr/README.md#build-in-separate-checkouts); native manual observation above needs neither.
+
+## Install this checkout from source for managed integration
+
+**For the optional managed attach workflow**, from this repository root first follow the [host build procedure](integrations/herdr/README.md#build-in-separate-checkouts) to patch/build official Herdr 0.9.3 in a separate checkout, run its isolated server, and set `PATCHED_HERDR` to that **built host executable** (for example, `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`). Keep the same intended host/profile/socket for the commands below; an unpatched binary on `PATH` is not a substitute for attach auto-start. Building the pet from source alone does not require a patched host.
 
 ```sh
 bash scripts/install.sh --source
@@ -97,7 +119,7 @@ The [character gallery](https://hanbong5938.github.io/herdr-characters/) preview
 
 `HERDR_PLUGIN_CONFIG_DIR` holds `preferences.json`, `lifecycle.json`, managed `characters/` and `menu-bar-icons/`; `HERDR_PLUGIN_STATE_DIR` holds the lock, control socket and `desktop-pet.log`. Without injection, Herdr's XDG plugin locations apply; native `--config-dir` / `--state-dir` can isolate profiles, but injected environment paths take precedence. Back up **both** actual directories before upgrading or switching channels. `lifecycle.json` controls `auto_start` and `exit_with_herdr`, separately from other preferences.
 
-If the app is hidden, use the menu-bar recovery above rather than reinstalling. If absent, check the running host/socket, plugin link warnings, `start`/`status`, actual executable/version and daemon log; disabled auto-start can intentionally skip launch. Release download failure under `--prebuilt` does not trigger source fallback. For connection errors inspect `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH` and the server actually owning the socket; for remote errors inspect the saved profile and local CLI. Run the pet on the **Mac whose desktop should display it**. Provider integrations belong to upstream Herdr; reload existing provider sessions after installing their hooks. See [troubleshooting](docs/usage.md#configuration-and-troubleshooting) and [lifecycle actions](docs/usage.md#lifecycle-and-plugin-actions).
+If the pet disappears about 30 seconds after a no-server start, use `settings get` to check `exit_with_herdr` and set it off **before** restarting for standalone use; confirmed disable/unlink of all registered local endpoints still ends this run. If hidden, use the menu-bar recovery above rather than reinstalling. If absent on a managed host, check its `client.attached` warnings, manual `start`/`status`, actual executable/version and daemon log; disabled auto-start can intentionally skip launch. For connection errors inspect `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH` and the server actually owning the backend socket; for remote errors inspect the saved profile and local CLI. Run the pet on the **Mac whose desktop should display it**. Provider integrations belong to upstream Herdr; reload existing provider sessions after installing their hooks. See [troubleshooting](docs/usage.md#configuration-and-troubleshooting) and [lifecycle](docs/usage.md#lifecycle-and-plugin-actions).
 
 ## Documentation and websites
 
