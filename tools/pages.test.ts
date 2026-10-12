@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { request, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -147,5 +147,108 @@ test('serve CLI keeps public responses safe when requested paths and 404 fallbac
       await promise;
     }
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+type CliResult = { code: number | null; stdout: string; stderr: string };
+
+function runPages(script: string, ...args: string[]): Promise<CliResult> {
+  const { promise, resolve, reject } = Promise.withResolvers<CliResult>();
+  const child = spawn('node', [script, ...args]);
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', data => { stdout += data.toString(); });
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  // A spawned Node process uses the real clock; this deadline only bounds a hung CLI.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, 10000);
+  child.once('error', error => { clearTimeout(timer); reject(error); });
+  child.once('close', code => {
+    clearTimeout(timer);
+    if (timedOut) reject(new Error('Pages CLI timed out'));
+    else resolve({ code, stdout, stderr });
+  });
+  return promise;
+}
+
+function pngChunk(type: string, payload: Buffer): Buffer {
+  const chunk = Buffer.alloc(12 + payload.length);
+  chunk.writeUInt32BE(payload.length, 0);
+  chunk.write(type, 4, 4, 'ascii');
+  payload.copy(chunk, 8);
+  let crc = 0xffffffff;
+  for (let i = 4; i < 8 + payload.length; i++) {
+    crc ^= chunk[i];
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, 8 + payload.length);
+  return chunk;
+}
+
+function beforeIend(png: Buffer): number {
+  let offset = 8;
+  while (offset + 12 <= png.length) {
+    const length = png.readUInt32BE(offset);
+    if (png.toString('ascii', offset + 4, offset + 8) === 'IEND') return offset;
+    offset += 12 + length;
+  }
+  throw new Error('Fixture PNG has no IEND chunk');
+}
+
+test('stage publishes clean PNGs and check/stage reject private PNG chunks and malformed envelopes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-pages-png-checkout-'));
+  let outputs: string | undefined;
+  try {
+    outputs = await mkdtemp(join(tmpdir(), 'herdr-pages-png-outputs-'));
+    await mkdir(join(root, 'tools'));
+    const script = join(root, 'tools', 'pages.mjs');
+    await copyFile(fileURLToPath(new URL('./pages.mjs', import.meta.url)), script);
+    await cp(fileURLToPath(new URL('../site/', import.meta.url)), join(root, 'site'), { recursive: true });
+    const image = join(root, 'site', 'assets', 'images', 'product-desktop.png');
+    const clean = await readFile(image);
+    const cleanStage = join(outputs, 'clean');
+    const success = await runPages(script, 'stage', cleanStage);
+    expect(success.code).toBe(0);
+    expect(success.stdout).not.toContain(secret);
+    expect(success.stderr).not.toContain(secret);
+    expect(await readFile(join(cleanStage, 'assets', 'images', 'product-desktop.png'))).toEqual(clean);
+
+    const iend = beforeIend(clean);
+    const xmp = Buffer.from(`XML:com.adobe.xmp\0\0\0\0\0${secret}`);
+    const cases: [string, Buffer][] = [
+      ['exif', Buffer.concat([clean.subarray(0, iend), pngChunk('eXIf', Buffer.from(secret)), clean.subarray(iend)])],
+      ['international-text', Buffer.concat([clean.subarray(0, iend), pngChunk('iTXt', Buffer.from(`Comment\0\0\0\0\0${secret}`)), clean.subarray(iend)])],
+      ['text', Buffer.concat([clean.subarray(0, iend), pngChunk('tEXt', Buffer.from(`Comment\0${secret}`)), clean.subarray(iend)])],
+      ['xmp', Buffer.concat([clean.subarray(0, iend), pngChunk('iTXt', xmp), clean.subarray(iend)])],
+      ['profile', Buffer.concat([clean.subarray(0, iend), pngChunk('iCCP', Buffer.from(`Profile\0\0${secret}`)), clean.subarray(iend)])],
+      ['unknown', Buffer.concat([clean.subarray(0, iend), pngChunk('iDOT', Buffer.from(secret)), clean.subarray(iend)])],
+      ['invalid-signature', Buffer.concat([Buffer.from(secret).subarray(0, 8), clean.subarray(8)])],
+      ['truncated-chunk', Buffer.concat([clean.subarray(0, iend), Buffer.from([0, 0, 0, 64, 0x74, 0x45, 0x58, 0x74]), Buffer.from(secret)])],
+      ['trailing-data', Buffer.concat([clean, Buffer.from(secret)])],
+    ];
+    for (const [label, tampered] of cases) {
+      await writeFile(image, tampered);
+      for (const command of ['check', 'stage'] as const) {
+        const destination = join(outputs, label);
+        const result = await runPages(script, command, ...(command === 'stage' ? [destination] : []));
+        expect(result.code).not.toBe(0);
+        expect(result.stderr.length).toBeGreaterThan(0);
+        expect(result.stdout).not.toContain(secret);
+        expect(result.stderr).not.toContain(secret);
+        if (command === 'stage') {
+          const entries = await readdir(destination).catch((error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return [];
+            throw error;
+          });
+          expect(entries).toEqual([]);
+        }
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    if (outputs) await rm(outputs, { recursive: true, force: true });
   }
 });

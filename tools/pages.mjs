@@ -166,9 +166,36 @@ function parseDocument(html, name) {
   return { ids, links, canonical, alternates, metas };
 }
 
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const SAFE_PNG_CHUNKS = new Set(['IHDR', 'PLTE', 'tRNS', 'IDAT', 'IEND', 'sRGB', 'gAMA', 'cHRM']);
+
+function checkPng(buffer, name) {
+  const source = `site/${name}`;
+  if (buffer.length < PNG_SIGNATURE.length || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    fail(`${source}: invalid PNG signature`);
+  }
+  let offset = PNG_SIGNATURE.length;
+  while (offset < buffer.length) {
+    if (buffer.length - offset < 12) fail(`${source}: truncated PNG chunk`);
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString('latin1', offset + 4, offset + 8);
+    if (!SAFE_PNG_CHUNKS.has(type)) fail(`${source}: forbidden PNG chunk ${type}`);
+    if (length > buffer.length - offset - 12) fail(`${source}: truncated PNG chunk ${type}`);
+    offset += 12 + length;
+    if (type === 'IEND') {
+      if (length !== 0 || offset !== buffer.length) fail(`${source}: invalid PNG ending`);
+      return;
+    }
+  }
+  fail(`${source}: missing PNG IEND`);
+}
+
 async function check() {
   const names = await siteFiles();
   const files = new Set(names);
+  for (const name of names) {
+    if (name.endsWith('.png')) checkPng(await readFile(join(SITE, name)), name);
+  }
   const documents = new Map();
   for (const name of names.filter(name => name.endsWith('.html'))) {
     documents.set(name, parseDocument(await readFile(join(SITE, name), 'utf8'), name));

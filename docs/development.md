@@ -6,6 +6,16 @@ Commands below assume the repository root as the current directory. This checkou
 
 ## Source development
 
+Building and manually starting the native app from this checkout does **not** require a Herdr plugin, patched host, or client-attach hook. On the supported Apple Silicon Mac, with Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools and `codesign` available, build the packaged app; the following manual-start example assumes an existing healthy local Herdr server:
+
+```sh
+bash scripts/install.sh --source
+./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet start
+./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet status
+```
+
+With an existing local Herdr server, manual `start` can show local session snapshots (Herdr 0.9.0+) without a plugin or host patch; replies separately require that server's `agent.prompt`. Follow the [first connection steps](../readme.md#install-with-homebrew-first-connection) for socket selection and daemon checks, substituting this packaged CLI for the Homebrew command. For a pet without a healthy Herdr server, set `exit_with_herdr off` using that CLI **before** `start`, as in [Pet without Herdr](../readme.md#pet-without-herdr). The default exit behavior is unchanged. The separate host procedure below is **only** for optional managed plugin lifecycle and client-attach auto-start; a stock host does not gain the `client.attached` hook by building the app.
+
 The [Herdr host integration guide](../integrations/herdr/README.md#build-in-separate-checkouts) gives the actual separate-checkout procedure: build official Herdr 0.9.3 source at commit `7b116c05bfda646af39d2524c54e70c751f57ee8` with the [client-attach patch](../integrations/herdr/client-attached.patch), then set `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"` to that built executable. Follow its locked host toolchain and isolated XDG/session instructions **before** using this variable; a link does not build the host or the pet. Stock Herdr 0.9.0 and 0.9.3 lack `client.attached`; `min_herdr_version = "0.9.3"` is the patch baseline, not evidence of hook support. Only an actual future host release advertising the hook can replace this patch. Check link warnings, the patched session's API subscription/schema, and the guide's client-attach probe; an unknown-hook warning or merely successful plugin link is not success. Use the same patched binary and session for inspection, not a different `herdr` on `PATH`.
 
 For a linked development checkout, build this checkout first (the plugin's `[[build]]` runs on managed install, **not** on `plugin link`):
@@ -58,6 +68,10 @@ Use the [character creator guide](../.agents/skills/character-creator/SKILL.md) 
 Keep each imported pack's license, attribution and source-term files with it. Bundled Rubelia's [license](../assets/rubelia-default/LICENSE.txt), [attribution](../assets/rubelia-default/ATTRIBUTION.txt), [source record](../assets/rubelia-default/source-record.json), and [background-repair record](../assets/rubelia-default/background-repair.json) remain the artwork authorities. [`LICENSE.txt`](../LICENSE.txt) retains the original Coding Cat notice; Coding Cat and its drawing source moved to the separate character repository. These notices do not give every repository component a blanket license. Artwork-owner approval does not grant model rights and software MIT does not relicense artwork. Qwen's research license remains an authoring record; no model weights or engines are bundled. Version-specific redraws, face corrections and historical limitations are documented in [v0.1.6](releases/v0.1.6.md), [v0.1.9](releases/v0.1.9.md), and [v0.1.10](releases/v0.1.10.md).
 
 ## Website (GitHub Pages)
+
+The website currently uses static images for its product visuals; no video or MP4 asset is required for this local Pages workflow.
+
+Before publishing captures, inspect the rendered pixels: use an isolated demo profile and include only the app, never real session content, account names, local paths, hostnames, email addresses or credentials. Public PNGs must contain only image/color chunks; `check` and `stage` reject EXIF, text, profiles and other metadata. This metadata gate does not inspect visible text, so manual privacy review remains required.
 
 The Korean-default/English promotional website is in [`site/`](../site/); it describes the native macOS app, not an app running in the browser. Published Pages URLs: [Korean](https://hanbong5938.github.io/herdr-desktop-pet/) · [English](https://hanbong5938.github.io/herdr-desktop-pet/en/). Headings use a compact responsive scale and tighter spacing; body text, terminal commands and control sizes remain independent of heading scale. From the repository root:
 

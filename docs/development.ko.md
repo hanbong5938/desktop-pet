@@ -6,6 +6,16 @@
 
 ## 소스 개발
 
+이 체크아웃의 네이티브 앱을 소스에서 빌드하고 수동 시작하는 데 Herdr 플러그인·패치 호스트·client-attach 훅은 **필요하지 않습니다**. 지원되는 Apple Silicon Mac에서 Rust/Cargo·Bun·Node.js/npm·Xcode Command Line Tools·`codesign`을 준비하고 앱을 패키징하세요. 아래 수동 시작 예시는 정상 로컬 Herdr 서버가 이미 실행 중인 경우입니다:
+
+```sh
+bash scripts/install.sh --source
+./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet start
+./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet status
+```
+
+기존 로컬 Herdr 서버가 있다면 수동 `start`로 플러그인·호스트 패치 없이 로컬 세션 스냅샷(Herdr 0.9.0 이상)을 볼 수 있습니다. 답장에는 해당 서버의 `agent.prompt` 지원이 별도로 필요합니다. 소켓 지정과 데몬 확인은 Homebrew 명령 대신 위 패키지 CLI를 사용해 [첫 연결 안내](../readme.ko.md#homebrew로-설치-첫-연결)를 따르세요. 정상 Herdr 서버 없이 캐릭터만 실행한다면 [Herdr 없이 캐릭터만 실행](../readme.ko.md#herdr-없이-캐릭터만-실행)처럼 **시작 전에** 해당 CLI에서 `exit_with_herdr off`를 설정하세요. 기본 단절 종료 동작은 바뀌지 않습니다. 아래 별도 호스트 절차는 **선택형** 관리형 플러그인 실행 관리·client-attach 자동 시작 전용이며 앱만 빌드해도 순정 호스트에 `client.attached` 훅이 생기지는 않습니다.
+
 [Herdr 호스트 연동 안내](../integrations/herdr/README.md#build-in-separate-checkouts)의 별도 체크아웃 절차를 먼저 따르세요. 공식 Herdr 0.9.3 소스 커밋 `7b116c05bfda646af39d2524c54e70c751f57ee8`에 [client-attach 패치](../integrations/herdr/client-attached.patch)를 적용해 호스트를 빌드하고, 빌드된 실행 파일에 `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`를 지정합니다. 해당 안내의 고정 호스트 도구와 격리된 XDG/세션 설정을 **먼저** 준비하세요. 플러그인 링크는 호스트나 앱을 빌드하지 않습니다. 순정 Herdr 0.9.0과 0.9.3에는 `client.attached` 훅이 없고 `min_herdr_version = "0.9.3"`은 패치 기준일 뿐 훅 지원의 증거가 아닙니다. 실제로 훅 지원을 명시한 향후 호스트 릴리스에서만 패치를 대체할 수 있습니다. 연결 경고·패치된 세션의 API 구독/스키마·안내의 클라이언트 attach probe를 확인하세요. 알 수 없는 훅 경고나 연결 성공만으로는 성공이 아닙니다. `PATH`의 다른 `herdr`가 아닌 동일한 패치 바이너리와 세션을 확인해야 합니다.
 
 연결할 개발 체크아웃은 먼저 직접 빌드하세요(관리형 설치와 달리 `plugin link`는 `[[build]]`를 실행하지 않습니다).
@@ -58,6 +68,10 @@ Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI �
 가져온 팩의 라이선스·출처·사용 조건 파일을 함께 보관하세요. 기본 루벨리아의 [라이선스](../assets/rubelia-default/LICENSE.txt)·[출처](../assets/rubelia-default/ATTRIBUTION.txt)·[제작 기록](../assets/rubelia-default/source-record.json)·[배경 보정 기록](../assets/rubelia-default/background-repair.json)이 그림 기준입니다. [`LICENSE.txt`](../LICENSE.txt)는 원래 Coding Cat 고지를 유지하지만 Coding Cat과 그 그림 생성 소스는 별도 캐릭터 저장소로 이동했습니다. 이 고지들이 저장소의 모든 구성 요소에 일괄 라이선스를 부여하지는 않습니다. 그림 소유자의 승인은 모델 권리를 부여하지 않으며 소프트웨어 MIT는 그림 라이선스를 바꾸지 않습니다. Qwen 연구 라이선스는 제작 기록으로 보존하고 모델 가중치·엔진은 번들에 넣지 않습니다. 버전별 다시 그리기·얼굴 보정·당시 한계는 [v0.1.6](releases/v0.1.6.md)·[v0.1.9](releases/v0.1.9.md)·[v0.1.10](releases/v0.1.10.md)을 참고하세요.
 
 ## 웹사이트 (GitHub Pages)
+
+현재 사이트의 제품 시각 자료는 정적 이미지이며 로컬 Pages 작업에 동영상·MP4 자산이 필요하지 않습니다.
+
+캡처를 게시하기 전에 화면 내용을 직접 확인하세요. 격리된 시연 프로필에서 앱만 담고 실제 세션 내용·계정명·로컬 경로·호스트명·이메일·인증 정보를 포함하지 마세요. 공개 PNG에는 이미지·색상 청크만 허용하며 `check`와 `stage`는 EXIF·텍스트·프로필 등 메타데이터를 거부합니다. 이 검사는 화면에 보이는 글자를 판별하지 않으므로 개인정보 수동 검토도 반드시 필요합니다.
 
 한국어 기본·영어 홍보 웹사이트는 [`site/`](../site/)에 있습니다. 네이티브 macOS 앱을 설명하는 사이트이며 브라우저에서 앱을 실행하지 않습니다. Pages 주소: [한국어](https://hanbong5938.github.io/herdr-desktop-pet/) · [영어](https://hanbong5938.github.io/herdr-desktop-pet/en/). 제목은 화면 폭에 맞춘 간결한 크기와 좁은 주변 여백을 사용하며 본문·터미널 명령어·버튼 크기는 제목과 독립적으로 유지합니다. 저장소 루트에서 실행하세요.
 

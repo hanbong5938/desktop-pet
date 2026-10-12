@@ -21,23 +21,12 @@
 ## 요구 사항
 
 - **Apple Silicon Mac, macOS 13 이상.** Intel Mac·Windows·Linux 네이티브 배포는 지원하지 않습니다.
-- 클라이언트 attach 자동 실행에는 공식 Herdr 0.9.3 소스에 [제공된 패치](integrations/herdr/client-attached.patch)를 적용해 빌드한 호스트(또는 실제 훅 지원을 명시한 향후 호스트 릴리스)가 필요합니다. 순정 Herdr 0.9.0/0.9.3에는 `client.attached`가 없으며 최소 버전 표기만으로 훅을 보장하지 않습니다. 로컬 세션 관찰의 최소 Herdr 0.9.0 조건과 답장을 위한 로컬 서버의 `agent.prompt` 지원은 각각 별개 기능이며 어느 쪽도 attach 훅을 보장하지 않습니다. [호스트 빌드·확인 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)를 따르고 알 수 없는 훅 경고를 성공으로 간주하지 마세요.
+- 로컬 세션 스냅샷은 기존 로컬 Herdr 서버(0.9.0 이상)에서 플러그인·호스트 패치 없이 관찰할 수 있습니다. 답장은 해당 서버의 `agent.prompt` 지원이 별도로 필요합니다. **선택형 클라이언트 attach 자동 시작에만** 공식 Herdr 0.9.3 소스의 [제공된 패치](integrations/herdr/client-attached.patch)로 빌드한 호스트(또는 실제 훅 지원을 명시한 향후 릴리스)가 필요합니다. 순정 Herdr 0.9.0/0.9.3에는 `client.attached`가 없으며 매니페스트 최소 버전도 이를 보장하지 않습니다. 관리형 설치에는 [호스트 빌드·확인 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)를 따르고 알 수 없는 훅 경고를 성공으로 간주하지 마세요.
 - 소스 빌드 및 사전 빌드 실패 후 기본 설치의 소스 전환에는 Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools가 필요합니다. 사전 빌드 성공 경로에는 이 빌드 도구가 필요하지 않습니다.
 
-## Herdr 플러그인으로 설치 (권장)
+## Homebrew로 설치: 첫 연결
 
-패치 호스트를 준비한 뒤 공개 저장소를 설치하고, 실행 중인 활성 Herdr 호스트에서 시작합니다.
-
-```sh
-herdr plugin install hanbong5938/herdr-desktop-pet
-herdr plugin action invoke start --plugin desktop-pet
-```
-
-관리형 설치는 플러그인을 클론해 `scripts/install.sh`를 실행합니다. 기본 모드는 매니페스트에 고정된 v0.3.5 앱 전용 압축 파일을 시도하고 자산 부재·검증 실패 시 안내 후 소스를 빌드합니다. `--prebuilt`는 실패해도 소스로 전환하지 않고 `--source`는 현재 체크아웃을 빌드합니다. **기본 fallback은 공개 사전 빌드의 증거가 아닙니다.** 실제 압축 파일·체크섬·설치기 일치를 확인하세요. 별도 출처 사이드카는 설치기 압축 파일에 넣지 않습니다. 사전 빌드는 SHA-256·아카이브·arm64·서명을 검사하지만 앱은 **ad-hoc 서명·미공증**입니다. [설치기·서명 상세](docs/development.ko.md#소스-개발).
-
-## Homebrew로 설치
-
-[개인 tap](https://github.com/hanbong5938/homebrew-tap)의 포뮬러와 실제 공개 v0.3.5 압축 파일·체크섬을 확인한 경우에만 설치하세요. 소스 매니페스트만으로 포뮬러 게시를 판단하지 마세요.
+[개인 tap](https://github.com/hanbong5938/homebrew-tap)과 비초안 v0.3.5 arm64 압축 파일·체크섬이 공개되어 있습니다. 설치 전 실제 [릴리스 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 포뮬러를 확인하세요. 캐릭터를 표시할 Mac에서 기존 로컬 Herdr 서버를 실행한 상태로:
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -45,6 +34,15 @@ herdr-desktop-pet --version
 herdr-desktop-pet start
 herdr-desktop-pet status
 ```
+
+네이티브 `start`는 수동 시작이며 `herdr plugin install`·`plugin link`·패치 호스트가 필요하지 않습니다. 말풍선을 펼쳐 해당 서버의 로컬 세션 카드(Herdr 0.9.0 이상 스냅샷)를 확인하세요. 실시간 카드에는 실제 에이전트 세션이 있어야 합니다. 답장은 해당 서버의 `agent.prompt`도 필요하고 제출 ACK는 완료가 아닙니다. 카드가 없으면 실제 Herdr CLI·실행 중인 서버와 `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`를 확인하세요. 백엔드 소켓이 앱의 환경/기본값과 다르면 서버가 실제로 출력한 **확인된 소켓 경로**를 사용하고 추측하지 마세요:
+
+```sh
+herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
+herdr-desktop-pet status
+```
+
+`/actual/path/to/herdr-api.sock`은 실제 Herdr **백엔드** 소켓 경로로 바꾸세요. `--socket`은 앱의 비공개 제어 소켓이 아닙니다. 실행 중 데몬을 `start`가 재사용하므로 백엔드 변경 전 종료하고, `--version`뿐 아니라 `status`로 실제 데몬 버전·실행 파일을 확인하세요. [연결 문제 해결](docs/usage.ko.md#설정과-문제-해결).
 
 기존 데몬은 업그레이드 **전에 종료**해야 합니다. `start`가 이전 데몬을 재사용할 수 있으므로 CLI 버전 외에 재시작 후 `status`의 `app_version`과 실제 실행 파일도 확인하세요.
 
@@ -58,9 +56,33 @@ herdr-desktop-pet status
 
 포뮬러는 앱을 Homebrew prefix에, CLI를 `PATH`에 설치하며 `/Applications`·Herdr 플러그인·패치 호스트는 설치하지 않습니다. 앱은 ad-hoc 서명·미공증입니다. 포뮬러 로딩이 거부된 경우에만 `brew trust --formula hanbong5938/tap/herdr-desktop-pet`으로 해당 포뮬러만 신뢰하세요. 옛 cask에서 이전하려면 [안정판 Homebrew 설치·업그레이드](docs/migrations/v0.1.11-to-v0.2.0.md#안정판-homebrew-설치업그레이드)를, 현재 0.3 계열로 이전하려면 [0.3 업그레이드 안내](docs/releases/0.3.md#upgrade-from-v021-or-beta)를 참고하세요.
 
-## 이 체크아웃 설치: 소스 빌드
+### Herdr 없이 캐릭터만 실행
 
-**저장소 루트에서** 먼저 [호스트 빌드·격리 프로필 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)에 따라 공식 Herdr 0.9.3 소스를 패치·빌드하고 `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`와 해당 호스트 세션을 준비하세요. 아래의 `plugin link`는 호스트도 앱도 빌드하지 않습니다.
+정상 로컬 Herdr 서버 없이 계속 표시하려면 새 프로필의 기본 30초 단절 종료를 **시작 전에** 끕니다:
+
+```sh
+herdr-desktop-pet settings set exit_with_herdr off
+herdr-desktop-pet settings get
+herdr-desktop-pet start
+herdr-desktop-pet status
+```
+
+Herdr 설치·플러그인·패치는 필요하지 않습니다. 시작 후 `herdr-desktop-pet hide_bubble`로 빈 말풍선을 선택적으로 숨기고 캐릭터는 유지할 수 있습니다. 약 30초 후 캐릭터가 사라지면 `settings get`과 `status`를 확인하세요. `exit_with_herdr`가 켜졌고 정상 서버가 없다면 유예 후 종료됩니다. 같은 실제 설정/상태 프로필에서 끈 뒤 다시 시작하세요. 이 스위치로 등록된 모든 로컬 플러그인 endpoint의 확인된 비활성화/연결 해제 종료를 막을 수는 없습니다. [실행 관리 상세](docs/usage.ko.md#실행-관리와-플러그인-액션).
+
+### 선택형 고급 경로: Herdr 관리형 플러그인·attach 자동 시작
+
+해당 호환 Herdr 호스트에서 [플러그인 저장소](https://github.com/hanbong5938/herdr-desktop-pet)를 설치한 뒤 실행 중인 호스트에서 명시적으로 시작합니다:
+
+```sh
+herdr plugin install hanbong5938/herdr-desktop-pet
+herdr plugin action invoke start --plugin desktop-pet
+```
+
+관리형 설치는 플러그인을 클론해 `scripts/install.sh`를 실행합니다. 기본 모드는 매니페스트에 고정된 v0.3.5 앱 전용 압축 파일을 시도하고 자산 부재·검증 실패 시 안내 후 소스를 빌드합니다. `--prebuilt`는 실패해도 소스로 전환하지 않고 `--source`는 현재 체크아웃을 빌드합니다. **기본 fallback은 공개 사전 빌드의 증거가 아닙니다.** 실제 압축 파일·체크섬·설치기 일치를 확인하세요. 별도 출처 사이드카는 설치기 압축 파일에 넣지 않습니다. 사전 빌드는 SHA-256·아카이브·arm64·서명을 검사하지만 앱은 **ad-hoc 서명·미공증**입니다. attach 자동 시작을 원하면 [패치 호스트 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)를 따르세요. 위 네이티브 수동 관찰에는 둘 다 필요 없습니다. [설치기·서명 상세](docs/development.ko.md#소스-개발).
+
+## 이 체크아웃 소스 빌드: 관리형 연동
+
+**선택형 관리형 attach 경로에서는** 저장소 루트에서 먼저 [호스트 빌드·격리 프로필 안내 (English)](integrations/herdr/README.md#build-in-separate-checkouts)에 따라 공식 Herdr 0.9.3 소스를 패치·빌드하고 `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`와 해당 호스트 세션을 준비하세요. 아래의 `plugin link`는 호스트도 앱도 빌드하지 않습니다. 앱만 소스에서 빌드하는 데 패치 호스트가 필요하지는 않습니다.
 
 ```sh
 bash scripts/install.sh --source
@@ -107,7 +129,7 @@ bash scripts/install.sh --source
 
 `HERDR_PLUGIN_CONFIG_DIR`에는 `preferences.json`, `lifecycle.json`, 관리 `characters/`·`menu-bar-icons/`가, `HERDR_PLUGIN_STATE_DIR`에는 잠금·제어 소켓·`desktop-pet.log`가 있습니다. 경로가 주입되지 않으면 Herdr의 XDG 플러그인 경로를 사용합니다. 네이티브 `--config-dir`·`--state-dir`는 격리 경로이며 주입 환경변수가 우선합니다. 안정판/베타 전환 시 실제 **설정과 상태를 모두 백업**하고 시작·명령·종료 경로를 일치시키세요.
 
-시작되지 않으면 해당 호스트의 `client.attached` 경고, 수동 `start`, `status`, 데몬 로그, 실제 Herdr CLI·소켓·서버를 확인하세요. 숨긴 창이나 클릭 통과만으로 시작 실패를 판단하지 마세요. 원격 세션은 로컬 Mac에서 앱을 실행해 관찰하며 원격 서버에 앱을 설치하지 않습니다. [문제 해결·설정](docs/usage.ko.md#설정과-문제-해결) · [호스트 안내 (English)](integrations/herdr/README.md).
+서버 없이 시작한 뒤 약 30초 후 캐릭터가 사라지면 `settings get`으로 `exit_with_herdr`를 확인하고 독립 실행용으로 **재시작 전에** 끄세요. 등록된 모든 로컬 endpoint의 확인된 비활성화/연결 해제 종료는 예외입니다. 숨긴 창이나 클릭 통과만으로 시작 실패를 판단하지 말고 메뉴 막대 복구를 사용하세요. 관리형 시작 문제라면 해당 호스트의 `client.attached` 경고, 수동 `start`, `status`, 데몬 로그, 실제 Herdr CLI·소켓·서버를 확인하세요. 원격 세션은 로컬 Mac에서 앱을 실행해 관찰하며 원격 서버에 앱을 설치하지 않습니다. [문제 해결·설정](docs/usage.ko.md#설정과-문제-해결) · [호스트 안내 (English)](integrations/herdr/README.md).
 
 ## 문서 및 웹사이트
 
