@@ -1,13 +1,67 @@
 //! The coordinator is outside the replaceable app and owns its own native window.
+use herdr_update_coordinator::{InstallOrigin, UpdatePlan};
+
+fn source_label(origin: &InstallOrigin) -> String {
+    match origin {
+        InstallOrigin::Herdr { requested_ref, .. } => format!(
+            "Herdr ref {}",
+            requested_ref.as_deref().unwrap_or("(default)")
+        ),
+        InstallOrigin::Homebrew { formula, .. } => format!("Homebrew {formula}"),
+        InstallOrigin::Local { .. } => "local source".into(),
+        InstallOrigin::Manual { .. } => "manual installation".into(),
+        InstallOrigin::Unknown { .. } => "unknown source".into(),
+    }
+}
+
+fn release_summary(plan: &UpdatePlan, korean: bool) -> String {
+    let Some(target) = &plan.target else {
+        return if korean {
+            "창을 닫아도 취소되지 않으며 프로필은 유지됩니다.".into()
+        } else {
+            "Closing only hides this window; your profile is preserved.".into()
+        };
+    };
+    let original = source_label(&plan.origin);
+    let destination = match &target.origin {
+        InstallOrigin::Herdr { requested_ref, .. } => {
+            format!(
+                "{} ({}; pinned {})",
+                source_label(&target.origin),
+                target.release.tag,
+                target
+                    .resolved_commit
+                    .as_deref()
+                    .or(requested_ref.as_deref())
+                    .unwrap_or("unknown")
+            )
+        }
+        _ => source_label(&target.origin),
+    };
+    if korean {
+        format!(
+            "{original} → {destination}\n출시 {} ({}) · 기존 프로필 유지",
+            target.release.version, target.release.tag
+        )
+    } else {
+        format!(
+            "{original} → {destination}\nRelease {} ({}) · existing profile preserved",
+            target.release.version, target.release.tag
+        )
+    }
+}
 #[cfg(target_os = "macos")]
 mod mac {
+    use super::UpdatePlan;
     use std::ffi::{c_char, c_void, CString};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {}
     #[link(name = "Foundation", kind = "framework")]
-    extern "C" {}
+    extern "C" {
+        static NSDefaultRunLoopMode: Obj;
+    }
     #[link(name = "objc")]
     extern "C" {
         fn objc_getClass(name: *const c_char) -> *mut c_void;
@@ -66,6 +120,17 @@ mod mac {
             std::mem::transmute(objc_msgSend as *const ());
         call(receiver, selector(message), value as i8);
     }
+    struct AutoreleasePool(Obj);
+    impl AutoreleasePool {
+        unsafe fn new() -> Self {
+            Self(object(object(class("NSAutoreleasePool"), "alloc"), "init"))
+        }
+    }
+    impl Drop for AutoreleasePool {
+        fn drop(&mut self) {
+            unsafe { send_void(self.0, "release") }
+        }
+    }
     unsafe fn string(value: &str) -> Obj {
         let call: unsafe extern "C" fn(Obj, Obj, *const c_char) -> Obj =
             std::mem::transmute(objc_msgSend as *const ());
@@ -80,6 +145,10 @@ mod mac {
     extern "C" fn recover_action(_: Obj, _: Obj, _: Obj) {
         RECOVER_REQUESTED.store(true, Ordering::Release);
     }
+    static DETAILS_REQUESTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn details_action(_: Obj, _: Obj, _: Obj) {
+        DETAILS_REQUESTED.store(true, Ordering::Release);
+    }
     fn recovery_target() -> Result<Obj, String> {
         unsafe {
             let name = CString::new("HerdrUpdateCoordinatorRecoveryTarget").unwrap();
@@ -87,33 +156,210 @@ mod mac {
             if cls.is_null() {
                 cls = objc_allocateClassPair(class("NSObject"), name.as_ptr(), 0);
                 if cls.is_null() {
-                    return Err("cannot allocate AppKit recovery action".into());
+                    return Err("cannot allocate AppKit updater action".into());
                 }
-                if class_addMethod(
-                    cls,
-                    selector("recoverUpdate:"),
-                    recover_action as *const c_void,
-                    b"v@:@\0".as_ptr().cast(),
-                ) == 0
-                {
-                    return Err("cannot register AppKit recovery action".into());
+                for (action, implementation) in [
+                    ("recoverUpdate:", recover_action as *const c_void),
+                    ("toggleUpdateDetails:", details_action as *const c_void),
+                ] {
+                    if class_addMethod(
+                        cls,
+                        selector(action),
+                        implementation,
+                        b"v@:@\0".as_ptr().cast(),
+                    ) == 0
+                    {
+                        return Err("cannot register AppKit updater action".into());
+                    }
                 }
                 objc_registerClassPair(cls);
             }
             Ok(object(object(cls, "alloc"), "init"))
         }
     }
-    // Native panel is deliberately nonmodal. A failure stays visible until the user closes it.
+    // The presentation is independent of durable operation.detail and CLI diagnostics.
+    #[derive(Clone, Copy)]
+    pub enum Phase {
+        Preparing,
+        Stopping,
+        Installing,
+        Validating,
+        Starting,
+        RestoringOriginal,
+        Reconciling,
+        Finalizing,
+        Attention(Attention),
+        UserStopped,
+    }
+    #[derive(Clone, Copy)]
+    pub enum Attention {
+        NotStarted,
+        Ownership,
+        Completion,
+        Release,
+        Interrupted,
+        Recovery,
+        OriginalUnchanged,
+    }
+    impl Phase {
+        fn text(self, korean: bool) -> (&'static str, &'static str) {
+            match (self, korean) {
+                (Self::Preparing, true) => (
+                    "업데이트 준비 중",
+                    "기존 앱을 실행한 채 릴리스를 확인하고 준비합니다.",
+                ),
+                (Self::Preparing, false) => (
+                    "Preparing update",
+                    "Checking and staging the release while the original app stays running.",
+                ),
+                (Self::Stopping, true) => ("앱 종료 중", "준비된 앱 인스턴스만 종료합니다."),
+                (Self::Stopping, false) => {
+                    ("Stopping app", "Only the prepared app instance is stopped.")
+                }
+                (Self::Installing, true) => (
+                    "업데이트 설치 중",
+                    "승인한 대상 버전과 설치 원본으로 설치합니다.",
+                ),
+                (Self::Installing, false) => (
+                    "Installing update",
+                    "Installing the approved target version and source.",
+                ),
+                (Self::Validating, true) => ("설치 확인 중", "실제 설치된 앱과 원본을 확인합니다."),
+                (Self::Validating, false) => (
+                    "Verifying installation",
+                    "Checking the installed app and its source.",
+                ),
+                (Self::Starting, true) => (
+                    "업데이트된 앱 시작 중",
+                    "기존 프로필로 시작하고 준비 상태를 확인합니다.",
+                ),
+                (Self::Starting, false) => (
+                    "Starting updated app",
+                    "Checking readiness on your existing profile.",
+                ),
+                (Self::RestoringOriginal, true) => (
+                    "원래 앱 시작 중",
+                    "기존 프로필로 원래 버전을 확인합니다. 업데이트는 아닙니다.",
+                ),
+                (Self::RestoringOriginal, false) => (
+                    "Starting original app",
+                    "Checking the original version on your profile; this is not an upgrade.",
+                ),
+                (Self::Reconciling, true) => (
+                    "업데이트 상태 확인 중",
+                    "설치를 반복하지 않고 안전한 상태를 확인합니다.",
+                ),
+                (Self::Reconciling, false) => (
+                    "Checking update state",
+                    "Checking safely without repeating installation.",
+                ),
+                (Self::Finalizing, true) => (
+                    "마무리 중",
+                    "앱 준비 상태를 확인했습니다. 기록을 저장합니다.",
+                ),
+                (Self::Finalizing, false) => {
+                    ("Finalizing", "App readiness verified. Saving the result.")
+                }
+                (Self::Attention(Attention::NotStarted), true) => (
+                    "업데이트를 시작하지 못했습니다",
+                    "상세 내용을 확인하거나 업데이트 상태를 조회하세요.",
+                ),
+                (Self::Attention(Attention::NotStarted), false) => (
+                    "Update could not start",
+                    "Review details or check the update status.",
+                ),
+                (Self::Attention(Attention::Ownership), true) => (
+                    "업데이트 창 인계 실패",
+                    "기존 앱은 종료하지 않았습니다. 상세 내용을 확인하세요.",
+                ),
+                (Self::Attention(Attention::Ownership), false) => (
+                    "Updater handoff failed",
+                    "The original app was not stopped. Review details.",
+                ),
+                (Self::Attention(Attention::Completion), true) => (
+                    "완료 기록을 저장하지 못했습니다",
+                    "새 앱은 준비됐지만 완료 확인이 필요합니다.",
+                ),
+                (Self::Attention(Attention::Completion), false) => (
+                    "Could not save completion",
+                    "The new app is ready, but completion needs review.",
+                ),
+                (Self::Attention(Attention::Release), true) => (
+                    "예약 해제 실패",
+                    "새 앱은 준비됐지만 복구 확인이 필요합니다.",
+                ),
+                (Self::Attention(Attention::Release), false) => (
+                    "Could not release reservation",
+                    "The new app is ready, but recovery needs review.",
+                ),
+                (Self::Attention(Attention::Interrupted), true) => (
+                    "업데이트 확인 필요",
+                    "자동 재시도나 되돌리기는 하지 않습니다. 상세 내용을 확인하세요.",
+                ),
+                (Self::Attention(Attention::Interrupted), false) => (
+                    "Update needs attention",
+                    "No automatic retry or rollback. Review details.",
+                ),
+                (Self::Attention(Attention::Recovery), true) => (
+                    "복구 확인 필요",
+                    "예약을 유지했습니다. 상세 내용을 확인하세요.",
+                ),
+                (Self::Attention(Attention::Recovery), false) => (
+                    "Recovery needs attention",
+                    "The reservation is retained. Review details.",
+                ),
+                (Self::Attention(Attention::OriginalUnchanged), true) => (
+                    "업데이트가 적용되지 않았습니다",
+                    "원래 앱이 유지되거나 복원됐습니다. 새 버전은 적용되지 않았습니다.",
+                ),
+                (Self::Attention(Attention::OriginalUnchanged), false) => (
+                    "Update was not applied",
+                    "The original app remains or was restored; this is not an upgrade.",
+                ),
+                (Self::UserStopped, true) => (
+                    "사용자가 앱을 종료했습니다",
+                    "앱을 자동으로 다시 시작하지 않습니다.",
+                ),
+                (Self::UserStopped, false) => (
+                    "App stopped by user",
+                    "The app will not be restarted automatically.",
+                ),
+            }
+        }
+        fn busy(self) -> bool {
+            matches!(
+                self,
+                Self::Preparing
+                    | Self::Stopping
+                    | Self::Installing
+                    | Self::Validating
+                    | Self::Starting
+                    | Self::RestoringOriginal
+                    | Self::Reconciling
+                    | Self::Finalizing
+            )
+        }
+    }
+    // The window is nonmodal: closing it only hides progress, never cancels the installer.
     pub struct Panel {
         app: Obj,
         window: Obj,
-        label: Obj,
+        heading: Obj,
+        footer: Obj,
+        explanation: Obj,
+        progress: Obj,
+        diagnostics: Obj,
+        details_button: Obj,
         recovery_button: Obj,
-        _target: Obj,
+        target: Obj,
+        korean: bool,
+        expanded: std::cell::Cell<bool>,
     }
     impl Panel {
-        pub fn new(locale: &str) -> Result<Self, String> {
+        pub fn new(locale: &str, plan: &UpdatePlan) -> Result<Self, String> {
             unsafe {
+                let _pool = AutoreleasePool::new();
+                let korean = locale.starts_with("ko");
                 let app = object(class("NSApplication"), "sharedApplication");
                 if app.is_null() {
                     return Err("AppKit application unavailable".into());
@@ -122,17 +368,16 @@ mod mac {
                     std::mem::transmute(objc_msgSend as *const ());
                 policy(app, selector("setActivationPolicy:"), 1);
                 send_void(app, "finishLaunching");
-                let alloc = object(class("NSPanel"), "alloc");
-                let init: unsafe extern "C" fn(Obj, Obj, Rect, usize, usize, i8) -> Obj =
+                let init_window: unsafe extern "C" fn(Obj, Obj, Rect, usize, usize, i8) -> Obj =
                     std::mem::transmute(objc_msgSend as *const ());
-                let window = init(
-                    alloc,
+                let window = init_window(
+                    object(class("NSPanel"), "alloc"),
                     selector("initWithContentRect:styleMask:backing:defer:"),
                     Rect {
                         origin: Point { x: 0., y: 0. },
                         size: Size {
-                            width: 510.,
-                            height: 185.,
+                            width: 700.,
+                            height: 230.,
                         },
                     },
                     1 | 2 | 128,
@@ -143,76 +388,149 @@ mod mac {
                     return Err("AppKit window unavailable".into());
                 }
                 send_bool(window, "setReleasedWhenClosed:", false);
-                let title = if locale.starts_with("ko") {
-                    "Herdr 앱 업데이트"
-                } else {
-                    "Herdr app update"
-                };
-                send_object(window, "setTitle:", string(title));
-                let label_alloc = object(class("NSTextField"), "alloc");
-                let label_init: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
-                    std::mem::transmute(objc_msgSend as *const ());
-                let label = label_init(
-                    label_alloc,
-                    selector("initWithFrame:"),
-                    Rect {
-                        origin: Point { x: 22., y: 52. },
-                        size: Size {
-                            width: 465.,
-                            height: 105.,
-                        },
-                    },
-                );
-                send_bool(label, "setEditable:", false);
-                send_bool(label, "setSelectable:", true);
-                send_bool(label, "setBezeled:", false);
-                send_bool(label, "setDrawsBackground:", false);
                 send_object(
-                    label,
-                    "setStringValue:",
-                    string(if locale.starts_with("ko") {
-                        "업데이트를 준비하고 있습니다…"
+                    window,
+                    "setTitle:",
+                    string(if korean {
+                        "Herdr 앱 업데이트"
                     } else {
-                        "Preparing update…"
+                        "Herdr app update"
                     }),
                 );
                 let content = object(window, "contentView");
-                send_object(content, "addSubview:", label);
-                let target = recovery_target()?;
-                let button_alloc = object(class("NSButton"), "alloc");
-                let button = label_init(
-                    button_alloc,
+                let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let field = |y, height| {
+                    let view = init_view(
+                        object(class("NSTextField"), "alloc"),
+                        selector("initWithFrame:"),
+                        Rect {
+                            origin: Point { x: 22., y },
+                            size: Size {
+                                width: 655.,
+                                height,
+                            },
+                        },
+                    );
+                    send_bool(view, "setEditable:", false);
+                    send_bool(view, "setSelectable:", true);
+                    send_bool(view, "setBezeled:", false);
+                    send_bool(view, "setDrawsBackground:", false);
+                    send_object(content, "addSubview:", view);
+                    view
+                };
+                let heading = field(179., 27.);
+                let explanation = field(149., 25.);
+                let footer = field(52., 68.);
+                send_object(
+                    footer,
+                    "setStringValue:",
+                    string(&super::release_summary(plan, korean)),
+                );
+                let progress = init_view(
+                    object(class("NSProgressIndicator"), "alloc"),
                     selector("initWithFrame:"),
                     Rect {
-                        origin: Point { x: 305., y: 14. },
+                        origin: Point { x: 22., y: 128. },
                         size: Size {
-                            width: 180.,
-                            height: 33.,
+                            width: 14.,
+                            height: 14.,
                         },
                     },
                 );
-                send_object(
-                    button,
-                    "setTitle:",
-                    string(if locale.starts_with("ko") {
+                send_bool(progress, "setIndeterminate:", true);
+                let set_style: unsafe extern "C" fn(Obj, Obj, isize) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                set_style(progress, selector("setStyle:"), 1); // NSProgressIndicatorSpinningStyle
+                send_bool(progress, "setUsesThreadedAnimation:", true);
+                send_bool(progress, "setDisplayedWhenStopped:", false);
+                send_object(content, "addSubview:", progress);
+                let target = recovery_target()?;
+                let button = |x, width, action, title: &str| {
+                    let view = init_view(
+                        object(class("NSButton"), "alloc"),
+                        selector("initWithFrame:"),
+                        Rect {
+                            origin: Point { x, y: 18. },
+                            size: Size { width, height: 33. },
+                        },
+                    );
+                    send_object(view, "setTitle:", string(title));
+                    send_object(view, "setTarget:", target);
+                    send_object(view, "setAction:", selector(action));
+                    send_bool(view, "setHidden:", true);
+                    send_object(content, "addSubview:", view);
+                    view
+                };
+                let details_button = button(
+                    22.,
+                    175.,
+                    "toggleUpdateDetails:",
+                    if korean {
+                        "진단 정보 보기"
+                    } else {
+                        "Show diagnostics"
+                    },
+                );
+                let recovery_button = button(
+                    476.,
+                    200.,
+                    "recoverUpdate:",
+                    if korean {
                         "확인 후 다시 시작"
                     } else {
                         "Recover verified start"
-                    }),
+                    },
                 );
-                send_object(button, "setTarget:", target);
-                send_object(button, "setAction:", selector("recoverUpdate:"));
-                send_bool(button, "setHidden:", true);
-                send_object(content, "addSubview:", button);
-                send_void(window, "center");
-                send_void(window, "orderFrontRegardless");
+                let diagnostics = init_view(
+                    object(class("NSScrollView"), "alloc"),
+                    selector("initWithFrame:"),
+                    Rect {
+                        origin: Point { x: 22., y: 149. },
+                        size: Size {
+                            width: 655.,
+                            height: 170.,
+                        },
+                    },
+                );
+                let text = init_view(
+                    object(class("NSTextView"), "alloc"),
+                    selector("initWithFrame:"),
+                    Rect {
+                        origin: Point { x: 0., y: 0. },
+                        size: Size {
+                            width: 655.,
+                            height: 170.,
+                        },
+                    },
+                );
+                send_bool(text, "setEditable:", false);
+                send_bool(text, "setSelectable:", true);
+                send_object(diagnostics, "setDocumentView:", text);
+                send_bool(diagnostics, "setHasVerticalScroller:", true);
+                send_bool(diagnostics, "setHidden:", true);
+                send_object(content, "addSubview:", diagnostics);
+                // The scroll view retains its document view.
+                send_void(text, "release");
+                RECOVER_REQUESTED.store(false, Ordering::Release);
+                DETAILS_REQUESTED.store(false, Ordering::Release);
                 let panel = Self {
                     app,
                     window,
-                    label,
-                    recovery_button: button,
-                    _target: target,
+                    heading,
+                    explanation,
+                    footer,
+                    progress,
+                    diagnostics,
+                    details_button,
+                    recovery_button,
+                    target,
+                    korean,
+                    expanded: std::cell::Cell::new(false),
                 };
+                panel.show(Phase::Preparing, None);
+                send_void(window, "center");
+                send_void(window, "orderFrontRegardless");
                 panel.pump();
                 Ok(panel)
             }
@@ -224,11 +542,74 @@ mod mac {
             }
             self.pump();
         }
-        pub fn show(&self, message: &str) {
+        pub fn show(&self, phase: Phase, diagnostic: Option<&str>) {
             unsafe {
-                send_object(self.label, "setStringValue:", string(message));
+                let _pool = AutoreleasePool::new();
+                RECOVER_REQUESTED.store(false, Ordering::Release);
+                send_bool(self.recovery_button, "setHidden:", true);
+                let (heading, explanation) = phase.text(self.korean);
+                send_object(self.heading, "setStringValue:", string(heading));
+                send_object(self.explanation, "setStringValue:", string(explanation));
+                if phase.busy() {
+                    send_object(self.progress, "startAnimation:", std::ptr::null_mut());
+                } else {
+                    send_object(self.progress, "stopAnimation:", std::ptr::null_mut());
+                }
+                send_bool(self.details_button, "setHidden:", diagnostic.is_none());
+                let document = object(self.diagnostics, "documentView");
+                send_object(document, "setString:", string(diagnostic.unwrap_or("")));
+                if diagnostic.is_none() && self.expanded.get() {
+                    self.toggle_details();
+                }
             }
             self.pump();
+        }
+        fn toggle_details(&self) {
+            unsafe {
+                let expanded = !self.expanded.get();
+                self.expanded.set(expanded);
+                let _pool = AutoreleasePool::new();
+                let resize: unsafe extern "C" fn(Obj, Obj, Size) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                resize(
+                    self.window,
+                    selector("setContentSize:"),
+                    Size {
+                        width: 700.,
+                        height: if expanded { 425. } else { 230. },
+                    },
+                );
+                let move_view: unsafe extern "C" fn(Obj, Obj, Point) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let offset = if expanded { 195. } else { 0. };
+                move_view(
+                    self.heading,
+                    selector("setFrameOrigin:"),
+                    Point {
+                        x: 22.,
+                        y: 179. + offset,
+                    },
+                );
+                move_view(
+                    self.explanation,
+                    selector("setFrameOrigin:"),
+                    Point {
+                        x: 22.,
+                        y: 149. + offset,
+                    },
+                );
+                send_bool(self.diagnostics, "setHidden:", !expanded);
+                send_object(
+                    self.details_button,
+                    "setTitle:",
+                    string(match (self.korean, expanded) {
+                        (true, true) => "진단 정보 숨기기",
+                        (true, false) => "진단 정보 보기",
+                        (false, true) => "Hide diagnostics",
+                        (false, false) => "Show diagnostics",
+                    }),
+                );
+            }
         }
         pub fn offer_recovery(&self) {
             RECOVER_REQUESTED.store(false, Ordering::Release);
@@ -238,7 +619,14 @@ mod mac {
             self.pump();
         }
         pub fn recovery_requested(&self) -> bool {
-            RECOVER_REQUESTED.swap(false, Ordering::AcqRel)
+            if RECOVER_REQUESTED.swap(false, Ordering::AcqRel) {
+                unsafe {
+                    send_bool(self.recovery_button, "setHidden:", true);
+                }
+                true
+            } else {
+                false
+            }
         }
         pub fn close(&self) {
             unsafe {
@@ -247,6 +635,7 @@ mod mac {
         }
         pub fn pump(&self) {
             unsafe {
+                let _pool = AutoreleasePool::new();
                 let date = object(class("NSDate"), "distantPast");
                 let next: unsafe extern "C" fn(Obj, Obj, usize, Obj, Obj, i8) -> Obj =
                     std::mem::transmute(objc_msgSend as *const ());
@@ -256,13 +645,16 @@ mod mac {
                         selector("nextEventMatchingMask:untilDate:inMode:dequeue:"),
                         usize::MAX,
                         date,
-                        string("kCFRunLoopDefaultMode"),
+                        NSDefaultRunLoopMode,
                         1,
                     );
                     if event.is_null() {
                         break;
                     }
                     send_object(self.app, "sendEvent:", event);
+                }
+                if DETAILS_REQUESTED.swap(false, Ordering::AcqRel) {
+                    self.toggle_details();
                 }
                 send_void(self.app, "updateWindows");
             }
@@ -279,26 +671,60 @@ mod mac {
         fn drop(&mut self) {
             unsafe {
                 send_object(self.window, "orderOut:", std::ptr::null_mut());
-                send_void(self.label, "release");
-                send_void(self.recovery_button, "release");
-                send_void(self._target, "release");
-                send_void(self.window, "release");
+                for view in [
+                    self.heading,
+                    self.explanation,
+                    self.footer,
+                    self.progress,
+                    self.diagnostics,
+                    self.details_button,
+                    self.recovery_button,
+                    self.target,
+                    self.window,
+                ] {
+                    send_void(view, "release");
+                }
             }
         }
     }
     pub use Panel as NativePanel;
 }
 #[cfg(target_os = "macos")]
-pub use mac::NativePanel as Panel;
+pub use mac::{Attention, NativePanel as Panel, Phase};
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub enum Attention {
+    NotStarted,
+    Ownership,
+    Completion,
+    Release,
+    Interrupted,
+    Recovery,
+    OriginalUnchanged,
+}
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub enum Phase {
+    Preparing,
+    Stopping,
+    Installing,
+    Validating,
+    Starting,
+    RestoringOriginal,
+    Reconciling,
+    Finalizing,
+    Attention(Attention),
+    UserStopped,
+}
 #[cfg(not(target_os = "macos"))]
 pub struct Panel;
 #[cfg(not(target_os = "macos"))]
 impl Panel {
-    pub fn new(_: &str) -> Result<Self, String> {
+    pub fn new(_: &str, _: &UpdatePlan) -> Result<Self, String> {
         Err("native updater requires macOS AppKit".into())
     }
     pub fn activate(&self) {}
-    pub fn show(&self, _: &str) {}
+    pub fn show(&self, _: Phase, _: Option<&str>) {}
     pub fn pump(&self) {}
     pub fn visible(&self) -> bool {
         false

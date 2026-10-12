@@ -8,15 +8,18 @@ use crate::character_service::PackService;
 use crate::character_types::{PackAction, PackListing, PackOperation, PackRequest};
 use crate::herdr::Watchers;
 use crate::lifecycle::{self, LifecycleLock, LifecycleSetting, LifecycleSettings, Paths};
+use crate::preferences::Preferences;
 use crate::session_view::{SessionCursor, SessionFilter, SessionPageCursor, SessionPageRequest};
 use crate::socket;
 use crate::state::AppState;
 use crate::ui;
 use herdr_update_coordinator::protocol::{
-    record_user_stop, start_allowed, stop_generation, verify_control, UpdateCommand,
+    record_user_stop, start_allowed, stop_generation, verify_control_for, UpdateCommand,
     UpdateControlReply, UpdateControlRequest, UPDATER_PROTOCOL,
 };
-use herdr_update_coordinator::{read_plan, InstallOrigin, UpdateContext, UpdatePlan};
+use herdr_update_coordinator::{
+    read_plan, validate_plan_target, InstallOrigin, UpdateContext, UpdatePlan, UpdatePolicy,
+};
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -1247,6 +1250,17 @@ fn verify_running_plan(plan: &UpdatePlan, context: &UpdateContext) -> Result<(),
     {
         return Err("updater plan does not match running executable, origin and profile".into());
     }
+    validate_plan_target(plan)?;
+    if let Some(target) = &plan.target {
+        let selected = if Preferences::load(&context.config_dir)?.receive_beta_updates() {
+            UpdatePolicy::StableAndBeta
+        } else {
+            UpdatePolicy::StableOnly
+        };
+        if target.policy != selected {
+            return Err("selected update policy changed since consent".into());
+        }
+    }
     Ok(())
 }
 
@@ -1281,14 +1295,15 @@ fn dispatch_update(
     if matches!(origin, InstallOrigin::Unknown { .. }) {
         return Err("unknown installation cannot be reserved for update".into());
     }
-    verify_control(
+    let plan = read_plan(&context.state_dir, &request.operation_id)?;
+    verify_running_plan(&plan, &context)?;
+    verify_control_for(
         origin,
+        plan.target.as_ref().map(|target| &target.origin),
         &context.state_dir,
         &request.operation_id,
         &request.token,
     )?;
-    let plan = read_plan(&context.state_dir, &request.operation_id)?;
-    verify_running_plan(&plan, &context)?;
     match request.command {
         UpdateCommand::Prepare => {
             let (sender, receiver) = mpsc::channel();
@@ -1316,8 +1331,9 @@ fn dispatch_update(
                     return Err("main-thread update preparation timed out".into());
                 }
             }
-            if let Err(error) = verify_control(
+            if let Err(error) = verify_control_for(
                 origin,
+                plan.target.as_ref().map(|target| &target.origin),
                 &context.state_dir,
                 &request.operation_id,
                 &request.token,
@@ -1333,8 +1349,9 @@ fn dispatch_update(
             let _lifecycle = lock_unpoisoned(&inner.lifecycle_writes);
             // Verify and read the durable generation before taking AppState;
             // ordinary control Stop writes it under the same lifecycle lock.
-            verify_control(
+            verify_control_for(
                 origin,
+                plan.target.as_ref().map(|target| &target.origin),
                 &context.state_dir,
                 &request.operation_id,
                 &request.token,
@@ -2950,6 +2967,7 @@ mod tests {
             action: UpdateAction::LocalRebuild,
             running,
             candidate: None,
+            target: None,
         };
         assert!(verify_running_plan(&plan, &context).is_ok());
         let mut tampered = plan.clone();
