@@ -4240,6 +4240,46 @@ fn migration_consent_detail(
     )
 }
 
+fn set_migration_alert_detail(alert: &NSAlert, mtm: MainThreadMarker, detail: &str) {
+    if let Some(accessory) = alert.accessoryView() {
+        if let Some(scroll) = accessory.downcast_ref::<NSScrollView>() {
+            if let Some(document) = scroll.documentView() {
+                if let Some(view) = document.downcast_ref::<NSTextView>() {
+                    view.setString(&NSString::from_str(detail));
+                    return;
+                }
+            }
+        }
+    }
+    // A root census can contain many profiles. Keep both consent buttons on
+    // screen while preserving every exact image, manager and profile detail.
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 320.0));
+    let view: Retained<NSTextView> =
+        unsafe { msg_send![NSTextView::alloc(mtm), initWithFrame: frame] };
+    view.setEditable(false);
+    view.setSelectable(true);
+    view.setRichText(false);
+    view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    view.setTextColor(Some(&NSColor::labelColor()));
+    view.setDrawsBackground(false);
+    view.setHorizontallyResizable(false);
+    view.setVerticallyResizable(true);
+    view.setMaxSize(NSSize::new(520.0, f64::MAX));
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    if let Some(container) = unsafe { view.textContainer() } {
+        container.setContainerSize(NSSize::new(520.0, f64::MAX));
+        container.setWidthTracksTextView(true);
+    }
+    view.setString(&NSString::from_str(detail));
+    let scroll: Retained<NSScrollView> =
+        unsafe { msg_send![NSScrollView::alloc(mtm), initWithFrame: frame] };
+    scroll.setDocumentView(Some(&*view));
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(false);
+    alert.setAccessoryView(Some(&scroll));
+}
+
 fn schedule_migration_confirmation(
     plan: desktop_pet_update_coordinator::migration::MigrationPlan,
     resume: bool,
@@ -4292,9 +4332,7 @@ fn confirm_legacy_migration(
         Message::MigrationTitle
     };
     alert.setMessageText(&NSString::from_str(text(locale, title)));
-    alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
-        &plan, locale,
-    )));
+    set_migration_alert_detail(&alert, mtm, &migration_consent_detail(&plan, locale));
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
     alert.addButtonWithTitle(&NSString::from_str(text(locale, title)));
     if alert.runModal() != NSAlertSecondButtonReturn {
@@ -4317,9 +4355,7 @@ fn confirm_legacy_migration(
             return;
         }
         let alert = NSAlert::new(ui.mtm);
-        alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
-            &plan, ui.locale,
-        )));
+        set_migration_alert_detail(&alert, ui.mtm, &migration_consent_detail(&plan, ui.locale));
         alert.addButtonWithTitle(&NSString::from_str(text(
             ui.locale,
             Message::AppUpdateLater,
@@ -5897,9 +5933,7 @@ impl Ui {
                 ui.locale,
                 Message::MigrationPreparing,
             )));
-            alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
-                plan, ui.locale,
-            )));
+            set_migration_alert_detail(&alert, ui.mtm, &migration_consent_detail(plan, ui.locale));
             alert.layout();
             alert.window().orderFrontRegardless();
             if !alert.window().isVisible() {
@@ -8496,11 +8530,15 @@ impl Ui {
                     .migration_plan
                     .as_ref()
                     .expect("matched migration consent");
-                alert.setInformativeText(&NSString::from_str(&format!(
-                    "{}\n\n{}",
-                    model.detail,
-                    migration_consent_detail(plan, self.locale)
-                )));
+                set_migration_alert_detail(
+                    alert,
+                    self.mtm,
+                    &format!(
+                        "{}\n\n{}",
+                        model.detail,
+                        migration_consent_detail(plan, self.locale)
+                    ),
+                );
                 alert.layout();
             }
         }
@@ -8880,10 +8918,11 @@ impl Ui {
                     self.locale,
                     Message::MigrationPreparing,
                 )));
-                alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
-                    &plan,
-                    self.locale,
-                )));
+                set_migration_alert_detail(
+                    &alert,
+                    self.mtm,
+                    &migration_consent_detail(&plan, self.locale),
+                );
                 alert.layout();
                 alert.window().orderFrontRegardless();
                 if !alert.window().isVisible() {
