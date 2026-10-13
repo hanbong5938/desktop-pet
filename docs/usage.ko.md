@@ -2,9 +2,9 @@
 
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
-[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)·bridge v0.3.7·중립 포뮬러·연동 태그는 **아직 공개되지 않았습니다**. 실제 후보 패키지/VM 검사는 공개 설치 가능 여부와 별개이며 최종 수락 표는 미완료입니다. 아래 명령은 중립 cutover 안내이지 검증된 공개 설치가 아닙니다. 과거 문서·태그·자산은 변경 불가합니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)(protocol 4 / capability 2 / integration API 1)과 중립 Homebrew 포뮬러는 공개되었고 disposable Mac에서 공개 설치를 검증했습니다. 현재 소스의 승인된 v0.4.1, bridge v0.3.7, 연동 태그는 아직 공개되지 않았으며 최종 migration/두 호스트 수락 표는 미완료입니다. 공개 중립 v0.4.0과 과거 Herdr 태그·자산은 변경하지 않습니다.
 
 ## 요구 사항
 
@@ -26,7 +26,7 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# 해당 체크아웃의 고정 공개 자산이 필요합니다. 현재 0.4.1은 아직 공개 전입니다:
 bash scripts/install.sh --prebuilt
 # Explicit source alternative:
 bash scripts/install.sh --source
@@ -194,5 +194,5 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 - 창 숨김이나 전체 클릭 통과는 시작 실패가 아닙니다. 위의 메뉴 막대 복구를 사용하세요. `plugin link` 후 실행되지 않았다면 `client.attached` 경고를 확인하고 수동 `start`, 데몬 `status`·로그를 확인하세요. 꺼진 `auto_start`는 의도적인 자동 시작 건너뜀이고 실행 중 호스트에 연결만 해서는 바로 실행되지 않습니다. 패치 호스트 격리 설치와 훅 확인은 [호스트 안내](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)에 있습니다.
 - `Herdr watchers are shutting down`이 나오면 상속된 `HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`, `PATH`의 실제 Herdr CLI 실행 파일/버전, 그 소켓을 소유한 서버를 확인하세요. **다른 서버**의 `herdr plugin list`로 데몬의 endpoint를 판정할 수 없습니다. 같은 CLI·소켓·세션을 대상으로 조사하고 원격이면 저장 머신 전달 지원 버전/선택 프로필도 검사하세요. 패치 호스트는 자동 실행 훅을 제공할 뿐 모든 서버에 플러그인을 설치하지 않습니다.
 - 원격 오류는 [관찰 대상 설정](#관찰-대상-설정)의 프로필 상태·대화형 재인증·API 전달 CLI를 확인하세요. 로컬 화면을 원하면 원격 호스트에서 SSH로 GUI를 실행하지 마세요. `agent.prompt` 제한과 원격 읽기 전용은 [메시지 전달](#인라인-답장과-메시지-전달)을 참고하세요.
-- 기본 및 명시적 `--prebuilt`는 prebuilt-only이며 다운로드/검증 실패 때 source fallback하지 않습니다. 현재 검증된 core 체크아웃 빌드에는 명시적 `--source`를 쓰고 admission이 보고한 실제 선택 설치를 확인하세요. 중립 v0.4.0/포뮬러/연동 태그는 아직 게시되지 않았습니다. ad-hoc 서명 검증은 Developer ID/공증이 아닙니다([설치](../readme.ko.md)).
+- 기본 및 명시적 `--prebuilt`는 prebuilt-only이며 다운로드/검증 실패 때 source fallback하지 않습니다. 현재 검증된 core 체크아웃 빌드에는 명시적 `--source`를 쓰고 admission이 보고한 실제 선택 설치를 확인하세요. 중립 v0.4.0과 포뮬러는 공개되었고 현재 v0.4.1·bridge·연동 태그는 아직 게시되지 않았습니다. ad-hoc 서명 검증은 Developer ID/공증이 아닙니다([설치](../readme.ko.md)).
 - 제공자 연동은 Herdr 업스트림 기능을 사용하며 해당 수명주기 훅 설치 뒤 기존 제공자 세션을 재시작/다시 로드하세요. 앱은 관측 상태만 표시하고 제공자 결과를 추측하지 않습니다. 버전별 동작은 [릴리스 기록](releases/README.ko.md), 호스트 세부 사항은 [호스트 통합](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)을 참고하세요.

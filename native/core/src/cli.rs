@@ -1168,10 +1168,13 @@ fn ensure(
         }
         let assets = resolve_assets(assets.as_deref())?;
         admit()?;
+        let profile = ProfileStore::with_lock(&paths.config_dir, Arc::new(lock))?
+            .with_preferences_validator(crate::preferences::Preferences::validate_committed_object);
         if !settings_request {
-            persist_observation_mode(&paths.config_dir, observation_mode.clone())?;
+            profile.with_writer_lock(|| {
+                persist_observation_mode(&paths.config_dir, observation_mode.clone())
+            })?;
         }
-        let profile = ProfileStore::with_lock(&paths.config_dir, Arc::new(lock))?;
         let Some(lease) = lifecycle::begin_startup(&profile, &composition.extensions.lifecycle)?
         else {
             drop(profile);

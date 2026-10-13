@@ -8,7 +8,7 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 [Browse the optional character and outfit gallery](https://hanbong5938.github.io/herdr-characters/) (opens in English; choose KO for Korean) · [Character pack source and licenses](https://github.com/hanbong5938/herdr-characters). **Only Rubelia (`default@0`) is bundled.**
 
-**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1), bridge v0.3.7, the neutral formula and integration tags are **not yet published**. Actual candidate packaging/VM checks are separate from public availability; final acceptance matrices remain pending. Commands describe the neutral cutover, not a verified public installation. Historical notes, tags and assets remain immutable.
+**Publication boundary:** independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) and `hanbong5938/tap/desktop-pet` are published and were installed from public assets in a disposable Mac. Current source targets separately approved **v0.4.1**, whose fixed prebuilt assets are not yet published; use the immutable v0.4.0 checkout for its installer. Bridge v0.3.7 and integration tags remain unpublished, and the final acceptance matrix remains incomplete. Legacy Herdr v0.3.6 and published neutral v0.4.0 tags/assets remain immutable.
 
 ## Features
 
@@ -27,7 +27,7 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 ## Installation and optional integrations
 
-**After the neutral release and formula are actually published**, the public Homebrew commands will be:
+The published neutral Homebrew installation commands are:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -43,7 +43,7 @@ For prebuilt or source installation use the **core** checkout, not a Herdr integ
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires the pinned neutral public assets; unavailable until publication:
+# Requires this checkout's exact published core assets (current 0.4.1 is not yet published):
 bash scripts/install.sh --prebuilt
 # Explicit source alternative for the current core checkout:
 bash scripts/install.sh --source

@@ -1,14 +1,14 @@
 # Desktop Pet versions
 
-**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1) and the legacy bridge v0.3.7 are reviewed candidates, not verified public installations. Commands below describe the neutral cutover; do not treat notes, a source version or a tag as publication proof.
+**Publication boundary:** independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) and the neutral Homebrew formula are published, with anonymously verified assets and actual disposable-Mac installation. Current source targets separately approved v0.4.1, not yet published. Bridge v0.3.7 and integration tags remain unpublished; final migration/two-host acceptance remains incomplete. Published neutral and historical legacy tags/assets remain immutable.
 
-[Desktop Pet v0.4.0 reviewed candidate](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
+[Desktop Pet v0.4.0 publication and evidence](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
 
 **English** · [한국어](README.ko.md)
 
-Reviewed Markdown in this repository is the canonical version documentation. The GitHub Wiki is a generated reading view, not a separately edited source. These pages describe versions; use the [root overview and installation](../../readme.md), [current usage guide](../usage.md), [development guide](../development.md), and [Herdr integration guide](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) for their respective procedures.
+Reviewed Markdown in this repository is the canonical version documentation. The GitHub Wiki is a generated reading view, not a separately edited source. These pages describe versions; use the [root overview and installation](../../README.md), [current usage guide](../usage.md), [development guide](../development.md), and [Herdr integration guide](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) for their respective procedures.
 
-Current app documentation and installation: [English](../../readme.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). Current app usage: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). The four-locale app site and generated app Wiki are core-owned; the original Herdr site/docs now provide only integration/migration entrypoints. Hosted availability is separately verified.
+Current app documentation and installation: [English](../../README.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). Current app usage: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). The four-locale app site and generated app Wiki are core-owned; the original Herdr site/docs now provide only integration/migration entrypoints. Hosted availability is separately verified.
 
 ## Choose the right source
 

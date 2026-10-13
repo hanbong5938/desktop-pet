@@ -1,6 +1,6 @@
 # Desktop Pet CLI contract
 
-**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1), bridge v0.3.7, the neutral formula and integration tags are **not yet published**. Actual candidate packaging/VM checks are separate from public availability; final acceptance matrices remain pending. Commands describe the neutral cutover, not a verified public installation. Historical notes, tags and assets remain immutable.
+**Publication boundary:** independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) and the neutral Homebrew formula are published, with actual public installation verified in a disposable Mac. Current source targets approved v0.4.1, not yet published. Bridge v0.3.7 and integration tags remain unpublished; the final migration/two-host matrix is incomplete. Historical tags and assets remain immutable.
 
 ## English
 
@@ -144,9 +144,9 @@ With `--no-wait`, an initial pack reply already in a failed terminal state exits
 
 ### 연결, 식별자, 작업 상태
 
-이 문서는 독립 **Desktop Pet v0.4.0 후보**의 CLI 계약입니다. 현재 앱·도우미 envelope는 `{"protocol":4,"observation_mode":2,"integration_api":1}`입니다. 기존 Herdr v0.3.6(protocol 3 / capability 1)은 변경 불가한 역사이며 독립 v0.4.0·bridge v0.3.7·중립 포뮬러·연동 태그는 아직 공개되지 않았습니다. 패키지·VM 검사나 문서/소스 버전은 공개 설치의 증거가 아니며 최종 수락 표는 미완료입니다. 아래 명령은 `desktop-pet`과 선택한 동일 프로필을 사용합니다. JSON 예시는 필드/타입 설명이지 붙여 넣을 ID가 아닙니다. 실제 CLI 버전뿐 아니라 실행 데몬의 실행 파일·프로필도 확인하세요. 프로그램 상태는 실제 키보드·IME·접근성·포인터·픽셀 동작의 물리적 인증이 아닙니다.
+이 문서는 독립 **Desktop Pet**의 CLI 계약입니다. 앱·도우미 envelope는 `{"protocol":4,"observation_mode":2,"integration_api":1}`입니다. 중립 v0.4.0과 Homebrew 포뮬러는 공개되었고 disposable Mac에서 공개 설치를 검증했습니다. 현재 소스의 승인된 v0.4.1, bridge v0.3.7, 연동 태그는 아직 공개되지 않았으며 최종 수락 표는 미완료입니다. 기존 Herdr v0.3.6과 공개 중립 v0.4.0의 태그·자산은 유지합니다. 아래 명령은 `desktop-pet`과 선택한 동일 프로필을 사용합니다. JSON 예시는 필드/타입 설명이지 붙여 넣을 ID가 아닙니다. CLI 버전뿐 아니라 실행 데몬의 실행 파일·프로필도 확인하세요. 프로그램 상태는 실제 키보드·IME·접근성·포인터·픽셀 동작의 물리적 인증이 아닙니다.
 
-기본 설치와 `--prebuilt`는 고정된 core 사전 빌드만 사용하고 다운로드/검증 실패 시 소스 빌드로 fallback하지 않습니다. 현재 core 소스 개발은 명시적 `bash scripts/install.sh --source`입니다. 공개 Homebrew 설치는 중립 릴리스·포뮬러가 실제 게시된 뒤에만 사용할 수 있습니다. 앱과 연동은 별도로 설치하며 자세한 설치·탐색 규칙은 [개발 안내](development.md#profiles-and-installation-discovery)를 따릅니다.
+기본 설치와 `--prebuilt`는 해당 체크아웃의 고정 core 사전 빌드만 사용하고 다운로드/검증 실패 시 소스 빌드로 fallback하지 않습니다. 공개 v0.4.0은 같은 태그의 설치기를 사용하며 현재 v0.4.1 소스는 공개 전까지 명시적 `bash scripts/install.sh --source`만 사용합니다. 공개 Homebrew 설치는 `brew install hanbong5938/tap/desktop-pet`입니다. 앱과 연동은 별도로 설치하며 자세한 설치·탐색 규칙은 [개발 안내](development.md#profiles-and-installation-discovery)를 따릅니다.
 
 `presentation`, `preferences`, `sessions`, `dialogue`, `worktree`는 동일 UID만 접근하는 `<state-dir>/control.sock` 전용 Unix 소켓을 사용합니다. 데몬과 같은 `--config-dir PATH`, `--state-dir PATH`를 사용하십시오. **`--herdr-socket ABS`는 Herdr 어댑터가 등록한 backend 옵션이지 제어 socket이 아닙니다.** HTTP, CLI `--file` 입력의 데몬 측 읽기, 자동 데몬 시작, 셸 대체 경로, 오프라인 변경은 없습니다. `ensure`, `start`, `stop`, `restart`, `settings get`, `settings set auto_start on|off`, 등록 어댑터의 `settings set KEY on|off` **생명주기 설정**과 `preferences set`은 다릅니다. `status`는 데몬/생명주기 상태를 보고합니다. 기존 show/hide/bubble/scale 즉시 제어와 절대값 `presentation set`도 구분하십시오.
 

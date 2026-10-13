@@ -188,7 +188,10 @@ pub trait LifecycleExtension: Send + Sync {
         _locale: &str,
         _preferences: Arc<dyn PreferenceAccess>,
     ) -> Result<(), String> {
-        Err(format!("{} does not support action activation", self.provider()))
+        Err(format!(
+            "{} does not support action activation",
+            self.provider()
+        ))
     }
 
     /// Opaque top-level preference patch keys owned by this adapter. Core

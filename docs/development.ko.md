@@ -2,9 +2,9 @@
 
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
-[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)·bridge v0.3.7·중립 포뮬러·연동 태그는 **아직 공개되지 않았습니다**. 실제 후보 패키지/VM 검사는 공개 설치 가능 여부와 별개이며 최종 수락 표는 미완료입니다. 아래 명령은 중립 cutover 안내이지 검증된 공개 설치가 아닙니다. 과거 문서·태그·자산은 변경 불가합니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)(protocol 4 / capability 2 / integration API 1)과 `hanbong5938/tap/desktop-pet` 포뮬러는 공개되었습니다. 익명 다운로드 6개, 압축 파일 체크섬·서명·68개 배포 파일 closure를 검증했고, 일회용 Mac에서 실제 Brew 설치와 네이티브 UI/control 준비를 확인했습니다. 현재 소스는 v0.4.1이며 해당 공개 자산은 아직 없습니다. bridge v0.3.7 및 Herdr v0.4.0/Tern v0.2.0 연동 태그는 미공개입니다. 두 호스트의 실제 계정/제공자 런타임은 여전히 차단되어 최종 수락 표는 미완료입니다. 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / capability 1의 과거 공개판입니다. 동결된 태그·본문·자산과 과거 증거는 변경하지 않습니다.
 
 ## 요구 사항
 
@@ -12,7 +12,7 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-중립 릴리스와 포뮬러가 실제로 게시된 뒤 공개 설치 명령은 다음과 같습니다:
+공개된 중립 v0.4.0은 다음 Brew 명령으로 설치할 수 있습니다:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -26,15 +26,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# Published immutable v0.4.0 installer and pinned assets:
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# Explicit current v0.4.1 source alternative in a separate current checkout:
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-기본/`--prebuilt`는 고정된 중립 공개 자산을 요구하며 아직 게시되지 않았습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+불변 v0.4.0 체크아웃의 기본/`--prebuilt` 설치는 공개된 고정 자산을 사용합니다. 현재 v0.4.1 체크아웃의 prebuilt는 해당 자산이 게시될 때까지 사용할 수 없습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
 
 필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 
@@ -112,7 +113,7 @@ Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI �
 
 네이티브 UI 문구는 정적 카탈로그 [`native/core/src/i18n.rs`](../native/core/src/i18n.rs)에 있으며 중국어 간체와 일본어 카탈로그는 각각 [`native/core/src/i18n/zh_hans.rs`](../native/core/src/i18n/zh_hans.rs), [`native/core/src/i18n/ja.rs`](../native/core/src/i18n/ja.rs)입니다. UI 메시지를 추가할 때는 모든 카탈로그를 갱신하고 런타임 값·경로·ID·팩 소유 메타데이터는 번역하지 마세요. 환경 설정의 정규 저장 토큰은 `system|ko|en|zh-Hans|ja`, 대화문 override 토큰은 `ko|en|zh-Hans|ja`이며 언어별 초안은 독립적입니다. CLI/패치 검사는 엄격하게 유지하고 기존 저장 설정의 알 수 없는 값에는 관대한 fallback을 유지하세요. `system`은 OS 선호 언어를 순서대로 검사합니다. 일본어 태그는 대소문자와 무관하며 중국어 `zh`·명시적 Hans·CN/SG 지역은 간체로 해석합니다. 명시적 Hant 또는 Hans가 없는 TW/HK/MO는 다음 지원 언어로 넘기고 없으면 영어를 사용합니다. 외부 카탈로그 메타데이터는 `ko`에 한국어, `en`·`zh-Hans`·`ja`에 영어 fallback을 사용하고 작성된 대화문과 fallback은 팩 소유를 유지합니다.
 
-네이티브 문구나 CLI 언어 계약을 바꿀 때 [CLI 계약](cli.md), README [English](../readme.md)·[한국어](../readme.ko.md)·[简体中文](../readme.zh-Hans.md)·[日本語](../readme.ja.md), 사용 안내 [English](usage.md)·[한국어](usage.ko.md)·[简体中文](usage.zh-Hans.md)·[日本語](usage.ja.md)를 함께 갱신하세요. 이 문서들은 네이티브 앱에 관한 것이며 홍보 웹사이트의 네 언어 번역은 별도로 관리하세요.
+네이티브 문구나 CLI 언어 계약을 바꿀 때 [CLI 계약](cli.md), README [English](../README.md)·[한국어](../readme.ko.md)·[简体中文](../readme.zh-Hans.md)·[日本語](../readme.ja.md), 사용 안내 [English](usage.md)·[한국어](usage.ko.md)·[简体中文](usage.zh-Hans.md)·[日本語](usage.ja.md)를 함께 갱신하세요. 이 문서들은 네이티브 앱에 관한 것이며 홍보 웹사이트의 네 언어 번역은 별도로 관리하세요.
 
 ## 캐릭터 제작
 

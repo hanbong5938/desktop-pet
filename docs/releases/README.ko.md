@@ -1,14 +1,14 @@
 # Desktop Pet 버전 안내
 
-**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)과 이전용 bridge v0.3.7은 검토된 후보이며 공개 설치·런타임 검증은 아직 완료되지 않았습니다. 아래 명령은 중립 제품 cutover 안내이며 문서·태그·소스 버전은 게시 증거가 아닙니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)과 중립 Homebrew 포뮬러는 공개되었고 공개 자산 익명 검증과 disposable Mac 설치를 확인했습니다. 현재 소스의 승인된 별도 v0.4.1, bridge v0.3.7, 연동 태그는 아직 공개되지 않았고 최종 migration/두 호스트 수락 표는 미완료입니다. 공개 중립 버전과 과거 Herdr 태그·자산은 유지합니다.
 
-[Desktop Pet v0.4.0 reviewed candidate](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
+[Desktop Pet v0.4.0 게시 및 검증 기록](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
 
 [English](README.md) · **한국어**
 
 이 저장소에서 검토한 Markdown이 버전 문서의 원본입니다. GitHub Wiki는 원본에서 생성한 읽기용 화면이며 따로 편집하는 원본이 아닙니다. 개요·설치는 [한국어 루트 안내](../../readme.ko.md), 현행 조작·운영은 [사용 안내](../usage.ko.md), 소스·웹사이트 개발은 [개발 안내](../development.ko.md), Herdr 호스트 연동은 [연동 안내(영어)](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)를 기준으로 합니다.
 
-현재 앱 문서·설치: [English](../../readme.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). 현재 앱 사용법: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). 4개 언어 앱 사이트와 생성된 앱 Wiki는 core 소유이며 이전 Herdr 사이트·문서는 연동·이전 입구입니다. 실제 공개 여부는 별도로 확인합니다.
+현재 앱 문서·설치: [English](../../README.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). 현재 앱 사용법: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). 4개 언어 앱 사이트와 생성된 앱 Wiki는 core 소유이며 이전 Herdr 사이트·문서는 연동·이전 입구입니다. 실제 공개 여부는 별도로 확인합니다.
 
 ## 목적에 맞는 문서 선택
 

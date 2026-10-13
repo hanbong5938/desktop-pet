@@ -40,6 +40,7 @@ mod operations;
 mod pack_authoring;
 mod pointer_capture;
 mod pose;
+mod preference_access;
 mod preferences;
 mod rig_renderer;
 mod session_cards;

@@ -1663,8 +1663,11 @@ pub fn stage_migration_target(plan: &crate::migration::MigrationPlan) -> Result<
     protocol::validate_operation_id(&plan.operation_id)?;
     let release = &plan.target.release;
     release.validate_neutral()?;
-    if release.version != "0.4.0" || release.channel != ReleaseChannel::Stable {
-        return Err("legacy migration target must be stable neutral 0.4.0".into());
+    if release.version != identity::neutral::VERSION || release.channel != ReleaseChannel::Stable {
+        return Err(format!(
+            "legacy migration target must be stable neutral {}",
+            identity::neutral::VERSION
+        ));
     }
     let bundle = &plan.target.staged_bundle;
     ensure_absolute(bundle)?;
@@ -1775,9 +1778,10 @@ pub fn stage_neutral_migration_helper(
     protocol::validate_operation_id(operation_id)?;
     release.validate_neutral()?;
     if release.version != identity::neutral::VERSION || release.channel != ReleaseChannel::Stable {
-        return Err(
-            "bridge migration may stage only the approved neutral stable 0.4.0 target".into(),
-        );
+        return Err(format!(
+            "bridge migration may stage only the approved neutral stable {} target",
+            identity::neutral::VERSION,
+        ));
     }
     let directory =
         protocol::private_updates(state_dir)?.join(format!("neutral-migration-{operation_id}"));
@@ -1798,7 +1802,12 @@ pub fn stage_neutral_migration_release(
             release.version == identity::neutral::VERSION
                 && release.channel == ReleaseChannel::Stable
         })
-        .ok_or("official neutral stable 0.4.0 release is unavailable")?;
+        .ok_or_else(|| {
+            format!(
+                "official neutral stable {} release is unavailable",
+                identity::neutral::VERSION
+            )
+        })?;
     let stage = stage_neutral_migration_helper(state_dir, operation_id, &release)?;
     #[cfg(not(desktop_pet_legacy))]
     let selected = discover_neutral(None)?;

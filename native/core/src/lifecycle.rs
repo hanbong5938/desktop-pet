@@ -1,6 +1,6 @@
 use desktop_pet_contracts::profile_store::{
     atomic_write, read_object, read_object_with_presence, setting_bool, write_object,
-    LIFECYCLE_FILE,
+    CONTROL_SOCKET_FILE, LIFECYCLE_FILE,
 };
 use desktop_pet_contracts::{LifecycleExtension, ProfileStore};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CONTROL_SOCKET_FILE: &str = "control.sock";
 pub const LOG_FILE: &str = "desktop-pet.log";
 const STARTUP_KEY: &str = "startup";
 const STARTUP_STALE_AFTER_SECS: u64 = 45;

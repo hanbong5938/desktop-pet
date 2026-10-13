@@ -2,9 +2,9 @@
 
 An independent native macOS desktop companion. Rubelia reacts to touch, displays sessions from registered providers such as Herdr and Tern, and lets you reply when that source grants prompt capability. The app also runs without a host.
 
-[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1), bridge v0.3.7, the neutral formula and integration tags are **not yet published**. Actual candidate packaging/VM checks are separate from public availability; final acceptance matrices remain pending. Commands describe the neutral cutover, not a verified public installation. Historical notes, tags and assets remain immutable.
+**Publication boundary:** Independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) (protocol 4 / observation capability 2 / integration API 1) and `hanbong5938/tap/desktop-pet` are public. All six anonymous downloads, archive checksums/signatures and the 68-file deployed closure were verified; actual Brew installation and native UI/control readiness were confirmed on a disposable Mac. Current source targets v0.4.1; its public assets are not yet available. Bridge v0.3.7 and Herdr v0.4.0/Tern v0.2.0 integration tags remain unpublished. Two-host actual account/provider runtime remains blocked and the final acceptance matrix is incomplete. Legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) remains the historical protocol-3 / capability-1 release. Frozen tags, release bodies, assets and historical evidence remain immutable.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ Apple Silicon Mac, macOS 13+. Source builds require Rust/Cargo, Bun, Node.js/npm
 
 ## Installation and optional integrations
 
-After the neutral release and formula are actually published, the public command is:
+The published neutral v0.4.0 is available through Homebrew:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -26,15 +26,16 @@ For prebuilt or source installation, use the **core** checkout, not a Herdr inte
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# Published immutable v0.4.0 installer and pinned assets:
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# Explicit current v0.4.1 source alternative in a separate current checkout:
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-Default and `--prebuilt` require the pinned neutral public assets, which are not yet published; failure never silently builds source. Only explicit `--source` builds the current verified core checkout. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; an admitted source installation uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy existing owner instead of taking it over: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
+Default and `--prebuilt` from the immutable v0.4.0 checkout use published pinned assets. Current v0.4.1 checkout prebuilt installation is unavailable until its assets are published; failure never silently builds source. Only explicit `--source` builds the current verified core checkout. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; an admitted source installation uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy existing owner instead of taking it over: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
 
 Install only the integrations you want. Herdr is a thin consumer; Tern does not download, build, install or auto-start the native app. Plugin updates/removal affect integrations only, never the shared app, profile or characters. Native updates do not reinstall Herdr plugins.
 
@@ -114,7 +115,7 @@ The rig bridge checks version and seven C layout sizes **before** handing typed 
 
 Native UI strings live in the static catalog [`native/core/src/i18n.rs`](../native/core/src/i18n.rs), with Simplified Chinese and Japanese catalogs in [`native/core/src/i18n/zh_hans.rs`](../native/core/src/i18n/zh_hans.rs) and [`native/core/src/i18n/ja.rs`](../native/core/src/i18n/ja.rs). Add each new UI message to every catalog rather than translating runtime values, paths, IDs, or pack-owned metadata. Preferences persist the canonical tokens `system|ko|en|zh-Hans|ja`; dialogue overrides accept `ko|en|zh-Hans|ja`, with independent drafts per locale. Keep CLI/patch validation strict while preserving the tolerant fallback for older saved preferences. `system` checks preferred OS languages in order: Japanese tags match case-insensitively; `zh`, explicit Hans and CN/SG regions resolve to Simplified Chinese, but explicit Hant or TW/HK/MO without Hans must be skipped for the next supported language (default English). External catalog metadata remains Korean for `ko` and English fallback for `en`, `zh-Hans` and `ja`; authored dialogue and its fallback belong to each pack.
 
-When changing native text or CLI language contracts, keep the [CLI contract](cli.md), [English](../readme.md), [한국어](../readme.ko.md), [简体中文](../readme.zh-Hans.md) and [日本語](../readme.ja.md) READMEs, and the [English](usage.md), [한국어](usage.ko.md), [简体中文](usage.zh-Hans.md) and [日本語](usage.ja.md) usage guides aligned. These links describe the native app; maintain the promotional website's four translations separately.
+When changing native text or CLI language contracts, keep the [CLI contract](cli.md), [English](../README.md), [한국어](../readme.ko.md), [简体中文](../readme.zh-Hans.md) and [日本語](../readme.ja.md) READMEs, and the [English](usage.md), [한국어](usage.ko.md), [简体中文](usage.zh-Hans.md) and [日本語](usage.ja.md) usage guides aligned. These links describe the native app; maintain the promotional website's four translations separately.
 
 ## Character authoring
 

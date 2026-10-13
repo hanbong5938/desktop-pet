@@ -2,9 +2,9 @@
 
 独立的原生 macOS 桌面伙伴。露贝莉娅回应触摸，显示 Herdr、Tern 等已注册提供商的会话，并在来源允许时发送回复。无需宿主也能运行。
 
-[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**发布边界：**旧版 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 已发布，采用 protocol 3 / observation capability 1。独立 Desktop Pet v0.4.0（protocol 4 / capability 2 / integration API 1）、bridge v0.3.7、中立 formula、集成标签**尚未发布**。实际候选 package／VM 检查不代表公开可安装，最终验收矩阵尚未完成。下文描述中立 cutover，并非已验证公开安装。历史文档、标签与资产不可改动。
+**发布边界：**独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）与 `hanbong5938/tap/desktop-pet` 配方已公开。已验证六个匿名下载、压缩包校验和／签名／68 个部署文件 closure，并在一次性 Mac 上确认实际 Brew 安装和原生 UI/control 就绪。当前源码为 v0.4.1，尚无该版公开资产。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 集成标签尚未发布。双宿主真实账户／提供方运行验证仍受阻，最终验收矩阵未完成。旧版 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 是 protocol 3 / capability 1 的历史公开版本。冻结标签、正文、资产及历史证据保持不变。
 
 <img src="assets/rubelia-thumbnail.png" alt="默认桌面伙伴露贝莉娅" width="220">
 
@@ -15,7 +15,7 @@
 - 向选中的**本地**代理会话发送单行回复，支持输入法组合输入与原生状态反馈。
 - 可配置角色、气泡、对话和可见性；支持可选的已验证角色包与官方目录浏览器。
 - Herdr 生命周期操作、受保护的关联工作树移除，以及明确区分安装来源的应用更新。
-- **仅当前源码：**统一的连接设置可选择 Auto 或已注册提供商（如 Herdr／Tern），显示实际提供商状态，并将运行中的切换保存到共享配置档；公开 v0.3.6 不包含此 capability-2 UI。
+- **capability 2：**统一的连接设置可选择 Auto 或已注册提供商（如 Herdr／Tern），显示实际提供商状态，并将运行中的切换保存到共享配置档；公开 Desktop Pet v0.4.0 包含此 UI，历史 Herdr v0.3.6 则没有。这不代表双宿主真实账户／提供方运行验证已完成。
 
 ## 系统要求
 
@@ -23,7 +23,7 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-中立发布及配方实际公开之后，公开安装命令为：
+已公开的中立 v0.4.0 可通过以下 Brew 命令安装：
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,15 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# 使用已公开的不可变 v0.4.0 安装器及固定资产：
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# 当前 v0.4.1 源码替代方案在另一个当前检出中显式运行：
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-默认／`--prebuilt` 要求固定的中立公开资产，目前尚未发布。失败绝不暗中构建 source；只有显式 `--source` 构建当前已验证 core。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
+不可变 v0.4.0 检出的默认／`--prebuilt` 使用已公开的固定资产；当前 v0.4.1 检出的预构建在该版资产发布前不可用。失败绝不暗中构建 source；只有显式 `--source` 构建当前已验证 core。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
 
 仅安装需要的集成。Herdr 是轻量消费者；Tern 不下载、构建、安装或自动启动原生应用。插件更新与卸载只影响集成，不删除共享应用、配置档或角色。常规应用更新不重新安装 Herdr 插件。
 

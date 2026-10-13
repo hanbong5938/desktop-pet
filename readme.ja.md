@@ -2,9 +2,9 @@
 
 独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
-[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**公開状態:** 既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / observation capability 1 の公開版です。独立 Desktop Pet v0.4.0（protocol 4 / capability 2 / integration API 1）、bridge v0.3.7、中立 formula、連携タグは **未公開**です。実際の候補 package／VM 検査は公開導入の可否とは別で、最終受入表は未完了です。以下は中立 cutover の案内であり、検証済み公開導入ではありません。過去の文書、タグ、アセットは変更不可です。
+**公開状態:** 独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）と `hanbong5938/tap/desktop-pet` formula は公開済みです。匿名ダウンロード6件、アーカイブのチェックサム・署名・配備68ファイルの closure を検証し、使い捨て Mac で実際の Brew 導入とネイティブ UI/control の準備完了を確認しました。現在のソースは v0.4.1 で、その公開アセットはまだありません。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 連携タグは未公開です。2ホストの実アカウント／プロバイダー実行検証は依然ブロックされ、最終受入表は未完了です。既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / capability 1 の過去の公開版です。凍結タグ・本文・アセットと過去の証拠は変更しません。
 
 <img src="assets/rubelia-thumbnail.png" alt="標準デスクトップコンパニオンのルベリア" width="220">
 
@@ -15,7 +15,7 @@
 - 選択した**ローカル**エージェントセッションへの一行返信。IME の変換中入力に配慮し、ネイティブの状態フィードバックを表示します。
 - キャラクター、バブル、セリフ、表示状態の設定。検証済み追加パックと公式カタログブラウザーに対応します。
 - Herdr のライフサイクル操作、保護付きの linked worktree 削除、インストール元を区別した明示的なアプリ更新。
-- **現在のソース限定：**統合された接続設定で Auto または登録されたプロバイダー（Herdr／Tern など）を選び、実際の接続状態を確認し、共有プロファイルへ稼働中の変更を保存します。公開 v0.3.6 にこの capability-2 UI は含まれません。
+- **capability 2：**統合された接続設定で Auto または登録されたプロバイダー（Herdr／Tern など）を選び、実際の接続状態を確認し、共有プロファイルへ稼働中の変更を保存します。公開 Desktop Pet v0.4.0 はこの UI を含みますが、過去の Herdr v0.3.6 にはありません。2ホストの実アカウント／プロバイダー実行検証完了を意味しません。
 
 ## 動作要件
 
@@ -23,7 +23,7 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-中立リリースと formula が実際に公開された後の公開コマンド:
+公開済みの中立 v0.4.0 は次の Brew コマンドで導入できます:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,15 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# 公開済みの不変 v0.4.0 インストーラーと固定アセットを使用:
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# 現在の v0.4.1 ソース代替は別の現在のチェックアウトで明示実行:
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-既定／`--prebuilt` は固定された中立公開アセットを要求し、現在は未公開です。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
+不変の v0.4.0 チェックアウトの既定／`--prebuilt` は公開済み固定アセットを使用します。現在の v0.4.1 チェックアウトの prebuilt は、そのアセット公開まで利用できません。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
 
 必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 

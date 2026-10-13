@@ -432,10 +432,13 @@ pub fn validate_plan(plan: &MigrationPlan) -> Result<(), String> {
         }
     }
     plan.target.release.validate_neutral()?;
-    if plan.target.release.version != "0.4.0"
+    if plan.target.release.version != crate::identity::neutral::VERSION
         || plan.target.release.channel != crate::ReleaseChannel::Stable
     {
-        return Err("migration requires approved neutral stable 0.4.0 release".into());
+        return Err(format!(
+            "migration requires approved neutral stable {} release",
+            crate::identity::neutral::VERSION
+        ));
     }
     crate::ensure_absolute(&plan.target.staged_bundle)?;
     if let Some(manager) = &plan.target_manager_program {
@@ -825,7 +828,12 @@ fn verify_status(
         || !live.ready
         || !live.ui_ready
         || !live.control_ready
-        || live.app_version != if target { "0.4.0" } else { "0.3.7" }
+        || live.app_version
+            != if target {
+                crate::identity::neutral::VERSION
+            } else {
+                "0.3.7"
+            }
         || live.updater_protocol != if target { 4 } else { 3 }
         || live.observation_capability != if target { 2 } else { 1 }
         || live.integration_api != 1
@@ -1147,7 +1155,7 @@ pub fn startup_authorization(
             return Err("bridge restart lacks valid rollback authorization".into());
         }
     } else if context.running != plan.target.image
-        || context.version != "0.4.0"
+        || context.version != crate::identity::neutral::VERSION
         || record.phase != MigrationPhase::Starting
     {
         return Err("target startup lacks held migration authorization".into());
@@ -1750,7 +1758,7 @@ fn execute(
         let existing = crate::installation::inspect(&plan.target.image.path)?;
         if existing.image != plan.target.image
             || existing.origin != plan.target.origin
-            || existing.app_version != "0.4.0"
+            || existing.app_version != crate::identity::neutral::VERSION
         {
             return Err(
                 "live read-only target installation changed; migration may not replace it".into(),
@@ -3081,7 +3089,7 @@ fn verify_committed_target(
         || !live.ui_ready
         || !live.control_ready
         || live.migration_gated
-        || live.app_version != "0.4.0"
+        || live.app_version != crate::identity::neutral::VERSION
         || live.updater_protocol != 4
         || live.observation_capability != 2
         || live.integration_api != 1
@@ -3131,11 +3139,12 @@ mod tests {
                 pid:1000,instance_id:"source-instance".into(),stop_generation:0,observation:ObservationSelection::Auto,environment:BTreeMap::new(),
                 herdr_socket:None,assets_override:None,host_plugin_config_dir:None,tern_reconnect_required:false}],
             target:MigrationTarget {release:ReleaseCandidate {
-                version:"0.4.0".into(),channel:crate::ReleaseChannel::Stable,tag:"v0.4.0".into(),release_id:1,
-                asset_name:"DesktopPet-v0.4.0-macos-arm64.tar.gz".into(),
-                archive_url:"https://github.com/hanbong5938/desktop-pet/releases/download/v0.4.0/DesktopPet-v0.4.0-macos-arm64.tar.gz".into(),
+                version:crate::identity::neutral::VERSION.into(),channel:crate::ReleaseChannel::Stable,
+                tag:format!("v{}", crate::identity::neutral::VERSION),release_id:1,
+                asset_name:format!("DesktopPet-v{}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
+                archive_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
                 archive_size:10,sha256:"a".repeat(64),
-                checksum_url:"https://github.com/hanbong5938/desktop-pet/releases/download/v0.4.0/DesktopPet-v0.4.0-macos-arm64.tar.gz.sha256".into()
+                checksum_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz.sha256", crate::identity::neutral::VERSION)
             },image:ExecutableIdentity {path:target.join("Contents/MacOS/desktop-pet"),sha256:"c".repeat(64)},
                 origin:InstallOrigin::Standalone{bundle:target},staged_bundle:root.join("stage/DesktopPet.app")},
             target_manager_program:None,legacy_aliases:Vec::new(),
@@ -3691,7 +3700,7 @@ fn capture_target_profiles(
             || !live.ready
             || !live.ui_ready
             || !live.control_ready
-            || live.app_version != "0.4.0"
+            || live.app_version != crate::identity::neutral::VERSION
             || live.updater_protocol != 4
             || live.observation_capability != 2
             || live.integration_api != 1
@@ -3789,7 +3798,7 @@ fn verify_neutral_profile(
         || !live.ui_ready
         || !live.control_ready
         || live.migration_gated
-        || live.app_version != "0.4.0"
+        || live.app_version != crate::identity::neutral::VERSION
         || live.updater_protocol != 4
         || live.observation_capability != 2
         || live.integration_api != 1

@@ -240,8 +240,7 @@ impl PreferencesOwner {
     pub(crate) fn acquire(config_dir: &Path, state_dir: &Path) -> Result<Self, String> {
         let config = owner_directory(config_dir)?;
         let state = owner_directory(state_dir)?;
-        let canonical_state =
-            fs::canonicalize(state_dir).map_err(|error| error.to_string())?;
+        let canonical_state = fs::canonicalize(state_dir).map_err(|error| error.to_string())?;
         let lock = owner_file_at(&config, PREFERENCES_OWNER_LOCK, true)?
             .ok_or("missing preferences owner lock")?;
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
@@ -290,16 +289,23 @@ mod tests {
     use super::*;
     use crate::ProfileStore;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture(PathBuf);
 
     impl Fixture {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
-                "desktop-pet-config-owner-{}-{}",
+                "desktop-pet-config-owner-{}-{}-{}",
                 std::process::id(),
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
             ));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -331,14 +337,16 @@ mod tests {
         drop(first);
         assert!(ProfileStore::acquire(&config, &state_b).is_err());
         let binding: Value =
-            serde_json::from_slice(&fs::read(config.join(PREFERENCES_OWNER_BINDING)).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(config.join(PREFERENCES_OWNER_BINDING)).unwrap())
+                .unwrap();
         assert_eq!(binding["state_dir"], state_a.to_str().unwrap());
         assert!(!config.join("plugin-manager").exists());
         drop(shared);
         let second = ProfileStore::acquire(&config, &state_b).unwrap();
         second.verify_owner().unwrap();
         let binding: Value =
-            serde_json::from_slice(&fs::read(config.join(PREFERENCES_OWNER_BINDING)).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(config.join(PREFERENCES_OWNER_BINDING)).unwrap())
+                .unwrap();
         assert_eq!(binding["state_dir"], state_b.to_str().unwrap());
     }
 
@@ -351,9 +359,12 @@ mod tests {
         fs::rename(&config, fixture.0.join("original-config")).unwrap();
         fs::create_dir(&config).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(owner.with_writer_lock(|| {
-            fs::write(config.join("must-not-write"), b"wrong profile").map_err(|error| error.to_string())
-        }).is_err());
+        assert!(owner
+            .with_writer_lock(|| {
+                fs::write(config.join("must-not-write"), b"wrong profile")
+                    .map_err(|error| error.to_string())
+            })
+            .is_err());
         assert!(!config.join("must-not-write").exists());
     }
 

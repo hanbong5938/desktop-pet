@@ -38,6 +38,9 @@ pub(crate) struct StateRuntime {
 }
 
 impl RuntimePort for StateRuntime {
+    fn mutation_admission(&self) -> Result<(), String> {
+        crate::control::shared_mutation_admission(&self.shared)
+    }
     fn with_domain(&self, operation: &mut dyn FnMut(&mut dyn DomainAccess)) -> Result<(), String> {
         let mut state = self
             .shared
@@ -224,7 +227,8 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         &config.paths,
         Instant::now() + crate::cli::STARTUP_TIMEOUT,
     )?);
-    let profile = ProfileStore::with_lock(&config.paths.config_dir, lock.clone())?;
+    let profile = ProfileStore::with_lock(&config.paths.config_dir, lock.clone())?
+        .with_preferences_validator(Preferences::validate_committed_object);
     let settings = lifecycle::read_settings(&config.paths.config_dir)?;
     let updater_generation = env::var("DESKTOP_PET_UPDATER_GENERATION")
         .ok()

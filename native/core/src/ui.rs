@@ -2377,16 +2377,46 @@ define_class!(
             with_ui_mut(|ui| ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn));
         }
 
-        #[unsafe(method(copyIntegrationAction:))]
-        fn copy_integration_action(&self, sender: Option<&AnyObject>) {
+        #[unsafe(method(activateIntegrationAction:))]
+        fn activate_integration_action(&self, sender: Option<&AnyObject>) {
             let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else { return };
             if !button.isEnabled() { return; }
-            let Some(payload) = button.identifier() else { return };
-            let pasteboard = NSPasteboard::generalPasteboard();
-            pasteboard.clearContents();
-            let success = pasteboard.setString_forType(&payload, unsafe { NSPasteboardTypeString });
-            if let Some(locale) = with_ui_read(|ui| ui.locale) {
-                button.setTitle(&NSString::from_str(text(locale, if success { Message::ObservationCommandCopied } else { Message::ObservationCopyFailed })));
+            let Some(identifier) = button.identifier() else { return };
+            let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
+            let context = with_ui_read(|ui| {
+                let state = ui.shared.lock().map_err(|_| "native state lock is poisoned".to_owned())?;
+                let extension = state.lifecycle_extensions().iter()
+                    .find(|extension| extension.provider() == provider).cloned()
+                    .ok_or("integration action owner is not registered")?;
+                let store = state.profile_store().cloned().ok_or("profile store is not available")?;
+                Ok::<_, String>((extension, store, ui.prefs.observation_host(), ui.locale))
+            });
+            let Some(context) = context else { return };
+            // Native adapter actions may run a modal loop. No UiState borrow or
+            // domain lock may survive across their activation.
+            let result = context.and_then(|(extension, store, selection, locale)| {
+                let action = extension.actions(&store, &selection, locale.tag())?
+                    .into_iter().find(|action| action.key == key && action.enabled)
+                    .ok_or("integration action is no longer available")?;
+                if let Some(payload) = action.copy_text {
+                    let pasteboard = NSPasteboard::generalPasteboard();
+                    pasteboard.clearContents();
+                    let success = pasteboard.setString_forType(&NSString::from_str(&payload), unsafe { NSPasteboardTypeString });
+                    button.setTitle(&NSString::from_str(text(locale, if success { Message::ObservationCommandCopied } else { Message::ObservationCopyFailed })));
+                    Ok(())
+                } else {
+                    let preferences = with_ui_read(|ui| {
+                        let state = ui.shared.lock().map_err(|_| "native state lock is poisoned".to_owned())?;
+                        state.update_mutation_allowed()?;
+                        Ok::<_, String>(crate::preference_access::ProfilePreferences::new(
+                            ui.lifecycle_paths.clone(), state.lifecycle_extensions().to_vec(),
+                        ))
+                    }).ok_or("native UI is not available")??;
+                    extension.activate_action(&store, &selection, &key, locale.tag(), preferences)
+                }
+            });
+            if let Err(error) = result {
+                with_ui_mut(|ui| ui.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error));
             }
         }
 

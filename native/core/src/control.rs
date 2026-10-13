@@ -37,11 +37,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const PROTOCOL_VERSION: u64 = 1;
-const MAX_FRAME_BYTES: usize = 16 * 1024;
+pub(crate) const PROTOCOL_VERSION: u64 = 1;
+pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_FRAME_BYTES: usize = 512 * 1024 + 4096;
 const MAX_SESSION_FRAME_BYTES: usize = 512 * 1024;
-const MAX_AUTOMATION_REPLY_BYTES: usize = 68 * 1024;
+pub(crate) const MAX_AUTOMATION_REPLY_BYTES: usize = 68 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const PACK_LIST_PAGE_SIZE: usize = 8;
 const MAX_PACK_LIST_RECORDS: usize = 32;
@@ -557,7 +557,7 @@ pub struct PackReplyEnvelope {
     pub error: Option<String>,
 }
 
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 const SOCKET_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -985,7 +985,7 @@ fn read_frame(
     }
 }
 
-fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), String> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     UniqueJsonKeys
         .deserialize(&mut deserializer)
@@ -994,17 +994,25 @@ fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), String> {
 }
 
 fn write_frame(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
-    let mut written = 0usize;
-    while written < bytes.len() {
+    write_frame_counted(stream, bytes, deadline, &mut 0)
+}
+
+pub(crate) fn write_frame_counted(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: Instant,
+    written: &mut usize,
+) -> io::Result<()> {
+    while *written < bytes.len() {
         stream.set_write_timeout(Some(socket::remaining(deadline)?))?;
-        let count = stream.write(&bytes[written..])?;
+        let count = stream.write(&bytes[*written..])?;
         if count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "control peer closed while writing",
             ));
         }
-        written += count;
+        *written += count;
     }
     Ok(())
 }
@@ -1014,13 +1022,35 @@ fn read_client_frame_with_size(
     deadline: Instant,
     limit: usize,
 ) -> io::Result<(Vec<u8>, usize)> {
+    read_client_frame_with_size_checked(stream, deadline, limit, false)
+}
+
+fn read_client_frame_with_size_checked(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    limit: usize,
+    reject_partial: bool,
+) -> io::Result<(Vec<u8>, usize)> {
     let mut frame = Vec::with_capacity(MAX_FRAME_BYTES);
     let mut chunk = [0u8; 1024];
     loop {
-        let read = socket::read_with_deadline(stream, &mut chunk, deadline)?;
+        let read = socket::read_with_deadline(stream, &mut chunk, deadline).map_err(|error| {
+            if !reject_partial || frame.is_empty() {
+                error
+            } else {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("control peer interrupted a partial frame: {error}"),
+                )
+            }
+        })?;
         if read == 0 {
             return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
+                if !reject_partial || frame.is_empty() {
+                    io::ErrorKind::UnexpectedEof
+                } else {
+                    io::ErrorKind::InvalidData
+                },
                 "control peer closed before frame terminator",
             ));
         }
@@ -1049,6 +1079,16 @@ fn read_client_frame(
     limit: usize,
 ) -> io::Result<Vec<u8>> {
     read_client_frame_with_size(stream, deadline, limit).map(|(frame, _)| frame)
+}
+
+pub(crate) fn read_client_frame_checked(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    limit: usize,
+    reject_partial: bool,
+) -> io::Result<Vec<u8>> {
+    read_client_frame_with_size_checked(stream, deadline, limit, reject_partial)
+        .map(|(frame, _)| frame)
 }
 
 fn common_status_key(key: &str) -> bool {
@@ -2288,8 +2328,12 @@ pub(crate) fn validate_pack_request(request: &PackRequest) -> Result<(), String>
 }
 
 fn mutation_admission(inner: &ControlInner) -> Result<(), String> {
+    shared_mutation_admission(&inner.shared)
+}
+
+pub(crate) fn shared_mutation_admission(shared: &Arc<Mutex<AppState>>) -> Result<(), String> {
     let scope = {
-        let state = lock_unpoisoned(&inner.shared);
+        let state = lock_unpoisoned(shared);
         state.update_mutation_allowed()?;
         state.update_context().map(|context| {
             (
@@ -2307,7 +2351,7 @@ fn mutation_admission(inner: &ControlInner) -> Result<(), String> {
     if let Some((origin, state_dir)) = scope {
         start_allowed(&origin, &state_dir, None, None)?;
     }
-    lock_unpoisoned(&inner.shared).update_mutation_allowed()
+    lock_unpoisoned(shared).update_mutation_allowed()
 }
 
 fn dispatch_pack(inner: &ControlInner, request: PackRequestEnvelope) -> PackReplyEnvelope {
@@ -2608,7 +2652,8 @@ fn access_lifecycle_settings(
                         let profile = desktop_pet_contracts::ProfileStore::with_lock(
                             &paths.config_dir,
                             lock.clone(),
-                        )?;
+                        )?
+                        .with_preferences_validator(Preferences::validate_committed_object);
                         lifecycle::update_setting(&profile, extensions, key, value)?
                     }
                     None => lifecycle::read_settings(&paths.config_dir)?,
@@ -2621,6 +2666,62 @@ fn access_lifecycle_settings(
             return Err("timed out waiting for desktop-pet lifecycle finalization".to_owned());
         }
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Offline counterpart of the common preference transaction. The client must
+/// establish socket absence before calling; recheck under the actual state
+/// lease and retain config-wide ownership through the sole atomic save.
+pub(crate) fn access_profile_preferences_offline(
+    paths: &Paths,
+    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+    change: Option<Map<String, Value>>,
+    deadline: Instant,
+) -> Result<Option<Map<String, Value>>, String> {
+    if Instant::now() >= deadline {
+        return Err("preference access deadline elapsed".into());
+    }
+    let Some(lease) = LifecycleLock::try_acquire(&paths.state_dir)? else {
+        return Ok(None);
+    };
+    if !crate::preference_access::profile_owner_absent_until(paths, deadline)?
+        || lifecycle::startup_pending(&paths.config_dir)?
+    {
+        return Ok(None);
+    }
+    if change.is_some() {
+        start_allowed(
+            &InstallOrigin::Unknown {
+                reason: "offline preference transaction".into(),
+            },
+            &paths.state_dir,
+            None,
+            None,
+        )?;
+    }
+    let profile =
+        desktop_pet_contracts::ProfileStore::with_lock(&paths.config_dir, Arc::new(lease))?
+            .with_preferences_validator(Preferences::validate_committed_object);
+    profile.verify_owner()?;
+    let mut preferences =
+        profile.with_writer_lock(|| Preferences::load_committed(profile.config_dir()))?;
+    preferences.set_integration_extensions(profile.clone(), extensions.to_vec());
+    preferences.refresh_owner_snapshot(profile.config_dir())?;
+    if let Some(patch) = change {
+        if Instant::now() >= deadline {
+            return Err("preference access deadline elapsed before save".into());
+        }
+        profile.verify_owner()?;
+        preferences.apply_patch(
+            serde_json::from_value(Value::Object(patch))
+                .map_err(|error| format!("invalid preference patch: {error}"))?,
+            profile.config_dir(),
+        )?;
+    }
+    profile.verify_owner()?;
+    match serde_json::to_value(preferences.snapshot()).map_err(|error| error.to_string())? {
+        Value::Object(saved) => Ok(Some(saved)),
+        _ => Err("common preferences snapshot is not an object".into()),
     }
 }
 
@@ -2713,7 +2814,8 @@ pub(crate) fn access_registered_lifecycle(
     {
         return Err("profile became active while accessing lifecycle settings".into());
     }
-    let profile = desktop_pet_contracts::ProfileStore::with_lock(&paths.config_dir, guard)?;
+    let profile = desktop_pet_contracts::ProfileStore::with_lock(&paths.config_dir, guard)?
+        .with_preferences_validator(Preferences::validate_committed_object);
     if change.is_some() {
         start_allowed(
             &InstallOrigin::Unknown {
@@ -2769,7 +2871,7 @@ impl Write for BoundedJson {
     }
 }
 
-fn bounded_json<T: Serialize>(value: &T, limit: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn bounded_json<T: Serialize>(value: &T, limit: usize) -> io::Result<Vec<u8>> {
     let mut writer = BoundedJson {
         bytes: Vec::new(),
         limit: limit - 1,
@@ -2859,7 +2961,7 @@ pub(crate) fn send_automation_request_until(
     Ok(reply)
 }
 
-fn validate_automation_reply(
+pub(crate) fn validate_automation_reply(
     reply: &AutomationReplyEnvelope,
     request: &AutomationRequestEnvelope,
 ) -> Result<(), String> {
@@ -3053,7 +3155,7 @@ pub(crate) fn send_presentation_request(
     decode_presentation_reply(&frame[..length], &request.command)
 }
 
-fn decode_presentation_reply(
+pub(crate) fn decode_presentation_reply(
     frame: &[u8],
     command: &str,
 ) -> Result<PresentationReplyEnvelope, String> {
@@ -3361,7 +3463,7 @@ fn connect_private_socket(path: &Path, deadline: Instant) -> Result<UnixStream, 
     })
 }
 
-fn connect_private_socket_io(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub(crate) fn connect_private_socket_io(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink()
             || !metadata.file_type().is_socket()

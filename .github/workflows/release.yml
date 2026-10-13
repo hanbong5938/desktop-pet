@@ -52,9 +52,9 @@ jobs:
           tag="$GITHUB_REF_NAME"
           bun scripts/release-docs.ts check "$tag" --repository "$GITHUB_REPOSITORY" --output "$RUNNER_TEMP/desktop-pet-release-notes.md"
           version="${tag#v}"
-          # This first self-contained installer is deliberately pinned, not a
-          # download of an unreviewed latest script or a host manifest version.
-          [[ "$version" == 0.4.0 ]]
+          # This approved self-contained installer is pinned, never a mutable
+          # latest script or a host manifest-derived app version.
+          [[ "$version" == 0.4.1 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
@@ -98,7 +98,7 @@ jobs:
           done
           for executable in "$binary" "$helper"; do
             "$executable" update-capabilities | node -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if(c.protocol!==4||c.observation_mode!==2||c.integration_api!==1)process.exit(1);'
-            "$executable" distribution-identity | node -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if(c.distribution!=="neutral"||c.app_name!=="DesktopPet.app"||c.executable!=="desktop-pet"||c.helper!=="desktop-pet-update-coordinator"||c.app_version!=="0.4.0"||c.bundle_id!=="io.github.hanbong5938.desktop-pet")process.exit(1);'
+            "$executable" distribution-identity | node -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if(c.distribution!=="neutral"||c.app_name!=="DesktopPet.app"||c.executable!=="desktop-pet"||c.helper!=="desktop-pet-update-coordinator"||c.app_version!==process.env.DESKTOP_PET_VERSION||c.bundle_id!=="io.github.hanbong5938.desktop-pet")process.exit(1);'
           done
           [[ "$("$binary" --version)" == "desktop-pet $DESKTOP_PET_VERSION" ]]
           [[ "$(otool -l "$helper")" != *'cmd LC_RPATH'* ]]

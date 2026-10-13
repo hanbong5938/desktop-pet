@@ -672,6 +672,24 @@ impl Preferences {
     pub(crate) fn postcommit_error(&self) -> Option<&str> {
         self.postcommit_error.as_deref()
     }
+
+    /// No legacy import or quarantine while authenticating committed settings.
+    pub(crate) fn load_committed(directory: &Path) -> Result<Self, String> {
+        Self::load_in_directory(directory, None, false)
+    }
+
+    pub(crate) fn validate_committed_object(object: &Map<String, Value>) -> Result<(), String> {
+        let disk = DiskPreferences::deserialize(serde::de::value::MapDeserializer::<
+            _,
+            serde_json::Error,
+        >::new(
+            object.iter().map(|(key, value)| (key.as_str(), value)),
+        ))
+        .map_err(|error| format!("preferences are invalid: {error}"))?;
+        disk.dialogue_overrides
+            .validate()
+            .map_err(|error| format!("preferences dialogue overrides are invalid: {error}"))
+    }
     /// Strict load for read-only consumers: an unusable file is reported as an
     /// error and left untouched.
     pub fn load(directory: &Path) -> Result<Self, String> {
@@ -917,7 +935,11 @@ impl Preferences {
                     return Err(format!("duplicate preference owner: {key}"));
                 }
             }
-            prepared.push(extension.prepare_preference_patch(&fields)?);
+            let profile = self
+                .profile_store
+                .as_ref()
+                .ok_or("opaque preference mutation requires the common profile owner")?;
+            prepared.push(extension.prepare_preference_patch(profile, &fields)?);
         }
         if let Some(key) = remaining.keys().next() {
             return Err(format!("unknown preference setting: {key}"));
@@ -1590,6 +1612,7 @@ mod tests {
 
         fn prepare_preference_patch(
             &self,
+            _profile: &desktop_pet_contracts::ProfileStore,
             patch: &Map<String, Value>,
         ) -> Result<Box<dyn desktop_pet_contracts::PreparedPreferencePatch>, String> {
             let value = patch

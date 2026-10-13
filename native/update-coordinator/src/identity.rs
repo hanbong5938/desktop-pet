@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.0";
+    pub const VERSION: &str = "0.4.1";
     pub const BINARY: &str = "desktop-pet";
     pub const HELPER: &str = "desktop-pet-update-coordinator";
     pub const APP_NAME: &str = "DesktopPet.app";

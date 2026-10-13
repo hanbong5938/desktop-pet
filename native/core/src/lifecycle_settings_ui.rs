@@ -324,7 +324,7 @@ impl LifecycleSettingsCard {
                     NSButton::buttonWithTitle_target_action(
                         &NSString::from_str(""),
                         Some(&*self.target),
-                        Some(sel!(copyIntegrationAction:)),
+                        Some(sel!(activateIntegrationAction:)),
                         self.mtm,
                     )
                 };
@@ -339,15 +339,10 @@ impl LifecycleSettingsCard {
                 }
             };
             row.button.setTitle(&NSString::from_str(&action.label));
-            row.button
-                .setEnabled(action.enabled && action.copy_text.is_some());
-            row.button.setIdentifier(
-                action
-                    .copy_text
-                    .as_ref()
-                    .map(|text| NSString::from_str(text))
-                    .as_deref(),
-            );
+            row.button.setEnabled(action.enabled);
+            row.button.setIdentifier(Some(&NSString::from_str(
+                &serde_json::to_string(&(provider, &action.key)).expect("action identifier"),
+            )));
             row.help.setStringValue(&NSString::from_str(&action.help));
             accessibility(&row.button, &action.label);
             accessibility(&row.help, &action.help);

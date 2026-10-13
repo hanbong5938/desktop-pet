@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "desktop-pet-core",
  "desktop-pet-herdr",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "block2",
  "desktop-pet-contracts",
@@ -118,10 +118,14 @@ dependencies = [
 [[package]]
 name = "desktop-pet-herdr"
 version = "0.1.0"
-source = "git+https://github.com/hanbong5938/herdr-desktop-pet?rev=d220c3eed2f1b47997066c29e5d6f344585595c1#d220c3eed2f1b47997066c29e5d6f344585595c1"
+source = "git+https://github.com/hanbong5938/herdr-desktop-pet?rev=fb28be4477b9a529e046a0f033ad9e2cd888abea#fb28be4477b9a529e046a0f033ad9e2cd888abea"
 dependencies = [
  "desktop-pet-contracts",
+ "dispatch2",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "sha2",
@@ -130,7 +134,7 @@ dependencies = [
 [[package]]
 name = "desktop-pet-tern"
 version = "0.1.0"
-source = "git+https://github.com/hanbong5938/tern-desktop-pet?rev=32baaa0943928a070342510cb1040ae75ed078e3#32baaa0943928a070342510cb1040ae75ed078e3"
+source = "git+https://github.com/hanbong5938/tern-desktop-pet?rev=0c1b6ca173e9b31f191f92fa394a5a2429f7c099#0c1b6ca173e9b31f191f92fa394a5a2429f7c099"
 dependencies = [
  "desktop-pet-contracts",
  "libc",
@@ -140,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-update-coordinator"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "desktop-pet-contracts",
  "libc",

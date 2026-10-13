@@ -2,9 +2,9 @@
 
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
-[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)·bridge v0.3.7·중립 포뮬러·연동 태그는 **아직 공개되지 않았습니다**. 실제 후보 패키지/VM 검사는 공개 설치 가능 여부와 별개이며 최종 수락 표는 미완료입니다. 아래 명령은 중립 cutover 안내이지 검증된 공개 설치가 아닙니다. 과거 문서·태그·자산은 변경 불가합니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)(protocol 4 / capability 2 / integration API 1)과 `hanbong5938/tap/desktop-pet` 포뮬러는 공개되었습니다. 익명 다운로드 6개, 압축 파일 체크섬·서명·68개 배포 파일 closure를 검증했고, 일회용 Mac에서 실제 Brew 설치와 네이티브 UI/control 준비를 확인했습니다. 현재 소스는 v0.4.1이며 해당 공개 자산은 아직 없습니다. bridge v0.3.7 및 Herdr v0.4.0/Tern v0.2.0 연동 태그는 미공개입니다. 두 호스트의 실제 계정/제공자 런타임은 여전히 차단되어 최종 수락 표는 미완료입니다. 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / capability 1의 과거 공개판입니다. 동결된 태그·본문·자산과 과거 증거는 변경하지 않습니다.
 
 <img src="assets/rubelia-thumbnail.png" alt="기본 데스크톱 캐릭터 루벨리아" width="220">
 
@@ -15,7 +15,7 @@
 - 로컬 에이전트 카드의 한 줄 답장과 별도 말풍선 표시·크기·대사 설정.
 - 공식 캐릭터 브라우저의 선택형 팩 다운로드·적용 및 로컬 팩 가져오기.
 - 실행 관리·관찰 대상 설정과 출처별 명시적 앱 업데이트; 자동 업데이트 확인은 읽기 전용.
-- **현재 소스 전용:** 통합 연결 설정에서 Auto 또는 등록된 제공자(Herdr·Tern 등)를 선택하고 실제 제공자 상태를 확인하며 공용 프로필에 실행 중 변경을 저장합니다. 공개 v0.3.6에는 이 capability-2 UI가 없습니다.
+- **capability 2:** 통합 연결 설정에서 Auto 또는 등록된 제공자(Herdr·Tern 등)를 선택하고 실제 제공자 상태를 확인하며 공용 프로필에 실행 중 변경을 저장합니다. 공개 Desktop Pet v0.4.0은 이 UI를 포함하지만 과거 Herdr v0.3.6에는 없습니다. 실제 두 호스트 계정/제공자 런타임 검증 완료를 뜻하지는 않습니다.
 
 ## 요구 사항
 
@@ -23,7 +23,7 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-중립 릴리스와 포뮬러가 실제로 게시된 뒤 공개 설치 명령은 다음과 같습니다:
+공개된 중립 v0.4.0은 다음 Brew 명령으로 설치할 수 있습니다:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,15 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# 공개된 불변 v0.4.0 설치기와 고정 자산 사용:
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# 현재 v0.4.1 소스 대안은 별도 현재 체크아웃에서 명시적으로 실행:
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-기본/`--prebuilt`는 고정된 중립 공개 자산을 요구하며 아직 게시되지 않았습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+불변 v0.4.0 체크아웃의 기본/`--prebuilt` 설치는 공개된 고정 자산을 사용합니다. 현재 v0.4.1 체크아웃의 prebuilt는 해당 자산이 게시될 때까지 사용할 수 없습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
 
 필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 

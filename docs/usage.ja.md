@@ -2,9 +2,9 @@
 
 独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
-[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**公開状態:** 既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / observation capability 1 の公開版です。独立 Desktop Pet v0.4.0（protocol 4 / capability 2 / integration API 1）、bridge v0.3.7、中立 formula、連携タグは **未公開**です。実際の候補 package／VM 検査は公開導入の可否とは別で、最終受入表は未完了です。以下は中立 cutover の案内であり、検証済み公開導入ではありません。過去の文書、タグ、アセットは変更不可です。
+**公開状態:** 独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）と `hanbong5938/tap/desktop-pet` formula は公開済みです。匿名ダウンロード6件、アーカイブのチェックサム・署名・配備68ファイルの closure を検証し、使い捨て Mac で実際の Brew 導入とネイティブ UI/control の準備完了を確認しました。現在のソースは v0.4.1 で、その公開アセットはまだありません。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 連携タグは未公開です。2ホストの実アカウント／プロバイダー実行検証は依然ブロックされ、最終受入表は未完了です。既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / capability 1 の過去の公開版です。凍結タグ・本文・アセットと過去の証拠は変更しません。
 
 ## 動作要件
 
@@ -12,7 +12,7 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-中立リリースと formula が実際に公開された後の公開コマンド:
+公開済みの中立 v0.4.0 は次の Brew コマンドで導入できます:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -26,15 +26,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# Published immutable v0.4.0 installer and pinned assets:
+git checkout --detach v0.4.0
 bash scripts/install.sh --prebuilt
-# Explicit source alternative:
-bash scripts/install.sh --source
+# Explicit current v0.4.1 source alternative in a separate current checkout:
+# bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-既定／`--prebuilt` は固定された中立公開アセットを要求し、現在は未公開です。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
+不変の v0.4.0 チェックアウトの既定／`--prebuilt` は公開済み固定アセットを使用します。現在の v0.4.1 チェックアウトの prebuilt は、そのアセット公開まで利用できません。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
 
 必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 
@@ -194,5 +195,5 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 - ウィンドウ非表示や全体クリック透過は起動失敗を意味しません。前述のメニューバー復旧を使います。`plugin link` 後に実行されなければ `client.attached` 警告を調べ、手動 `start` を呼び、デーモンの `status`／ログを確認します。`auto_start` オフは自動起動を意図してスキップします。稼働中のホストをリンクするだけでは起動しません。attach 用ホストパッチの分離配置と実際のフック確認は[ホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - `Herdr watchers are shutting down` なら、継承した `HERDR_SOCKET_PATH`／`HERDR_CLIENT_SOCKET_PATH`、`PATH` 上の実際の CLI／版、ソケットのサーバーを確認します。**別のサーバー**に対する `herdr plugin list` はデーモンのエンドポイントの診断になりません。同じ CLI／ソケット／セッションを対象にし、遠隔エラーなら保存マシン転送／版／選択も確認します。パッチ済みホストは自動起動を可能にしますが、全サーバーにこのプラグインを導入しません。
 - 遠隔のエラーは[観測元](#観測元)のプロファイル状態、対話認証／再接続、対応する転送 CLI を確認します。GUI は遠隔に SSH してローカル画面を期待せず、ローカル Mac で起動します。`agent.prompt` の制限と遠隔の読み取り専用は[上記](#インライン返信とメッセージ配送)を参照してください。
-- 既定／明示 `--prebuilt` は prebuilt-only で、取得／検証失敗でも source fallback しません。現在の検証済み core checkout は明示 `--source` で構築し、admission が示す実際の導入選択を確認します。中立 v0.4.0／formula／連携タグは未公開です。ad-hoc 署名検証は Developer ID／公証ではありません（[導入](../readme.ja.md)）。
+- 既定／明示 `--prebuilt` は prebuilt-only で、取得／検証失敗でも source fallback しません。現在の検証済み core checkout は明示 `--source` で構築し、admission が示す実際の導入選択を確認します。中立 v0.4.0／formula は公開済みですが、現在の v0.4.1 アセットと連携タグは未公開です。ad-hoc 署名検証は Developer ID／公証ではありません（[導入](../readme.ja.md)）。
 - プロバイダ連携は Herdr 上流側の責任です。上流ライフサイクルフック導入後、既存のプロバイダセッションを再起動／再読み込みしてください。ペットは観測状態を表示し、プロバイダの結果を推測しません。版ごとの動作は[リリース履歴（英語）](releases/README.md)、ホストの詳細は[ホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)を参照してください。

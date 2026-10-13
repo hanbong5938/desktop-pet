@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       core_revision:
-        description: "Exact published v0.4.0 core commit (40 lowercase hex characters)"
+        description: "Exact approved published v0.4.1 core commit (40 lowercase hex characters)"
         required: true
         type: string
       herdr_migration_revision:
@@ -49,9 +49,9 @@ jobs:
           set -euo pipefail
           [[ "$REQUESTED_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$REQUESTED_CORE_REVISION" ]]
-          [[ "$(git rev-parse 'refs/tags/v0.4.0^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(git rev-parse 'refs/tags/v0.4.1^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
           [[ "$(plutil -extract name raw -o - package.json)" == desktop-pet ]]
-          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.0 ]]
+          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.1 ]]
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           ref="$DESKTOP_PET_HERDR_MIGRATION_REV"
           [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
-          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.0 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.0" and (.assets as $assets | ["DesktopPet-v0.4.0-macos-arm64.tar.gz","DesktopPet-v0.4.0-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.0-rig-native.json","desktop-pet-install-v0.4.0.sh","desktop-pet-install-v0.4.0.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
+          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.1 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.1" and (.assets as $assets | ["DesktopPet-v0.4.1-macos-arm64.tar.gz","DesktopPet-v0.4.1-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.1-rig-native.json","desktop-pet-install-v0.4.1.sh","desktop-pet-install-v0.4.1.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
           repository=hanbong5938/herdr-desktop-pet
           gh api "repos/$repository/releases/tags/v0.4.0" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.0"' >/dev/null
           [[ "$(gh api "repos/$repository/commits/$ref" --jq '.sha')" == "$ref" ]]

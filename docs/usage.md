@@ -2,9 +2,9 @@
 
 An independent native macOS desktop companion. Rubelia reacts to touch, displays sessions from registered providers such as Herdr and Tern, and lets you reply when that source grants prompt capability. The app also runs without a host.
 
-[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1), bridge v0.3.7, the neutral formula and integration tags are **not yet published**. Actual candidate packaging/VM checks are separate from public availability; final acceptance matrices remain pending. Commands describe the neutral cutover, not a verified public installation. Historical notes, tags and assets remain immutable.
+**Publication boundary:** independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) and the neutral Homebrew formula are published, with public installation exercised in a disposable Mac. Current source targets approved v0.4.1, not yet published. Bridge v0.3.7 and integration tags remain unpublished; final migration/two-host acceptance remains incomplete. Published neutral and historical tags/assets remain immutable.
 
 ## Requirements
 
@@ -26,7 +26,7 @@ For prebuilt or source installation, use the **core** checkout, not a Herdr inte
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires neutral public assets; not yet published:
+# Requires this checkout's exact published assets; current 0.4.1 is not yet published:
 bash scripts/install.sh --prebuilt
 # Explicit source alternative:
 bash scripts/install.sh --source
@@ -34,7 +34,7 @@ bash scripts/install.sh --source
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-Default and `--prebuilt` require the pinned neutral public assets, which are not yet published; failure never silently builds source. Only explicit `--source` builds the current verified core checkout. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; an admitted source installation uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy existing owner instead of taking it over: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
+Default and `--prebuilt` require this checkout's exact pinned neutral public assets; use the immutable v0.4.0 checkout for the published installer until v0.4.1 is published. Failure never silently builds source. Only explicit `--source` builds the current verified core checkout. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; an admitted source installation uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy existing owner instead of taking it over: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
 
 Install only the integrations you want. Herdr is a thin consumer; Tern does not download, build, install or auto-start the native app. Plugin updates/removal affect integrations only, never the shared app, profile or characters. Native updates do not reinstall Herdr plugins.
 
@@ -192,5 +192,5 @@ Legacy protocol-1/2/3 evidence remains preserved and blocked; use only the retai
 - Hidden windows or full-window click-through do not mean startup failed: use menu-bar recovery above. If not running after `plugin link`, inspect `client.attached` warnings, invoke manual `start`, inspect daemon `status`/log; `auto_start` off intentionally skips automatic startup. Linking a running host does not itself launch the pet. For client-attach host patch, isolated deployment and actual hook confirmation follow [integrations/herdr/README.md](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md).
 - On `Herdr watchers are shutting down`, inspect inherited `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`, actual CLI executable/version on `PATH` and server owning that socket. `herdr plugin list` against a **different server** does not diagnose the daemon's endpoint. Target the same CLI/socket/session; for remote errors also check saved-machine forwarding/version/selected profile. The patched host enables auto-start but does not install this plugin on every server.
 - For remote errors see [Observation sources](#observation-sources): profile status, interactive authentication/reconnect and compatible forwarding CLI. Launch the GUI on the local Mac, not over SSH on a remote host expecting local windows. `agent.prompt` limitations and remote read-only behavior are [above](#inline-replies-and-message-delivery).
-- Default and explicit `--prebuilt` are prebuilt-only; unavailable/invalid release downloads never fall back to source. Use explicit `--source` only to build the current verified core checkout, and inspect the selected installation reported by admission. Neutral v0.4.0/formula/integration tags are not yet published. Ad-hoc signature validation is not Developer ID signing or notarization ([installation](../readme.md)).
+- Default and explicit `--prebuilt` are prebuilt-only; unavailable/invalid release downloads never fall back to source. Use explicit `--source` only to build the current verified core checkout, and inspect the selected installation reported by admission. Neutral v0.4.0 and its formula are published; current v0.4.1, bridge and integration tags are not yet published. Ad-hoc signature validation is not Developer ID signing or notarization ([installation](../README.md)).
 - Provider integration is Herdr's upstream responsibility; restart/reload existing provider sessions after installing upstream lifecycle hooks. The pet displays observed status and never infers provider outcomes. Refer to [release history](releases/README.md) for version-specific behavior and [host integration](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) for host details.
