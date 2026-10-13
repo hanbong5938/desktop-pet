@@ -614,6 +614,10 @@ fn root_registry_keys(roots: &[PathBuf]) -> Vec<String> {
             "desktop-pet-beta",
             "herdr-desktop-pet",
             "herdr-desktop-pet-beta",
+            "hanbong5938/tap/desktop-pet",
+            "hanbong5938/tap/desktop-pet-beta",
+            "hanbong5938/tap/herdr-desktop-pet",
+            "hanbong5938/tap/herdr-desktop-pet-beta",
         ] {
             keys.push(format!(
                 "{:x}",
@@ -3004,6 +3008,38 @@ mod tests {
             root: dir.path().join("checkout"),
         };
         (dir, global, state, origin)
+    }
+
+    #[test]
+    fn registered_qualified_brew_profile_blocks_root_replacement() {
+        let (_dir, global, state, _) = fixture();
+        let global = fs::canonicalize(global).unwrap();
+        let state = fs::canonicalize(state).unwrap();
+        let prefix = global.parent().unwrap().join("brew");
+        let root = prefix.join("Cellar").join(crate::identity::STABLE_FORMULA);
+        let origin = InstallOrigin::Homebrew {
+            brew: prefix.join("bin/brew"),
+            prefix: prefix.clone(),
+            cellar_formula_root: root.clone(),
+            formula: format!("hanbong5938/tap/{}", crate::identity::STABLE_FORMULA),
+            locator: prefix
+                .join("opt")
+                .join(crate::identity::STABLE_FORMULA)
+                .join("app"),
+        };
+        register_active_at(
+            &global,
+            &origin,
+            &state,
+            std::process::id(),
+            "registered-brew-owner",
+            None,
+            None,
+        )
+        .unwrap();
+        let unrelated = prefix.join("Cellar/unrelated");
+        reject_active_evidence(&global, &[unrelated], None, true).unwrap();
+        assert!(reject_active_evidence(&global, &[root], None, true).is_err());
     }
 
     #[cfg(not(desktop_pet_legacy))]
