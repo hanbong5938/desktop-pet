@@ -10,14 +10,14 @@ Usage: bash scripts/publish-wiki.sh --source-dir DIR [--repository OWNER/REPO]
 
 DIR must contain the generator's .wiki-managed-pages manifest and rendered pages.
 The default remote is https://github.com/OWNER/REPO.wiki.git; repository defaults
- to GITHUB_REPOSITORY, or hanbong5938/herdr-desktop-pet outside Actions.
+ to GITHUB_REPOSITORY, or hanbong5938/desktop-pet outside Actions.
 --wiki-url overrides the remote ONLY for an isolated local/file:// Git repository.
 HTTPS publishing requires WIKI_PUBLISH_TOKEN; the token is never stored in Git.
 USAGE
 }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 source_dir=""
-repository="${GITHUB_REPOSITORY:-hanbong5938/herdr-desktop-pet}"
+repository="${GITHUB_REPOSITORY:-hanbong5938/desktop-pet}"
 source_ref=""
 wiki_url=""
 while [[ $# -gt 0 ]]; do
@@ -141,7 +141,7 @@ if git -C "$wiki_dir" diff --cached --quiet; then
   printf 'Wiki is already up to date; no commit or push.\n'
   exit 0
 fi
-git -C "$wiki_dir" -c user.name='herdr Wiki publisher' -c user.email='wiki-publisher@users.noreply.github.com' \
+git -C "$wiki_dir" -c user.name='Desktop Pet Wiki publisher' -c user.email='wiki-publisher@users.noreply.github.com' \
   -c commit.gpgsign=false commit -m "Sync reviewed Wiki documentation${source_ref:+ from $source_ref}"
 # A concurrent/manual remote change fails normally; never force or overwrite it.
 if ! git -C "$wiki_dir" -c credential.helper= push origin "HEAD:refs/heads/$branch"; then
