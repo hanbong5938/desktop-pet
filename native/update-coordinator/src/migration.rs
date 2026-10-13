@@ -2192,7 +2192,7 @@ fn retired(plan: &MigrationPlan) -> Result<(), String> {
             return Err("consented legacy CLI alias remains published".into());
         }
     }
-    crate::origin::installation_roots_inactive(&[plan.source_origin.root().to_path_buf()])
+    crate::processes::installation_roots_inactive(&[plan.source_origin.root().to_path_buf()])
 }
 #[cfg(not(desktop_pet_legacy))]
 fn retire(

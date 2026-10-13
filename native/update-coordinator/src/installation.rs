@@ -1750,7 +1750,9 @@ pub fn commit_migration_target(
     if exists(&bundle)? {
         return Err("migration must not replace an existing unconsented target bundle".into());
     }
-    origin::installation_roots_inactive(&[physical_install_root(&target.origin)?.to_path_buf()])?;
+    crate::processes::installation_roots_inactive(&[
+        physical_install_root(&target.origin)?.to_path_buf()
+    ])?;
     let app = ValidatedApp {
         bundle: stage.bundle.clone(),
         image: stage.image.clone(),

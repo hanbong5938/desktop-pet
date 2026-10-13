@@ -14,6 +14,7 @@ pub mod migration;
 mod origin;
 #[cfg(not(desktop_pet_legacy))]
 mod origin;
+mod processes;
 pub mod protocol;
 pub mod releases;
 

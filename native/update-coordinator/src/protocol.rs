@@ -899,7 +899,7 @@ impl InstallationAdmission {
             reject_reservation_evidence(&global, &self.roots, None)?;
             reject_active_evidence(&global, &self.roots, None, true)?;
         }
-        crate::origin::installation_roots_inactive(&self.roots)
+        crate::processes::installation_roots_inactive(&self.roots)
     }
     pub fn profile_adoption_allowed(&self, config: &Path, state: &Path) -> Result<(), String> {
         check_dir(config, false)?;
@@ -1425,7 +1425,7 @@ fn migration_recheck(global: &Path, scope: &MigrationScope) -> Result<(), String
         .filter(|profile| live(profile.pid))
         .map(|profile| (profile.pid, profile.image.clone()))
         .collect::<Vec<_>>();
-    crate::origin::installation_roots_admitted(&scope.roots, &authorized)
+    crate::processes::installation_roots_admitted(&scope.roots, &authorized)
 }
 impl LegacyMigrationAdmission {
     pub fn recheck_profiles(&self) -> Result<(), String> {
@@ -1446,7 +1446,7 @@ impl LegacyMigrationAdmission {
         if self.scope.profiles.iter().any(|profile| live(profile.pid)) {
             return Err("authenticated bridge profiles have not all stopped".into());
         }
-        crate::origin::installation_roots_inactive(&migration_source_roots(&self.scope)?)
+        crate::processes::installation_roots_inactive(&migration_source_roots(&self.scope)?)
     }
     pub fn stop_requested(&self) -> Result<bool, String> {
         for profile in &self.scope.profiles {
@@ -1774,7 +1774,7 @@ impl MigrationReservation {
         if scope.profiles.iter().any(|profile| live(profile.pid)) {
             return Err("bridge still running".into());
         }
-        crate::origin::installation_roots_inactive(&migration_source_roots(&scope)?)
+        crate::processes::installation_roots_inactive(&migration_source_roots(&scope)?)
     }
     pub fn recheck_inactive_source(&self) -> Result<(), String> {
         let _gates = lock_gates(&self.global)?;
@@ -1783,7 +1783,7 @@ impl MigrationReservation {
             return Err("legacy source daemon still running".into());
         }
         let roots = migration_source_roots(&scope)?;
-        crate::origin::installation_roots_inactive(&roots)
+        crate::processes::installation_roots_inactive(&roots)
     }
     /// Any captured read-only target user forbids target image replacement.
     pub fn target_reuse_present(&self) -> Result<bool, String> {
@@ -2026,7 +2026,7 @@ fn migration_start_registry_checks(
             }
         }
     }
-    crate::origin::installation_roots_admitted(&scope.roots, &authorized)
+    crate::processes::installation_roots_admitted(&scope.roots, &authorized)
 }
 
 struct FileLock {
