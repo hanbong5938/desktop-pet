@@ -1453,6 +1453,7 @@ struct Ui {
     migration_launch_receiver: Option<
         mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
     >,
+    migration_launch_error: Option<String>,
     migration_plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
     migration_record: Option<desktop_pet_update_coordinator::migration::MigrationRecord>,
     migration_journal_receiver: Option<
@@ -4402,12 +4403,23 @@ fn confirm_legacy_migration(
                 command.env_clear().envs(&plan.profiles[0].environment).stdin(std::process::Stdio::null()).stdout(if resume { std::process::Stdio::null() } else { std::process::Stdio::piped() }).stderr(std::process::Stdio::null());
                 unsafe { command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
                 let mut child = command.spawn().map_err(|error| format!("Verified migration helper could not start: {error}"))?;
-                if !resume {
-                    let mut stdout = child.stdout.take().ok_or("Migration helper ownership channel is missing")?;
-                    desktop_pet_update_coordinator::migration::read_final_visible_ack(&mut stdout, &plan, &path)?;
-                    std::io::copy(&mut stdout, &mut std::io::sink()).map_err(|error| format!("Migration helper result channel failed: {error}"))?;
+                let ownership = if !resume {
+                    match child.stdout.take() {
+                        Some(mut stdout) => desktop_pet_update_coordinator::migration::read_final_visible_ack(&mut stdout, &plan, &path)
+                            .and_then(|_| std::io::copy(&mut stdout, &mut std::io::sink())
+                                .map(|_| ())
+                                .map_err(|error| format!("Migration helper result channel failed: {error}"))),
+                        None => Err("Migration helper ownership channel is missing".into()),
+                    }
+                } else {
+                    Ok(())
+                };
+                // Reap even when the ownership channel closes before its ACK.
+                let status = child.wait().map_err(|error| format!("Migration helper wait failed; delivery is unknown: {error}"))?;
+                ownership?;
+                if !status.success() {
+                    return Err(format!("Migration helper exited with {status}; inspect the retained journal before another operation"));
                 }
-                child.wait().map_err(|error| format!("Migration helper wait failed; delivery is unknown: {error}"))?;
                 desktop_pet_update_coordinator::migration::read_record(&plan)
             })();
             let _ = sender.send(result);
@@ -5862,6 +5874,7 @@ impl Ui {
             migration_busy: migration_plan.is_some(),
             migration_plan_receiver: None,
             migration_launch_receiver: None,
+            migration_launch_error: None,
             migration_plan,
             migration_record: None,
             migration_journal_receiver: None,
@@ -8266,7 +8279,10 @@ impl Ui {
     }
 
     fn begin_legacy_migration(&mut self) {
-        if self.migration_busy || self.update_frozen.is_some() {
+        if self.migration_busy
+            || self.migration_launch_error.is_some()
+            || self.update_frozen.is_some()
+        {
             return;
         }
         if let Some(plan) = self.migration_plan.clone() {
@@ -8339,8 +8355,11 @@ impl Ui {
                 self.migration_busy = false;
                 self.painted_app_update = None;
                 match result {
-                    Ok(record) => self.migration_record = Some(record),
-                    Err(error) => self.app_update.set_problem(error),
+                    Ok(record) => {
+                        self.migration_launch_error = None;
+                        self.migration_record = Some(record);
+                    }
+                    Err(error) => self.migration_launch_error = Some(error),
                 }
             }
         }
@@ -8366,6 +8385,11 @@ impl Ui {
                             | desktop_pet_update_coordinator::migration::MigrationPhase::UserStopped
                             | desktop_pet_update_coordinator::migration::MigrationPhase::Failed
                             | desktop_pet_update_coordinator::migration::MigrationPhase::RolledBack);
+                        if !self.migration_busy {
+                            self.migration_launch_error = None;
+                        } else if self.migration_launch_error.is_some() {
+                            self.migration_busy = false;
+                        }
                         self.migration_record = Some(record);
                         if self.migration_record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete) && self.update_frozen.is_none() {
                             self.clear_update_consent();
@@ -8514,6 +8538,13 @@ impl Ui {
                     model.migration_available = !self.migration_busy;
                 }
             }
+        }
+        if let Some(error) = &self.migration_launch_error {
+            model.busy = false;
+            model.status = desktop_pet_update_coordinator::CheckStatus::Failed;
+            model.status_text = text(self.locale, Message::AppUpdateOutcomeUnknown).to_owned();
+            model.detail = error.clone();
+            model.migration_available = false;
         }
         if self.migration_busy {
             model.busy = true;
