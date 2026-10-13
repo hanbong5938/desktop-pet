@@ -1588,7 +1588,13 @@ fn run_impl(
 ) -> Result<MigrationRecord, String> {
     let plan = read_plan(path)?;
     visible(presentation, &plan)?;
-    let _lease = protocol::lock_operation(&plan.profiles[0].state_dir, &plan.operation_id)?;
+    let admission = protocol::admit_legacy_migration(
+        &roots(&plan)?,
+        &migration_profiles(&plan),
+        &plan.readonly_target_profiles,
+        &plan.operation_id,
+    )?;
+    let _lease = admission.lock_operation()?;
     let bytes = owned_private_file(path, MAX_PLAN)?;
     let captured: MigrationPlan = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if captured != plan {
@@ -1609,12 +1615,6 @@ fn run_impl(
     for profile in &plan.profiles {
         verify_status(&plan, profile, &status(profile)?, false)?;
     }
-    let admission = protocol::admit_legacy_migration(
-        &roots(&plan)?,
-        &migration_profiles(&plan),
-        &plan.readonly_target_profiles,
-        &plan.operation_id,
-    )?;
     admission.recheck_profiles()?;
     if admission.stop_requested()? || stop_requested(&plan)? {
         return Err("user Stop superseded migration consent".into());
@@ -2963,7 +2963,11 @@ pub fn confirm_tern_reconnect(
     evidence_file: &Path,
 ) -> Result<MigrationRecord, String> {
     let plan = read_plan(plan_path)?;
-    let _lease = protocol::lock_operation(&plan.profiles[0].state_dir, &plan.operation_id)?;
+    let _lease = protocol::lock_migration_operation(
+        &plan.profiles[0].state_dir,
+        &plan.operation_id,
+        &plan.token,
+    )?;
     let mut record = read_record(&plan)?;
     if record.phase != MigrationPhase::AwaitingReconnect
         || !record.native_ready

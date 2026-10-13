@@ -107,7 +107,7 @@ fn check_dir(path: &Path, create: bool) -> Result<(), String> {
 
 /// Single-process lease held through journal creation, reservation, execution and recovery.
 pub struct OperationLease {
-    _file: File,
+    _file: FileLock,
 }
 
 pub fn lock_operation(state_dir: &Path, op: &str) -> Result<OperationLease, String> {
@@ -363,7 +363,7 @@ fn lock_scope(
     source: &InstallOrigin,
     target: Option<&InstallOrigin>,
     keys: &[String],
-) -> Result<Vec<File>, String> {
+) -> Result<Vec<FileLock>, String> {
     let mut origins = std::iter::once(source)
         .chain(target)
         .map(|origin| crate::physical_install_root(origin).map(|root| (root, origin)))
@@ -455,7 +455,7 @@ fn compatibility_global(global: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 /// All namespace users acquire these gates in this order, never from HOME.
-fn lock_gates(global: &Path) -> Result<Vec<File>, String> {
+fn lock_gates(global: &Path) -> Result<Vec<FileLock>, String> {
     check_dir(global, false)?;
     let mut locks = Vec::new();
     if let Some(old) = old_global(global)? {
@@ -755,8 +755,8 @@ fn reject_old_evidence(
 
 /// Retain this guard through staging, replacement and locator writes.
 pub struct InstallationAdmission {
-    _roots: Vec<File>,
-    _gates: Vec<File>,
+    _roots: Vec<FileLock>,
+    _gates: Vec<FileLock>,
     roots: Vec<PathBuf>,
     global: PathBuf,
 }
@@ -768,7 +768,7 @@ pub struct InstallationLocks {
     _admission: InstallationAdmission,
 }
 
-fn lock_roots(global: &Path, roots: &[PathBuf]) -> Result<Vec<File>, String> {
+fn lock_roots(global: &Path, roots: &[PathBuf]) -> Result<Vec<FileLock>, String> {
     let old = old_global(global)?;
     let mut locks = Vec::new();
     for root in roots {
@@ -1033,8 +1033,8 @@ struct MigrationScope {
     startups: Vec<MigrationStartup>,
 }
 pub struct LegacyMigrationAdmission {
-    _locks: Vec<File>,
-    _gates: Vec<File>,
+    _locks: Vec<FileLock>,
+    _gates: Vec<FileLock>,
     global: PathBuf,
     scope: MigrationScope,
 }
@@ -1430,6 +1430,16 @@ fn migration_recheck(global: &Path, scope: &MigrationScope) -> Result<(), String
 impl LegacyMigrationAdmission {
     pub fn recheck_profiles(&self) -> Result<(), String> {
         migration_recheck(&self.global, &self.scope)
+    }
+    /// Lease an initial operation only under authenticated root/profile admission.
+    /// Ordinary updater leasing correctly rejects the still-live legacy owner.
+    pub fn lock_operation(&self) -> Result<OperationLease, String> {
+        let state = &self.scope.profiles[0].state_dir;
+        let file = lock_with_mode(
+            &private_updates(state)?.join(format!("{}.operation.lock", self.scope.operation_id)),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?;
+        Ok(OperationLease { _file: file })
     }
     pub fn profiles_stopped(&self) -> Result<(), String> {
         self.recheck_profiles()?;
@@ -2019,10 +2029,25 @@ fn migration_start_registry_checks(
     crate::origin::installation_roots_admitted(&scope.roots, &authorized)
 }
 
-fn lock(path: &Path) -> Result<File, String> {
+struct FileLock {
+    file: File,
+    owner_pid: libc::pid_t,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing alone leaves flock held by any concurrent fork until exec.
+        // Only the acquiring process may release this shared open-file lock.
+        if unsafe { libc::getpid() } == self.owner_pid {
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn lock(path: &Path) -> Result<FileLock, String> {
     lock_with_mode(path, libc::LOCK_EX)
 }
-fn lock_with_mode(path: &Path, mode: libc::c_int) -> Result<File, String> {
+fn lock_with_mode(path: &Path, mode: libc::c_int) -> Result<FileLock, String> {
     check_dir(path.parent().ok_or("lock without parent")?, false)?;
     let file = OpenOptions::new()
         .read(true)
@@ -2046,7 +2071,10 @@ fn lock_with_mode(path: &Path, mode: libc::c_int) -> Result<File, String> {
             std::io::Error::last_os_error()
         ));
     }
-    Ok(file)
+    Ok(FileLock {
+        file,
+        owner_pid: unsafe { libc::getpid() },
+    })
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2588,8 +2616,8 @@ fn record_user_stop_at(global: &Path, state_dir: &Path) -> Result<u64, String> {
 /// Durable atomic scope index gates both roots even across partial marker writes.
 /// Dropping the locks never clears the scope; release follows reconciliation.
 pub struct InstallationReservation {
-    _locks: Vec<File>,
-    _profile_lock: File,
+    _locks: Vec<FileLock>,
+    _profile_lock: FileLock,
     source: InstallOrigin,
     target: Option<InstallOrigin>,
     operation_id: String,
@@ -3008,6 +3036,35 @@ mod tests {
             root: dir.path().join("checkout"),
         };
         (dir, global, state, origin)
+    }
+
+    #[test]
+    fn dropped_reservation_can_recover_while_an_unrelated_fork_is_alive() {
+        let (_dir, global, state, origin) = fixture();
+        let operation = "0123456789abcdef0123456789abcdef";
+        let reservation = reserve_install_at(&global, &origin, None, &state, operation).unwrap();
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            // Only async-signal-safe calls after fork in a multi-threaded test.
+            unsafe {
+                libc::close(pipe[1]);
+                let mut byte = 0u8;
+                libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(pipe[0]) };
+        drop(reservation);
+        let recovered = recover_reservation_at(&global, &origin, None, &state, operation);
+        // Always reap the child before asserting, including the failing case.
+        unsafe {
+            libc::close(pipe[1]);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        recovered.unwrap().release().unwrap();
     }
 
     #[test]

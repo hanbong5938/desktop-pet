@@ -853,11 +853,60 @@ mod mac {
                         "Migrate Herdr to Desktop Pet?"
                     }),
                 );
+                // Exact details for up to 64 profiles must not push the
+                // confirmation controls beyond the available screen.
+                let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let frame = Rect {
+                    origin: Point { x: 0., y: 0. },
+                    size: Size {
+                        width: 520.,
+                        height: 320.,
+                    },
+                };
+                let details = init_view(
+                    object(class("NSTextView"), "alloc"),
+                    selector("initWithFrame:"),
+                    frame,
+                );
+                send_bool(details, "setEditable:", false);
+                send_bool(details, "setSelectable:", true);
+                send_bool(details, "setRichText:", false);
                 send_object(
-                    alert,
-                    "setInformativeText:",
+                    details,
+                    "setTextColor:",
+                    object(class("NSColor"), "labelColor"),
+                );
+                send_bool(details, "setDrawsBackground:", false);
+                send_bool(details, "setHorizontallyResizable:", false);
+                send_bool(details, "setVerticallyResizable:", true);
+                let set_size: unsafe extern "C" fn(Obj, Obj, Size) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let maximum = Size {
+                    width: 520.,
+                    height: f64::MAX,
+                };
+                set_size(details, selector("setMaxSize:"), maximum);
+                let container = object(details, "textContainer");
+                set_size(container, selector("setContainerSize:"), maximum);
+                send_bool(container, "setWidthTracksTextView:", true);
+                send_object(
+                    details,
+                    "setString:",
                     string(&super::migration_summary(plan)),
                 );
+                let scroll = init_view(
+                    object(class("NSScrollView"), "alloc"),
+                    selector("initWithFrame:"),
+                    frame,
+                );
+                send_object(scroll, "setDocumentView:", details);
+                send_bool(scroll, "setHasVerticalScroller:", true);
+                send_bool(scroll, "setAutohidesScrollers:", true);
+                send_bool(scroll, "setDrawsBackground:", false);
+                send_object(alert, "setAccessoryView:", scroll);
+                send_void(details, "release");
+                send_void(scroll, "release");
                 send_object(
                     alert,
                     "addButtonWithTitle:",
