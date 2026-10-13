@@ -1,6 +1,6 @@
-use crate::agent_outcome::AgentOutcome;
 use crate::pose::{PoseKind, PoseSnapshot};
 use crate::state::{Phase, Scene};
+use desktop_pet_contracts::AgentOutcome;
 use std::time::Duration;
 
 /// A small user interaction that can produce a cosmetic response from the pet.

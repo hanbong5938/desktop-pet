@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fromMarkdown } from "mdast-util-from-markdown";
-import { requiredAssetNames, type ReleaseRecord } from "./release-docs";
+import { CORE_REPOSITORY, requiredAssetNames, releaseHeading, type ReleaseRecord } from "./release-docs";
 import { generateWiki, publicationState, requirePublishedRelease, type WikiOptions } from "./wiki-docs";
 
-const repository = "example/herdr";
+const repository = "hanbong5938/herdr-desktop-pet";
 const temporary: string[] = [];
 afterEach(async () => {
   for (const path of temporary.splice(0)) await rm(path, { recursive: true, force: true });
@@ -59,7 +59,7 @@ function release(tag: string, overrides: Partial<ReleaseRecord> = {}): ReleaseRe
   };
 }
 async function note(root: string, tag: string, content = "Reviewed release evidence."): Promise<void> {
-  await put(root, `docs/releases/${tag}.md`, `# Herdr Desktop Pet ${tag} release notes\n\n${content}\n`);
+  await put(root, `docs/releases/${tag}.md`, `${releaseHeading(tag)}\n\n${content}\n`);
 }
 
 async function rendered(markdown: string): Promise<{
@@ -102,6 +102,61 @@ describe("publication states", () => {
 });
 
 describe("Wiki projection", () => {
+  test("core migration guidance maps to a managed page and current Wiki navigation", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    await put(options.root, "docs/migrations/desktop-pet.md", "# Desktop Pet migration\n\n[Version policy](../releases/policy.md#compatibility)\n");
+    await put(options.root, "docs/releases/README.md", "# Versions\n\n[Migration](../migrations/desktop-pet.md)\n");
+    commitFixture(options.root);
+    expect(await generateWiki(options)).toContain("Migration-Desktop-Pet.md");
+    const home = await rendered(await readFile(join(options.output, "Home.md"), "utf8"));
+    expect(home.links).toContainEqual({ href: `https://github.com/${CORE_REPOSITORY}/wiki/Migration-Desktop-Pet`, title: null });
+    const migration = await rendered(await readFile(join(options.output, "Migration-Desktop-Pet.md"), "utf8"));
+    expect(migration.links).toContainEqual({ href: `https://github.com/${CORE_REPOSITORY}/wiki/Versioning-and-Compatibility#compatibility`, title: null });
+    const sidebar = await rendered(await readFile(join(options.output, "_Sidebar.md"), "utf8"));
+    expect(sidebar.links).toContainEqual({ href: "Migration-Desktop-Pet", title: null });
+  });
+
+  test("core Wiki keeps planned candidates unshipped and freezes only complete canonical core releases", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    const tag = "v0.4.0";
+    await note(options.root, tag, "Planned candidate. [Guide](../../README.md) ![Icon](../../assets/icon.png)");
+    commitFixture(options.root);
+    git(options.root, "tag", tag);
+    await generateWiki(options);
+    expect(publicationState(tag)).toBe("no-release");
+    const candidateLinks = (await rendered(await readFile(join(options.output, `Release-${tag}.md`), "utf8"))).links;
+    expect(candidateLinks.some((link) => link.href === `https://github.com/${CORE_REPOSITORY}/releases/tag/${tag}`)).toBe(false);
+    const record = release(tag, { html_url: `https://github.com/${CORE_REPOSITORY}/releases/tag/${tag}` });
+    options.releases = [record];
+    await note(options.root, tag, "Unpublished working-copy changes.");
+    await generateWiki(options);
+    const frozen = await rendered(await readFile(join(options.output, `Release-${tag}.md`), "utf8"));
+    expect(frozen.links).toContainEqual({ href: `https://github.com/${CORE_REPOSITORY}/blob/${tag}/README.md`, title: null });
+    expect(frozen.images).toContainEqual({
+      src: `https://raw.githubusercontent.com/${CORE_REPOSITORY}/${tag}/assets/icon.png`, title: null, alt: "Icon", parent: null,
+    });
+    const historicalTag = "v0.3.6";
+    await note(options.root, historicalTag, "Reviewed historical release. [Guide](../../README.md) ![Icon](../../assets/icon.png)");
+    commitFixture(options.root);
+    git(options.root, "tag", historicalTag);
+    options.releases = [record, release(historicalTag)];
+    await generateWiki(options);
+    const historical = await rendered(await readFile(join(options.output, `Release-${historicalTag}.md`), "utf8"));
+    expect(historical.links).toContainEqual({ href: `https://github.com/${repository}/blob/${historicalTag}/README.md`, title: null });
+    expect(historical.images).toContainEqual({
+      src: `https://raw.githubusercontent.com/${repository}/${historicalTag}/assets/icon.png`, title: null, alt: "Icon", parent: null,
+    });
+    const previous = await readFile(join(options.output, "Release-Status.md"));
+    options.releases = [release(tag)];
+    await expect(generateWiki(options)).rejects.toThrow("canonical authority");
+    expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(previous);
+    for (const asset of record.assets) {
+      expect(publicationState(tag, { ...record, assets: record.assets.filter((candidate) => candidate !== asset) })).toBe("partial");
+    }
+  });
+
   test("links portable canonical pages, source guides and images; writes only managed pages", async () => {
     const options = await fixture();
     const head = git(options.root, "rev-parse", "HEAD");

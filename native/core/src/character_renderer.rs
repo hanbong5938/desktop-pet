@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 const MAX_MASK_STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 mod preparation_limits {
-    include!(env!("HERDR_RIG_LIMITS_RS"));
+    include!(env!("DESKTOP_PET_RIG_LIMITS_RS"));
 }
 
 pub const SURFACE_PREPARATION_TIMEOUT: Duration =

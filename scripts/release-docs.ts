@@ -4,6 +4,19 @@ import { normalizeIdentifier } from "micromark-util-normalize-identifier";
 import type { Nodes, Root } from "mdast";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
+import { parseConfigFileTextToJson } from "typescript";
+
+export const CORE_REPOSITORY = "hanbong5938/desktop-pet";
+export const LEGACY_REPOSITORY = "hanbong5938/herdr-desktop-pet";
+
+export function releaseRepository(tag: string): string {
+  const { major, minor } = parseStableTag(tag);
+  return major === 0 && minor < 4 ? LEGACY_REPOSITORY : CORE_REPOSITORY;
+}
+
+export function releaseHeading(tag: string): string {
+  return `# ${releaseRepository(tag) === LEGACY_REPOSITORY ? "Herdr Desktop Pet" : "Desktop Pet"} ${tag} release notes`;
+}
 
 export type ReleaseRecord = {
   tag_name: string;
@@ -24,13 +37,19 @@ export function parseStableTag(tag: string): { version: string; major: number; m
 
 export function requiredAssetNames(tag: string): string[] {
   const { version } = parseStableTag(tag);
-  const archive = `HerdrDesktopPet-v${version}-macos-arm64.tar.gz`;
-  return [archive, `${archive}.sha256`, "SHA256SUMS"];
+  if (releaseRepository(tag) === LEGACY_REPOSITORY) {
+    const archive = `HerdrDesktopPet-v${version}-macos-arm64.tar.gz`;
+    return [archive, `${archive}.sha256`, "SHA256SUMS"];
+  }
+  const archive = `DesktopPet-v${version}-macos-arm64.tar.gz`;
+  const installer = `desktop-pet-install-v${version}.sh`;
+  return [archive, `${archive}.sha256`, "SHA256SUMS", `DesktopPet-v${version}-rig-native.json`, installer, `${installer}.sha256`];
 }
 
 export function isPublishedRelease(record: ReleaseRecord): boolean {
   let required: string[];
   try { required = requiredAssetNames(record.tag_name); } catch { return false; }
+  if (record.html_url !== `https://github.com/${releaseRepository(record.tag_name)}/releases/tag/${record.tag_name}`) return false;
   if (record.draft || record.prerelease || !record.published_at || !Number.isFinite(Date.parse(record.published_at))) return false;
   return required.every((name) => record.assets.some((asset) =>
     asset.name === name && Number.isFinite(asset.size) && asset.size > 0 &&
@@ -484,21 +503,59 @@ export function rewriteRelativeLinks(
   return result + markdown.slice(cursor);
 }
 
+/** Validate the neutral Cargo product version, independently of distribution identity or release notes. */
+export async function validateProductMetadata(root: string, version: string): Promise<void> {
+  const tag = `v${version}`;
+  parseStableTag(tag);
+  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+    name?: unknown; version?: unknown; dependencies?: Record<string, string>; devDependencies?: Record<string, string>;
+  };
+  const bunLock = parseConfigFileTextToJson("bun.lock", await readFile(join(root, "bun.lock"), "utf8"));
+  if (bunLock.error) throw new Error("Invalid root bun.lock metadata");
+  const lockedRoot = bunLock.config?.workspaces?.[""] as typeof packageJson | undefined;
+  const sameDependencies = (left: Record<string, string> = {}, right: Record<string, string> = {}): boolean =>
+    Object.keys(left).length === Object.keys(right).length && Object.entries(left).every(([name, value]) => right[name] === value);
+  if (packageJson.name !== "desktop-pet" || packageJson.version !== version ||
+    !lockedRoot || lockedRoot.name !== packageJson.name || (lockedRoot.version !== undefined && lockedRoot.version !== version) ||
+    !sameDependencies(packageJson.dependencies, lockedRoot.dependencies) ||
+    !sameDependencies(packageJson.devDependencies, lockedRoot.devDependencies)) {
+    throw new Error(`Tag ${tag} must match package.json and root bun.lock metadata`);
+  }
+  const workspace = Bun.TOML.parse(await readFile(join(root, "native/Cargo.toml"), "utf8")) as {
+    workspace?: { members?: string[] }; package?: unknown;
+  };
+  const products = [
+    ["app", "desktop-pet"], ["core", "desktop-pet-core"], ["update-coordinator", "desktop-pet-update-coordinator"],
+  ] as const;
+  if (workspace.package !== undefined || !products.every(([directory]) => workspace.workspace?.members?.includes(directory))) {
+    throw new Error("native/Cargo.toml must be the core product workspace containing app, core, and update-coordinator");
+  }
+  const lock = Bun.TOML.parse(await readFile(join(root, "native/Cargo.lock"), "utf8")) as {
+    package?: { name?: string; version?: unknown; source?: unknown }[];
+  };
+  for (const [directory, name] of products) {
+    const path = `native/${directory}/Cargo.toml`;
+    const cargo = Bun.TOML.parse(await readFile(join(root, path), "utf8")) as {
+      package?: { name?: string; version?: unknown }; bin?: { name?: string }[];
+    };
+    const locked = lock.package?.filter((entry) => entry.name === name && entry.source === undefined) ?? [];
+    if (cargo.package?.name !== name || cargo.package.version !== version || locked.length !== 1 || locked[0]?.version !== version ||
+      (directory !== "core" && cargo.bin !== undefined && !cargo.bin.some((bin) => bin.name === name))) {
+      throw new Error(`Tag ${tag} must match ${name} in ${path} and its unique workspace crate in native/Cargo.lock`);
+    }
+  }
+}
+
 export async function generateReleaseBody(root: string, tag: string, repository: string): Promise<string> {
   const { version } = parseStableTag(tag);
   requireRepository(repository);
-  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version?: unknown };
-  const cargo = Bun.TOML.parse(await readFile(join(root, "native/Cargo.toml"), "utf8")) as { package?: { name?: string; version?: unknown } };
-  const plugin = Bun.TOML.parse(await readFile(join(root, "herdr-plugin.toml"), "utf8")) as { version?: unknown };
-  const lock = Bun.TOML.parse(await readFile(join(root, "native/Cargo.lock"), "utf8")) as { package?: { name?: string; version?: unknown; source?: unknown }[] };
-  const rootCrates = lock.package?.filter((entry) => entry.name === cargo.package?.name && entry.source === undefined) ?? [];
-  if (!cargo.package?.name || rootCrates.length !== 1 ||
-    [packageJson.version, cargo.package.version, plugin.version, rootCrates[0]?.version].some((value) => value !== version)) {
-    throw new Error(`Tag ${tag} must match package.json, native/Cargo.toml, herdr-plugin.toml, and the root crate in native/Cargo.lock`);
+  if (repository !== CORE_REPOSITORY || releaseRepository(tag) !== CORE_REPOSITORY) {
+    throw new Error(`New product releases must use ${CORE_REPOSITORY} and a core release tag (v0.4.0 or newer)`);
   }
+  await validateProductMetadata(root, version);
   const sourcePath = `docs/releases/${tag}.md`;
   const markdown = await readFile(join(root, sourcePath), "utf8");
-  const heading = `# Herdr Desktop Pet ${tag} release notes`;
+  const heading = releaseHeading(tag);
   const lines = markdown.split(/\r?\n/);
   const first = lines.findIndex((line) => line.trim() !== "");
   if (first < 0 || lines[first] !== heading) throw new Error(`${sourcePath} must start with the exact heading: ${heading}`);
@@ -530,7 +587,7 @@ async function main(args: string[]): Promise<void> {
     options.set(name, value);
   }
   const root = resolve(options.get("--root") ?? join(import.meta.dir, ".."));
-  const repository = options.get("--repository") ?? process.env.GITHUB_REPOSITORY ?? "hanbong5938/herdr-desktop-pet";
+  const repository = options.get("--repository") ?? process.env.GITHUB_REPOSITORY ?? CORE_REPOSITORY;
   const body = await generateReleaseBody(root, tag, repository);
   const output = resolve(options.get("--output") ?? join(root, "dist", `${tag}-release-notes.md`));
   await mkdir(dirname(output), { recursive: true });

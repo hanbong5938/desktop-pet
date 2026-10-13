@@ -7,9 +7,29 @@ use std::cmp::Ordering;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const REPOSITORY: &str = "hanbong5938/herdr-desktop-pet";
-const API: &str = "https://api.github.com/repos/hanbong5938/herdr-desktop-pet/releases";
-const DOWNLOAD: &str = "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/";
+const REPOSITORY: &str = crate::identity::REPOSITORY;
+const API: &str = crate::identity::RELEASE_API;
+const DOWNLOAD: &str = crate::identity::RELEASE_DOWNLOAD;
+
+#[derive(Clone, Copy)]
+struct Authority {
+    repository: &'static str,
+    api: &'static str,
+    download: &'static str,
+    archive_prefix: &'static str,
+}
+const COMPILED_AUTHORITY: Authority = Authority {
+    repository: REPOSITORY,
+    api: API,
+    download: DOWNLOAD,
+    archive_prefix: crate::identity::ARCHIVE_PREFIX,
+};
+const NEUTRAL_AUTHORITY: Authority = Authority {
+    repository: crate::identity::neutral::REPOSITORY,
+    api: crate::identity::neutral::RELEASE_API,
+    download: crate::identity::neutral::RELEASE_DOWNLOAD,
+    archive_prefix: crate::identity::neutral::ARCHIVE_PREFIX,
+};
 const PAGE_SIZE: usize = 50;
 const MAX_PAGES: usize = 4;
 const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -89,28 +109,53 @@ fn classify(version: &str) -> Result<(Version, ReleaseChannel, String), String> 
     Ok((parsed, channel, tag))
 }
 
+#[cfg(test)]
 fn download_url(tag: &str, asset: &str) -> String {
     format!("{DOWNLOAD}{tag}/{asset}")
 }
 
-fn trusted_url(url: &str, tag: &str, asset: &str) -> bool {
-    url == download_url(tag, asset)
-        || (tag.starts_with("beta/") && url == download_url(&tag.replacen('/', "%2F", 1), asset))
+fn trusted_url(authority: Authority, url: &str, tag: &str, asset: &str) -> bool {
+    url == format!("{}{tag}/{asset}", authority.download)
+        || (tag.starts_with("beta/")
+            && url
+                == format!(
+                    "{}{}/{asset}",
+                    authority.download,
+                    tag.replacen('/', "%2F", 1)
+                ))
 }
 
 impl ReleaseCandidate {
     /// Check every portable release identity field, including the exact official download paths.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for(COMPILED_AUTHORITY)
+    }
+
+    /// The bridge stages a real neutral helper using fixed neutral release trust,
+    /// not its own paired protocol-3 release authority.
+    pub fn validate_neutral(&self) -> Result<(), String> {
+        self.validate_for(NEUTRAL_AUTHORITY)
+    }
+
+    fn validate_for(&self, authority: Authority) -> Result<(), String> {
         let (_, channel, tag) = classify(&self.version)?;
         if self.channel != channel || self.tag != tag || self.release_id == 0 {
             return Err("release channel, tag or id does not match version".into());
         }
-        let asset = format!("HerdrDesktopPet-v{}-macos-arm64.tar.gz", self.version);
+        let asset = format!(
+            "{}-v{}-macos-arm64.tar.gz",
+            authority.archive_prefix, self.version
+        );
         if self.asset_name != asset || self.archive_size == 0 {
             return Err("release archive name or size is invalid".into());
         }
-        if !trusted_url(&self.archive_url, &tag, &asset)
-            || !trusted_url(&self.checksum_url, &tag, &format!("{asset}.sha256"))
+        if !trusted_url(authority, &self.archive_url, &tag, &asset)
+            || !trusted_url(
+                authority,
+                &self.checksum_url,
+                &tag,
+                &format!("{asset}.sha256"),
+            )
         {
             return Err("release asset URL is not the official repository/tag/name".into());
         }
@@ -128,6 +173,15 @@ impl ReleaseCandidate {
     /// Verify the downloaded per-archive checksum before using the catalog digest.
     pub fn validate_checksum(&self, checksum: &str) -> Result<(), String> {
         self.validate()?;
+        self.validate_checksum_digest(checksum)
+    }
+
+    pub fn validate_neutral_checksum(&self, checksum: &str) -> Result<(), String> {
+        self.validate_neutral()?;
+        self.validate_checksum_digest(checksum)
+    }
+
+    fn validate_checksum_digest(&self, checksum: &str) -> Result<(), String> {
         if checksum.len() > 4096 {
             return Err("release checksum exceeds bound".into());
         }
@@ -150,7 +204,12 @@ impl ReleaseCandidate {
     }
 }
 
-fn asset<'a>(assets: &'a [Value], name: &str, tag: &str) -> Option<&'a Value> {
+fn asset<'a>(
+    authority: Authority,
+    assets: &'a [Value],
+    name: &str,
+    tag: &str,
+) -> Option<&'a Value> {
     let mut matching = assets
         .iter()
         .filter(|a| a.get("name").and_then(Value::as_str) == Some(name));
@@ -165,7 +224,7 @@ fn asset<'a>(assets: &'a [Value], name: &str, tag: &str) -> Option<&'a Value> {
         || !result
             .get("browser_download_url")
             .and_then(Value::as_str)
-            .is_some_and(|url| trusted_url(url, tag, name))
+            .is_some_and(|url| trusted_url(authority, url, tag, name))
     {
         return None;
     }
@@ -174,6 +233,16 @@ fn asset<'a>(assets: &'a [Value], name: &str, tag: &str) -> Option<&'a Value> {
 
 /// Parse one official GitHub releases API page; unqualified releases are ignored.
 pub fn parse_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
+    parse_catalog_for(json, COMPILED_AUTHORITY)
+}
+
+pub fn parse_neutral_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
+    parse_catalog_for(json, NEUTRAL_AUTHORITY)
+}
+
+fn parse_catalog_for(json: &str, authority: Authority) -> Result<Vec<ReleaseCandidate>, String> {
+    let api = authority.api;
+    let repository = authority.repository;
     if json.len() > MAX_PAGE_BYTES {
         return Err("release catalog page exceeds bound".into());
     }
@@ -210,16 +279,16 @@ pub fn parse_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
         if tag != expected_tag
             || release.get("prerelease").and_then(Value::as_bool)
                 != Some(channel == ReleaseChannel::Beta)
-            || release.get("url").and_then(Value::as_str) != Some(format!("{API}/{id}").as_str())
+            || release.get("url").and_then(Value::as_str) != Some(format!("{api}/{id}").as_str())
             || !release
                 .get("html_url")
                 .and_then(Value::as_str)
                 .is_some_and(|url| {
-                    url == format!("https://github.com/{REPOSITORY}/releases/tag/{tag}")
+                    url == format!("https://github.com/{repository}/releases/tag/{tag}")
                         || (channel == ReleaseChannel::Beta
                             && url
                                 == format!(
-                                    "https://github.com/{REPOSITORY}/releases/tag/{}",
+                                    "https://github.com/{repository}/releases/tag/{}",
                                     tag.replace('/', "%2F")
                                 ))
                 })
@@ -233,14 +302,14 @@ pub fn parse_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
         else {
             continue;
         };
-        let name = format!("HerdrDesktopPet-v{version}-macos-arm64.tar.gz");
-        let Some(archive) = asset(assets, &name, tag) else {
+        let name = format!("{}-v{version}-macos-arm64.tar.gz", authority.archive_prefix);
+        let Some(archive) = asset(authority, assets, &name, tag) else {
             continue;
         };
-        let Some(checksum) = asset(assets, &format!("{name}.sha256"), tag) else {
+        let Some(checksum) = asset(authority, assets, &format!("{name}.sha256"), tag) else {
             continue;
         };
-        if asset(assets, "SHA256SUMS", tag).is_none() {
+        if asset(authority, assets, "SHA256SUMS", tag).is_none() {
             continue;
         }
         let Some(sha256) = archive
@@ -267,7 +336,7 @@ pub fn parse_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
                 .unwrap_or_default()
                 .into(),
         };
-        if candidate.validate().is_ok() {
+        if candidate.validate_for(authority).is_ok() {
             candidates.push(candidate);
         }
     }
@@ -277,6 +346,15 @@ pub fn parse_catalog_page(json: &str) -> Result<Vec<ReleaseCandidate>, String> {
 /// Perform an anonymous read-only catalog request. Call this from a background check worker,
 /// never from the AppKit main thread. Four pages and one overall deadline bound the operation.
 pub fn fetch_candidates() -> Result<Vec<ReleaseCandidate>, String> {
+    fetch_for(COMPILED_AUTHORITY)
+}
+
+pub fn fetch_neutral_candidates() -> Result<Vec<ReleaseCandidate>, String> {
+    fetch_for(NEUTRAL_AUTHORITY)
+}
+
+fn fetch_for(authority: Authority) -> Result<Vec<ReleaseCandidate>, String> {
+    let api = authority.api;
     let deadline = Instant::now() + Duration::from_secs(40);
     let mut result = Vec::new();
     for page in 1..=MAX_PAGES {
@@ -286,7 +364,7 @@ pub fn fetch_candidates() -> Result<Vec<ReleaseCandidate>, String> {
         if seconds == 0 {
             return Err("release catalog deadline exceeded".into());
         }
-        let url = format!("{API}?per_page={PAGE_SIZE}&page={page}");
+        let url = format!("{api}?per_page={PAGE_SIZE}&page={page}");
         let text = command_output(
             Path::new("/usr/bin/curl"),
             &[
@@ -305,7 +383,7 @@ pub fn fetch_candidates() -> Result<Vec<ReleaseCandidate>, String> {
                 "--header",
                 "Accept: application/vnd.github+json",
                 "--header",
-                "User-Agent: herdr-update-coordinator",
+                &format!("User-Agent: {}", crate::identity::HELPER),
                 &url,
             ],
             MAX_PAGE_BYTES,
@@ -314,12 +392,29 @@ pub fn fetch_candidates() -> Result<Vec<ReleaseCandidate>, String> {
         let entries: Vec<Value> =
             serde_json::from_str(&text).map_err(|e| format!("invalid release catalog: {e}"))?;
         let count = entries.len();
-        result.extend(parse_catalog_page(&text)?);
+        result.extend(parse_catalog_for(&text, authority)?);
         if count < PAGE_SIZE {
             return Ok(result);
         }
     }
     Ok(result)
+}
+
+/// Operation B has one approved stable target, independent of this bridge's
+/// own release stream. Missing or ambiguous published bytes are not fallback.
+pub fn fetch_neutral_migration_candidate() -> Result<ReleaseCandidate, String> {
+    let mut candidates = fetch_neutral_candidates()?.into_iter().filter(|candidate| {
+        candidate.version == crate::identity::neutral::VERSION
+            && candidate.channel == ReleaseChannel::Stable
+    });
+    let candidate = candidates
+        .next()
+        .ok_or("approved neutral migration release is unavailable")?;
+    if candidates.next().is_some() {
+        return Err("approved neutral migration release is ambiguous".into());
+    }
+    candidate.validate_neutral()?;
+    Ok(candidate)
 }
 
 /// Select the greatest valid SemVer precedence above the running version; equal-precedence
@@ -362,7 +457,10 @@ mod tests {
 
     fn fixture(version: &str) -> Value {
         let (_, channel, tag) = classify(version).unwrap();
-        let name = format!("HerdrDesktopPet-v{version}-macos-arm64.tar.gz");
+        let name = format!(
+            "{}-v{version}-macos-arm64.tar.gz",
+            crate::identity::ARCHIVE_PREFIX
+        );
         let asset = |name: &str, size: u64| {
             json!({
                 "name": name, "size": size, "state": "uploaded",
@@ -399,10 +497,13 @@ mod tests {
         altered["url"] = json!("https://api.github.com/repos/attacker/repo/releases/17");
         cases.push(altered);
         let mut altered = stable.clone();
-        altered["assets"][0]["browser_download_url"] = json!("https://github.com.evil.test/hanbong5938/herdr-desktop-pet/releases/download/v0.3.3/HerdrDesktopPet-v0.3.3-macos-arm64.tar.gz");
+        altered["assets"][0]["browser_download_url"] = json!(format!("https://github.com.evil.test/{REPOSITORY}/releases/download/v0.3.3/{}-v0.3.3-macos-arm64.tar.gz", crate::identity::ARCHIVE_PREFIX));
         cases.push(altered);
         let mut altered = stable.clone();
-        altered["assets"][0]["browser_download_url"] = json!("https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.3/../HerdrDesktopPet-v0.3.3-macos-arm64.tar.gz");
+        altered["assets"][0]["browser_download_url"] = json!(format!(
+            "{DOWNLOAD}v0.3.3/../{}-v0.3.3-macos-arm64.tar.gz",
+            crate::identity::ARCHIVE_PREFIX
+        ));
         cases.push(altered);
         let mut altered = stable.clone();
         altered["assets"][0]["digest"] = json!("sha256:not-a-digest");
@@ -440,13 +541,19 @@ mod tests {
         let mut altered = beta.clone();
         altered["assets"][0]["browser_download_url"] = json!(download_url(
             "beta%2F0.3.3-beta.1",
-            "HerdrDesktopPet-v0.3.3-beta.1-macos-arm64.tar.gz"
+            &format!(
+                "{}-v0.3.3-beta.1-macos-arm64.tar.gz",
+                crate::identity::ARCHIVE_PREFIX
+            )
         ));
         assert_eq!(parse(&[altered]).len(), 1);
         let mut altered = beta;
         altered["assets"][0]["browser_download_url"] = json!(download_url(
             "beta%252F0.3.3-beta.1",
-            "HerdrDesktopPet-v0.3.3-beta.1-macos-arm64.tar.gz"
+            &format!(
+                "{}-v0.3.3-beta.1-macos-arm64.tar.gz",
+                crate::identity::ARCHIVE_PREFIX
+            )
         ));
         assert!(parse(&[altered]).is_empty());
     }
@@ -520,6 +627,54 @@ mod tests {
                 .allows_version("0.3.3+build")
                 .unwrap(),
             false
+        );
+    }
+
+    #[test]
+    fn bridge_neutral_staging_uses_fixed_neutral_authority() {
+        let version = crate::identity::neutral::VERSION;
+        let mut release = fixture(version);
+        let tag = format!("v{version}");
+        let archive = format!(
+            "{}-v{version}-macos-arm64.tar.gz",
+            crate::identity::neutral::ARCHIVE_PREFIX
+        );
+        release["url"] = json!(format!("{}/17", crate::identity::neutral::RELEASE_API));
+        release["html_url"] = json!(format!(
+            "https://github.com/{}/releases/tag/{tag}",
+            crate::identity::neutral::REPOSITORY
+        ));
+        let names = [
+            archive.clone(),
+            format!("{archive}.sha256"),
+            "SHA256SUMS".into(),
+        ];
+        for (asset, name) in release["assets"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(names)
+        {
+            asset["name"] = json!(name);
+            asset["browser_download_url"] = json!(format!(
+                "{}{tag}/{name}",
+                crate::identity::neutral::RELEASE_DOWNLOAD
+            ));
+        }
+        let page = serde_json::to_string(&vec![release.clone()]).unwrap();
+        let candidate = parse_neutral_catalog_page(&page).unwrap().pop().unwrap();
+        candidate.validate_neutral().unwrap();
+        candidate
+            .validate_neutral_checksum(&format!("{SHA}  {}", candidate.asset_name))
+            .unwrap();
+        if crate::identity::LEGACY {
+            assert!(candidate.validate().is_err());
+        }
+        release["url"] = json!("https://api.github.com/repos/attacker/repo/releases/17");
+        assert!(
+            parse_neutral_catalog_page(&serde_json::to_string(&vec![release]).unwrap())
+                .unwrap()
+                .is_empty()
         );
     }
 }

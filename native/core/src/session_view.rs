@@ -1,25 +1,19 @@
-use crate::agent_outcome::{AgentOutcome, OutcomeReport};
 use crate::i18n::{session_local_source, text, Message, UiLocale};
-use crate::session::{AgentRecord, AgentStatus, SessionMetadata, WorkspaceWorktreeInfo};
+use desktop_pet_contracts::{
+    AgentOutcome, AgentRecord, AgentStatus, OutcomeReport, PromptTarget, PromptTargetError,
+    SessionKey, SessionMetadata, SourceAdmission, SourceDescriptor, SourceLocality,
+    WorktreeRemoveTarget, WorktreeRemoveTargetError, MAX_AGENT_RECORDS, MAX_SOURCES,
+};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-const MAX_SOURCES: usize = 64;
-const MAX_RECORDS_PER_SOURCE: usize = crate::session::MAX_AGENT_RECORDS;
+const MAX_RECORDS_PER_SOURCE: usize = MAX_AGENT_RECORDS;
 const MAX_ROWS: usize = 128;
 /// Maximum number of materialized rows in a single complete-session page.
 pub(crate) const MAX_PAGE_ROWS: usize = MAX_ROWS;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SessionKey {
-    pub(crate) source_id: u64,
-    pub(crate) generation: u64,
-    pub(crate) terminal_id: String,
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,7 +121,10 @@ impl<'a> SessionListOptions<'a> {
 pub(crate) struct SessionView {
     pub(crate) key: SessionKey,
     pub(crate) source_label: String,
+    pub(crate) provider_label: String,
     pub(crate) is_local: bool,
+    pub(crate) prompt_supported: bool,
+    pub(crate) remove_worktree_supported: bool,
     pub(crate) pane_id: String,
     pub(crate) status: AgentStatus,
     pub(crate) outcome: Option<AgentOutcome>,
@@ -240,56 +237,19 @@ struct StoredRecord {
 
 #[derive(Debug)]
 struct SourceState {
-    source: String,
+    descriptor: SourceDescriptor,
     source_id: u64,
     generation: u64,
-    label: String,
     visible: bool,
     availability: Availability,
     records: BTreeMap<String, StoredRecord>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PromptTarget {
-    pub(crate) source: String,
-    pub(crate) pane_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PromptTargetError {
-    ReadOnly,
-    Offline,
-    Stale,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WorktreeRemoveTarget {
-    pub(crate) key: SessionKey,
-    pub(crate) source: String,
-    pub(crate) pane_id: String,
-    pub(crate) workspace_id: String,
-    pub(crate) worktree: Arc<WorkspaceWorktreeInfo>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorktreeRemoveTargetError {
-    ReadOnly,
-    Offline,
-    Stale,
-    NotLinkedWorktree,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SourceAdmission {
-    Allowed,
-    Capacity,
-    Rejected,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SessionStore {
     sources: Vec<SourceState>,
     next_source_id: u64,
+    provider_labels: Arc<BTreeMap<String, String>>,
     revision: u64,
 }
 
@@ -300,6 +260,19 @@ impl SessionStore {
 
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn set_provider_labels(&mut self, labels: Arc<BTreeMap<String, String>>) {
+        if *self.provider_labels != *labels {
+            self.provider_labels = labels;
+            self.bump_revision();
+        }
+    }
+
+    fn provider_label<'a>(&'a self, source: &SourceState) -> &'a str {
+        self.provider_labels
+            .get(&source.descriptor.provider)
+            .map_or("", String::as_str)
     }
 
     /// Validate admission without consuming an opaque ID or changing retained
@@ -338,7 +311,8 @@ impl SessionStore {
     /// The return value reports whether this was an accepted source operation,
     /// rather than whether visible rows changed. A duplicate same-generation
     /// begin is accepted and leaves the revision unchanged.
-    pub(crate) fn begin_source(&mut self, source: &str, generation: u64) -> bool {
+    pub(crate) fn begin_source(&mut self, descriptor: &SourceDescriptor, generation: u64) -> bool {
+        let source = descriptor.id.as_str();
         if self.source_admission(source, generation) != SourceAdmission::Allowed {
             return false;
         }
@@ -348,6 +322,9 @@ impl SessionStore {
                 return false;
             }
             if generation == existing.generation {
+                if existing.descriptor != *descriptor {
+                    return false;
+                }
                 return true;
             }
 
@@ -355,6 +332,7 @@ impl SessionStore {
             // invalidates a selected old-generation key.
             let was_live = existing.availability == Availability::Live;
             existing.generation = generation;
+            existing.descriptor.clone_from(descriptor);
             existing.availability = Availability::Offline;
             for record in existing.records.values_mut() {
                 record.outcome = None;
@@ -375,10 +353,9 @@ impl SessionStore {
         // Source IDs are intentionally opaque and are never copied into a
         // card from the source path itself.
         self.sources.push(SourceState {
-            source: source.to_owned(),
+            descriptor: descriptor.clone(),
             source_id,
             generation,
-            label: "Local".to_owned(),
             visible: true,
             availability: Availability::Offline,
             records: BTreeMap::new(),
@@ -562,7 +539,7 @@ impl SessionStore {
         let Some(source_state) = self
             .sources
             .iter_mut()
-            .find(|entry| entry.source == source && entry.generation == generation)
+            .find(|entry| entry.descriptor.id == source && entry.generation == generation)
         else {
             return;
         };
@@ -588,7 +565,7 @@ impl SessionStore {
         at_unix_ms: u64,
     ) -> bool {
         let Some(source_state) = self.sources.iter_mut().find(|entry| {
-            entry.source == source
+            entry.descriptor.id == source
                 && entry.generation == generation
                 && entry.availability == Availability::Live
         }) else {
@@ -672,7 +649,7 @@ impl SessionStore {
             .records
             .get(&key.terminal_id)
             .ok_or(PromptTargetError::Stale)?;
-        if crate::sources::remote_machine_id(&source.source).is_some() {
+        if source.descriptor.locality == SourceLocality::Remote {
             return Err(PromptTargetError::ReadOnly);
         }
         if source.availability != Availability::Live {
@@ -684,7 +661,7 @@ impl SessionStore {
             return Err(PromptTargetError::Stale);
         }
         Ok(PromptTarget {
-            source: source.source.clone(),
+            source: source.descriptor.id.clone(),
             pane_id: record.pane_id.clone(),
         })
     }
@@ -703,7 +680,7 @@ impl SessionStore {
             .sources
             .iter()
             .find(|entry| entry.source_id == source_id)?;
-        if source.source != source_path
+        if source.descriptor.id != source_path
             || source.generation != generation
             || source.availability != Availability::Live
         {
@@ -729,8 +706,8 @@ impl SessionStore {
             .records
             .get(&key.terminal_id)
             .ok_or(WorktreeRemoveTargetError::Stale)?;
-        if crate::sources::remote_machine_id(&source.source).is_some()
-            || source.source.starts_with("tern:")
+        if source.descriptor.locality == SourceLocality::Remote
+            || !source.descriptor.capabilities.remove_worktree
         {
             return Err(WorktreeRemoveTargetError::ReadOnly);
         }
@@ -761,7 +738,7 @@ impl SessionStore {
         }
         Ok(WorktreeRemoveTarget {
             key: key.clone(),
-            source: source.source.clone(),
+            source: source.descriptor.id.clone(),
             pane_id: record.pane_id.clone(),
             workspace_id: workspace_id.clone(),
             worktree: Arc::clone(worktree),
@@ -770,7 +747,11 @@ impl SessionStore {
 
     /// Visibility changes invalidate cached snapshots even when rows are unchanged.
     pub(crate) fn set_visibility(&mut self, source: &str, visible: bool) {
-        if let Some(entry) = self.sources.iter_mut().find(|entry| entry.source == source) {
+        if let Some(entry) = self
+            .sources
+            .iter_mut()
+            .find(|entry| entry.descriptor.id == source)
+        {
             if entry.visible != visible {
                 entry.visible = visible;
                 self.bump_revision();
@@ -779,10 +760,14 @@ impl SessionStore {
     }
 
     pub(crate) fn set_label(&mut self, source: &str, label: &str) {
-        if let Some(entry) = self.sources.iter_mut().find(|entry| entry.source == source) {
-            if entry.label != label {
-                entry.label.clear();
-                entry.label.push_str(label);
+        if let Some(entry) = self
+            .sources
+            .iter_mut()
+            .find(|entry| entry.descriptor.id == source)
+        {
+            if entry.descriptor.label != label {
+                entry.descriptor.label.clear();
+                entry.descriptor.label.push_str(label);
                 if entry.visible {
                     self.bump_revision();
                 }
@@ -802,7 +787,7 @@ impl SessionStore {
                 && source.generation == key.generation
         })?;
         let record = source.records.get(&key.terminal_id)?;
-        Some(Self::view_from_record(source, &key.terminal_id, record))
+        Some(self.view_from_record(source, &key.terminal_id, record))
     }
     /// Present a retained target against the complete visible universe, even
     /// when it is outside the current filter or the bounded list.
@@ -851,7 +836,8 @@ impl SessionStore {
             .iter()
             .filter(|source| source.visible)
             .flat_map(|source| {
-                let is_local = crate::sources::remote_machine_id(&source.source).is_none();
+                let is_local = source.descriptor.locality == SourceLocality::Local;
+                let provider_label = self.provider_label(source);
                 source
                     .records
                     .iter()
@@ -860,7 +846,8 @@ impl SessionStore {
                             source_id: source.source_id,
                             terminal_id,
                         },
-                        source_label: &source.label,
+                        source_label: &source.descriptor.label,
+                        provider_label,
                         is_local,
                         metadata: &record.metadata,
                     })
@@ -1027,7 +1014,7 @@ impl SessionStore {
                         continue;
                     }
                     if rows.len() < limit {
-                        rows.push(Self::view_from_record(source, terminal_id, record));
+                        rows.push(self.view_from_record(source, terminal_id, record));
                     } else {
                         has_more = true;
                     }
@@ -1077,7 +1064,7 @@ impl SessionStore {
         if let Some((_, displays)) = presentation {
             rows.reserve(candidates.len());
             for candidate in candidates {
-                rows.push(Self::view_from_record(
+                rows.push(self.view_from_record(
                     candidate.source,
                     candidate.terminal_id,
                     candidate.record,
@@ -1096,6 +1083,7 @@ impl SessionStore {
     }
 
     fn view_from_record(
+        &self,
         source: &SourceState,
         terminal_id: &str,
         record: &StoredRecord,
@@ -1106,8 +1094,11 @@ impl SessionStore {
                 generation: source.generation,
                 terminal_id: terminal_id.to_owned(),
             },
-            source_label: source.label.clone(),
-            is_local: crate::sources::remote_machine_id(&source.source).is_none(),
+            source_label: source.descriptor.label.clone(),
+            provider_label: self.provider_label(source).to_owned(),
+            is_local: source.descriptor.locality == SourceLocality::Local,
+            prompt_supported: source.descriptor.capabilities.prompt,
+            remove_worktree_supported: source.descriptor.capabilities.remove_worktree,
             pane_id: record.pane_id.clone(),
             status: record.status,
             outcome: record.outcome,
@@ -1117,7 +1108,9 @@ impl SessionStore {
     }
 
     fn source_index(&self, source: &str) -> Option<usize> {
-        self.sources.iter().position(|entry| entry.source == source)
+        self.sources
+            .iter()
+            .position(|entry| entry.descriptor.id == source)
     }
 
     fn contains_key(&self, key: &SessionKey) -> bool {
@@ -1167,6 +1160,7 @@ struct PresentationKey<'a> {
 struct PresentationRow<'a> {
     key: PresentationKey<'a>,
     source_label: &'a str,
+    provider_label: &'a str,
     is_local: bool,
     metadata: &'a SessionMetadata,
 }
@@ -1236,10 +1230,11 @@ fn search_matches(
                 .all(|character| character.is_ascii_digit())
                 && contains(&format!("{} {}", text(locale, Message::Tab), tab.trim()))
         }))
-        || (crate::sources::remote_machine_id(&source.source).is_none()
+        || contains(&display.context)
+        || (source.descriptor.locality == SourceLocality::Local
             && contains(session_local_source(locale)))
-        || (crate::sources::remote_machine_id(&source.source).is_some()
-            && display_value(Some(&source.label)).is_some_and(|label| contains(&label)))
+        || (source.descriptor.locality == SourceLocality::Remote
+            && display_value(Some(&source.descriptor.label)).is_some_and(|label| contains(&label)))
 }
 
 pub(crate) fn display_value(value: Option<&str>) -> Option<String> {
@@ -1297,6 +1292,19 @@ fn tab_location(locale: UiLocale, view: &PresentationRow<'_>) -> String {
 }
 
 fn card_source_label<'a>(locale: UiLocale, view: &'a PresentationRow<'_>) -> Cow<'a, str> {
+    if let Some(provider) = display_value(Some(view.provider_label)) {
+        let label = display_value(Some(view.source_label))
+            .unwrap_or_else(|| format!("#{}", view.key.source_id));
+        let locality = text(
+            locale,
+            if view.is_local {
+                Message::SourceLocal
+            } else {
+                Message::SourceRemote
+            },
+        );
+        return Cow::Owned(format!("{provider} · {label} · {locality}"));
+    }
     if view.is_local {
         Cow::Borrowed(session_local_source(locale))
     } else {
@@ -1316,6 +1324,7 @@ pub(crate) fn card_displays(locale: UiLocale, rows: &[SessionView]) -> Vec<CardD
                 terminal_id: &view.key.terminal_id,
             },
             source_label: &view.source_label,
+            provider_label: &view.provider_label,
             is_local: view.is_local,
             metadata: &view.metadata,
         })
@@ -1531,6 +1540,27 @@ fn unsafe_identifier_char(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desktop_pet_contracts::WorkspaceWorktreeInfo;
+
+    fn descriptor(id: &str) -> SourceDescriptor {
+        SourceDescriptor {
+            id: id.to_owned(),
+            provider: "fixture".into(),
+            label: "Local".into(),
+            locality: SourceLocality::Local,
+            capabilities: desktop_pet_contracts::SourceCapabilities {
+                prompt: true,
+                remove_worktree: true,
+            },
+        }
+    }
+
+    fn remote_descriptor(id: &str) -> SourceDescriptor {
+        SourceDescriptor {
+            locality: SourceLocality::Remote,
+            ..descriptor(id)
+        }
+    }
 
     fn record(terminal_id: &str, pane_id: &str, status: AgentStatus) -> AgentRecord {
         AgentRecord {
@@ -1563,9 +1593,128 @@ mod tests {
     }
 
     #[test]
+    fn registered_source_context_search_sort_and_label_refresh_preserve_selection() {
+        let mut store = SessionStore::new();
+        store.set_provider_labels(Arc::new(BTreeMap::from([(
+            "fixture".into(),
+            "Provider".into(),
+        )])));
+        let local = "opaque-local";
+        let remote = "opaque-remote";
+        let mut row = record("same-pane", "same-pane", AgentStatus::Working);
+        row.metadata.title = Some("Build".into());
+        let mut local_descriptor = descriptor(local);
+        local_descriptor.label = "Zulu".into();
+        let mut remote_descriptor = remote_descriptor(remote);
+        remote_descriptor.label = "Alpha".into();
+        assert!(store.begin_source(&local_descriptor, 1));
+        assert!(store.begin_source(&remote_descriptor, 1));
+        assert!(store.replace_source(local, 1, [&row]));
+        assert!(store.replace_source(remote, 1, [&row]));
+        let options = SessionListOptions {
+            sort: SessionSort::SourceAsc,
+            ..SessionListOptions::default()
+        };
+        let snapshot = store.snapshot(&options, None);
+        let remote_key = snapshot.rows[0].key.clone();
+        let local_key = snapshot.rows[1].key.clone();
+        assert_ne!(local_key.source_id, remote_key.source_id);
+        assert!(!snapshot.rows[0].is_local);
+        assert!(snapshot.rows[1].is_local);
+        assert!(snapshot.displays[0]
+            .context
+            .contains("Provider · Alpha · Remote"));
+        assert!(snapshot.displays[1]
+            .context
+            .contains("Provider · Zulu · Local"));
+        assert_eq!(
+            store.prompt_target(&remote_key),
+            Err(PromptTargetError::ReadOnly)
+        );
+        assert_eq!(store.prompt_target(&local_key).unwrap().source, local);
+        for (locale, local_label, remote_label) in [
+            (UiLocale::En, "Local", "Remote"),
+            (UiLocale::Ko, "로컬", "원격"),
+            (UiLocale::Ja, "ローカル", "リモート"),
+            (UiLocale::ZhHans, "本地", "远程"),
+        ] {
+            for (label, key) in [(local_label, &local_key), (remote_label, &remote_key)] {
+                let filtered = store.snapshot(
+                    &SessionListOptions {
+                        query: label,
+                        locale,
+                        ..SessionListOptions::default()
+                    },
+                    Some(key),
+                );
+                assert_eq!(filtered.matched, 1);
+                assert_eq!(&filtered.rows[0].key, key);
+                assert!(filtered.displays[0].context.contains(label));
+            }
+        }
+        store.set_label(local, " \u{202e}Aardvark\n Mac ");
+        let renamed = store.snapshot(&options, Some(&local_key));
+        assert_eq!(renamed.selected, Some(local_key.clone()));
+        assert_eq!(renamed.rows[0].key, local_key);
+        assert!(renamed.displays[0]
+            .context
+            .contains("Provider · Aardvark Mac · Local"));
+        assert_eq!(
+            store
+                .snapshot(
+                    &SessionListOptions {
+                        query: "Zulu",
+                        ..SessionListOptions::default()
+                    },
+                    None
+                )
+                .matched,
+            0
+        );
+        store.set_label(remote, "42");
+        assert!(store
+            .display_for_key(UiLocale::En, &remote_key)
+            .unwrap()
+            .context
+            .contains("Provider · 42 · Remote"));
+    }
+
+    #[test]
+    fn descriptor_authority_is_immutable_until_a_new_generation() {
+        let mut store = SessionStore::new();
+        let local = descriptor("opaque-source");
+        let remote = remote_descriptor("opaque-source");
+        let row = record("pane", "pane", AgentStatus::Working);
+        assert!(store.begin_source(&local, 1));
+        assert!(store.replace_source(&local.id, 1, [&row]));
+        let key = store.snapshot(&SessionListOptions::default(), None).rows[0]
+            .key
+            .clone();
+        assert!(store.prompt_target(&key).is_ok());
+        assert!(!store.begin_source(&remote, 1));
+        assert!(store.prompt_target(&key).is_ok());
+        assert!(store.begin_source(&remote, 2));
+        assert_eq!(store.prompt_target(&key), Err(PromptTargetError::Stale));
+        assert!(store.replace_source(&remote.id, 2, [&row]));
+        let next = store.snapshot(&SessionListOptions::default(), Some(&key));
+        assert_eq!(next.selected, None);
+        assert!(!next.rows[0].is_local);
+        assert_eq!(
+            store.prompt_target(&next.rows[0].key),
+            Err(PromptTargetError::ReadOnly)
+        );
+        assert!(!store.begin_source(&local, 2));
+        assert!(store.begin_source(&local, 3));
+        assert!(store.replace_source(&local.id, 3, [&row]));
+        assert!(store
+            .prompt_target(&store.snapshot(&SessionListOptions::default(), None).rows[0].key)
+            .is_ok());
+    }
+
+    #[test]
     fn directory_names_partition_short_normalized_and_unrelated_paths() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut rows = vec![
             path_record("short", "/src", AgentStatus::Idle),
             path_record("alpha", "/alpha/src", AgentStatus::Idle),
@@ -1618,7 +1767,7 @@ mod tests {
     #[test]
     fn directory_names_refine_long_shared_suffix_without_depth_limit() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let shared = "nested/".repeat(160);
         let west = format!("/west/{shared}src");
         let east = format!("/east/{shared}src");
@@ -1651,8 +1800,8 @@ mod tests {
     #[test]
     fn identical_suffixes_keep_source_ranks_after_reordering() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("first", 1));
-        assert!(store.begin_source("second", 1));
+        assert!(store.begin_source(&descriptor("first"), 1));
+        assert!(store.begin_source(&descriptor("second"), 1));
         let first = [
             path_record("z", "/one//src/", AgentStatus::Idle),
             path_record("a", "/one/src", AgentStatus::Idle),
@@ -1690,8 +1839,8 @@ mod tests {
     #[test]
     fn names_use_full_visible_universe_before_query_filter_sort_cap_and_lookup() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("first", 1));
-        assert!(store.begin_source("second", 1));
+        assert!(store.begin_source(&descriptor("first"), 1));
+        assert!(store.begin_source(&descriptor("second"), 1));
         let mut rows: Vec<_> = (0..129)
             .map(|index| {
                 path_record(
@@ -1762,7 +1911,7 @@ mod tests {
     #[test]
     fn search_intersects_status_before_cap_and_uses_localized_visible_fields() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket-private-id", 1));
+        assert!(store.begin_source(&descriptor("socket-private-id"), 1));
         let mut rows: Vec<_> = (0..130)
             .map(|index| {
                 let mut row = record(&format!("hidden-{index:03}"), "pane", AgentStatus::Idle);
@@ -1861,8 +2010,8 @@ mod tests {
     #[test]
     fn running_priority_is_global_bounded_and_requires_effective_live_running() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("first", 1));
-        assert!(store.begin_source("second", 1));
+        assert!(store.begin_source(&descriptor("first"), 1));
+        assert!(store.begin_source(&descriptor("second"), 1));
         let first: Vec<_> = (0..140)
             .map(|index| record(&format!("idle-{index:03}"), "pane", AgentStatus::Idle))
             .collect();
@@ -1915,10 +2064,10 @@ mod tests {
     #[test]
     fn sorting_and_duplicate_discriminators_hold_outside_default_cap() {
         let mut store = SessionStore::new();
-        let first = crate::sources::remote_source("east");
-        let second = crate::sources::remote_source("west");
-        assert!(store.begin_source(&first, 1));
-        assert!(store.begin_source(&second, 1));
+        let first = "opaque-east".to_owned();
+        let second = "opaque-west".to_owned();
+        assert!(store.begin_source(&remote_descriptor(&first), 1));
+        assert!(store.begin_source(&remote_descriptor(&second), 1));
         store.set_label(&first, "Zulu");
         store.set_label(&second, "Alpha");
         let mut early: Vec<_> = (0..130)
@@ -2024,7 +2173,7 @@ mod tests {
     #[test]
     fn title_sort_prefers_named_tab_then_workspace_and_leaves_unnamed_last() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut explicit = record("a", "pane-a", AgentStatus::Idle);
         explicit.metadata.title = Some("Zebra".into());
         let mut named_tab = record("b", "pane-b", AgentStatus::Idle);
@@ -2060,7 +2209,7 @@ mod tests {
     #[test]
     fn terminal_results_require_acceptance_and_new_activity_invalidates_them() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         for (outcome, display) in [
             (AgentOutcome::Succeeded, DisplayStatus::Succeeded),
             (AgentOutcome::Failed, DisplayStatus::Failed),
@@ -2141,7 +2290,7 @@ mod tests {
     #[test]
     fn source_and_report_identity_invalidate_success_without_revival() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let row = reported("terminal", "1", AgentOutcome::Succeeded);
         assert!(store.replace_source("socket", 1, [&row]));
         assert!(!store.accept_outcome(
@@ -2181,7 +2330,7 @@ mod tests {
             store.snapshot(&SessionListOptions::default(), None).rows[0].display_status(),
             DisplayStatus::Offline
         );
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         assert!(store.replace_source("socket", 2, [&row]));
         assert_eq!(
             store.snapshot(&SessionListOptions::default(), None).rows[0].display_status(),
@@ -2223,7 +2372,7 @@ mod tests {
         for status in [AgentStatus::Idle, AgentStatus::Done] {
             for authoritative in [false, true] {
                 let mut store = SessionStore::new();
-                assert!(store.begin_source("socket", 1));
+                assert!(store.begin_source(&descriptor("socket"), 1));
                 let mut row = reported("terminal", "1", AgentOutcome::Succeeded);
                 row.status = status;
                 assert!(store.replace_source("socket", 1, [&row]));
@@ -2278,7 +2427,7 @@ mod tests {
     fn contradictory_same_turn_report_invalidates_success() {
         for contradict_outcome in [false, true] {
             let mut store = SessionStore::new();
-            assert!(store.begin_source("socket", 1));
+            assert!(store.begin_source(&descriptor("socket"), 1));
             let mut row = reported("terminal", "1", AgentOutcome::Succeeded);
             assert!(store.replace_source("socket", 1, [&row]));
             assert!(store.accept_outcome(
@@ -2313,7 +2462,7 @@ mod tests {
     #[test]
     fn repeated_accepted_report_preserves_outcome_and_revision() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let row = reported("terminal", "1", AgentOutcome::Succeeded);
         assert!(store.replace_source("socket", 1, [&row]));
         assert!(store.accept_outcome(
@@ -2342,7 +2491,7 @@ mod tests {
                 .status,
             DisplayStatus::NoSessions
         );
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         assert_eq!(
             store
                 .snapshot(&SessionListOptions::default(), None)
@@ -2390,7 +2539,7 @@ mod tests {
                 .len(),
             MAX_ROWS
         );
-        assert!(store.begin_source("other", 1));
+        assert!(store.begin_source(&descriptor("other"), 1));
         assert_eq!(
             store
                 .snapshot(&SessionListOptions::default(), None)
@@ -2434,8 +2583,8 @@ mod tests {
     #[test]
     fn same_terminal_ids_are_isolated_by_opaque_source_identity() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("/private/one.sock", 1));
-        assert!(store.begin_source("/private/two.sock", 1));
+        assert!(store.begin_source(&descriptor("/private/one.sock"), 1));
+        assert!(store.begin_source(&descriptor("/private/two.sock"), 1));
         let first = record("terminal", "pane-one", AgentStatus::Working);
         let second = record("terminal", "pane-two", AgentStatus::Done);
         assert!(store.replace_source("/private/one.sock", 1, [&first]));
@@ -2458,10 +2607,10 @@ mod tests {
     #[test]
     fn stale_generation_callbacks_are_rejected_and_new_rows_start_offline() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let old = record("terminal", "pane", AgentStatus::Working);
         assert!(store.replace_source("socket", 1, [&old]));
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         let after_begin =
             store.snapshot(&SessionListOptions::with_filter(SessionFilter::All), None);
         assert_eq!(after_begin.rows[0].availability, Availability::Offline);
@@ -2480,7 +2629,7 @@ mod tests {
     #[test]
     fn offline_reconnect_empty_and_removal_preserve_then_clear_rows() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let cached = record("terminal", "pane", AgentStatus::Done);
         assert!(store.replace_source("socket", 1, [&cached]));
         assert!(store.mark_offline("socket", 1));
@@ -2505,7 +2654,7 @@ mod tests {
             1
         );
 
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         let reconnecting =
             store.snapshot(&SessionListOptions::with_filter(SessionFilter::All), None);
         assert_eq!(reconnecting.rows[0].availability, Availability::Offline);
@@ -2529,13 +2678,13 @@ mod tests {
     #[test]
     fn retired_provider_identity_never_aliases_same_metadata_or_recreated_source() {
         let mut store = SessionStore::new();
-        let local = "/private/herdr.sock";
-        let tern = crate::tern::source_id("window-a");
+        let local = "opaque-first";
+        let tern = "opaque-second".to_owned();
         let mut row = record("shared-terminal", "shared-pane", AgentStatus::Working);
         row.metadata.title = Some("Shared project".into());
         row.metadata.cwd = Some("/same/project".into());
-        assert!(store.begin_source(local, 1));
-        assert!(store.begin_source(&tern, 1));
+        assert!(store.begin_source(&descriptor(local), 1));
+        assert!(store.begin_source(&descriptor(&tern), 1));
         assert!(store.replace_source(local, 1, [&row]));
         assert!(store.replace_source(&tern, 1, [&row]));
         let snapshot = store.snapshot(&SessionListOptions::default(), None);
@@ -2545,7 +2694,7 @@ mod tests {
         assert_ne!(local_key.source_id, old_tern_key.source_id);
         assert!(store.remove_source(&tern, 1));
         assert_eq!(store.view_for_key(&old_tern_key), None);
-        assert!(store.begin_source(&tern, 2));
+        assert!(store.begin_source(&descriptor(&tern), 2));
         assert!(store.replace_source(&tern, 2, [&row]));
         let current = store.snapshot(&SessionListOptions::default(), Some(&old_tern_key));
         assert_eq!(current.total, 2);
@@ -2566,7 +2715,7 @@ mod tests {
     #[test]
     fn filtering_counts_before_cap_and_reports_omitted_rows() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let records: Vec<AgentRecord> = (0..200)
             .map(|index| {
                 let status = if index < 150 {
@@ -2596,9 +2745,9 @@ mod tests {
     #[test]
     fn complete_pages_reach_every_row_beyond_gui_cap_in_source_order() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("first", 1));
-        assert!(store.begin_source("second", 1));
-        assert!(store.begin_source("hidden", 1));
+        assert!(store.begin_source(&descriptor("first"), 1));
+        assert!(store.begin_source(&descriptor("second"), 1));
+        assert!(store.begin_source(&descriptor("hidden"), 1));
         let first: Vec<_> = (0..129)
             .map(|index| record(&format!("terminal-{index:03}"), "first", AgentStatus::Idle))
             .collect();
@@ -2665,8 +2814,8 @@ mod tests {
     #[test]
     fn complete_pages_preserve_filter_and_unfiltered_summary() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("live", 1));
-        assert!(store.begin_source("offline", 1));
+        assert!(store.begin_source(&descriptor("live"), 1));
+        assert!(store.begin_source(&descriptor("offline"), 1));
         let live: Vec<_> = (0..130)
             .map(|index| {
                 record(
@@ -2723,7 +2872,7 @@ mod tests {
     #[test]
     fn complete_pages_reject_stale_revision_and_invalid_limits() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let row = record("one", "pane", AgentStatus::Idle);
         let other = record("two", "other-pane", AgentStatus::Idle);
         assert!(store.replace_source("socket", 1, [&row, &other]));
@@ -2748,7 +2897,7 @@ mod tests {
     #[test]
     fn displayed_key_observes_filtered_row_past_all_cap_through_outcome_and_invalidation() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut records: Vec<_> = (0..128)
             .map(|index| {
                 record(
@@ -2823,7 +2972,7 @@ mod tests {
             store.view_for_key(&key).unwrap().display_status(),
             DisplayStatus::Offline
         );
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         assert_eq!(store.view_for_key(&key), None);
         let new_key = SessionKey {
             generation: 2,
@@ -2838,8 +2987,8 @@ mod tests {
     #[test]
     fn display_lookup_keeps_remote_and_ambiguous_panes_without_prompt_permission() {
         let mut store = SessionStore::new();
-        let remote = crate::sources::remote_source("east");
-        assert!(store.begin_source(&remote, 1));
+        let remote = format!("opaque-{}", "east");
+        assert!(store.begin_source(&remote_descriptor(&remote), 1));
         let remote_row = record("remote", "remote-pane", AgentStatus::Working);
         assert!(store.replace_source(&remote, 1, [&remote_row]));
         let remote_key = store
@@ -2856,7 +3005,7 @@ mod tests {
             Err(PromptTargetError::ReadOnly)
         );
 
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let first = record("first", "shared-pane", AgentStatus::Idle);
         let second = record("second", "shared-pane", AgentStatus::Done);
         assert!(store.replace_source("socket", 1, [&first, &second]));
@@ -2887,7 +3036,7 @@ mod tests {
             tab_count: 2,
         });
         let mut store = SessionStore::new();
-        assert!(store.begin_source("/local.sock", 1));
+        assert!(store.begin_source(&descriptor("/local.sock"), 1));
         let mut first = record("first", "pane-one", AgentStatus::Working);
         first.metadata.workspace_id = Some("w".into());
         first.metadata.worktree = Some(Arc::clone(&info));
@@ -2956,13 +3105,13 @@ mod tests {
             store.worktree_remove_target(&key),
             Err(WorktreeRemoveTargetError::Offline)
         );
-        assert!(store.begin_source("/local.sock", 2));
+        assert!(store.begin_source(&descriptor("/local.sock"), 2));
         assert_eq!(
             store.worktree_remove_target(&key),
             Err(WorktreeRemoveTargetError::Stale)
         );
-        let remote = crate::sources::remote_source("east");
-        assert!(store.begin_source(&remote, 1));
+        let remote = format!("opaque-{}", "east");
+        assert!(store.begin_source(&remote_descriptor(&remote), 1));
         assert!(store.replace_source(&remote, 1, [&first]));
         let remote_key = store
             .snapshot(&SessionListOptions::with_filter(SessionFilter::All), None)
@@ -2980,7 +3129,7 @@ mod tests {
     #[test]
     fn selection_survives_status_changes_but_not_generation_changes() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let initial = record("terminal", "pane", AgentStatus::Working);
         assert!(store.replace_source("socket", 1, [&initial]));
         let key = store
@@ -2995,7 +3144,7 @@ mod tests {
         );
         assert_eq!(changed.selected, Some(key.clone()));
         assert!(changed.rows.is_empty());
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         assert_eq!(
             store
                 .snapshot(&SessionListOptions::default(), Some(&key))
@@ -3007,8 +3156,8 @@ mod tests {
     #[test]
     fn rows_are_sorted_by_source_ordinal_then_terminal_id() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("first", 1));
-        assert!(store.begin_source("second", 1));
+        assert!(store.begin_source(&descriptor("first"), 1));
+        assert!(store.begin_source(&descriptor("second"), 1));
         let first_b = record("b", "pane-b", AgentStatus::Idle);
         let first_a = record("a", "pane-a", AgentStatus::Idle);
         let second_a = record("a", "pane-c", AgentStatus::Idle);
@@ -3026,7 +3175,7 @@ mod tests {
     #[test]
     fn duplicate_publication_does_not_advance_revision() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let row = record("terminal", "pane", AgentStatus::Idle);
         assert!(store.replace_source("socket", 1, [&row]));
         let revision = store.revision();
@@ -3043,7 +3192,7 @@ mod tests {
     #[test]
     fn title_change_repaints_without_changing_key_order_or_selection() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut first = record("a", "pane-a", AgentStatus::Working);
         first.metadata.title = Some("Initial task".to_owned());
         let second = record("b", "pane-b", AgentStatus::Working);
@@ -3083,7 +3232,7 @@ mod tests {
     #[test]
     fn offline_title_survives_and_old_generation_cannot_replace_it() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut cached = record("terminal", "pane", AgentStatus::Working);
         cached.metadata.title = Some("Cached task".to_owned());
         assert!(store.replace_source("socket", 1, [&cached]));
@@ -3097,7 +3246,7 @@ mod tests {
             Some("Cached task")
         );
 
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         let reconnecting = store.snapshot(
             &SessionListOptions::with_filter(SessionFilter::Offline),
             None,
@@ -3124,7 +3273,7 @@ mod tests {
     #[test]
     fn generation_change_invalidates_selection_even_when_already_offline() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let row = record("terminal", "pane", AgentStatus::Idle);
         assert!(store.replace_source("socket", 1, [&row]));
         let key = store
@@ -3134,7 +3283,7 @@ mod tests {
             .clone();
         assert!(store.mark_offline("socket", 1));
         let revision = store.revision();
-        assert!(store.begin_source("socket", 2));
+        assert!(store.begin_source(&descriptor("socket"), 2));
         assert!(store.revision() > revision);
         assert_eq!(
             store
@@ -3153,7 +3302,7 @@ mod tests {
         ] {
             for event_first in [true, false] {
                 let mut store = SessionStore::new();
-                assert!(store.begin_source("socket", 1));
+                assert!(store.begin_source(&descriptor("socket"), 1));
                 let row = reported("terminal", "1", outcome);
                 assert!(store.replace_source("socket", 1, [&row]));
                 let before_accept = store.revision();
@@ -3210,7 +3359,7 @@ mod tests {
     #[test]
     fn idle_without_acceptance_is_neutral_and_activity_event_revokes_same_status() {
         let mut store = SessionStore::new();
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let mut row = reported("terminal", "1", AgentOutcome::Succeeded);
         row.status = AgentStatus::Idle;
         assert!(store.replace_source("socket", 1, [&row]));
@@ -3274,7 +3423,7 @@ mod tests {
                 .status,
             DisplayStatus::NoSessions
         );
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         let before_snapshot = store.revision();
         assert_eq!(
             store
@@ -3286,7 +3435,7 @@ mod tests {
                 total: 0
             }
         );
-        assert!(store.begin_source("socket", 1));
+        assert!(store.begin_source(&descriptor("socket"), 1));
         assert!(!store.replace_source("socket", 2, std::iter::empty::<&AgentRecord>()));
         assert!(!store.mark_offline("socket", 2));
         assert_eq!(store.revision(), before_snapshot);
@@ -3318,7 +3467,7 @@ mod tests {
         let mut store = SessionStore::new();
         for index in 0..MAX_SOURCES {
             let source = format!("source-{index}");
-            assert!(store.begin_source(&source, 1));
+            assert!(store.begin_source(&descriptor(&source), 1));
             assert!(store.replace_source(
                 &source,
                 1,
@@ -3352,7 +3501,7 @@ mod tests {
             store.source_admission("new-source", 1),
             SourceAdmission::Rejected
         );
-        assert!(!store.begin_source("new-source", 1));
+        assert!(!store.begin_source(&descriptor("new-source"), 1));
         assert_eq!(store.revision(), revision);
         assert_eq!(store.sources.len(), MAX_SOURCES);
         store.next_source_id = next_id;
@@ -3365,7 +3514,7 @@ mod tests {
             store.source_admission("new-source", 1),
             SourceAdmission::Allowed
         );
-        assert!(store.begin_source("new-source", 1));
+        assert!(store.begin_source(&descriptor("new-source"), 1));
         assert!(store.replace_source(
             "new-source",
             1,

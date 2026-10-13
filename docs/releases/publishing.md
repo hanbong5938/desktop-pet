@@ -1,10 +1,14 @@
 # Publishing release documentation and the Wiki
 
+**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1) and the legacy bridge v0.3.7 are reviewed candidates, not verified public installations. Commands below describe the neutral cutover; do not treat notes, a source version or a tag as publication proof.
+
+Current publication authority is the independent core; historical authorization records below retain their original Herdr URLs, results and limits. [Reviewed neutral candidate](v0.4.0.md) · [migration](../migrations/desktop-pet.md).
+
 [Versions](README.md) · [Versioning and compatibility](policy.md) · [Unreleased](unreleased.md) · [한국어 버전 안내](README.ko.md)
 
 Reviewed Markdown in this repository is canonical; the Wiki is a generated reading view. New app Release bodies and Wiki version pages use the same note frozen by the exact release tag, while current indexes and status use reviewed default-branch documents and the live Release catalog. The [v0.3.6 canonical note](v0.3.6.md) belongs to the verified [published stable Release](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6); the [0.3 publication record](0.3.md) records current asset and consumer proof separately from historical [v0.3.5](v0.3.5.md) evidence. Neither note nor source build alone proves publication.
 
-The original documentation/tools-only authorization, v0.2.0 promotion and narrower v0.2.1 patch authorization below are **historical release scopes**, separate from the authorized **v0.3.6 stable patch**. Preserve all existing stable/beta tags, assets and checksums, the separate beta formula, pack v5, bundled `default@0`, artwork/rig overrides/motion/licensing and the independent Herdr/Tern hosts. No new beta release or beta-formula update is authorized.
+The original documentation/tools-only authorization, v0.2.0 promotion and narrower v0.2.1 patch authorization below are **historical release scopes**, separate from the historical **v0.3.6 stable patch** and current independent v0.4.0 candidate. Preserve all existing stable/beta tags, assets and checksums, the separate beta formula, pack v5, bundled `default@0`, artwork/rig overrides/motion/licensing and the independent Herdr/Tern hosts. No new beta release or beta-formula update is implied by this cutover.
 
 ## Authorization and setup record
 
@@ -37,7 +41,7 @@ Review four matching manifests/root lock and [bilingual v0.3.5 note](v0.3.5.md) 
 
 The paired `beta/0.3.5-beta.1` has the same functionality but its own `HerdrDesktopPetBeta.app` archive (`HerdrDesktopPet-v0.3.5-beta.1-macos-arm64.tar.gz`), individual `.sha256`, `SHA256SUMS` and separate `HerdrDesktopPet-v0.3.5-beta.1-rig-native.json`. Publish it as a distinct non-latest prerelease, verify its own assets and deployed-byte sidecar, then update the separate rolling beta formula and check the beta executable and `app_version: 0.3.5-beta.1`. Neither candidate source/version nor stable assets prove beta publication. Preserve older stable and beta tags/assets.
 
-### Current v0.3.6 stable publication contract (completed)
+### Historical v0.3.6 stable publication contract (completed)
 
 1. Review the matching v0.3.6 manifests/root lock and [canonical note](v0.3.6.md) on the final candidate. Freeze the reviewed note at the exact `v0.3.6` tag. In that tagged checkout, the release documentation gate is `bun scripts/release-docs.ts check v0.3.6 --repository hanbong5938/herdr-desktop-pet --output dist/v0.3.6-release-notes.md`; the generated body and Wiki version page must use this same frozen note, never current default-branch prose or a historical note.
 2. Complete the final candidate's native/package/signature/worker-entitlement, host-isolation, four-language, updater/helper and recovery gates before publication. Earlier v0.3.5 or source-only evidence does not certify this package. The stable native app remains **ad-hoc signed, not notarized**. Its app and helper expose additive JSON capabilities `protocol: 3` and `observation_mode: 1` and must form a matched protocol-3 pair. The standalone installer may still accept intact historical matched protocol-2 pairs; mixed protocol pairs are rejected. Old protocol-1/2 plans, journals and reservations are preserved for their matching helper, never silently migrated.
@@ -61,7 +65,7 @@ Recommended owner safeguards, not runtime prerequisites: protect the default bra
 
 ## Workflow and trust boundary
 
-The [Wiki workflow](../../.github/workflows/wiki.yml) uses the reviewed pushed default-branch SHA for **current** navigation and the exact fetched release tag for a **frozen** version page. For v0.3.6 this must be its stable tag, never historical v0.3.5 source, the isolated v0.2.1 patch or a beta tag. It reads the actual default branch and Release catalog; an old tag is not a current-index snapshot. Only default-branch push/manual runs or matching release-tag push callers are accepted. Successful publication still requires the configured Wiki-write credential; the v0.2.1 Wiki run below is historical.
+The [Wiki workflow](../../.github/workflows/wiki.yml) uses the reviewed pushed default-branch SHA for **current** navigation and the exact fetched release tag for a **frozen** version page. For neutral v0.4.0 this must be its stable core tag, never historical v0.3.5 source, the isolated v0.2.1 patch or a beta tag. It reads the actual default branch and Release catalog; an old tag is not a current-index snapshot. Only default-branch push/manual runs or matching release-tag push callers are accepted. Successful publication still requires the configured Wiki-write credential; the v0.2.1 Wiki run below is historical.
 
 The checkout does not persist credentials. GitHub API reads use only the ordinary `GITHUB_TOKEN` (`contents: read`). Rendering finishes and validates the full managed page set **before** the publisher is invoked. `WIKI_PUBLISH_TOKEN` is assigned only in the publishing step's environment. The workflow uses SHA-pinned actions and one repository-wide, non-cancelling publication concurrency group, shared by push, manual and reusable calls.
 
@@ -69,7 +73,7 @@ The workflow's current push filter is `main`, the repository's current default b
 
 ### Reusable Release integration
 
-The Release workflow validates `docs/releases/vX.Y.Z.md` from the tagged checkout before publishing a new Release. Its first heading must be exactly `# Herdr Desktop Pet vX.Y.Z release notes`, the note must be nonempty, and the package manifest, native Cargo manifest, plugin manifest and the app's root package entry in `native/Cargo.lock` must match the stable tag. `scripts/release-docs.ts check` writes the note body with relative repository file links rewritten to exact tag blob URLs and Markdown images to tagged raw-byte URLs; the Release action uses that file, not a separate handwritten summary.
+The Release workflow validates `docs/releases/vX.Y.Z.md` from the tagged checkout before publishing a new Release. Its first heading must be exactly `# Desktop Pet vX.Y.Z release notes`, the note must be nonempty, and the core package/Bun lock, workspace/app/core/helper manifests and their unique source-less workspace entries in `native/Cargo.lock` (host manifests are not product version authority) must match the stable tag. `scripts/release-docs.ts check` writes the note body with relative repository file links rewritten to exact tag blob URLs and Markdown images to tagged raw-byte URLs; the Release action uses that file, not a separate handwritten summary.
 
 After the Release assets/body are published, call the Wiki workflow as a separate dependent job:
 
@@ -87,7 +91,7 @@ wiki_sync:
 
 `required_release` is an optional string, defaulting to empty. The reusable secret declaration allows an owner-configured callee environment to provide the credential instead, but the publisher always requires a usable credential for an HTTPS push. Do not add `continue-on-error`: a failed Wiki synchronization must remain visibly failed, even though the already published Release is not rolled back.
 
-The generator requires the selected stable tag to have a **public, non-draft, actually published Release with all three uploaded nonzero required assets**: the app `.tar.gz`, its `.sha256`, and `SHA256SUMS`. Tag existence or a note filename does not meet that requirement. Drafts, incomplete uploads and pending source notes never become shipped entries merely because Markdown was merged.
+The generator requires the selected stable tag to have a **public, non-draft, actually published Release with all six uploaded nonzero required core assets**: app archive, its `.sha256`, `SHA256SUMS`, separate rig provenance, versioned bootstrap installer and its `.sha256`. Tag existence or a note filename does not meet that requirement. Drafts, incomplete uploads and pending source notes never become shipped entries merely because Markdown was merged.
 
 ## Initial historical backfill and future frozen notes
 
@@ -101,17 +105,17 @@ Generated pages contain source attribution with immutable source references. Pub
 
 Use this routine for the **next stable release**, recording each phase's observed version, URL/digest, run and result separately. A successful tag, Release, PR preview or Wiki run is not proof that the public Pages site changed. Keep beta tags/assets/formula and beta evidence separate from stable; do not rewrite the frozen historical contracts above.
 
-1. **Public binary / 공개 바이너리:** Confirm the stable Release is non-draft and actually public. Anonymously download its complete arm64 archive, individual `.sha256`, `SHA256SUMS` and separate post-signing rig-native sidecar; verify archive digests and the sidecar `deployed_sha256` against the extracted signed app. Record the release URL, asset names and observed checksums. / stable Release가 비초안·실제 공개 상태인지 확인하고 arm64 압축 파일, 개별 `.sha256`, `SHA256SUMS`, 별도 서명 후 rig-native 사이드카를 익명으로 내려받아 압축 파일 체크섬과 추출한 서명 앱의 `deployed_sha256`를 대조합니다. URL·자산명·관측한 체크섬을 기록합니다.
-2. **Stable distribution / stable 배포 경로:** Only after public-asset verification, confirm the default/`--prebuilt` installer manifest and stable Homebrew formula point to that exact stable version, archive URL and SHA-256. Check the publicly served tap formula, not only a proposed change. Record each cutover result; a failed tap update does not erase an already published Release. / 공개 자산 확인 후 기본/`--prebuilt` 설치기 manifest와 공개 stable Homebrew tap 포뮬러의 버전·압축 파일 URL·SHA-256이 정확히 일치하는지 확인합니다. 제안된 변경만 보지 말고 공개 포뮬러를 확인하고 경로별 결과를 기록합니다. tap 실패가 이미 공개된 Release를 없애지는 않습니다.
+1. **Public binary / 공개 바이너리:** Confirm the stable Release is non-draft and actually public. Anonymously download its complete arm64 archive, individual `.sha256`, `SHA256SUMS`, separate post-signing rig-native sidecar and versioned bootstrap installer/checksum; verify archive digests and the sidecar `deployed_sha256` against the extracted signed app. Record the release URL, asset names and observed checksums. / stable Release가 비초안·실제 공개 상태인지 확인하고 arm64 압축 파일, 개별 `.sha256`, `SHA256SUMS`, 별도 서명 후 rig-native 사이드카를 익명으로 내려받아 압축 파일 체크섬과 추출한 서명 앱의 `deployed_sha256`를 대조합니다. URL·자산명·관측한 체크섬을 기록합니다.
+2. **Stable distribution / stable 배포 경로:** Only after public-asset verification, confirm the default/`--prebuilt` installer core release pin and stable `desktop-pet` Homebrew formula point to that exact stable version, archive URL and SHA-256. Check the publicly served tap formula, not only a proposed change. Record each cutover result; a failed tap update does not erase an already published Release. / 공개 자산 확인 후 기본/`--prebuilt` 설치기 manifest와 공개 stable Homebrew tap 포뮬러의 버전·압축 파일 URL·SHA-256이 정확히 일치하는지 확인합니다. 제안된 변경만 보지 말고 공개 포뮬러를 확인하고 경로별 결과를 기록합니다. tap 실패가 이미 공개된 Release를 없애지는 않습니다.
 3. **Consumer / 실제 사용자 설치:** Install or upgrade through the stable consumer path; record the native CLI version, restart the daemon and confirm its `app_version` and running executable belong to that same installed version. Do not substitute a source-tree version or an unrestarted daemon. / stable 소비자 경로로 설치·업그레이드하고 네이티브 CLI 버전을 기록합니다. 데몬을 재시작하여 `app_version`과 실행 파일이 해당 설치 버전인지 확인합니다. 소스 버전이나 재시작하지 않은 데몬으로 대신하지 않습니다.
-4. **Site source / 사이트 원본:** Review all four pages: `site/index.html`, `site/en/index.html`, `site/zh-Hans/index.html` and `site/ja/index.html`. Current-target prose must remain conditional until the exact non-draft v0.3.6 Release/assets and stable formula are published; public installation/tap claims must then match the proven version and path. Preserve the explicitly labeled v0.3.2 offline screenshot/capture version unless genuine new media is produced. Record reviewed source separately from public deployment. / 네 언어 페이지의 현행 대상은 정확한 비초안 v0.3.6 자산과 stable 포뮬러 게시 전까지 조건부로 표시하며 설치 주장은 실제 공개 버전·경로와 일치해야 합니다. 새 실제 촬영물이 없다면 v0.3.2 오프라인 캡처 표시는 그대로 두고 소스 검토와 공개 배포는 별도로 기록합니다.
-5. **Pages / 공개 페이지:** Merge the reviewed site edit to `main`, or use an authorized `workflow_dispatch` on `main`, then confirm the [Pages workflow](../../.github/workflows/pages.yml) result and anonymously render public [KO](https://hanbong5938.github.io/herdr-desktop-pet/), [EN](https://hanbong5938.github.io/herdr-desktop-pet/en/), [简体中文](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/) and [日本語](https://hanbong5938.github.io/herdr-desktop-pet/ja/) pages. Compare rendered version/install claims with the exact Release and public tap; record URL, run and observed result. A PR check/staged artifact is not a public deployment; a site failure does not mean the binary Release is absent. Never rebuild or retag published binaries to repair the site or Wiki. / 네 언어의 공개 페이지와 Pages 배포를 확인하고 버전·설치 문구를 실제 Release/tap과 대조하여 URL·실행·관측 결과를 기록합니다. PR 검사·스테이징 자산은 공개 배포가 아니며 사이트 실패가 바이너리 부재를 뜻하지 않습니다. 사이트·Wiki 복구를 위해 공개 바이너리를 재빌드·재태그하지 않습니다.
+4. **Site source / 사이트 원본:** Review all four pages: `site/index.html`, `site/en/index.html`, `site/zh-Hans/index.html` and `site/ja/index.html`. Current-target prose must remain conditional until the exact non-draft v0.4.0 core Release/assets and stable formula are published; public installation/tap claims must then match the proven version and path. Preserve the explicitly labeled v0.3.2 offline screenshot/capture version unless genuine new media is produced. Record reviewed source separately from public deployment. / 네 언어 페이지의 현행 대상은 정확한 비초안 core v0.4.0 자산과 stable 포뮬러 게시 전까지 조건부로 표시하며 설치 주장은 실제 공개 버전·경로와 일치해야 합니다. 새 실제 촬영물이 없다면 v0.3.2 오프라인 캡처 표시는 그대로 두고 소스 검토와 공개 배포는 별도로 기록합니다.
+5. **Pages / 공개 페이지:** Merge the reviewed site edit to `main`, or use an authorized `workflow_dispatch` on `main`, then confirm the [Pages workflow](../../.github/workflows/pages.yml) result and anonymously render public [KO](https://hanbong5938.github.io/desktop-pet/), [EN](https://hanbong5938.github.io/desktop-pet/en/), [简体中文](https://hanbong5938.github.io/desktop-pet/zh-Hans/) and [日本語](https://hanbong5938.github.io/desktop-pet/ja/) pages. Compare rendered version/install claims with the exact Release and public tap; record URL, run and observed result. A PR check/staged artifact is not a public deployment; a site failure does not mean the binary Release is absent. Never rebuild or retag published binaries to repair the site or Wiki. / 네 언어의 공개 페이지와 Pages 배포를 확인하고 버전·설치 문구를 실제 Release/tap과 대조하여 URL·실행·관측 결과를 기록합니다. PR 검사·스테이징 자산은 공개 배포가 아니며 사이트 실패가 바이너리 부재를 뜻하지 않습니다. 사이트·Wiki 복구를 위해 공개 바이너리를 재빌드·재태그하지 않습니다.
 
 ## Routine documentation updates and Wiki-only repair
 
-Edit and review canonical pages, then merge to the default branch. Main-branch Wiki synchronization updates navigation and history but does not create a binary Release. Historical v0.2.1 used isolated source; the authorized v0.3.6 target requires its exact frozen note/tag, separately confirmed complete assets, stable formula/default-installer cutover and consumer upgrade. Do not count a Wiki-only sync as a release.
+Edit and review canonical pages, then merge to the default branch. Main-branch Wiki synchronization updates navigation and history but does not create a binary Release. Historical v0.2.1 used isolated source; the reviewed neutral v0.4.0 target requires its exact frozen note/tag, separately confirmed complete assets, stable formula/default-installer cutover and consumer upgrade. Do not count a Wiki-only sync as a release.
 
-After dedicated automation credential setup, repair a failed publication by opening [the Wiki workflow](https://github.com/hanbong5938/herdr-desktop-pet/actions/workflows/wiki.yml), choosing the **default branch**, and selecting **Run workflow**. This Actions manual dispatch is distinct from the authorized local owner-OAuth publication; the Wiki already has initialized Git history:
+After dedicated automation credential setup, repair a failed publication by opening [the Wiki workflow](https://github.com/hanbong5938/desktop-pet/actions/workflows/wiki.yml), choosing the **default branch**, and selecting **Run workflow**. This Actions manual dispatch is distinct from the authorized local owner-OAuth publication; the Wiki already has initialized Git history:
 
 - Leave **tag** blank for a routine Wiki-only sync/backfill.
 - Set **tag** to an existing public complete release, such as `v0.1.11`, when repairing a post-Release failure and you want that publication requirement rechecked.
@@ -122,12 +126,12 @@ If a called Wiki job fails, its step summary independently checks the Release AP
 
 ## Local rendering and isolated Git publication
 
-The generator has no publishing side effects. For an authorized remote Wiki publication, render from the reviewed **pushed default-branch documentation source** at its immutable source SHA with the selected actually published stable tag fetched for its frozen version note; do not select v0.3.6 before its non-draft Release and complete assets exist. The isolated v0.2.1 patch source and current integrated source are not interchangeable. `git rev-parse HEAD` below must identify that reviewed pushed default-branch snapshot:
+The generator has no publishing side effects. For an authorized remote Wiki publication, render from the reviewed **pushed default-branch documentation source** at its immutable source SHA with the selected actually published stable tag fetched for its frozen version note; do not select neutral v0.4.0 before its non-draft Release and complete assets exist. The isolated v0.2.1 patch source and current integrated source are not interchangeable. `git rev-parse HEAD` below must identify that reviewed pushed default-branch snapshot:
 
 ```sh
 rendered="$(mktemp -d)"
 bun scripts/wiki-docs.ts --root . --output "$rendered" \
-  --repository hanbong5938/herdr-desktop-pet \
+  --repository hanbong5938/desktop-pet \
   --source-ref "$(git rev-parse HEAD)"
 ```
 
@@ -141,7 +145,7 @@ The output includes `.wiki-managed-pages`, a sorted newline-separated list of ge
 
 ```sh
 bash scripts/publish-wiki.sh --source-dir "$rendered" \
-  --repository hanbong5938/herdr-desktop-pet \
+  --repository hanbong5938/desktop-pet \
   --source-ref "$(git rev-parse HEAD)"
 ```
 
@@ -151,7 +155,7 @@ bash scripts/publish-wiki.sh --source-dir "$rendered" \
 set +x
 WIKI_PUBLISH_TOKEN="$(gh auth token)" \
   bash scripts/publish-wiki.sh --source-dir "$rendered" \
-    --repository hanbong5938/herdr-desktop-pet \
+    --repository hanbong5938/desktop-pet \
     --source-ref "$(git rev-parse HEAD)"
 ```
 
@@ -165,7 +169,7 @@ bash scripts/publish-wiki.sh --source-dir "$rendered" \
 
 `--wiki-url` accepts only a local filesystem path or `file:///` URL. It cannot redirect a token-bearing publisher to another network host. The isolated repository must be a real Git remote with an initial commit and valid HEAD; the publisher clones it, discovers its branch and performs a real ordinary push. No token is required for this local mode. For isolated verification, seed an unrelated Wiki page, check its preservation, repeat the command to confirm unchanged content causes no extra commit/push, and exercise an update and failure paths against disposable remotes. Do not treat these scenarios as evidence that remote GitHub Wiki publication has occurred.
 
-Publisher options are exactly `--source-dir DIR` (required), `--repository OWNER/REPO` (defaults to `GITHUB_REPOSITORY`, otherwise `hanbong5938/herdr-desktop-pet`), `--source-ref COMMIT` (optional full 40-character SHA for the commit message), `--wiki-url LOCAL_PATH_OR_FILE_URL` (optional isolated local override), and `--help`. It requires Bash, Git and Bun, and the sibling generator module for shared ownership validation.
+Publisher options are exactly `--source-dir DIR` (required), `--repository OWNER/REPO` (defaults to `GITHUB_REPOSITORY`, otherwise `hanbong5938/desktop-pet`), `--source-ref COMMIT` (optional full 40-character SHA for the commit message), `--wiki-url LOCAL_PATH_OR_FILE_URL` (optional isolated local override), and `--help`. It requires Bash, Git and Bun, and the sibling generator module for shared ownership validation.
 
 ## Managed files, credentials and failures
 
@@ -200,7 +204,7 @@ A render error occurs before the publisher is called. Clone/validation/copy/comm
 
 ## 한국어 운영·안전 요약
 
-정본은 저장소에서 검토한 Markdown이고 Wiki는 생성된 읽기용 문서입니다. 현재 승인된 대상은 **아직 게시되지 않은 v0.3.6 안정판 patch**이며 [정본 노트](v0.3.6.md)를 정확한 태그에서 동결하고 `bun scripts/release-docs.ts check v0.3.6`로 새 Release 본문을 만듭니다. 앱 전용 `HerdrDesktopPet-v0.3.6-macos-arm64.tar.gz`·개별 `.sha256`·`SHA256SUMS`와 별도 `HerdrDesktopPet-v0.3.6-rig-native.json`의 실제 비초안 게시·체크섬을 확인한 뒤에만 stable 포뮬러를 공개된 해시로 전환합니다. 앱은 ad-hoc 서명·미공증이며 앱/helper는 JSON `protocol: 3`, `observation_mode: 1`의 일치하는 쌍이어야 합니다. Tern 경로는 앱 Homebrew 설치 후 명시적 플러그인 설치이며 플러그인은 앱을 몰래 다운로드·빌드·실행하지 않습니다. 최종 검사·소비자 설치·Wiki·4개 언어 Pages 게시를 각각 확인하고 공개 v0.3.5 기록/태그/자산/체크섬·기존 베타 포뮬러를 보존하세요. 새 베타 릴리스는 승인하지 않습니다.
+정본은 저장소에서 검토한 Markdown이고 Wiki는 생성된 읽기용 문서입니다. 현재 중립 대상은 **아직 게시·런타임 검증 전인 Desktop Pet v0.4.0 후보**이며 [검토 노트](v0.4.0.md)를 정확한 core 태그에서 동결하고 `bun scripts/release-docs.ts check v0.4.0`로 새 Release 본문을 만듭니다. 앱 전용 `DesktopPet-v0.4.0-macos-arm64.tar.gz`·개별 `.sha256`·`SHA256SUMS`와 별도 `DesktopPet-v0.4.0-rig-native.json`·버전 고정 설치기 및 설치기 `.sha256`의 실제 비초안 게시·체크섬을 확인한 뒤에만 stable 포뮬러를 공개된 해시로 전환합니다. 앱은 ad-hoc 서명·미공증이며 앱/helper는 JSON `protocol: 3`, `observation_mode: 1`의 일치하는 쌍이어야 합니다. Tern 경로는 앱 Homebrew 설치 후 명시적 플러그인 설치이며 플러그인은 앱을 몰래 다운로드·빌드·실행하지 않습니다. 최종 검사·소비자 설치·Wiki·4개 언어 Pages 게시를 각각 확인하고 공개 v0.3.5 기록/태그/자산/체크섬·기존 베타 포뮬러를 보존하세요. 새 베타 릴리스는 승인하지 않습니다.
 
 `docs/releases/`와 `docs/migrations/`의 최상위 정본 Markdown 파일명은 위 매핑으로 제한되며, 지원하지 않는 파일명은 무시되지 않고 렌더링 오류를 일으킵니다. 수동 검증 체크리스트와 보조 기록은 `docs/validation/`에 둡니다. 정본 페이지에서 해당 파일을 링크할 수 있지만 Wiki에서는 새 관리 페이지가 아니라 소스 커밋에 고정된 blob URL로 연결됩니다. 체크리스트의 절차 자체는 완료된 인수 검증 증거가 아니므로 관찰한 결과와 실행하지 않은 항목을 구분합니다. `docs/validation/`의 변경도 Wiki 동기화를 트리거하여 고정 링크를 갱신합니다.
 
@@ -208,4 +212,4 @@ A render error occurs before the publisher is called. Clone/validation/copy/comm
 
 새 릴리스의 본문과 Wiki 버전 페이지는 같은 태그의 고정된 문서를 사용하고, 인덱스·정책·Unreleased는 현재 기본 브랜치 문서와 실제 Release API 상태를 사용합니다. Markdown 병합이나 태그 존재만으로 미배포 변경을 출시 완료로 표시하지 않습니다. 전용 자동화 토큰이 준비된 뒤에는 아래 Wiki 전용 워크플로로 복구할 수 있으며, 허가된 로컬 수동 발행과 Actions의 수동 실행은 다른 경로입니다.
 
-Wiki만 실패했으면 이미 공개된 Release는 그대로 두고 [Wiki 전용 워크플로](https://github.com/hanbong5938/herdr-desktop-pet/actions/workflows/wiki.yml)를 **기본 브랜치**에서 다시 실행하세요. 일반 동기화는 tag를 비우고, 릴리스 후 복구는 해당 공개·완전 배포 태그를 넣습니다. Wiki 복구 때문에 바이너리 릴리스 작업을 다시 실행하지 마세요. 과거 v0.1.5는 태그만 있고 공개 바이너리가 없습니다. 관련 없는 Wiki 페이지와 기존 이력은 보존하고, 충돌 해결에 force push를 쓰지 않습니다. 로컬 `--wiki-url` 검증은 초기 커밋이 있는 격리된 로컬 Git 원격만 대상으로 합니다.
+Wiki만 실패했으면 이미 공개된 Release는 그대로 두고 [Wiki 전용 워크플로](https://github.com/hanbong5938/desktop-pet/actions/workflows/wiki.yml)를 **기본 브랜치**에서 다시 실행하세요. 일반 동기화는 tag를 비우고, 릴리스 후 복구는 해당 공개·완전 배포 태그를 넣습니다. Wiki 복구 때문에 바이너리 릴리스 작업을 다시 실행하지 마세요. 과거 v0.1.5는 태그만 있고 공개 바이너리가 없습니다. 관련 없는 Wiki 페이지와 기존 이력은 보존하고, 충돌 해결에 force push를 쓰지 않습니다. 로컬 `--wiki-url` 검증은 초기 커밋이 있는 격리된 로컬 Git 원격만 대상으로 합니다.

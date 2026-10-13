@@ -77,6 +77,9 @@ name = "desktop-pet"
 version = "0.4.0"
 dependencies = [
  "desktop-pet-core",
+ "desktop-pet-herdr",
+ "desktop-pet-tern",
+ "desktop-pet-update-coordinator",
 ]
 
 [[package]]
@@ -94,9 +97,9 @@ version = "0.4.0"
 dependencies = [
  "block2",
  "desktop-pet-contracts",
+ "desktop-pet-update-coordinator",
  "dispatch2",
  "flate2",
- "herdr-update-coordinator",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -110,6 +113,43 @@ dependencies = [
  "sha2",
  "tempfile",
  "url",
+]
+
+[[package]]
+name = "desktop-pet-herdr"
+version = "0.1.0"
+source = "git+https://github.com/hanbong5938/herdr-desktop-pet?rev=d220c3eed2f1b47997066c29e5d6f344585595c1#d220c3eed2f1b47997066c29e5d6f344585595c1"
+dependencies = [
+ "desktop-pet-contracts",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "desktop-pet-tern"
+version = "0.1.0"
+source = "git+https://github.com/hanbong5938/tern-desktop-pet?rev=32baaa0943928a070342510cb1040ae75ed078e3#32baaa0943928a070342510cb1040ae75ed078e3"
+dependencies = [
+ "desktop-pet-contracts",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "desktop-pet-update-coordinator"
+version = "0.4.0"
+dependencies = [
+ "desktop-pet-contracts",
+ "libc",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -223,19 +263,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "herdr-update-coordinator"
-version = "0.2.0"
-dependencies = [
- "libc",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
-]
 
 [[package]]
 name = "icu_collections"

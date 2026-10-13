@@ -1,69 +1,59 @@
-# Herdr Desktop Pet 사용법
+# Desktop Pet — 사용법
 
-[English](usage.md) · **한국어** · [简体中文](usage.zh-Hans.md) · [日本語](usage.ja.md) · [설치 및 요구 사항](../readme.ko.md) · [CLI 계약](cli.md#한국어)
+독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
-[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 검증된 공개 arm64 자산·체크섬과 갱신된 안정판 Homebrew 포뮬러를 갖춘 최신 공개 안정판입니다. 일치하는 앱·도우미 쌍은 `protocol: 3`, `observation_mode: 1`을 보고합니다. 과거 v0.3.5와 베타 자산은 변경하지 않습니다.
+[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-## 첫 실행: 로컬 호스트 또는 독립 캐릭터
+**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)·bridge v0.3.7·중립 포뮬러·연동 태그는 **아직 공개되지 않았습니다**. 실제 후보 패키지/VM 검사는 공개 설치 가능 여부와 별개이며 최종 수락 표는 미완료입니다. 아래 명령은 중립 cutover 안내이지 검증된 공개 설치가 아닙니다. 과거 문서·태그·자산은 변경 불가합니다.
 
-아래 안정판 포뮬러로 공개 사전 빌드를 설치합니다. Rust/Cargo·Bun·Node.js·소스 체크아웃은 필요하지 않습니다. 기존 Brew 사용자는 아래 업그레이드 명령을 사용하세요. 기존 프로필·환경설정은 유지됩니다. 업그레이드 전 `herdr-desktop-pet stop`, 이후 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`, 명시적 `start`·`status`를 실행하세요.
+## 요구 사항
+
+Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/npm·Xcode Command Line Tools가 필요하며 사전 빌드 설치에는 필요 없습니다. 앱은 ad-hoc 서명·미공증입니다. Herdr 스냅샷에는 호환 로컬 서버(0.9.0 이상), 답장에는 별도 `agent.prompt`가 필요합니다. 선택형 client-attach 자동 시작에는 공식 Herdr 0.9.3에 [연동 저장소의 패치와 호스트 빌드 절차](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)를 적용하거나 실제 훅 지원 호스트를 사용해야 합니다. 순정 0.9.0/0.9.3에는 훅이 없고 플러그인 설치는 호스트를 패치하지 않습니다.
+
+## 설치와 선택형 연동
+
+중립 릴리스와 포뮬러가 실제로 게시된 뒤 공개 설치 명령은 다음과 같습니다:
 
 ```sh
-brew install hanbong5938/tap/herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
+brew install hanbong5938/tap/desktop-pet
+desktop-pet --version
+desktop-pet start
+desktop-pet status
 ```
 
-이 소스 체크아웃과 별도로 실제 [v0.3.6 릴리스 자산](https://github.com/hanbong5938/herdr-desktop-pet/releases)과 tap 포뮬러를 확인하세요. `--version`은 설치된 CLI, `status`의 `app_version`·실행 파일은 **실행 중인 데몬**을 식별합니다. `start`가 이전 데몬을 재사용할 수 있으므로 업그레이드·백엔드 변경 전 종료하세요. 말풍선을 열면 Herdr 0.9.0 이상 서버의 실제 에이전트 세션 스냅샷이 로컬 카드로 표시됩니다. 네이티브 수동 관찰에는 플러그인·패치·`client.attached` 훅이 필요하지 않습니다. 로컬 답장은 해당 서버의 `agent.prompt` 지원이 별도로 필요하며 ACK는 제출이지 완료가 아닙니다. 서버의 백엔드 소켓이 앱이 물려받은 환경/기본값과 다르면 서버의 **실제 소켓 경로**를 확인해 지정하세요(예시 경로를 실제 경로로 바꾸고 추측하지 마세요):
+사전 빌드·소스 설치는 Herdr 연동이 아니라 **core** 체크아웃에서 실행합니다. 기본 설치는 prebuilt-only이며 다운로드·검증 실패를 소스 빌드로 숨기지 않습니다. `--source`는 현재 core 체크아웃만 빌드하고 그 `dist/DesktopPet.app`을 사용합니다.
 
 ```sh
-herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
-herdr-desktop-pet status
+git clone https://github.com/hanbong5938/desktop-pet.git
+cd desktop-pet
+# Requires neutral public assets; not yet published:
+bash scripts/install.sh --prebuilt
+# Explicit source alternative:
+bash scripts/install.sh --source
+# Replace with the installer-reported executable and your actual profile paths:
+/absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-`--socket`은 `<state-dir>/control.sock`이 아닌 Herdr 백엔드를 지정합니다. `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`, `PATH`의 Herdr CLI와 실제 소켓을 소유한 서버를 확인하세요. 백엔드를 바꾸려면 기존 앱 데몬부터 종료하세요. **정상 Herdr 서버 없이** 캐릭터만 실행하려면 시작 전에 종료 스위치를 끄고 확인합니다:
+기본/`--prebuilt`는 고정된 중립 공개 자산을 요구하며 아직 게시되지 않았습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+
+필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 
 ```sh
-herdr-desktop-pet settings set exit_with_herdr off
-herdr-desktop-pet settings get
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-시작 **후** `herdr-desktop-pet hide_bubble`로 빈 말풍선만 선택적으로 숨길 수 있습니다. Herdr 설치·플러그인은 필요 없습니다. 약 30초 후 캐릭터가 사라지면 `settings get`과 `status`를 확인하세요. 새 프로필의 `exit_with_herdr`는 기본 켜짐이어서 정상 서버가 없으면 유예 후 종료합니다. 같은 설정/상태 프로필에서 끈 다음 다시 시작하세요. 등록된 모든 로컬 플러그인 endpoint의 확인된 비활성화/연결 해제는 꺼진 스위치와 무관하게 종료합니다. 원격 관찰은 [별도 선택 경로](#관찰-대상-설정)이고 관리형 attach 자동 시작에는 [패치 호스트 연동](../integrations/herdr/README.md#build-in-separate-checkouts)이 필요합니다.
-
-## Tern 설치와 분리 프로필
-
-네이티브 앱을 먼저 설치하고 별도 공개 플러그인을 명시적으로 설치하세요. 플러그인은 앱을 다운로드·빌드·시작하지 않습니다.
-
-```sh
-brew install hanbong5938/tap/herdr-desktop-pet
+herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
-PET="$(command -v herdr-desktop-pet)"
-PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
-PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
-"$PET" --version
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 ```
 
-기본 호스트는 Herdr입니다. `--host tern`에는 Herdr 서버·소켓·플러그인이 필요 없습니다. 실제 Tern 창의 **Configure desktop pet connection**에서 절대 실행 파일 `PET`와 위의 설정 및 상태 경로를 모두 지정한 뒤 **Connect to desktop pet**을 실행하세요. 변수 이름이 아닌 실제 경로를 입력하세요. 창 연결과 같은 프로필의 네이티브 `status`를 확인하세요. 목록 발견만으로 연결을 입증하지 않습니다. 바이너리·모드를 바꾸기 전에 같은 프로필을 종료하세요. 소스 개발은 선택 사항이며 현재 체크아웃에서 `bash scripts/install.sh --source`로 빌드하고 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`로 지정합니다. 특별한 브랜치는 필요 없습니다. 앱·도우미는 일치하는 프로토콜 3 쌍이며 추가 JSON 기능은 `protocol: 3`, `observation_mode: 1`입니다. 영어·한국어·중국어 간체·일본어를 유지합니다. **베타 업데이트 받기**는 기본 꺼짐이며 직접 선택해야 합니다. 확인만으로 설치·재시작하지 않습니다.
+## 프로필·연결·이전
 
-설치·링크·목록은 플러그인 발견만 확인하며 기존 창이 최신 코드를 로드했다는 증거가 아닙니다. **실제 Tern 창의 연결 상태**와 같은 프로필의 네이티브 `status`를 확인하세요. 설치·링크·변경 뒤 명령이 없거나 창이 이전 코드를 사용한다면 그 창에서 플러그인을 명시적으로 다시 로드하고 재확인하세요. 이전의 잘못된/기본 연결 경로로 Tern의 50ms 콜백 시간 한도가 초과됐다면 **Configure desktop pet connection**에서 빌드한 실행 파일과 동일한 설정·상태 프로필을 지정한 뒤 플러그인을 명시적으로 다시 로드하세요. 경로를 고쳐도 다시 로드하기 전까지 훅은 비활성 상태로 남을 수 있습니다. 별도로 CLI에서 시작한 창의 로그인·Keychain 오류는 이미 실행 중인 창의 상태를 설명하지 않습니다.
+새 프로필은 Auto입니다. Connection은 등록된 제공자의 실제 연결을 표시하며 설치 여부로 추측하지 않습니다. 제공자 ID는 불투명 값이고 작업 권한은 출처 이름 접두사·경로가 아니라 capability로 결정합니다. Auto는 동시 관찰이지 fallback이 아닙니다. 원격은 읽기 전용이며 Tern은 답장만 지원하고 worktree 제거는 지원하지 않습니다. 접수는 에이전트 완료가 아닙니다.
 
-**연결 저장과 복구:** 실행 파일·설정·상태 경로를 함께 검증하고 버전이 있는 하나의 연결 프로필로 커밋한 뒤 활성 연결·창 식별을 전환합니다. 취소·검증 실패·저장 실패 시 이전 프로필을 유지합니다. 기존 세 키는 정식 프로필이 없을 때만 한 번 이전하며 성공적으로 커밋한 뒤에만 삭제합니다. 정식 프로필이 잘못되어도 기존 키의 기본값으로 대체하지 않습니다. 다른 창이 프로필을 커밋한 경우에도 이전 연결의 지연된 콜백이 새 연결에 적용되지 않습니다. 데몬 재시작·첫 등록 응답 유실·출처 회수 시 일반 주기 조회가 새 연결 식별을 얻으며 이전 `agents:ask`를 재실행하지 않습니다. 현재 연결의 접수가 거부되면 해당 교환에 담긴 보고만 버리고 이후 보고는 유지합니다. 전달 여부가 불확실하면 수동 재전송 전에 실제 에이전트 대화 기록을 확인하세요.
+[사용법](usage.ko.md), [정확한 프로필·탐색 계약](development.md#profiles-and-installation-discovery), [A→B 이전 안내](migrations/desktop-pet.md)를 확인하세요. status 또는 Connection의 실제 실행 파일/config/state 세 값을 Tern Configure에 입력하고 Connect하세요. 기존 별도 Tern·beta·custom 프로필은 그 자리에서 보존하고 병합하지 않습니다.
 
-**연속 조회와 프롬프트 접수:** 목록 수집을 네 개의 협력적·지연 시간 0인 콜백으로 나누어 콜백마다 수행하는 작업량을 줄입니다. 한 콜백에서 모든 목록을 동기적으로 수집하거나 단계 사이에 큰 타이머 지연을 두지 않으며 주기 조회 간격은 그대로입니다. 한 번만 호출하는 `agents:ask`의 성공·실패 결과가 나오면 기존의 새 전체 목록 교환을 즉시 시작해 결과를 보고합니다. 다음 주기 조회를 기다리거나 ask를 재실행하거나 캐시된 스냅샷을 사용하지 않습니다. SDK 호출 하나가 느리거나 OS 스케줄링·선점이 발생하면 여전히 Tern 콜백 시간 한도를 초과하거나 전달이 늦어질 수 있으며 지연 시간이나 무기한 안정성을 보장하지 않습니다. 콜백 시간 한도 수정은 [개발 안내](development.ko.md), 접수 의미와 기한은 [CLI 규약](cli.md)을 참고하세요.
-
-**최신 상태와 용량:** 새 스냅샷 없이 5초가 지나면 Herdr 조회나 느린 클라이언트 입출력과 독립적으로 Tern 출처가 오프라인이 됩니다. Herdr와 Tern은 출처 한도 64개를 공유합니다. 새 Tern 창은 대기 작업이 마무리된 만료·오프라인 Tern 출처만 회수할 수 있습니다. 살아 있는 출처·Herdr 출처는 밀어내지 않고 회수한 출처 ID를 재사용하지 않습니다. 따라서 한도가 찼다면 활성 창 대신 새 창의 연결을 거부할 수 있습니다. 네이티브 `status.herdr_socket`은 Tern 전용 모드에서도 설정된 Herdr 경로를 표시합니다. 실제 수신 엔드포인트의 증거나 Herdr 소켓을 만들어야 한다는 뜻이 아닙니다. 크기 제한과 교환 상세는 [CLI 규약](cli.md)과 [개발 안내](development.ko.md)를 참고하세요. 접수 수락을 에이전트 완료로 해석하지 마세요.
-
-Herdr와 Tern을 **함께** 관찰하려면 이 프로필을 종료한 뒤 같은 설정·상태 경로의 네이티브 실행 파일을 `--host both`로 다시 시작하세요. 이 모드에서 Herdr 카드를 보려면 로컬 Herdr 서버가 필요합니다. `--socket PATH`는 그 Herdr 백엔드만 선택합니다. Tern 전용 모드는 **Herdr 서버·플러그인·패치 호스트·소켓이 필요 없고**, Herdr 등록이나 단절 종료 타이머도 실행하지 않습니다. 해당 프로필의 네이티브 명령은 동일한 `--host`를 사용하고 Herdr로 돌아가려면 종료 뒤 `--host herdr`로 시작하세요. 기본값은 계속 `herdr`이고 엄격히 해석되는 `HERDR_PET_OBSERVATION_MODE=herdr|tern|both` 환경변수를 사용하지 않는 한 바뀌지 않습니다. 명시적 `--host`가 우선하며 다른 모드로 실행 중인 데몬은 조용히 재사용하지 않고 거부합니다. `"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop`으로 종료하세요(`both`라면 바꾸어 입력). 모드·바이너리를 바꾸기 전후 `status`와 실제 실행 파일을 확인하세요. 주입된 `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`는 CLI 경로 플래그보다 우선하므로 수동 명령에서 해제하거나 맞추세요. 설정·상태 **두 경로 모두** 교체할 앱 설치 경로 밖에 두고 CLI·Tern 창에 똑같이 지정하세요.
-
-창 VM은 자신의 로컬 호스트 에이전트 목록만 읽습니다. 각 창 VM의 실행 세대는 별도 출처로 취급하며 오래되거나 닫힌 창은 마지막 카드가 남아도 **오프라인**이 됩니다. 플러그인은 `tern.process.run`을 통해 크기 제한 스냅샷을 로컬 `tern-exchange`에 전달하고 비공개 제어 소켓을 사용합니다. `--socket`으로 이를 지정하거나 원격 Tern 호스트를 조회하지 않습니다. 에이전트 상태는 Tern 관찰 결과이며 제공자 완료 결과를 추측하지 않습니다. `idle`은 완료/성공 증거가 아닙니다. 선택한 로컬 Tern 카드의 답장은 한 번만 제안하고 플러그인이 패널을 재검증한 뒤 Tern의 의미 기반 `agents:ask`를 호출합니다. 셸·PTY 입력·몰래 재시도·Tern 워크트리 삭제는 없습니다. 네이티브 제출 ACK와 뒤따르는 `prompt_accepted` 접수는 별개입니다. 수락된 전달도 **대기열에 있을 수 있고** `committed: false`이며 에이전트 완료가 아닙니다. 교환이 만료·실패하거나 결과가 없다면 성공으로 단정하거나 무작정 재전송하지 마세요. Herdr 원격 카드는 계속 읽기 전용이고 Tern 카드에는 워크트리 삭제가 없습니다.
-
-앞서 일반 설치 Tern 0.6.1의 로그아웃 창은 연결된 플러그인을 로딩했고 프로필을 맞춘 서명·패키징 소스 앱과 `agents:list` / `process.run`으로 실제 연결됐습니다. `data_connected: true`, 정상적인 **빈** 출처 하나, 세션 0개를 확인했고 창을 닫자 약 6초 뒤 출처는 오프라인이 되었지만 캐릭터는 계속 실행됐습니다. 설치된 구형 앱은 `tern-exchange`가 없다고 보고했습니다. 주입된 브리지 교환으로 네이티브 표시 창·접수 처리·만료·오래된/다른 호스트 거부도 별도로 확인했습니다. 이후 사용자의 기존 Tern 창에서 명시적인 분리 앱 프로필·플러그인 연결과 Tern CLI로 만든 임시 OMP 탭을 사용해 실검증했습니다. 플러그인은 실제 로컬 에이전트를 관찰했고 네이티브 의미 기반 프롬프트는 `prompt_accepted`와 전달 상태 `accepted_may_be_queued`를 반환했습니다. 별도로 Tern 에이전트 대화 기록에는 `TERN_PET_SMOKE_OK`라고 정확히 답하라는 사용자 요청과 어시스턴트의 `TERN_PET_SMOKE_OK` 답장이 기록됐습니다. 관찰된 `idle` 상태와 일치하는 마지막 메시지는 권위 있는 완료·성공 이벤트가 아닙니다. 일반적인 베타 사용에는 로그인이 필요합니다. 테스트할 때 사용자의 실행 중인 Tern 창을 재사용하고, 별도로 시작한 CLI 창의 Keychain 접근 오류를 기존 로그인 고장의 증거로 해석하지 마세요. 원격 호스트 지원이나 공개 플러그인·아티팩트·Tern 최소 공개 버전을 입증하지 않습니다.
+```sh
+desktop-pet profile show --json
+desktop-pet --herdr-socket /actual/path/to/herdr-api.sock start
+desktop-pet preferences set --observation-host auto
+```
 
 ## 조작
 
@@ -102,7 +92,9 @@ Herdr와 Tern을 **함께** 관찰하려면 이 프로필을 종료한 뒤 같�
 
 조합 중에는 카드 선택·필터 변경·행 교체를 문자 손실 없이 미룹니다. 조합 종료 후 마지막 필터와 여전히 표시되는 유효한 세션 선택만 적용하며 확정 텍스트는 원래 세션·연결 세대의 초안에 남습니다. 그사이 상태와 전송 가능 여부는 갱신됩니다. 답장칸은 테두리와 팔레트 기반 불투명 배경을 사용하며 작은 네이티브 보내기 버튼은 전송 가능 상태를 따릅니다. 실시간 테마 변경에도 초안과 미확정 입력은 유지됩니다.
 
-메시지는 선택한 **로컬** Herdr 출처의 `agent.prompt` API로만 전달합니다. 전역 CLI·셸·SSH·패널 직접 입력으로 대체하지 않습니다. 로컬 관찰 제외, 출처 오프라인, 오래되거나 준비되지 않은 세션, 서버 메서드 미지원에는 보낼 수 없습니다. `unsupported_method`를 보고하고 우회하지 않습니다. 마지막 관측 카드가 남은 원격 출처도 읽기 전용입니다. 승인/질문 UI는 실제 터미널에서 처리하세요. 이 API는 Herdr 0.9.2에서 확인됐지만 로컬 관찰 최소 버전 0.9.0만으로 실행 중 서버의 지원을 보장하지 않습니다. 제출 **ACK는 에이전트 완료가 아닙니다**. 자동 재전송하지 않으며 불명확한 전달은 수동 재전송 전에 확인하세요. API는 원자적인 예상 세션 보호 없이 패널의 현재 에이전트를 대상으로 하므로 제출 순간 에이전트·세션 교체 경합은 배제할 수 없습니다. 자동화에서는 [CLI 세션 식별·전달 계약](cli.md#세션과-에이전트-프롬프트)을 참고하되 이를 GUI의 우회 전달 수단으로 사용하지 마세요.
+Herdr 카드의 메시지는 선택한 **로컬** Herdr 출처의 `agent.prompt` API로만 전달합니다. 전역 CLI·셸·SSH·패널 직접 입력으로 대체하지 않습니다. 로컬 관찰 제외, 출처 오프라인, 오래되거나 준비되지 않은 세션, 서버 메서드 미지원에는 보낼 수 없습니다. `unsupported_method`를 보고하고 우회하지 않습니다. 마지막 관측 카드가 남은 원격 출처도 읽기 전용입니다. 승인/질문 UI는 실제 터미널에서 처리하세요. 이 API는 Herdr 0.9.2에서 확인됐지만 로컬 관찰 최소 버전 0.9.0만으로 실행 중 서버의 지원을 보장하지 않습니다. 제출 **ACK는 에이전트 완료가 아닙니다**. 자동 재전송하지 않으며 불명확한 전달은 수동 재전송 전에 확인하세요. API는 원자적인 예상 세션 보호 없이 패널의 현재 에이전트를 대상으로 하므로 제출 순간 에이전트·세션 교체 경합은 배제할 수 없습니다. 자동화에서는 [CLI 세션 식별·전달 계약](cli.md#세션과-에이전트-프롬프트)을 참고하되 이를 GUI의 우회 전달 수단으로 사용하지 마세요.
+
+Tern 답장은 등록 어댑터가 다시 검증한 **일회 `agents:ask`**를 사용하며 Herdr fallback·셸·PTY 입력을 하지 않습니다. `prompt_accepted`/`accepted_may_be_queued`는 SDK 접수일 뿐 모델 전달/완료가 아니며 제시/불명확한 ask를 다시 보내지 않습니다. 로컬 창·그룹 호스트 목록은 어댑터가 승인한 locality를 유지하고 원격 카드는 읽기 전용이며 Tern에는 worktree 삭제 권한이 없습니다. 창 출처는 5초 만료 뒤 Offline이 되지만 Auto/어댑터 없는 앱은 유지됩니다. 목록은 네 개의 cooperative zero-delay 콜백으로 나누고 ask 결과 뒤 새 교환을 바로 시작합니다. 단일 SDK 호출/OS 선점은 여전히 예산을 넘길 수 있어 지연·안정성 보장은 아닙니다.
 
 ## 독립 표시와 메뉴 막대 복구
 
@@ -123,6 +115,8 @@ Herdr와 Tern을 **함께** 관찰하려면 이 프로필을 종료한 뒤 같�
 확인 창에는 저장소, **정확한 체크아웃 경로**, 카드 하나가 아닌 **작업 공간 전체**의 탭·패널 수가 표시됩니다. 삭제는 그 작업 공간과 모든 탭·패널을 닫고 실행 중 에이전트/프로세스를 종료하며 연결 체크아웃과 **무시된 파일·빌드 출력물**까지 지웁니다. 주 저장소와 Git 브랜치는 삭제하지 않고 휴지통/실행 취소는 없습니다. **취소**가 첫 번째·기본 동작으로 Return·숫자 키패드 Enter·Escape도 취소합니다. **워크트리 삭제**는 별도 두 번째 동작이며 배치 후 기본 취소 버튼 설정에 실패하면 삭제 자체를 중단합니다. 자신의 폐기 가능한 대상, 파일과 모든 프로세스 영향을 먼저 확인하세요.
 
 현재 정상 관찰 중인 일관된 로컬 출처와 유효하고 모호하지 않은 연결 워크트리 메타데이터만 대상입니다. 주 저장소 루트·원격/보관/오프라인 카드·누락/오류 메타데이터·구형 서버는 제외합니다. 서버가 `worktree.remove`를 지원하지 않으면 알릴 뿐 Git/셸/SSH·강제 삭제로 우회하지 않습니다. IME 조합 중 삭제가 비활성화되고 제출 전에도 검사합니다. 한 번에 한 작업만 진행하며 고정한 대상을 확인 후 새 서버 스냅샷으로 다시 검증하고 `force: false`로 **한 번만** 요청합니다. 낙관적 행 삭제나 자동 재시도는 없습니다. 변경된 추적/미추적 파일·잠긴 체크아웃은 서버가 거절할 수 있지만 **ignored 파일은 삭제될 수 있습니다**. 보통 5초 감시자 갱신이 카드 표시의 기준이며 행·선택·창이 바뀌어도 결과 안내는 남습니다. 전달이 불명확하면 **수동 재시도 전 실제 서버/워크트리 상태를 별도로 확인**하세요. 요청은 `workspace_id`를 지정하며 원자적 예상 체크아웃/generation CAS가 없어 마지막 검사 이후 서버 재시작·작업 공간 재연결 경합은 막는다고 보장할 수 없습니다. [CLI 검사 토큰 계약](cli.md#워크트리-제거)은 60초 일회용 검사 대상과 상위 ACK, 이후 pane+session 부재 관측 및 실제 파일시스템 증명을 구분합니다. 실제 작업 체크아웃을 시험에 쓰지 마세요. [과거 beta 관찰](releases/unreleased.md)은 안정판 물리 입력 인증이 아닙니다.
+
+대상은 추가로 등록 출처의 local/worktree 삭제 capability가 있어야 합니다. 제공자 이름·로컬처럼 보이는 경로로 권한을 얻지 못하며 Tern은 삭제 capability가 없습니다.
 
 ## 말풍선과 캐릭터 설정
 
@@ -154,43 +148,51 @@ Herdr와 Tern을 **함께** 관찰하려면 이 프로필을 종료한 뒤 같�
 
 ## 관찰 대상 설정
 
-원격 관찰은 v0.1.6에 처음 배포됐고 안정판 v0.2.0에는 간결한 관찰 설정·재연결 명령 복사·단독 원격 전용 watcher 시작 수정이 포함됩니다. **설정 → 관찰 대상**의 **이 Mac**은 기본 켜짐, **원격 머신**은 기본 꺼짐입니다. 원격에서는 먼저 **대화형 터미널**에서 [Herdr 저장 머신 안내](https://herdr.dev/docs/0.9.2/connecting-machines/)에 따라 SSH 머신을 추가·인증하세요(예: `herdr machine add workbox`). 원격 서버 설치/승인 질문도 터미널에서 해결합니다. 그런 다음 원격 머신을 켜고 **관찰할 머신**에서 활성 저장 프로필을 명시적으로 선택합니다. 프로필 하나는 호스트 전체가 아니라 **저장된 원격 Herdr 세션 하나**를 관찰합니다. 등록·attach만으로 선택되지 않습니다. 화면을 표시할 **로컬 Mac**에서 앱을 실행하세요. 원격 호스트에는 호환 Herdr 서버만 필요하고 앱/플러그인은 필요 없으며 로컬 CLI로 조회합니다.
+현재 소스에서는 기본 접힘 상태의 **연결 → 관찰 범위**를 펼치세요. 공개 v0.3.6은 **설정 → 관찰 대상** 경로를 사용합니다. 원격 관찰은 Auto/Herdr에만 있고 Tern 전용은 원격·머신 컨트롤을 숨기되 저장 선택을 유지합니다.
 
-아직 정상적인 로컬 서버가 없을 때 원격 전용 프로필을 설정하려면 **첫 앱 시작 전에** 설치된 네이티브 CLI에서 선택적으로 `herdr-desktop-pet settings set exit_with_herdr off`를 실행해 30초 종료 유예 후 종료되지 않게 할 수 있습니다. 원격 조회가 정상이 되면 원한다면 다시 켜세요. 원격 플러그인/Herdr 플러그인 액션은 필요 없습니다. **이 Mac**을 꺼도 로컬 카드만 제외하며 등록 로컬 실행 관리 endpoint나 비활성화 확정 종료를 바꾸지 않습니다. 머신 목록은 원격 관찰이 꺼져도 **5초**마다 갱신되고 켜졌을 때는 선택된 활성 프로필만 **5초**마다 조회합니다. 선택은 앱 재시작·원격 끄기를 지나도 유지되고 이름 변경에도 유지됩니다. 프로필 비활성화/삭제는 관찰만 제외하며 프로세스를 중지하지 않습니다. 로컬·각 원격 출처는 같은 세션 ID라도 별도 카드 레이블/정체성을 사용합니다.
+원격 관찰은 v0.1.6에 처음 배포됐고 안정판 v0.2.0에는 간결한 관찰 설정·재연결 명령 복사·단독 원격 전용 watcher 시작 수정이 포함됩니다. 로컬 **이 Mac**은 기본 켜짐, **원격 머신**은 기본 꺼짐입니다. 원격에서는 먼저 **대화형 터미널**에서 [Herdr 저장 머신 안내](https://herdr.dev/docs/0.9.2/connecting-machines/)에 따라 SSH 머신을 추가·인증하세요(예: `herdr machine add workbox`). 원격 서버 설치/승인 질문도 터미널에서 해결합니다. 그런 다음 원격 머신을 켜고 **관찰할 머신**에서 활성 저장 프로필을 명시적으로 선택합니다. 프로필 하나는 호스트 전체가 아니라 **저장된 원격 Herdr 세션 하나**를 관찰합니다. 등록·attach만으로 선택되지 않습니다. 화면을 표시할 **로컬 Mac**에서 앱을 실행하세요. 원격 호스트에는 호환 Herdr 서버만 필요하고 앱/플러그인은 필요 없으며 로컬 CLI로 조회합니다.
+
+아래 30초 종료 방지와 확인된 비활성화 종료 설명은 **Herdr 전용 모드**(등록 Herdr 어댑터)에 해당합니다. Auto/어댑터 없는 앱은 종료 방지 설정 없이 유지됩니다.
+
+아직 정상적인 로컬 서버가 없을 때 원격 전용 프로필을 설정하려면 **첫 앱 시작 전에** 설치된 네이티브 CLI에서 선택적으로 `desktop-pet settings set exit_with_herdr off`를 실행해 30초 종료 유예 후 종료되지 않게 할 수 있습니다. 원격 조회가 정상이 되면 원한다면 다시 켜세요. 원격 플러그인/Herdr 플러그인 액션은 필요 없습니다. **이 Mac**을 꺼도 로컬 카드만 제외하며 등록 로컬 실행 관리 endpoint나 비활성화 확정 종료를 바꾸지 않습니다. 머신 목록은 원격 관찰이 꺼져도 **5초**마다 갱신되고 켜졌을 때는 선택된 활성 프로필만 **5초**마다 조회합니다. 선택은 앱 재시작·원격 끄기를 지나도 유지되고 이름 변경에도 유지됩니다. 프로필 비활성화/삭제는 관찰만 제외하며 프로세스를 중지하지 않습니다. 로컬·각 원격 출처는 같은 세션 ID라도 별도 카드 레이블/정체성을 사용합니다.
 
 행은 이름·저장 세션·상태를 분리해 표시하고 긴 오류는 줄바꿈하고 스크롤합니다. 최초 목록 조회와 빈 목록을 구분하며 갱신 실패 시 이전 목록과 오래된 목록 경고를 함께 보여줍니다. 원격을 끄면 예전 성공 상태가 아닌 **관찰 꺼짐**을 보여줍니다. 미선택·일시 중지·확인 중·관찰 중·이용 불가·비활성 상태도 구분합니다. 불투명 프로필 ID 기준 컨트롤 재사용으로 폴링/이름 변경 때 포커스·스크롤을 보존하고 목록이 줄면 스크롤 범위를 조정합니다. 라벨/문맥 접근성 이름은 한영 현지화했고 **등록 방법**/접힌 진단은 읽기 전용입니다. 출처 스위치·선택 프로필은 카드·수·전체 상태·완료/결과 반응을 결정하고 카드의 상태 필터는 포함된 카드의 표시만 바꿉니다. 모두 끄면 일부러 제외한 출처의 단절 경고가 아닌 **알 수 없음**입니다.
 
-폴링 사이 5초 미만의 상태 변화·짧은 완료는 놓칠 수 있습니다. 단절 시 마지막 카드는 **오프라인**으로 남고 실시간이 아닌 상태 불명으로 집계됩니다. 재연결/재선택 후 첫 스냅샷은 과거 완료를 재생하지 않는 기준값입니다. 인증 문제 시 `herdr machine list`로 ID를 확인하고 아래 명령의 인용된 자리표시자를 정확한 ID로 바꾸어 **사용자가 대화형 터미널에서 직접** 실행하세요: `herdr machine reconnect '<profile-id>'`. **오류 자세히 보기**는 읽기 전용이며 **재연결 명령 복사**는 안전하게 인용된 명령만 복사하고 실행하지 않습니다. 앱은 인증 질문에 답하거나 원격 소프트웨어를 설치하거나 실패한 원격 관찰을 로컬 조회로 대체하지 않으며 원격 카드는 읽기 전용입니다. 로컬 관찰은 Herdr ≥0.9.0이고 원격에는 [Herdr 0.9.2 CLI 문서](https://herdr.dev/docs/0.9.2/cli-reference/#saved-ssh-machines)에 설명된 **로컬 CLI**의 저장 머신 API 전달(`herdr --machine <profile-id> api snapshot`)과 호환 원격 서버가 추가로 필요합니다. CLI 부족은 설정에서 보고하며 로컬 관찰의 버전 기준을 올리지 않습니다. `client.attached` 자동 실행에는 단순 0.9.3 매니페스트 기준이 아닌 **별도 패치 호스트**가 필요합니다([호스트 통합](../integrations/herdr/README.md)).
+폴링 사이 5초 미만의 상태 변화·짧은 완료는 놓칠 수 있습니다. 단절 시 마지막 카드는 **오프라인**으로 남고 실시간이 아닌 상태 불명으로 집계됩니다. 재연결/재선택 후 첫 스냅샷은 과거 완료를 재생하지 않는 기준값입니다. 인증 문제 시 `herdr machine list`로 ID를 확인하고 아래 명령의 인용된 자리표시자를 정확한 ID로 바꾸어 **사용자가 대화형 터미널에서 직접** 실행하세요: `herdr machine reconnect '<profile-id>'`. **오류 자세히 보기**는 읽기 전용이며 **재연결 명령 복사**는 안전하게 인용된 명령만 복사하고 실행하지 않습니다. 앱은 인증 질문에 답하거나 원격 소프트웨어를 설치하거나 실패한 원격 관찰을 로컬 조회로 대체하지 않으며 원격 카드는 읽기 전용입니다. 로컬 관찰은 Herdr ≥0.9.0이고 원격에는 [Herdr 0.9.2 CLI 문서](https://herdr.dev/docs/0.9.2/cli-reference/#saved-ssh-machines)에 설명된 **로컬 CLI**의 저장 머신 API 전달(`herdr --machine <profile-id> api snapshot`)과 호환 원격 서버가 추가로 필요합니다. CLI 부족은 설정에서 보고하며 로컬 관찰의 버전 기준을 올리지 않습니다. `client.attached` 자동 실행에는 단순 0.9.3 매니페스트 기준이 아닌 **별도 패치 호스트**가 필요합니다([호스트 통합](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)).
 
 ## 실행 관리와 플러그인 액션
 
-설정의 **Herdr 실행 시 자동 시작**(`auto_start`)과 **모든 Herdr 서버 연결이 끊기면 종료**(`exit_with_herdr`)는 새 프로필에서 둘 다 켜진 독립 스위치입니다. 기존 `lifecycle.json`의 boolean `enabled`는 false까지 그대로 `auto_start`로 이전하고 빠진 `exit_with_herdr`는 기존 독립 실행 동작을 위해 꺼짐으로 시작합니다. 둘 다 `preferences.json`이 아닌 `lifecycle.json`에만 저장하고 endpoint·시작 메타데이터와 무관한 필드를 보존합니다. 잘못된 JSON/값은 기본값으로 초기화하지 않고 오류이며 저장 실패도 기존 스위치·실행 정책을 보존하고 오류를 표시합니다.
+Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추가 키는 등록 연동이 소유합니다. Herdr 소유자는 **`lifecycle.json`이 없을 때만** 첫 lifecycle 쓰기의 공유 profile writer 안에서 `exit_with_herdr:true`를 원자적으로 초기화합니다. 기존 파일에서 키가 없으면 false이며 명시적 false도 유지합니다. 기존 boolean `enabled`는 false까지 `auto_start`로 이전합니다. endpoint·시작 메타데이터·다른 소유자의 필드를 보존하며 `preferences.json`이 아닌 `lifecycle.json`에 저장합니다. 잘못된 JSON/값은 초기화하지 않고 오류이며 저장 실패는 기존 실행 정책을 유지합니다. Auto/어댑터 없는 앱은 Herdr 없이 살아 있고 아래 Herdr endpoint·단절 규칙은 Herdr 전용 선택에서만 적용합니다.
 
-자동 시작이 켜지면 서버 시작 또는 **성공한 shell/terminal 클라이언트 attach**에서 앱이 없을 때 실행합니다. 꺼진 상태의 자동 `ensure`는 없는 앱을 정상적으로 건너뛰며 실행 중 endpoint는 등록할 수 있지만 숨긴 앱을 강제로 표시하지 않습니다. 수동 `start`는 설정을 바꾸지 않고 실행됩니다. `stop`/네이티브 **Quit**은 시작 대기 중인 경우를 포함해 이번 실행만 종료합니다. `restart`는 수동으로 다시 시작하고 설정·위치·크기를 보존합니다. 자동 시작이 켜져 있다면 다음 해당 이벤트에서 다시 시작할 수 있으므로 이를 막으려면 스위치를 끄세요. Herdr 플러그인 비활성화/연결 해제는 **별도 호스트 기능**입니다. 순정 Herdr 0.9.0/0.9.3은 `client.attached`가 없으며 공식 0.9.3의 제공 패치 또는 추후 실제 훅 제공 호스트가 필요합니다. 알 수 없는 훅 경고는 성공이 아닙니다([호스트 통합](../integrations/herdr/README.md)).
+자동 시작이 켜지면 서버 시작 또는 **성공한 shell/terminal 클라이언트 attach**에서 앱이 없을 때 실행합니다. 꺼진 상태의 자동 `ensure`는 없는 앱을 정상적으로 건너뛰며 실행 중 endpoint는 등록할 수 있지만 숨긴 앱을 강제로 표시하지 않습니다. 수동 `start`는 설정을 바꾸지 않고 실행됩니다. `stop`/네이티브 **Quit**은 시작 대기 중인 경우를 포함해 이번 실행만 종료합니다. `restart`는 수동으로 다시 시작하고 설정·위치·크기를 보존합니다. 자동 시작이 켜져 있다면 다음 해당 이벤트에서 다시 시작할 수 있으므로 이를 막으려면 스위치를 끄세요. Herdr 플러그인 비활성화/연결 해제는 **별도 호스트 기능**입니다. 순정 Herdr 0.9.0/0.9.3은 `client.attached`가 없으며 공식 0.9.3의 제공 패치 또는 추후 실제 훅 제공 호스트가 필요합니다. 알 수 없는 훅 경고는 성공이 아닙니다([호스트 통합](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)).
 
 처음 관찰한 로컬 endpoint에서 유효한 `plugin_list`에 `desktop-pet`이 없다면 **이 서버에 미설치**, 비활성화가 아닙니다. 로컬 스냅샷·선택한 원격 관찰은 계속할 수 있습니다. 명시적 `enabled: false`는 endpoint를 분리합니다. 같은 데몬이 그 endpoint에서 활성화 **또는 비활성화** 항목을 한 번이라도 봤다면 이후 항목 부재는 연결 해제로 취급하고 분리합니다. 기억은 이번 실행의 재확인·재연결을 지나지만 새 데몬에서는 초기화됩니다. **등록된 모든 로컬 endpoint**의 비활성화/연결 해제가 확정되면 원격 서버가 정상이어도, `exit_with_herdr`가 꺼져도 **즉시** 종료합니다. 처음부터 항목이 없던 경우는 이 조건이 아닙니다. 그 외에는 종료 스위치가 켜졌을 때 **마지막 정상 서버 연결**이 끊긴 뒤 **30초** 내 정상 연결이 돌아오지 않으면 종료합니다. 처음 시작부터 연결이 없어도 같은 유예를 적용합니다. 클라이언트 detach만으로 서버를 잃은 것이 아니며 오래된 endpoint/실패 재시도로 유예를 늘리지 않습니다. 스위치를 끄면 카운트다운을 취소하고 단절 상태에서 켜면 새 30초를 시작합니다. 정상 서버 하나만 남아도 앱을 유지하며 종료 설정을 끄면 수동 앱은 Herdr 없이 유지할 수 있습니다. 자동 시작 변경만으로 이번 앱을 종료/표시하지 않으며 `show`/`hide`/`toggle`은 표시만 바꿉니다.
 
-실행 중 활성 Herdr 호스트에서는 `herdr plugin action invoke status --plugin desktop-pet` 형태로 `settings`, `restart`, `stop` 등도 호출합니다. 전역 `settings`는 앱이 꺼져도 **실행 관리 설정창만** 열지만 해당 호스트가 필요합니다. 네이티브 앱 실행 파일의 `settings`, `settings get`, `settings set auto_start off`, `settings set exit_with_herdr on`은 호스트 없이 가능하며 get/set은 구조화 JSON을 반환합니다. set은 정확한 두 키와 `on|off`만 허용하고 앱을 시작하거나 다른 설정을 바꾸지 않으며 잘못된 입력·저장 실패를 오류로 반환합니다. `status`도 둘 다 보고합니다. 추가 액션 ID는 실행 관리 `start`, `ensure`, `stop`, `restart`, `status`, `settings`; 표시 `show`, `hide`, `toggle`; 클릭 통과 `passthrough`, `alpha_passthrough`; 말풍선 `show_bubble`, `hide_bubble`, `bubble_above|below|left|right|auto`; 위치·크기 `reset`, `bigger`, `smaller`입니다. [네이티브 CLI 계약](cli.md#한국어)은 즉시 액션과 절대값 presentation/preferences, 비공개 소켓과 명령 계열별 작업 조회를 구별하며 공개 `orchestrate`/HTTP 서비스는 없습니다.
+실행 중 활성 Herdr 호스트에서는 `herdr plugin action invoke status --plugin desktop-pet` 형태로 `settings`, `restart`, `stop` 등도 호출합니다. **현재 소스:** 인자 없는 네이티브 `desktop-pet settings`와 기존 Herdr 플러그인 Settings 액션은 별도의 실행 관리 전용 창이 아닌 **동일한 통합 설정 탭**을 엽니다. 앱이 꺼져 있으면 명시적 `settings`가 선택한 프로필의 저장 호스트로 시작하되 캐릭터·말풍선의 숨김 상태를 유지합니다. 소스의 오프라인 `settings`는 `--assets PATH`도 받을 수 있습니다. 같은 설정·상태 경로를 사용하세요. 네이티브 진입은 Herdr 호스트 없이 가능하며 플러그인 액션에는 해당 호스트가 필요합니다. **공개 v0.3.6**은 앱이 꺼져도 별도의 실행 관리 전용 설정창을 여는 이전 동작을 유지합니다.
+
+네이티브 `settings get`, `settings set auto_start off`, `settings set exit_with_herdr on`의 실행 관리 전용 CLI 규약은 그대로입니다. get/set은 구조화 JSON을 반환하며 set은 core `auto_start` 또는 등록 어댑터 소유 키와 정확한 `on|off`만 허용하고 앱을 시작하거나 다른 설정을 바꾸지 않으며 잘못된 입력·저장 실패를 오류로 반환합니다. `status`도 둘 다 보고합니다. 추가 액션 ID는 실행 관리 `start`, `ensure`, `stop`, `restart`, `status`, `settings`; 표시 `show`, `hide`, `toggle`; 클릭 통과 `passthrough`, `alpha_passthrough`; 말풍선 `show_bubble`, `hide_bubble`, `bubble_above|below|left|right|auto`; 위치·크기 `reset`, `bigger`, `smaller`입니다. [네이티브 CLI 계약](cli.md#한국어)은 즉시 액션과 절대값 presentation/preferences, 비공개 소켓과 명령 계열별 작업 조회를 구별하며 공개 `orchestrate`/HTTP 서비스는 없습니다.
 
 ## 앱 내 업데이트
 
 **설정 → 앱 업데이트**에는 독립적인 자동 확인(기본 켜짐)·**베타 업데이트 받기**(기본 꺼짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인과 명시적 버튼이 있습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다.
 
-- **Herdr 관리:** 지정 소켓의 부모나 앱의 덮어쓴 프로필이 아닌 *원래 주입된 호스트 플러그인 설정·전역 Herdr registry*를 사용합니다. 활성 source/ref, 체크아웃 루트, 플러그인 하위 디렉터리는 별개이며 하위 디렉터리 플러그인도 전체 체크아웃이 설치 경계입니다. **같은 실행 중 호환 호스트**가 updater ≥0.9.3과 제안된 대상의 최소 버전을 제안 시점·Stop 전에 모두 만족해야 합니다. 공식 릴리스 태그는 불변 커밋으로 확정하며 사용자 지정/로컬 ref를 몰래 이전하지 않습니다.
+- **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 update는 Herdr plugin manager를 호출하지 않으며 레거시 Herdr 관리는 별도 동의한 [A→B 이전](migrations/desktop-pet.md)에만 속합니다.
 - **Homebrew:** 캡처한 manager·prefix를 유지하고 대상 포뮬러·버전을 명시합니다. 실제 교체 경계는 prefix 전체가 아닌 **그 포뮬러의 모든 keg를 포괄하는 Cellar 하위 트리**입니다. 승인된 적격 안정판 ↔ 베타 이전은 양쪽 물리 설치 루트를 예약하고 대상 메타데이터를 재검증해 대상 포뮬러를 설치·업그레이드하며 원본 포뮬러를 몰래 제거하지 않습니다. 확인은 캐시 메타데이터만 읽습니다.
 - **로컬 체크아웃:** 디스크의 현재 파일을 명시적으로 다시 빌드하고 Git pull/reset/ref 변경은 하지 않습니다. 동일 실행 파일로 재빌드됐어도 새 인스턴스가 실제 준비돼야 적용입니다.
-- **검증된 외부 설치:** 이미 설치된 서명·protocol-3 호환 패키지라면 설치기를 재실행하지 않는 **설치된 업데이트 적용**을 제안할 수 있습니다. 안정판만 받는 정책에서도 적격 기설치 베타를 명시적으로 승인해 적용할 수 있습니다. 수동/불명 출처를 Herdr/Homebrew로 몰래 바꾸지 않습니다.
+- **검증된 외부 설치:** 이미 설치된 서명·protocol-4 호환 패키지라면 설치기를 재실행하지 않는 **설치된 업데이트 적용**을 제안할 수 있습니다. 안정판만 받는 정책에서도 적격 기설치 베타를 명시적으로 승인해 적용할 수 있습니다. 수동/불명 출처를 Herdr/Homebrew로 몰래 바꾸지 않습니다.
 
 동의와 Prepare는 미저장 초안·IME·진행 작업·제스처를 다시 확인하고 변경 조작을 동결하지만 **정확한 원본 인스턴스는 계속 실행**합니다. 대사 undo/redo 및 브라우저 검색/필터/로컬 폴더의 AX·내부 callback도 포함하며 안전한 취소/조정 뒤 기존 제어 상태·편집 이력을 복원합니다. 도우미 소유권 **ACK는 설치·Stop·Quit 완료가 아닙니다**. 수락된 Prepare 뒤 일치하는 최종 visible/prepared ACK만 동의를 이전하며, 정확히 예약한 Stop의 수락 응답이 전부 전달되어야 updater 종료를 확정합니다. 느린 staging은 worker에서 실행되어 도우미 UI가 반응하며 네이티브 30초 초과는 취소가 아니라 대기입니다. 답장 전송 실패에는 설치를 시작하지 않고 원본을 해동하며 일반 사용자 Stop/Quit가 updater 재시작보다 우선합니다. **도우미 생성 전** 실패가 입증된 경우 원인을 수정하고 새 Check 후 재시도할 수 있지만 도우미 생성/소유권 불명은 근거 있는 복구 전까지 막습니다.
 
-독립 **서명 도우미**와 선택 설정·상태·사용자 에셋은 실제 교체할 설치 경로 밖에 있어야 하며 같은 물리 설치를 공유하는 다른 실행 프로필도 교체를 막습니다. 도우미는 선택 프로필·백엔드·에셋을 유지하고 새 인스턴스의 실제 준비를 확인하며 **설치**와 **적용**을 구분합니다. 적용됨은 “공개 최신판”이 아닙니다. 후보 시작에는 영속화된 정확한 **이미지와 설치 출처** 쌍이 필요하며 현재 디스크에서 누락된 pin을 추정하지 않습니다. 호환되는 일부 예약 표식은 manager 재실행 없이 복구할 수 있지만 불완전한 pin·변경된 근거·불명확한 manager 실행은 차단합니다. 독립적으로 검증된 Original도 영속화된 업데이트 실패 목적에서만 복원하며 업그레이드로 보고하지 않습니다. 사용자 Stop은 재시작을 금지하지만 안전하게 중지된 작업이 완전히 입증되면 조정·예약 해제를 허용합니다. 정확한 원본이 준비된 **NoSpawn** 중단만 입증되면 원본을 재시작하지 않고 해동하며 이후 새 Check는 기존 이력을 지우지 않고 새 계획을 제안할 수 있습니다. 관리자 자동 재실행이나 저널 자동 삭제는 하지 않습니다. 오프라인 `update-status`는 저장 기록이지 현재 프로세스/서명 증명이 아닙니다. 검증한 비공개 도우미의 `status`와 lease를 갖는 명시적 `recover`를 [상태·복구 계약](cli.md#앱-업데이트-상태와-복구)에 따라 사용하세요. 구 protocol-1/2 기록은 보존·차단하고 해당 버전 도우미로 확인·복구하세요. 공개 v0.3.6의 일치하는 protocol-3/observation-mode-1 쌍은 안정판 Brew 설치·업그레이드 또는 고정 `--prebuilt` 설치기로 채택합니다. 소스 개발은 선택 사항입니다. 소스 매니페스트/버전만으로 자산 게시나 채널 전환을 주장할 수 없습니다.
+독립 **서명 도우미**와 선택 설정·상태·사용자 에셋은 실제 교체할 설치 경로 밖에 있어야 하며 같은 물리 설치를 공유하는 다른 실행 프로필도 교체를 막습니다. 도우미는 선택 프로필·백엔드·에셋을 유지하고 새 인스턴스의 실제 준비를 확인하며 **설치**와 **적용**을 구분합니다. 적용됨은 “공개 최신판”이 아닙니다. 후보 시작에는 영속화된 정확한 **이미지와 설치 출처** 쌍이 필요하며 현재 디스크에서 누락된 pin을 추정하지 않습니다. 호환되는 일부 예약 표식은 manager 재실행 없이 복구할 수 있지만 불완전한 pin·변경된 근거·불명확한 manager 실행은 차단합니다. 독립적으로 검증된 Original도 영속화된 업데이트 실패 목적에서만 복원하며 업그레이드로 보고하지 않습니다. 사용자 Stop은 재시작을 금지하지만 안전하게 중지된 작업이 완전히 입증되면 조정·예약 해제를 허용합니다. 정확한 원본이 준비된 **NoSpawn** 중단만 입증되면 원본을 재시작하지 않고 해동하며 이후 새 Check는 기존 이력을 지우지 않고 새 계획을 제안할 수 있습니다. 관리자 자동 재실행이나 저널 자동 삭제는 하지 않습니다. 오프라인 `update-status`는 저장 기록이지 현재 프로세스/서명 증명이 아닙니다. 검증한 비공개 도우미의 `status`와 lease를 갖는 명시적 `recover`를 [상태·복구 계약](cli.md#앱-업데이트-상태와-복구)에 따라 사용하세요.
+
+구 protocol-1/2/3 근거는 차단·보존하며 matching signed helper로만 조회·복구하고 v4로 바꾸지 않습니다. 새 `updates-v4/`와 실제 계정 home `.desktop-pet-updates`는 구 `updates/`/`.herdr-updates`와 공존합니다. lock 순서는 old global → new global → 정렬 installation roots이며 legacy stop-generation도 검사합니다. bridge A→neutral B는 별도 동의와 검증된 v4 `migrate-legacy --plan ABS`가 필요합니다. 문서·후보 패키지는 공개 게시나 최종 수락 완료의 증거가 아닙니다. [이전·복구](migrations/desktop-pet.md).
 
 ## 설정과 문제 해결
 
-- `HERDR_PLUGIN_CONFIG_DIR`에는 `lifecycle.json`(두 실행 관리 스위치), `preferences.json`(기타 설정·대사), 관리 `characters/`·`menu-bar-icons/`가 있고 `HERDR_PLUGIN_STATE_DIR`에는 프로세스 잠금·`<state-dir>/control.sock`·데몬 `desktop-pet.log`와 업데이트 상태가 있습니다. 주입되지 않으면 Herdr XDG 플러그인 설정/상태 디렉터리를 사용합니다. 네이티브 `--config-dir`·`--state-dir`로 프로필을 격리할 수 있지만 주입된 환경변수가 우선합니다. 특히 안정판/베타 동시 사용은 시작·명령·종료·백업에 실제 설정 **및 상태** 두 경로를 맞추세요. `--socket PATH`는 네이티브 CLI 제어 소켓이 아닌 Herdr 백엔드 지정입니다([CLI 연결 계약](cli.md#연결-식별자-작업-상태)).
-- 독립 실행 중 정상 서버 없이 약 30초 뒤 사라지면 `settings get`과 `status`를 확인하고 같은 설정/상태 프로필의 `exit_with_herdr`를 끈 뒤 다시 시작하세요. 창을 숨긴 경우와 데몬 종료를 구별하세요. 등록된 모든 로컬 endpoint의 명시적 비활성화/연결 해제에 따른 즉시 종료는 이 스위치로 막지 못합니다.
-- 창 숨김이나 전체 클릭 통과는 시작 실패가 아닙니다. 위의 메뉴 막대 복구를 사용하세요. `plugin link` 후 실행되지 않았다면 `client.attached` 경고를 확인하고 수동 `start`, 데몬 `status`·로그를 확인하세요. 꺼진 `auto_start`는 의도적인 자동 시작 건너뜀이고 실행 중 호스트에 연결만 해서는 바로 실행되지 않습니다. 패치 호스트 격리 설치와 훅 확인은 [호스트 안내](../integrations/herdr/README.md)에 있습니다.
+- 프로필은 **명시적 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 중립 XDG 기본값** 순입니다(XDG 미지정 시 `~/.config/desktop-pet`, `~/.local/state/desktop-pet`). core는 `HERDR_PLUGIN_*`를 암묵적으로 사용하지 않으며 Herdr wrapper만 host 주입을 명시 인자로 전달합니다. config에는 lifecycle/preferences·characters·menu-bar-icons, state에는 lock·전용 `control.sock`·daemon log·update 근거가 있습니다. 실제 두 경로를 맞추고 함께 백업하세요. `--herdr-socket ABS`는 등록된 Herdr 어댑터의 backend 옵션이지 제어 socket이 아니며 어댑터 없이는 core가 정규화/등록하지 않습니다. [정확한 프로필·탐색 계약](development.md#profiles-and-installation-discovery).
+- Herdr 전용 모드(등록 Herdr 어댑터)에서 정상 서버 없이 약 30초 뒤 사라지면 `settings get`과 `status`를 확인하고 같은 설정/상태 프로필의 `exit_with_herdr`를 끈 뒤 다시 시작하세요. 창을 숨긴 경우와 데몬 종료를 구별하세요. Herdr 전용에서 등록된 모든 로컬 endpoint의 명시적 비활성화/연결 해제에 따른 즉시 종료는 이 스위치로 막지 못합니다. Auto/Tern/어댑터 없는 앱에는 이 Herdr 종료 정책이 없습니다.
+- 창 숨김이나 전체 클릭 통과는 시작 실패가 아닙니다. 위의 메뉴 막대 복구를 사용하세요. `plugin link` 후 실행되지 않았다면 `client.attached` 경고를 확인하고 수동 `start`, 데몬 `status`·로그를 확인하세요. 꺼진 `auto_start`는 의도적인 자동 시작 건너뜀이고 실행 중 호스트에 연결만 해서는 바로 실행되지 않습니다. 패치 호스트 격리 설치와 훅 확인은 [호스트 안내](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)에 있습니다.
 - `Herdr watchers are shutting down`이 나오면 상속된 `HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`, `PATH`의 실제 Herdr CLI 실행 파일/버전, 그 소켓을 소유한 서버를 확인하세요. **다른 서버**의 `herdr plugin list`로 데몬의 endpoint를 판정할 수 없습니다. 같은 CLI·소켓·세션을 대상으로 조사하고 원격이면 저장 머신 전달 지원 버전/선택 프로필도 검사하세요. 패치 호스트는 자동 실행 훅을 제공할 뿐 모든 서버에 플러그인을 설치하지 않습니다.
 - 원격 오류는 [관찰 대상 설정](#관찰-대상-설정)의 프로필 상태·대화형 재인증·API 전달 CLI를 확인하세요. 로컬 화면을 원하면 원격 호스트에서 SSH로 GUI를 실행하지 마세요. `agent.prompt` 제한과 원격 읽기 전용은 [메시지 전달](#인라인-답장과-메시지-전달)을 참고하세요.
-- 릴리스 다운로드 오류 시 `github.com` 접근 및 실제 Release 자산을 확인하세요. 명시적 `--prebuilt`는 **소스 빌드로 전환하지 않으며** 옵션 없는 설치만 조건부로 소스 빌드하므로 도구가 필요합니다. 포뮬러 게시를 별도 확인하고 ad-hoc 서명 검증을 Developer ID 서명/공증으로 오인하지 마세요([설치](../readme.ko.md)).
-- 제공자 연동은 Herdr 업스트림 기능을 사용하며 해당 수명주기 훅 설치 뒤 기존 제공자 세션을 재시작/다시 로드하세요. 앱은 관측 상태만 표시하고 제공자 결과를 추측하지 않습니다. 버전별 동작은 [릴리스 기록](releases/README.ko.md), 호스트 세부 사항은 [호스트 통합](../integrations/herdr/README.md)을 참고하세요.
+- 기본 및 명시적 `--prebuilt`는 prebuilt-only이며 다운로드/검증 실패 때 source fallback하지 않습니다. 현재 검증된 core 체크아웃 빌드에는 명시적 `--source`를 쓰고 admission이 보고한 실제 선택 설치를 확인하세요. 중립 v0.4.0/포뮬러/연동 태그는 아직 게시되지 않았습니다. ad-hoc 서명 검증은 Developer ID/공증이 아닙니다([설치](../readme.ko.md)).
+- 제공자 연동은 Herdr 업스트림 기능을 사용하며 해당 수명주기 훅 설치 뒤 기존 제공자 세션을 재시작/다시 로드하세요. 앱은 관측 상태만 표시하고 제공자 결과를 추측하지 않습니다. 버전별 동작은 [릴리스 기록](releases/README.ko.md), 호스트 세부 사항은 [호스트 통합](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)을 참고하세요.

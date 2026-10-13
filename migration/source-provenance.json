@@ -337,5 +337,37 @@
     "commit_created": false,
     "pushed": false,
     "builds_tests_linters_formatters_run": false
-  }
+  },
+  "supplemental_source_checkpoints": [
+    {
+      "kind": "index_only_working_source_capture",
+      "scope": "Preserves later concurrent native changes and new integration source before deletion; not a final cutover or release claim.",
+      "source_head": "ed1fe248199697b3a61d208f9a42bc741e52a858",
+      "commit": "b0aee0a54b7a4373893b1329d20043288392c007",
+      "tree": "6c3222ae286f2b09809027c8e5fd017118f12bde",
+      "initial_working_tree_reconstructed_from_frozen_patch": "85e2ae833b1319dac17163aea92ccc3500321aaa",
+      "core_reference": "refs/migration-source/herdr-desktop-pet/pre-cutover",
+      "method": "Separate GIT_INDEX_FILE, read-tree original HEAD, add current source and compare two write-tree results, then commit-tree without changing the original branch/index/working files.",
+      "generated_adapter_target_excluded": true,
+      "source_tree_equal_on_two_reads": true,
+      "native_delta": {
+        "path": "migration/source-snapshot/later-native-source.patch",
+        "bytes": 268074,
+        "sha256": "c1afbcae38d35356d1672929f548c0601df56a9c3464de5f97bc6563f16db203"
+      },
+      "reconciliation": "Later common behavior was compared against core and adapter owners. Tern retention/response-instance/raw-frame differences and Herdr-owned locale/visibility differences were restored; common retirement regressions were retained."
+    },
+    {
+      "kind": "final_pre_cutover_source_capture",
+      "source_head": "ed1fe248199697b3a61d208f9a42bc741e52a858",
+      "commit": "d1d7ce1f762b54d731fac4c7755ca2fdb8dba902",
+      "tree": "81d5dc1e4bd0906d8a0d82cf47e2b7c6d81fd5c7",
+      "core_reference": "refs/migration-source/herdr-desktop-pet/pre-cutover-final",
+      "method": "Separate GIT_INDEX_FILE and two equal write-tree results; original HEAD, index and worktree preserved.",
+      "tracked_source_files": 306,
+      "generated_target_dist_node_modules_paths": 0,
+      "reconciled_native_tree": "402a4dea0bb16052bc0b563ced4acc5c6f939dda",
+      "native_tree_unchanged_since_reconciled_checkpoint": true
+    }
+  ]
 }

@@ -331,12 +331,13 @@ A valid catalog or a synthetic switching fixture is not artistic acceptance.
 
 ### Authoritative OMP failure and cancellation
 
-Load `integrations/omp/herdr-pet-outcomes.ts` alongside Herdr's managed OMP state
+Load the [Herdr integration-owned outcome extension](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/omp/herdr-pet-outcomes.ts) alongside Herdr's managed OMP state
 extension; do not replace or modify the managed extension. For a private session
 started inside Herdr:
 
 ```sh
-omp --extension "$PWD/integrations/omp/herdr-pet-outcomes.ts"
+HERDR_INTEGRATION=/absolute/path/to/current/herdr-desktop-pet-checkout
+omp --extension "$HERDR_INTEGRATION/integrations/omp/herdr-pet-outcomes.ts"
 ```
 Use an OMP version with the `agent_end.willContinue` contract; the real TUI
 producer/consumer flow was verified with OMP 18.2.10. Earlier versions without

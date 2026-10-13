@@ -1,11 +1,24 @@
 //! Read-only installation discovery and durable, explicitly consented update plans.
 //! This crate deliberately has no dependency on the desktop app's build script or rig.
-mod observation;
+pub mod identity;
+pub mod installation;
+#[cfg(desktop_pet_legacy)]
+#[path = "../../../migration/legacy-0.3.7/codec.rs"]
+pub mod legacy_codec;
+#[cfg(desktop_pet_legacy)]
+#[path = "../../../migration/legacy-0.3.7/entry.rs"]
+pub mod legacy_entry;
+pub mod migration;
+#[cfg(desktop_pet_legacy)]
+#[path = "../../../migration/legacy-0.3.7/origin.rs"]
+mod origin;
+#[cfg(not(desktop_pet_legacy))]
 mod origin;
 pub mod protocol;
 pub mod releases;
 
-use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
+use desktop_pet_contracts::{ObservationSelection, OBSERVATION_SELECTION_ENV};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -14,9 +27,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use observation::{ObservationMode, OBSERVATION_MODE_ENV};
+#[cfg(not(desktop_pet_legacy))]
+pub use origin::validate_standalone_bundle;
 pub use origin::{
-    check, detect_origin, installed_candidate, manager_command, recheck_plan,
+    check, detect_origin, executable_version, installed_candidate, manager_command, recheck_plan,
     refresh_release_target, restored_original, validate_plan_target, ManagerCommand,
 };
 pub use protocol::{read_operation, write_operation, OperationPhase, OperationRecord};
@@ -29,9 +43,11 @@ pub struct UpdateContext {
     pub version: String,
     pub instance_id: String,
     pub config_dir: PathBuf,
+    #[cfg(desktop_pet_legacy)]
     /// Original injected host plugin config; never an override profile or socket parent.
     pub host_plugin_config_dir: Option<PathBuf>,
     pub state_dir: PathBuf,
+    #[cfg(desktop_pet_legacy)]
     pub herdr_socket: PathBuf,
     /// Snapshot captured once when this daemon starts, never reconstructed from the locator.
     pub running: ExecutableIdentity,
@@ -39,52 +55,51 @@ pub struct UpdateContext {
     #[serde(default)]
     pub running_origin: Option<Box<InstallOrigin>>,
     pub assets_override: Option<PathBuf>,
-    #[serde(
-        serialize_with = "serialize_environment",
-        deserialize_with = "deserialize_environment"
-    )]
     pub environment: BTreeMap<String, String>,
     pub locale: String,
 }
 
 impl UpdateContext {
     /// Use only the selection captured with this context, never the process environment.
-    pub fn observation_mode(&self) -> Result<ObservationMode, String> {
-        ObservationMode::from_environment(&self.environment)
-    }
-}
-
-fn serialize_environment<S>(
-    environment: &BTreeMap<String, String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let mut map = serializer.serialize_map(Some(environment.len()))?;
-    for (key, value) in environment {
-        let value = if key == OBSERVATION_MODE_ENV && value == "both" {
-            "auto"
-        } else {
-            value.as_str()
-        };
-        map.serialize_entry(key, value)?;
-    }
-    map.end()
-}
-
-fn deserialize_environment<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mut environment = BTreeMap::<String, String>::deserialize(deserializer)?;
-    if let Some(value) = environment.get_mut(OBSERVATION_MODE_ENV) {
-        if value == "both" {
-            value.clear();
-            value.push_str("auto");
+    pub fn observation_mode(&self) -> Result<ObservationSelection, String> {
+        #[cfg(desktop_pet_legacy)]
+        {
+            legacy_codec::observation_from_environment(&self.environment)
+        }
+        #[cfg(not(desktop_pet_legacy))]
+        {
+            self.environment
+                .get(OBSERVATION_SELECTION_ENV)
+                .map_or(Ok(ObservationSelection::Auto), |value| value.parse())
         }
     }
-    Ok(environment)
+
+    /// Captures a live change using this envelope's codec, without consulting
+    /// the process environment or inferring an owner from a provider key.
+    pub fn set_observation_selection(
+        &mut self,
+        selection: &ObservationSelection,
+    ) -> Result<(), String> {
+        #[cfg(desktop_pet_legacy)]
+        let token = legacy_codec::observation_token(selection)?;
+        #[cfg(not(desktop_pet_legacy))]
+        let token = {
+            if matches!(selection, ObservationSelection::Provider(provider)
+                if matches!(provider.as_str(), "" | "auto" | "both"))
+            {
+                return Err("reserved observation provider key".into());
+            }
+            selection.as_str()
+        };
+        if let Some(value) = self.environment.get_mut(identity::OBSERVATION_ENV) {
+            value.clear();
+            value.push_str(token);
+        } else {
+            self.environment
+                .insert(identity::OBSERVATION_ENV.into(), token.into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -105,6 +120,7 @@ pub struct VerifiedInstallation {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstallOrigin {
+    #[cfg(desktop_pet_legacy)]
     Herdr {
         host: PathBuf,
         host_config_dir: PathBuf,
@@ -115,8 +131,12 @@ pub enum InstallOrigin {
         resolved_commit: Option<String>,
         enabled: bool,
     },
-    Local {
+    #[cfg_attr(desktop_pet_legacy, serde(rename = "local"))]
+    Source {
         root: PathBuf,
+    },
+    Standalone {
+        bundle: PathBuf,
     },
     Homebrew {
         brew: PathBuf,
@@ -133,11 +153,32 @@ pub enum InstallOrigin {
     },
 }
 
+impl InstallOrigin {
+    /// Presentation consumes this owner label without concrete host branching.
+    pub fn manager_label(&self) -> &'static str {
+        match self {
+            #[cfg(desktop_pet_legacy)]
+            Self::Herdr { .. } => "Herdr plugin manager",
+            Self::Source { .. } => "Core source checkout",
+            Self::Standalone { .. } => "Standalone installation",
+            Self::Homebrew { .. } => "Homebrew",
+            Self::Manual { .. } => "Manual installation",
+            Self::Unknown { .. } => "Unknown installation",
+        }
+    }
+
+    pub fn supports_update(&self) -> bool {
+        !matches!(self, Self::Manual { .. } | Self::Unknown { .. })
+    }
+}
+
 /// Immutable replaceable boundary shared by reservations and process scans.
 pub fn physical_install_root(origin: &InstallOrigin) -> Result<&Path, String> {
     match origin {
+        #[cfg(desktop_pet_legacy)]
         InstallOrigin::Herdr { checkout_root, .. } => Ok(checkout_root),
-        InstallOrigin::Local { root } => Ok(root),
+        InstallOrigin::Source { root } => Ok(root),
+        InstallOrigin::Standalone { bundle } => Ok(bundle),
         InstallOrigin::Homebrew {
             cellar_formula_root,
             ..
@@ -154,10 +195,31 @@ pub fn physical_install_root(origin: &InstallOrigin) -> Result<&Path, String> {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UpdateAction {
+    #[cfg(desktop_pet_legacy)]
     HerdrReinstall,
     HomebrewUpgrade,
-    LocalRebuild,
+    #[cfg_attr(desktop_pet_legacy, serde(rename = "local_rebuild"))]
+    SourceRebuild,
+    StandaloneReplace,
     ApplyInstalled,
+}
+
+impl UpdateAction {
+    pub fn consent_notice(&self, locale: &str) -> &'static str {
+        match self {
+            #[cfg(desktop_pet_legacy)]
+            Self::HerdrReinstall => match locale {
+                "ko" => "등록된 Herdr 관리자와 소스의 빌드 스크립트를 실행합니다. 사전 빌드 파일 설치 실패 후에도 소스 빌드로 전환될 수 있습니다.",
+                "zh-hans" | "zh-Hans" => "将运行已注册的 Herdr 管理器和源代码构建脚本。即使预构建映像替换失败，也可能转为从源码构建。",
+                "ja" => "登録済みの Herdr マネージャーとソースのビルドスクリプトを実行します。ビルド済みイメージの置き換えに失敗した場合も、ソースからのビルドに移ることがあります。",
+                _ => "Runs the registered Herdr manager and source build scripts. Source fallback may follow even a failed prebuilt replacement.",
+            },
+            Self::SourceRebuild => "Builds only this exact core checkout and its on-disk scripts; no source fetching or git ref changes.",
+            Self::StandaloneReplace => "Installs only the verified core release archive after staging and validation; no source-build fallback.",
+            Self::HomebrewUpgrade => "Runs only the captured Homebrew manager for the approved core formula.",
+            Self::ApplyInstalled => "Applies only the exact verified installed image without running an installer.",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -300,7 +362,7 @@ pub fn executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
 
 /// Require the actual bundle and updater capability, not merely a changed hash/version.
 pub fn validate_candidate(path: &Path) -> Result<ExecutableIdentity, String> {
-    validate_candidate_mode(path, ObservationMode::Herdr)
+    validate_candidate_mode(path, &ObservationSelection::Auto)
 }
 
 /// Reject a candidate that cannot preserve the captured observation selection.
@@ -308,12 +370,12 @@ pub fn validate_candidate_for_context(
     path: &Path,
     context: &UpdateContext,
 ) -> Result<ExecutableIdentity, String> {
-    validate_candidate_mode(path, context.observation_mode()?)
+    validate_candidate_mode(path, &context.observation_mode()?)
 }
 
 fn validate_candidate_mode(
     path: &Path,
-    mode: ObservationMode,
+    mode: &ObservationSelection,
 ) -> Result<ExecutableIdentity, String> {
     let image = executable_identity(path)?;
     let macos = image.path.parent().ok_or("candidate has no parent")?;
@@ -328,8 +390,8 @@ fn validate_candidate_mode(
             .parent()
             .and_then(Path::file_name)
             .is_none_or(|s| s != "Contents")
-        || binary != "herdr-desktop-pet"
-        || (app != "HerdrDesktopPet.app" && app != "HerdrDesktopPetBeta.app")
+        || binary != identity::BINARY
+        || (app != identity::APP_NAME && app != identity::BETA_APP_NAME)
     {
         return Err("candidate is not a supported app bundle executable".into());
     }
@@ -359,60 +421,53 @@ fn validate_candidate_mode(
 
 fn validate_capabilities(
     capabilities: &serde_json::Value,
-    mode: ObservationMode,
+    mode: &ObservationSelection,
 ) -> Result<(), String> {
     if capabilities
         .get("protocol")
         .and_then(serde_json::Value::as_u64)
-        != Some(protocol::UPDATER_PROTOCOL.into())
+        != Some(identity::PROTOCOL.into())
     {
-        return Err("candidate does not support updater protocol 3".into());
+        return Err(format!(
+            "candidate does not support updater protocol {}",
+            identity::PROTOCOL
+        ));
     }
-    validate_observation_capability(capabilities, mode, false)
+    if !identity::LEGACY
+        && capabilities
+            .get("integration_api")
+            .and_then(serde_json::Value::as_u64)
+            != Some(identity::INTEGRATION_API.into())
+    {
+        return Err("candidate does not support the integration API".into());
+    }
+    validate_observation_capability(capabilities, mode)
 }
 
 fn validate_observation_capability(
     capabilities: &serde_json::Value,
-    mode: ObservationMode,
-    explicit_herdr: bool,
+    mode: &ObservationSelection,
 ) -> Result<(), String> {
-    let capability = capabilities
+    if capabilities
         .get("observation_mode")
-        .and_then(serde_json::Value::as_u64);
-    let supported = match mode {
-        ObservationMode::Both => capability == Some(2),
-        ObservationMode::Tern => matches!(capability, Some(1 | 2)),
-        ObservationMode::Herdr => {
-            matches!(capability, Some(1 | 2))
-                || !explicit_herdr
-                    && !capabilities
-                        .as_object()
-                        .is_some_and(|fields| fields.contains_key("observation_mode"))
-        }
-    };
-    if !supported {
-        let required = if mode == ObservationMode::Both { 2 } else { 1 };
+        .and_then(serde_json::Value::as_u64)
+        != Some(identity::OBSERVATION_CAPABILITY.into())
+    {
         return Err(format!(
-            "cannot preserve host {}: observation mode capability {required} is required",
-            mode.as_str()
+            "cannot preserve observation {}: capability {} is required",
+            mode.as_str(),
+            identity::OBSERVATION_CAPABILITY
         ));
     }
+    #[cfg(desktop_pet_legacy)]
+    legacy_codec::observation_token(mode)?;
     Ok(())
 }
 
-/// Require the signed helper to understand explicit captured mode keys, including Herdr.
+/// Require the signed helper to match the compiled app's complete contract.
 pub fn validate_helper_capabilities(response: &str, context: &UpdateContext) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(response).map_err(|e| e.to_string())?;
-    if parsed.get("protocol").and_then(serde_json::Value::as_u64)
-        != Some(protocol::UPDATER_PROTOCOL.into())
-    {
-        return Err("release helper does not match updater protocol 3".into());
-    }
-    validate_observation_capability(
-        &parsed,
-        context.observation_mode()?,
-        context.environment.contains_key(OBSERVATION_MODE_ENV),
-    )
+    validate_capabilities(&parsed, &context.observation_mode()?)
 }
 
 pub fn helper_path_for_context(
@@ -420,7 +475,7 @@ pub fn helper_path_for_context(
     context: &UpdateContext,
 ) -> Result<PathBuf, String> {
     let image = validate_candidate_for_context(executable, context)?;
-    let path = image.path.with_file_name("herdr-update-coordinator");
+    let path = image.path.with_file_name(identity::HELPER);
     executable_identity(&path)?;
     Ok(path)
 }
@@ -519,9 +574,9 @@ mod candidate_tests {
     #[test]
     fn unsigned_replacement_is_rejected_without_running_its_code() {
         let root = tempfile::tempdir().unwrap();
-        let macos = root.path().join("HerdrDesktopPet.app/Contents/MacOS");
+        let macos = root.path().join(identity::APP_NAME).join("Contents/MacOS");
         fs::create_dir_all(&macos).unwrap();
-        let candidate = macos.join("herdr-desktop-pet");
+        let candidate = macos.join(identity::BINARY);
         let canary = root.path().join("executed");
         fs::write(
             &candidate,
@@ -545,72 +600,33 @@ mod observation_capability_tests {
     use super::*;
 
     #[test]
-    fn capabilities_distinguish_auto_contract_from_legacy_single_host_support() {
-        let legacy = serde_json::json!({"protocol": 3});
-        assert!(validate_capabilities(&legacy, ObservationMode::Herdr).is_ok());
-        for mode in [ObservationMode::Tern, ObservationMode::Both] {
-            assert!(validate_capabilities(&legacy, mode).is_err());
-        }
-        let old_modes = serde_json::json!({"protocol": 3, "observation_mode": 1});
-        assert!(validate_capabilities(&old_modes, ObservationMode::Herdr).is_ok());
-        assert!(validate_capabilities(&old_modes, ObservationMode::Tern).is_ok());
-        assert!(validate_capabilities(&old_modes, ObservationMode::Both)
-            .unwrap_err()
-            .contains("capability 2"));
-        let live_modes = serde_json::json!({"protocol": 3, "observation_mode": 2});
-        for mode in [
-            ObservationMode::Herdr,
-            ObservationMode::Tern,
-            ObservationMode::Both,
-        ] {
-            assert!(validate_capabilities(&live_modes, mode).is_ok());
-            for value in [
-                serde_json::json!(0),
-                serde_json::json!(3),
-                serde_json::json!("2"),
-            ] {
-                assert!(validate_capabilities(
-                    &serde_json::json!({"protocol": 3, "observation_mode": value}),
-                    mode
-                )
-                .is_err());
+    fn candidate_and_helper_require_the_compiled_distribution_contract() {
+        let mode = ObservationSelection::Auto;
+        assert!(validate_capabilities(&identity::capabilities(), &mode).is_ok());
+        for field in ["protocol", "observation_mode", "integration_api"] {
+            if identity::LEGACY && field == "integration_api" {
+                continue;
             }
+            let mut changed = identity::capabilities();
+            changed.as_object_mut().unwrap().remove(field);
+            assert!(validate_capabilities(&changed, &mode).is_err());
+            changed[field] = serde_json::json!(999);
+            assert!(validate_capabilities(&changed, &mode).is_err());
         }
-        assert!(validate_capabilities(
-            &serde_json::json!({"protocol": 2, "observation_mode": 2}),
-            ObservationMode::Both
-        )
-        .is_err());
     }
 
+    #[cfg(not(desktop_pet_legacy))]
     #[test]
-    fn helper_requires_explicit_mode_support_and_auto_contract() {
-        assert!(validate_observation_capability(
-            &serde_json::json!({"protocol": 3}),
-            ObservationMode::Herdr,
-            true
+    fn provider_ids_are_opaque_and_old_capabilities_cannot_preserve_them() {
+        let mode = ObservationSelection::Provider("another-provider".into());
+        assert!(validate_capabilities(&identity::capabilities(), &mode).is_ok());
+        assert!(validate_capabilities(
+            &serde_json::json!({
+                "protocol":3,"observation_mode":1,"integration_api":1
+            }),
+            &mode
         )
         .is_err());
-        for mode in [ObservationMode::Herdr, ObservationMode::Tern] {
-            assert!(validate_observation_capability(
-                &serde_json::json!({"observation_mode": 1}),
-                mode,
-                true
-            )
-            .is_ok());
-        }
-        assert!(validate_observation_capability(
-            &serde_json::json!({"observation_mode": 1}),
-            ObservationMode::Both,
-            true
-        )
-        .is_err());
-        assert!(validate_observation_capability(
-            &serde_json::json!({"observation_mode": 2}),
-            ObservationMode::Both,
-            true
-        )
-        .is_ok());
     }
 }
 
@@ -619,14 +635,16 @@ mod plan_protocol_tests {
     use super::*;
 
     #[test]
-    fn durable_reader_rejects_old_protocols_but_migrates_both_without_rewriting_evidence() {
+    fn durable_reader_preserves_unsupported_evidence_and_current_selection() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("profile");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let binary = temp
             .path()
-            .join("HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet");
+            .join(identity::APP_NAME)
+            .join("Contents/MacOS")
+            .join(identity::BINARY);
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
         fs::write(&binary, b"fixture").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -636,11 +654,13 @@ mod plan_protocol_tests {
         };
         let context = UpdateContext {
             executable: identity.path.clone(),
-            version: "0.2.0".into(),
+            version: identity::VERSION.into(),
             instance_id: "fixture".into(),
             config_dir: temp.path().join("config"),
+            #[cfg(desktop_pet_legacy)]
             host_plugin_config_dir: None,
             state_dir: state.clone(),
+            #[cfg(desktop_pet_legacy)]
             herdr_socket: temp.path().join("socket"),
             running: identity.clone(),
             running_origin: Some(Box::new(origin.clone())),
@@ -648,7 +668,7 @@ mod plan_protocol_tests {
             environment: BTreeMap::new(),
             locale: "en".into(),
         };
-        for version in [1, 2] {
+        for version in (1..=4).filter(|version| *version != identity::PROTOCOL) {
             let id = format!("{version:032x}");
             let old = UpdatePlan {
                 version,
@@ -670,7 +690,7 @@ mod plan_protocol_tests {
             assert!(read_plan(&state, &id).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
-        let id = "00000000000000000000000000000003";
+        let id = "00000000000000000000000000000005";
         let legacy = UpdatePlan {
             version: protocol::UPDATER_PROTOCOL,
             operation_id: id.into(),
@@ -682,28 +702,22 @@ mod plan_protocol_tests {
             target: None,
         };
         let mut record = serde_json::to_value(&legacy).unwrap();
-        record["context"]["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
+        record["context"]["environment"][identity::OBSERVATION_ENV] =
+            serde_json::json!(if identity::LEGACY { "both" } else { "auto" });
         let bytes = serde_json::to_vec(&record).unwrap();
         let path = protocol::private_updates(&state)
             .unwrap()
             .join(format!("{id}.plan.json"));
         protocol::write_private_new(&path, &bytes, 0o600).unwrap();
-        let migrated = read_plan(&state, id).unwrap();
+        let captured = read_plan(&state, id).unwrap();
         assert_eq!(
-            migrated.context.observation_mode().unwrap(),
-            ObservationMode::Both
+            captured.context.observation_mode().unwrap(),
+            ObservationSelection::Auto
         );
-        assert_eq!(migrated.context.environment[OBSERVATION_MODE_ENV], "auto");
         assert_eq!(fs::read(path).unwrap(), bytes);
         assert!(validate_helper_capabilities(
-            r#"{"protocol":3,"observation_mode":1}"#,
-            &migrated.context
-        )
-        .unwrap_err()
-        .contains("capability 2"));
-        assert!(validate_helper_capabilities(
-            r#"{"protocol":3,"observation_mode":2}"#,
-            &migrated.context
+            &identity::capabilities().to_string(),
+            &captured.context
         )
         .is_ok());
     }

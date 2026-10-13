@@ -37,16 +37,16 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = env::temp_dir().join(format!(
-            "herdr-bundle-symlink-{}-{nonce}",
+            "desktop-pet-bundle-symlink-{}-{nonce}",
             std::process::id()
         ));
         let macos = root.join("Pet.app/Contents/MacOS");
         let bin = root.join("bin");
         fs::create_dir_all(&macos).unwrap();
         fs::create_dir_all(&bin).unwrap();
-        let target = macos.join("herdr-desktop-pet");
+        let target = macos.join(desktop_pet_update_coordinator::identity::BINARY);
         fs::write(&target, b"").unwrap();
-        let link = bin.join("herdr-desktop-pet");
+        let link = bin.join(desktop_pet_update_coordinator::identity::BINARY);
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let other = bin.join("other-regular-file");
         fs::write(&other, b"").unwrap();

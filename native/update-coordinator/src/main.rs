@@ -1,21 +1,177 @@
 mod helper_ui;
 mod runner;
 
-use herdr_update_coordinator::{protocol, read_plan, OperationPhase};
+use desktop_pet_update_coordinator::{identity, installation, protocol, read_plan, OperationPhase};
 use std::path::PathBuf;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let command = args.next().ok_or("usage: herdr-update-coordinator update-capabilities | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
-    if command == "update-capabilities" {
+    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install --request ABS | migrate-legacy --plan ABS [--resume-retirement | --confirm-tern ABS] | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
+    if command == "update-capabilities" || command == "distribution-identity" {
         if args.next().is_some() {
-            return Err("update-capabilities accepts no arguments".into());
+            return Err("identity commands accept no arguments".into());
         }
+        let result = if command == "update-capabilities" {
+            identity::capabilities()
+        } else {
+            identity::json()
+        };
         println!(
-            "{{\"protocol\":{},\"observation_mode\":2}}",
-            protocol::UPDATER_PROTOCOL
+            "{}",
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
         );
         return Ok(());
+    }
+    if command == "discover" {
+        if identity::LEGACY {
+            return Err("legacy distribution cannot discover neutral installations".into());
+        }
+        let mut executable = None;
+        let mut json = false;
+        while let Some(arg) = args.next() {
+            if arg == "--executable" && executable.is_none() {
+                executable = Some(PathBuf::from(
+                    args.next()
+                        .ok_or("--executable requires an absolute path")?,
+                ));
+            } else if arg == "--json" && !json {
+                json = true;
+            } else {
+                return Err(format!(
+                    "unexpected discovery argument: {}",
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+        if !json {
+            return Err("discover requires --json".into());
+        }
+        let record = installation::discover(executable.as_deref())?;
+        println!(
+            "{}",
+            serde_json::to_string(&record).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if command == "install" {
+        if identity::LEGACY {
+            return Err("legacy distribution cannot install neutral applications".into());
+        }
+        if args.next().as_deref() != Some(std::ffi::OsStr::new("--request")) {
+            return Err("install requires --request ABS".into());
+        }
+        let request = PathBuf::from(args.next().ok_or("--request requires an absolute path")?);
+        if args.next().is_some() {
+            return Err("install accepts only --request ABS".into());
+        }
+        let record = installation::install_request(&request)?;
+        println!(
+            "{}",
+            serde_json::to_string(&record).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if command == "migrate-legacy" {
+        #[cfg(desktop_pet_legacy)]
+        return Err("migration requires a verified neutral protocol-4 helper".into());
+        #[cfg(not(desktop_pet_legacy))]
+        {
+            if args.next().as_deref() != Some(std::ffi::OsStr::new("--plan")) {
+                return Err("migrate-legacy requires --plan ABS".into());
+            }
+            let plan = PathBuf::from(args.next().ok_or("--plan requires an absolute path")?);
+            if !plan.is_absolute() {
+                return Err("migration plan must be absolute".into());
+            }
+            let action = args.next();
+            let evidence = if action.as_deref() == Some(std::ffi::OsStr::new("--confirm-tern")) {
+                let evidence = PathBuf::from(
+                    args.next()
+                        .ok_or("--confirm-tern requires an absolute evidence path")?,
+                );
+                if !evidence.is_absolute() {
+                    return Err("Tern reconnect evidence must be absolute".into());
+                }
+                Some(evidence)
+            } else {
+                None
+            };
+            if args.next().is_some() {
+                return Err(
+                    "migration actions are mutually exclusive and accept no extra arguments".into(),
+                );
+            }
+            use desktop_pet_update_coordinator::migration::{self, MigrationPresentation};
+            // The helper owns this system-library-only native window independently
+            // of both replaceable applications, on the process main thread.
+            let approved = migration::read_plan(&plan)?;
+            let panel = helper_ui::Panel::for_migration("en", &approved)?;
+            let resume = action.as_deref() == Some(std::ffi::OsStr::new("--resume-retirement"));
+            let confirm_reconnect =
+                action.as_deref() == Some(std::ffi::OsStr::new("--confirm-tern"));
+            if action.is_some() && !resume && !confirm_reconnect {
+                return Err("unexpected migration argument".into());
+            }
+            if !confirm_reconnect && !panel.confirm_migration(&approved, resume)? {
+                panel.close();
+                return Err("migration consent cancelled; no migration action started".into());
+            }
+            let result = match action.as_deref() {
+                None => migration::run_with_presentation(&plan, &panel),
+                Some(arg) if arg == "--resume-retirement" => {
+                    migration::resume_retirement_with_presentation(&plan, &panel)
+                }
+                Some(arg) if arg == "--confirm-tern" => migration::confirm_tern_reconnect(
+                    &plan,
+                    evidence
+                        .as_deref()
+                        .ok_or("missing Tern reconnect evidence")?,
+                ),
+                Some(_) => unreachable!(),
+            };
+            match &result {
+                Ok(record) => {
+                    MigrationPresentation::show(&panel, record.phase, record.error.as_deref())
+                }
+                Err(error) => {
+                    if let Ok(record) = migration::read_record(&approved) {
+                        MigrationPresentation::show(&panel, record.phase, Some(error));
+                    } else {
+                        panel.show(
+                            helper_ui::Phase::Attention(helper_ui::Attention::NotStarted),
+                            Some(error),
+                        );
+                    }
+                }
+            }
+            if result
+                .as_ref()
+                .is_ok_and(|record| record.phase == migration::MigrationPhase::Complete)
+            {
+                panel.close();
+            } else {
+                // A nonterminal/failed operation remains inspectable in the real
+                // helper window. Closing hides it; it never replays a manager.
+                while panel.visible() {
+                    panel.pump();
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+            }
+            let record = result?;
+            // The source consent reader can exit after the authenticated ACK
+            // and source Stop. Its closed output pipe is not a migration failure.
+            // This exception applies only to the final journal result, never ACK.
+            use std::io::Write;
+            let mut output = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+            output.push(b'\n');
+            let mut stdout = std::io::stdout().lock();
+            if let Err(error) = stdout.write_all(&output).and_then(|_| stdout.flush()) {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(format!("cannot write migration result: {error}"));
+                }
+            }
+            return Ok(());
+        }
     }
     let mut state_dir = None;
     let mut operation_id = None;
@@ -76,7 +232,7 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("herdr-update-coordinator: {error}");
+        eprintln!("{}: {error}", identity::HELPER);
         std::process::exit(1);
     }
 }

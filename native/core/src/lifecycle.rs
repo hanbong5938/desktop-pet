@@ -1,91 +1,41 @@
-use crate::socket;
+use desktop_pet_contracts::profile_store::{
+    atomic_write, read_object, read_object_with_presence, setting_bool, write_object,
+    LIFECYCLE_FILE,
+};
+use desktop_pet_contracts::{LifecycleExtension, ProfileStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::env;
-use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PLUGIN_ID: &str = "desktop-pet";
-/// Private launcher-to-daemon provenance; never forwarded to an update manager.
-pub(crate) const CAPTURED_HOST_CONFIG_KEY: &str =
-    "HERDR_DESKTOP_PET_CAPTURED_HOST_PLUGIN_CONFIG_DIR";
-
-/// Capture the original host injection before the launcher rewrites the plugin
-/// profile variables for its child. The private value is only routing evidence:
-/// origin detection must still prove the registry, live host and running image.
-pub(crate) fn captured_host_plugin_config_dir(daemon_child: bool) -> Option<PathBuf> {
-    if std::env::var("HERDR_PLUGIN_ID").ok().as_deref() != Some(PLUGIN_ID)
-        || std::env::var("HERDR_ENV")
-            .ok()
-            .is_none_or(|value| value.is_empty())
-        || std::env::var("HERDR_BIN_PATH")
-            .ok()
-            .is_none_or(|value| value.is_empty())
-    {
-        return None;
-    }
-    let path = if daemon_child {
-        if std::env::var_os("HERDR_DESKTOP_PET_STARTUP_TOKEN").is_some() {
-            // A spawned child's HERDR_PLUGIN_CONFIG_DIR is the selected pet
-            // profile, not the upstream host injection. Never infer from it.
-            std::env::var_os(CAPTURED_HOST_CONFIG_KEY)
-        } else {
-            // A directly foregrounded daemon still sees the original injection.
-            std::env::var_os("HERDR_PLUGIN_CONFIG_DIR")
-        }
-    } else {
-        // The helper's child launcher has the original private capture but may
-        // be restoring a selected profile through HERDR_PLUGIN_CONFIG_DIR.
-        std::env::var_os(CAPTURED_HOST_CONFIG_KEY)
-            .or_else(|| std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"))
-    }?;
-    let path = PathBuf::from(path);
-    if !path.is_absolute()
-        || path.file_name()? != PLUGIN_ID
-        || path.parent()?.file_name()? != "config"
-        || path.parent()?.parent()?.file_name()? != "plugins"
-    {
-        return None;
-    }
-    Some(path)
-}
-
-pub const LIFECYCLE_FILE: &str = "lifecycle.json";
 pub const CONTROL_SOCKET_FILE: &str = "control.sock";
-pub const LOCK_FILE: &str = "desktop-pet.lock";
 pub const LOG_FILE: &str = "desktop-pet.log";
-
-const CONFIG_ROOT_NAME: &str = "herdr";
-const MAX_PERSISTED_ENDPOINTS: usize = 64;
-const LOCK_MODE: u32 = 0o600;
 const STARTUP_KEY: &str = "startup";
 const STARTUP_STALE_AFTER_SECS: u64 = 45;
+const PROFILE_FILE: &str = "default-profile.json";
+const MAX_PROFILE_BYTES: u64 = 16 * 1024;
 
-/// Settings writes are serialized by the caller's lifecycle lock or daemon writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct LifecycleSettings {
     pub auto_start: bool,
-    pub exit_with_herdr: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LifecycleSetting {
     AutoStart,
-    ExitWithHerdr,
 }
 
 impl std::str::FromStr for LifecycleSetting {
     type Err = String;
-
-    fn from_str(key: &str) -> Result<Self, Self::Err> {
+    fn from_str(key: &str) -> Result<Self, String> {
         match key {
             "auto_start" => Ok(Self::AutoStart),
-            "exit_with_herdr" => Ok(Self::ExitWithHerdr),
             _ => Err(format!("unknown lifecycle setting: {key}")),
         }
     }
@@ -95,7 +45,6 @@ impl std::str::FromStr for LifecycleSetting {
 pub struct StartupLease {
     pub token: String,
 }
-const DIRECTORY_MODE: u32 = 0o700;
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -105,17 +54,39 @@ pub struct Paths {
     pub log_file: PathBuf,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProfileRecord {
+    pub version: u32,
+    pub config_dir: PathBuf,
+    pub state_dir: PathBuf,
+}
+
 impl Paths {
-    pub fn resolve(
-        explicit_config: Option<&Path>,
-        explicit_state: Option<&Path>,
-    ) -> Result<Self, String> {
-        let config_dir = resolve_dir(
-            "HERDR_PLUGIN_CONFIG_DIR",
-            explicit_config,
-            plugin_config_dir,
-        )?;
-        let state_dir = resolve_dir("HERDR_PLUGIN_STATE_DIR", explicit_state, plugin_state_dir)?;
+    pub fn resolve(config: Option<&Path>, state: Option<&Path>) -> Result<Self, String> {
+        let paths = Self::resolve_readonly(config, state)?;
+        desktop_pet_contracts::profile_store::validate_directory(&paths.config_dir, true)?;
+        desktop_pet_contracts::profile_store::validate_directory(&paths.state_dir, true)?;
+        Ok(paths)
+    }
+
+    pub fn resolve_readonly(config: Option<&Path>, state: Option<&Path>) -> Result<Self, String> {
+        let configured = selected_path(config, "DESKTOP_PET_CONFIG_DIR")?;
+        let stated = selected_path(state, "DESKTOP_PET_STATE_DIR")?;
+        // A malformed unused pointer must not override an explicit complete profile.
+        let record = if configured.is_none() || stated.is_none() {
+            read_profile_record()?
+        } else {
+            None
+        };
+        let config_dir = configured
+            .or_else(|| record.as_ref().map(|r| r.config_dir.clone()))
+            .map_or_else(default_config_root, Ok)?;
+        let state_dir = stated
+            .or_else(|| record.as_ref().map(|r| r.state_dir.clone()))
+            .map_or_else(default_state_root, Ok)?;
+        validate_path_components(&config_dir, false)?;
+        validate_path_components(&state_dir, false)?;
         Ok(Self {
             control_socket: state_dir.join(CONTROL_SOCKET_FILE),
             log_file: state_dir.join(LOG_FILE),
@@ -123,414 +94,265 @@ impl Paths {
             state_dir,
         })
     }
-}
 
-fn resolve_dir(
-    variable: &str,
-    explicit: Option<&Path>,
-    fallback: fn() -> PathBuf,
-) -> Result<PathBuf, String> {
-    let path = match env::var_os(variable) {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        Some(_) => return Err(format!("{variable} is set to an empty path")),
-        None => explicit.map(Path::to_path_buf).unwrap_or_else(fallback),
-    };
-    validate_directory(&path, true)
-}
-
-/// Resolve an update journal profile without creating or changing its directories.
-pub(crate) fn update_status_directory(explicit: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    let path = match env::var_os("HERDR_PLUGIN_STATE_DIR") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        Some(_) => return Err("HERDR_PLUGIN_STATE_DIR is set to an empty path".into()),
-        None => explicit
-            .map(Path::to_path_buf)
-            .unwrap_or_else(plugin_state_dir),
-    };
-    if !path.is_absolute() {
-        return Err("update status directory must be absolute".into());
-    }
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect update status directory {}: {error}",
-                path.display()
-            ))
-        }
-    };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != effective_uid()
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(format!(
-            "update status directory {} is not a private owned directory",
-            path.display()
-        ));
-    }
-    Ok(Some(path))
-}
-
-fn config_root() -> PathBuf {
-    if let Some(root) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(root).join(CONFIG_ROOT_NAME);
-    }
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".config").join(CONFIG_ROOT_NAME))
-        .unwrap_or_else(|| env::temp_dir().join(CONFIG_ROOT_NAME))
-}
-
-fn state_root() -> PathBuf {
-    if let Some(root) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(root).join(CONFIG_ROOT_NAME);
-    }
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".local").join("state").join(CONFIG_ROOT_NAME))
-        .unwrap_or_else(|| env::temp_dir().join(format!("{CONFIG_ROOT_NAME}-state")))
-}
-
-pub(crate) fn plugin_config_dir() -> PathBuf {
-    config_root().join("plugins").join("config").join(PLUGIN_ID)
-}
-
-fn plugin_state_dir() -> PathBuf {
-    state_root().join("plugins").join(PLUGIN_ID)
-}
-
-pub fn default_herdr_socket() -> PathBuf {
-    if let Some(value) = env::var_os("HERDR_SOCKET_PATH").filter(|value| !value.is_empty()) {
-        return PathBuf::from(value);
-    }
-    config_root().join("herdr.sock")
-}
-
-pub fn validate_directory(path: &Path, create: bool) -> Result<PathBuf, String> {
-    if path.as_os_str().is_empty() {
-        return Err("directory path is empty".to_owned());
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "directory {} must not be a symlink",
-                    path.display()
-                ));
-            }
-            if !metadata.is_dir() {
-                return Err(format!("path {} is not a directory", path.display()));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            fs::create_dir_all(path)
-                .map_err(|error| format!("cannot create directory {}: {error}", path.display()))?;
-        }
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect directory {}: {error}",
-                path.display()
-            ));
-        }
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect directory {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!(
-            "path {} is not a regular directory",
-            path.display()
-        ));
-    }
-    if metadata.uid() != effective_uid() {
-        return Err(format!(
-            "directory {} is not owned by the current user",
-            path.display()
-        ));
-    }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        fs::set_permissions(path, Permissions::from_mode(DIRECTORY_MODE)).map_err(|error| {
-            format!(
-                "directory {} is not private and cannot be secured: {error}",
-                path.display()
-            )
-        })?;
-    }
-    let secured = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect directory {}: {error}", path.display()))?;
-    if secured.permissions().mode() & 0o077 != 0 {
-        return Err(format!(
-            "directory {} is not private to the current user",
-            path.display()
-        ));
-    }
-    Ok(path.to_path_buf())
-}
-
-#[derive(Debug)]
-pub struct LifecycleLock {
-    file: File,
-}
-
-impl LifecycleLock {
-    pub fn acquire(state_dir: &Path) -> Result<Self, String> {
-        let path = state_dir.join(LOCK_FILE);
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "lifecycle lock {} must not be a symlink",
-                    path.display()
-                ));
-            }
-            if !metadata.is_file() {
-                return Err(format!(
-                    "lifecycle lock {} is not a regular file",
-                    path.display()
-                ));
-            }
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(LOCK_MODE)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(|error| format!("cannot open lifecycle lock {}: {error}", path.display()))?;
-        let metadata = file.metadata().map_err(|error| {
-            format!("cannot inspect lifecycle lock {}: {error}", path.display())
-        })?;
-        if metadata.uid() != effective_uid() {
-            return Err(format!(
-                "lifecycle lock {} is not owned by the current user",
-                path.display()
-            ));
-        }
-        fs::set_permissions(&path, Permissions::from_mode(LOCK_MODE))
-            .map_err(|error| format!("cannot secure lifecycle lock {}: {error}", path.display()))?;
-        if file
-            .metadata()
-            .map_err(|error| error.to_string())?
-            .permissions()
-            .mode()
-            & 0o077
-            != 0
-        {
-            return Err(format!("lifecycle lock {} is not private", path.display()));
-        }
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
-            {
-                return Err("another desktop-pet lifecycle operation is in progress".to_owned());
-            }
-            return Err(format!(
-                "cannot lock lifecycle guard {}: {error}",
-                path.display()
-            ));
-        }
-        Ok(Self { file })
-    }
-
-    pub fn try_acquire(state_dir: &Path) -> Result<Option<Self>, String> {
-        match Self::acquire(state_dir) {
-            Ok(lock) => Ok(Some(lock)),
-            Err(error) if error.contains("lifecycle operation is in progress") => Ok(None),
-            Err(error) => Err(error),
+    pub(crate) fn record(&self) -> ProfileRecord {
+        ProfileRecord {
+            version: 1,
+            config_dir: self.config_dir.clone(),
+            state_dir: self.state_dir.clone(),
         }
     }
 }
 
-impl Drop for LifecycleLock {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+fn selected_path(explicit: Option<&Path>, variable: &str) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = explicit {
+        return Ok(Some(path.to_owned()));
     }
-}
-
-fn read_object_with_presence(config_dir: &Path) -> Result<(Map<String, Value>, bool), String> {
-    let path = config_dir.join(LIFECYCLE_FILE);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((Map::new(), false)),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect lifecycle state {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!(
-            "lifecycle state {} is not a regular file",
-            path.display()
-        ));
-    }
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("cannot read lifecycle state {}: {error}", path.display()))?;
-    match serde_json::from_str::<Value>(&text)
-        .map_err(|error| format!("invalid lifecycle state {}: {error}", path.display()))?
-    {
-        Value::Object(object) => Ok((object, true)),
-        _ => Err(format!(
-            "invalid lifecycle state {}: expected an object",
-            path.display()
-        )),
-    }
-}
-
-fn read_object(config_dir: &Path) -> Result<Map<String, Value>, String> {
-    read_object_with_presence(config_dir).map(|(object, _)| object)
-}
-
-fn setting_bool(
-    config_dir: &Path,
-    object: &Map<String, Value>,
-    key: &str,
-) -> Result<Option<bool>, String> {
-    match object.get(key) {
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(format!(
-            "invalid lifecycle state {}: {key} must be boolean",
-            config_dir.join(LIFECYCLE_FILE).display()
-        )),
+    match env::var_os(variable) {
+        Some(value) if value.is_empty() => Err(format!("{variable} is set to an empty path")),
+        Some(value) => Ok(Some(PathBuf::from(value))),
         None => Ok(None),
     }
 }
 
+fn home() -> Result<PathBuf, String> {
+    env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| "HOME must be an absolute path".into())
+}
+
+fn default_config_root() -> Result<PathBuf, String> {
+    Ok(
+        match env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            Some(value) => PathBuf::from(value),
+            None => home()?.join(".config"),
+        }
+        .join("desktop-pet"),
+    )
+}
+
+fn default_state_root() -> Result<PathBuf, String> {
+    Ok(
+        match env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+            Some(value) => PathBuf::from(value),
+            None => home()?.join(".local/state"),
+        }
+        .join("desktop-pet"),
+    )
+}
+
+fn read_profile_record() -> Result<Option<ProfileRecord>, String> {
+    let path = default_config_root()?.join(PROFILE_FILE);
+    validate_path_components(path.parent().expect("profile parent"), false)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot inspect profile record: {e}")),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > MAX_PROFILE_BYTES
+    {
+        return Err("default profile record is not a bounded private owned regular file".into());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|e| format!("cannot read profile record: {e}"))?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        return Err("default profile record changed during read".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PROFILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_PROFILE_BYTES {
+        return Err("profile record is too large".into());
+    }
+    let record: ProfileRecord = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid default profile record: {e}"))?;
+    if record.version != 1 {
+        return Err("unsupported default profile record version".into());
+    }
+    validate_path_components(&record.config_dir, false)?;
+    validate_path_components(&record.state_dir, false)?;
+    Ok(Some(record))
+}
+
+/// Read-only validation also checks ancestors, so a symlink cannot hide in a parent.
+fn validate_path_components(path: &Path, require_existing: bool) -> Result<(), String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "profile path {} must be absolute without parent traversal",
+            path.display()
+        ));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(format!(
+                    "profile directory {} is not a nonsymlink directory",
+                    current.display()
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !require_existing => break,
+            Err(e) => {
+                return Err(format!(
+                    "cannot inspect profile directory {}: {e}",
+                    current.display()
+                ))
+            }
+        }
+    }
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.uid() != effective_uid() {
+            return Err(format!(
+                "profile directory {} is not owned by current user",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn adopt_profile(config: &Path, state: &Path) -> Result<ProfileRecord, String> {
+    validate_path_components(config, true)?;
+    validate_path_components(state, true)?;
+    let root = default_config_root()?;
+    validate_path_components(&root, false)?;
+    // Validate old pointer before any mutation; never repair corrupt evidence silently.
+    let previous = read_profile_record()?;
+    let mut profiles = vec![(config.to_owned(), state.to_owned())];
+    let previous_paths = if let Some(previous) = &previous {
+        Some((previous.config_dir.clone(), previous.state_dir.clone()))
+    } else {
+        // The first pointer replaces the implicit XDG profile too. Its live
+        // daemon/reservations remain authoritative even without a pointer file.
+        let state = default_state_root()?;
+        validate_path_components(&state, false)?;
+        match fs::symlink_metadata(&state) {
+            Ok(_) => Some((root.clone(), state)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("cannot inspect previous default profile: {error}")),
+        }
+    };
+    if let Some(previous_paths) = previous_paths {
+        if previous_paths.0 != config || previous_paths.1 != state {
+            profiles.push(previous_paths);
+        }
+    }
+    let _admission =
+        desktop_pet_update_coordinator::protocol::admit_profile_adoption_profiles(&profiles)?;
+    if read_profile_record()? != previous {
+        return Err("default profile changed while adoption was being admitted".into());
+    }
+    let record = ProfileRecord {
+        version: 1,
+        config_dir: config.to_owned(),
+        state_dir: state.to_owned(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    desktop_pet_contracts::profile_store::validate_directory(&root, true)?;
+    atomic_write(&root.join(PROFILE_FILE), &bytes)?;
+    Ok(record)
+}
+
+pub(crate) fn update_status_directory(explicit: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let paths = Paths::resolve_readonly(None, explicit)?;
+    let path = paths.state_dir;
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+        Ok(metadata)
+            if metadata.uid() == effective_uid() && metadata.permissions().mode() & 0o077 == 0 =>
+        {
+            Ok(Some(path))
+        }
+        Ok(_) => Err("update status directory must be private and owned".into()),
+    }
+}
+
 fn settings_from_object(
-    config_dir: &Path,
+    config: &Path,
     object: &Map<String, Value>,
-    exists: bool,
+    _exists: bool,
 ) -> Result<LifecycleSettings, String> {
-    // Validate legacy data even if its canonical replacement is already present.
-    let legacy = setting_bool(config_dir, object, "enabled")?;
-    let auto_start = setting_bool(config_dir, object, "auto_start")?;
-    let exit_with_herdr = setting_bool(config_dir, object, "exit_with_herdr")?;
+    let legacy = setting_bool(config, object, "enabled")?;
     Ok(LifecycleSettings {
-        auto_start: auto_start.or(legacy).unwrap_or(true),
-        exit_with_herdr: exit_with_herdr.unwrap_or(!exists),
+        auto_start: setting_bool(config, object, "auto_start")?
+            .or(legacy)
+            .unwrap_or(true),
     })
 }
 
 fn put_settings(object: &mut Map<String, Value>, settings: LifecycleSettings) {
     object.remove("enabled");
-    object.insert("auto_start".to_owned(), Value::Bool(settings.auto_start));
-    object.insert(
-        "exit_with_herdr".to_owned(),
-        Value::Bool(settings.exit_with_herdr),
-    );
+    object.insert("auto_start".into(), Value::Bool(settings.auto_start));
 }
 
-fn store_settings(
-    config_dir: &Path,
-    mut object: Map<String, Value>,
+pub(crate) fn read_settings(config: &Path) -> Result<LifecycleSettings, String> {
+    let (object, exists) = read_object_with_presence(config)?;
+    settings_from_object(config, &object, exists)
+}
+
+fn initialize_owner_settings(
+    object: &mut Map<String, Value>,
+    exists: bool,
+    extensions: &[Arc<dyn LifecycleExtension>],
+) -> Result<(), String> {
+    if !exists {
+        for extension in extensions {
+            extension.initialize_lifecycle(object)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_settings(
+    profile: &ProfileStore,
+    extensions: &[Arc<dyn LifecycleExtension>],
     settings: LifecycleSettings,
 ) -> Result<(), String> {
-    put_settings(&mut object, settings);
-    write_object(config_dir, object)
-}
-
-pub(crate) fn read_settings(config_dir: &Path) -> Result<LifecycleSettings, String> {
-    let (object, exists) = read_object_with_presence(config_dir)?;
-    settings_from_object(config_dir, &object, exists)
-}
-
-pub(crate) fn write_settings(config_dir: &Path, settings: LifecycleSettings) -> Result<(), String> {
-    let (object, exists) = read_object_with_presence(config_dir)?;
-    settings_from_object(config_dir, &object, exists)?;
-    store_settings(config_dir, object, settings)
+    profile.update(|object, exists| {
+        settings_from_object(profile.config_dir(), object, exists)?;
+        initialize_owner_settings(object, exists, extensions)?;
+        put_settings(object, settings);
+        Ok(())
+    })
 }
 
 pub(crate) fn update_setting(
-    config_dir: &Path,
+    profile: &ProfileStore,
+    extensions: &[Arc<dyn LifecycleExtension>],
     key: LifecycleSetting,
     value: bool,
 ) -> Result<LifecycleSettings, String> {
-    let (object, exists) = read_object_with_presence(config_dir)?;
-    let mut settings = settings_from_object(config_dir, &object, exists)?;
-    match key {
-        LifecycleSetting::AutoStart => settings.auto_start = value,
-        LifecycleSetting::ExitWithHerdr => settings.exit_with_herdr = value,
-    }
-    store_settings(config_dir, object, settings)?;
-    Ok(settings)
+    profile.update(|object, exists| {
+        let mut settings = settings_from_object(profile.config_dir(), object, exists)?;
+        match key {
+            LifecycleSetting::AutoStart => settings.auto_start = value,
+        }
+        initialize_owner_settings(object, exists, extensions)?;
+        put_settings(object, settings);
+        Ok(settings)
+    })
 }
 
-pub fn read_endpoints(config_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let object = read_object(config_dir)?;
-    let Some(value) = object.get("endpoints") else {
-        return Ok(Vec::new());
-    };
-    let values = value.as_array().ok_or_else(|| {
-        format!(
-            "invalid lifecycle state {}: endpoints must be an array",
-            config_dir.join(LIFECYCLE_FILE).display()
-        )
-    })?;
-    if values.len() > MAX_PERSISTED_ENDPOINTS {
-        return Err(format!(
-            "invalid lifecycle state {}: too many endpoints",
-            config_dir.join(LIFECYCLE_FILE).display()
-        ));
-    }
-    let mut endpoints = Vec::with_capacity(values.len());
-    for value in values {
-        let endpoint = value.as_str().ok_or_else(|| {
-            format!(
-                "invalid lifecycle state {}: endpoint must be a string",
-                config_dir.join(LIFECYCLE_FILE).display()
-            )
-        })?;
-        endpoints.push(socket::canonical_endpoint(Path::new(endpoint))?);
-    }
-    endpoints.sort();
-    endpoints.dedup();
-    Ok(endpoints)
-}
-
-pub fn add_endpoint(config_dir: &Path, endpoint: &Path) -> Result<bool, String> {
-    let endpoint = socket::canonical_endpoint(endpoint)?;
-    validate_directory(config_dir, true)?;
-    let (mut object, exists) = read_object_with_presence(config_dir)?;
-    let mut endpoints = read_endpoints(config_dir)?;
-    if endpoints.iter().any(|known| known == &endpoint) {
-        return Ok(false);
-    }
-    if endpoints.len() >= MAX_PERSISTED_ENDPOINTS {
-        return Err("cannot persist more than 64 Herdr endpoints".to_owned());
-    }
-    endpoints.push(endpoint);
-    endpoints.sort();
-    endpoints.dedup();
-    if !exists {
-        put_settings(
-            &mut object,
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: true,
-            },
-        );
-    }
-    object.insert(
-        "endpoints".to_owned(),
-        Value::Array(
-            endpoints
-                .iter()
-                .map(|path| Value::String(path.display().to_string()))
-                .collect(),
-        ),
-    );
-    let path = config_dir.join(LIFECYCLE_FILE);
-    let bytes = serde_json::to_vec_pretty(&Value::Object(object))
-        .map_err(|error| format!("cannot encode lifecycle state: {error}"))?;
-    atomic_write(&path, &bytes)?;
-    Ok(true)
+pub fn validate_directory(path: &Path, create: bool) -> Result<PathBuf, String> {
+    desktop_pet_contracts::profile_store::validate_directory(path, create)
 }
 
 /// Reserve a durable startup handoff before spawning the detached daemon.
@@ -539,8 +361,17 @@ pub fn add_endpoint(config_dir: &Path, endpoint: &Path) -> Result<bool, String> 
 /// `Command::spawn`: the child must acquire that lock itself.  This marker is
 /// the durable ownership handoff that prevents a second ensure invocation from
 /// spawning another child during that gap.
-pub fn begin_startup(config_dir: &Path) -> Result<Option<StartupLease>, String> {
-    validate_directory(config_dir, true)?;
+pub fn begin_startup(
+    profile: &ProfileStore,
+    extensions: &[Arc<dyn LifecycleExtension>],
+) -> Result<Option<StartupLease>, String> {
+    profile.with_writer_lock(|| reserve_startup(profile.config_dir(), extensions))
+}
+
+fn reserve_startup(
+    config_dir: &Path,
+    extensions: &[Arc<dyn LifecycleExtension>],
+) -> Result<Option<StartupLease>, String> {
     let (mut object, exists) = read_object_with_presence(config_dir)?;
     if let Some(value) = object.get(STARTUP_KEY).cloned() {
         let marker = value.as_object().ok_or_else(|| {
@@ -584,6 +415,7 @@ pub fn begin_startup(config_dir: &Path) -> Result<Option<StartupLease>, String> 
         object.remove(STARTUP_KEY);
     }
     let settings = settings_from_object(config_dir, &object, exists)?;
+    initialize_owner_settings(&mut object, exists, extensions)?;
     put_settings(&mut object, settings);
     let token = format!(
         "{}-{}",
@@ -756,65 +588,11 @@ pub fn cancel_startup(config_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_object(config_dir: &Path, object: Map<String, Value>) -> Result<(), String> {
-    validate_directory(config_dir, true)?;
-    let bytes = serde_json::to_vec_pretty(&Value::Object(object))
-        .map_err(|error| format!("cannot encode lifecycle state: {error}"))?;
-    atomic_write(&config_dir.join(LIFECYCLE_FILE), &bytes)
-}
-
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("lifecycle path {} has no parent", path.display()))?;
-    validate_directory(parent, true)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id(),
-        nonce
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(LOCK_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)
-        .map_err(|error| {
-            format!(
-                "cannot create lifecycle temporary file {}: {error}",
-                temp.display()
-            )
-        })?;
-    let result = (|| {
-        file.write_all(bytes)
-            .map_err(|error| format!("cannot write lifecycle state {}: {error}", temp.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("cannot flush lifecycle state {}: {error}", temp.display()))?;
-        fs::rename(&temp, path).map_err(|error| {
-            format!("cannot replace lifecycle state {}: {error}", path.display())
-        })?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-pub fn effective_uid() -> u32 {
-    unsafe { libc::geteuid() }
 }
 
 pub fn pid_alive(pid: u32) -> bool {
@@ -825,10 +603,95 @@ pub fn pid_alive(pid: u32) -> bool {
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+pub fn effective_uid() -> u32 {
+    desktop_pet_contracts::profile_store::effective_uid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desktop_pet_contracts::{LifecycleSettingView, ObservationSelection};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct LifecycleOwner {
+        initializations: AtomicU64,
+        reject_initialization: bool,
+    }
+
+    impl LifecycleExtension for LifecycleOwner {
+        fn provider(&self) -> &'static str {
+            "fixture"
+        }
+
+        fn initialize_lifecycle(&self, candidate: &mut Map<String, Value>) -> Result<(), String> {
+            self.initializations.fetch_add(1, Ordering::SeqCst);
+            candidate.insert("owner_setting".into(), Value::Bool(true));
+            candidate.insert("owner_future".into(), serde_json::json!({"token": 7}));
+            if self.reject_initialization {
+                return Err("owner initialization rejected".into());
+            }
+            Ok(())
+        }
+
+        fn settings(
+            &self,
+            store: &ProfileStore,
+            _selection: &ObservationSelection,
+            _locale: &str,
+        ) -> Result<Vec<LifecycleSettingView>, String> {
+            let (object, exists) = store.read_object_with_presence()?;
+            let value =
+                setting_bool(store.config_dir(), &object, "owner_setting")?.unwrap_or(!exists);
+            Ok(vec![LifecycleSettingView {
+                key: "owner_setting".into(),
+                label: "Owner setting".into(),
+                help: String::new(),
+                value,
+                enabled: true,
+            }])
+        }
+
+        fn apply_setting(
+            &self,
+            store: &ProfileStore,
+            key: &str,
+            value: bool,
+        ) -> Result<(), String> {
+            if key != "owner_setting" {
+                return Err(format!("unknown owner setting: {key}"));
+            }
+            store.update(|object, _| {
+                object.insert(key.into(), Value::Bool(value));
+                Ok(())
+            })
+        }
+
+        fn should_exit(&self, _selection: &ObservationSelection, _now: std::time::Instant) -> bool {
+            false
+        }
+    }
+
+    fn owner(reject_initialization: bool) -> Arc<LifecycleOwner> {
+        Arc::new(LifecycleOwner {
+            initializations: AtomicU64::new(0),
+            reject_initialization,
+        })
+    }
+
+    fn first_common_write(
+        profile: &ProfileStore,
+        extensions: &[Arc<dyn LifecycleExtension>],
+        operation: &str,
+    ) -> Result<(), String> {
+        match operation {
+            "set" => {
+                update_setting(profile, extensions, LifecycleSetting::AutoStart, false).map(|_| ())
+            }
+            "save" => write_settings(profile, extensions, LifecycleSettings { auto_start: false }),
+            "startup" => begin_startup(profile, extensions).map(|_| ()),
+            _ => Err(format!("unknown test lifecycle operation: {operation}")),
+        }
+    }
 
     struct Fixture(PathBuf);
 
@@ -855,6 +718,10 @@ mod tests {
         fn state(&self) -> PathBuf {
             self.0.join(LIFECYCLE_FILE)
         }
+
+        fn profile(&self) -> ProfileStore {
+            ProfileStore::acquire(self.path(), self.path()).expect("profile writer")
+        }
     }
 
     impl Drop for Fixture {
@@ -864,185 +731,201 @@ mod tests {
     }
 
     #[test]
-    fn migrated_false_remains_false_when_changing_other_setting_and_preserves_lease() {
-        let fixture = Fixture::new();
-        fs::write(
-            fixture.state(),
-            r#"{"enabled":false,"endpoints":["/tmp/herdr.sock"],"other":{"retained":9}}"#,
-        )
-        .expect("legacy profile");
-        let lease = begin_startup(fixture.path())
-            .expect("reserve")
-            .expect("lease");
-        assert_eq!(
-            read_settings(fixture.path()).expect("legacy read"),
-            LifecycleSettings {
-                auto_start: false,
-                exit_with_herdr: false,
-            }
-        );
-        assert_eq!(
-            update_setting(fixture.path(), LifecycleSetting::ExitWithHerdr, true).expect("update"),
-            LifecycleSettings {
-                auto_start: false,
-                exit_with_herdr: true,
-            }
-        );
-        let object = read_object(fixture.path()).expect("persisted state");
-        assert!(!object.contains_key("enabled"));
-        assert_eq!(object["auto_start"], false);
-        assert_eq!(object["exit_with_herdr"], true);
-        assert_eq!(object["endpoints"], serde_json::json!(["/tmp/herdr.sock"]));
-        assert_eq!(object["other"], serde_json::json!({"retained":9}));
-        assert_eq!(
-            object["startup"]["token"].as_str(),
-            Some(lease.token.as_str())
-        );
-        claim_startup(fixture.path(), &lease.token).expect("lease survives update");
-        finish_startup(fixture.path(), &lease.token).expect("finish lease");
-        assert!(!startup_pending(fixture.path()).expect("lease released"));
-    }
-
-    #[test]
-    fn fresh_and_existing_files_migrate_with_distinct_exit_policy() {
-        let fixture = Fixture::new();
-        assert_eq!(
-            read_settings(fixture.path()).expect("fresh read"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: true,
-            }
-        );
-        assert!(
-            !fixture.state().exists(),
-            "reads do not create a state file"
-        );
-        fs::write(fixture.state(), "{}").expect("empty existing profile");
-        assert_eq!(
-            read_settings(fixture.path()).expect("empty existing read"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: false,
-            }
-        );
-        fs::write(fixture.state(), r#"{"other":1}"#).expect("existing profile");
-        assert_eq!(
-            read_settings(fixture.path()).expect("existing read"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: false,
-            }
-        );
-        write_settings(
-            fixture.path(),
-            LifecycleSettings {
-                auto_start: false,
-                exit_with_herdr: false,
-            },
-        )
-        .expect("canonical write");
-        assert_eq!(read_object(fixture.path()).expect("preserved")["other"], 1);
-        assert_eq!(
-            update_setting(fixture.path(), LifecycleSetting::AutoStart, true).expect("set"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: false,
-            }
-        );
-    }
-
-    #[test]
-    fn fresh_startup_and_endpoint_writes_preserve_new_profile_policy() {
-        let startup = Fixture::new();
-        let lease = begin_startup(startup.path())
-            .expect("reserve fresh profile")
-            .expect("lease");
-        assert_eq!(
-            read_settings(startup.path()).expect("settings after startup"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: true,
-            }
-        );
-        assert!(startup_pending(startup.path()).expect("lease remains valid"));
-        finish_startup(startup.path(), &lease.token).expect("finish lease");
-
-        let endpoint = Fixture::new();
-        let address = endpoint.path().join("herdr.sock");
-        assert!(add_endpoint(endpoint.path(), &address).expect("new endpoint"));
-        assert_eq!(
-            read_settings(endpoint.path()).expect("settings after endpoint"),
-            LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: true,
-            }
-        );
-        assert_eq!(
-            read_endpoints(endpoint.path()).expect("endpoint retained"),
-            vec![socket::canonical_endpoint(&address).expect("canonical endpoint")]
-        );
-    }
-
-    #[test]
-    fn canonical_precedence_does_not_hide_malformed_legacy_data() {
-        let fixture = Fixture::new();
-        fs::write(
-            fixture.state(),
-            r#"{"auto_start":false,"enabled":true,"exit_with_herdr":true}"#,
-        )
-        .expect("canonical profile");
-        assert!(
-            !read_settings(fixture.path())
-                .expect("canonical precedence")
-                .auto_start
-        );
-        for malformed in [
-            r#"{"enabled":"false","auto_start":false}"#,
-            r#"{"enabled":false,"auto_start":0}"#,
-            r#"{"enabled":false,"exit_with_herdr":null}"#,
-            r#"{"enabled":false"#,
-        ] {
-            fs::write(fixture.state(), malformed).expect("malformed fixture");
-            assert!(read_settings(fixture.path()).is_err());
-            assert!(update_setting(fixture.path(), LifecycleSetting::AutoStart, true).is_err());
-            assert!(write_settings(
-                fixture.path(),
-                LifecycleSettings {
-                    auto_start: true,
-                    exit_with_herdr: true,
-                },
-            )
-            .is_err());
-            assert_eq!(
-                fs::read_to_string(fixture.state()).expect("untouched old file"),
-                malformed
+    fn fresh_defaults_survive_every_first_common_write_and_startup_handoff() {
+        for operation in ["set", "save", "startup"] {
+            let fixture = Fixture::new();
+            let profile = fixture.profile();
+            let owner = owner(false);
+            let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner.clone()];
+            assert!(read_settings(fixture.path()).unwrap().auto_start);
+            assert!(
+                owner
+                    .settings(&profile, &ObservationSelection::Auto, "en")
+                    .unwrap()[0]
+                    .value
             );
+            assert!(!fixture.state().exists());
+            assert_eq!(owner.initializations.load(Ordering::SeqCst), 0);
+
+            first_common_write(&profile, &extensions, operation).unwrap();
+            let object = profile.read_object_with_presence().unwrap().0;
+            assert_eq!(object["owner_setting"], true, "{operation}");
+            assert_eq!(object["owner_future"], serde_json::json!({"token": 7}));
+            assert_eq!(object["auto_start"], operation == "startup");
+
+            let token = if operation == "startup" {
+                object["startup"]["token"].as_str().unwrap().to_owned()
+            } else {
+                begin_startup(&profile, &extensions).unwrap().unwrap().token
+            };
+            profile
+                .with_writer_lock(|| claim_startup(fixture.path(), &token))
+                .unwrap();
+            profile
+                .with_writer_lock(|| finish_startup(fixture.path(), &token))
+                .unwrap();
+            assert!(
+                owner
+                    .settings(&profile, &ObservationSelection::Auto, "en")
+                    .unwrap()[0]
+                    .value
+            );
+            assert_eq!(owner.initializations.load(Ordering::SeqCst), 1);
+            assert!(!startup_pending(fixture.path()).unwrap());
         }
     }
 
     #[test]
-    fn setting_keys_accept_only_canonical_names() {
-        assert_eq!(
-            "auto_start"
-                .parse::<LifecycleSetting>()
-                .expect("auto start"),
-            LifecycleSetting::AutoStart
-        );
-        assert_eq!(
-            "exit_with_herdr"
-                .parse::<LifecycleSetting>()
-                .expect("exit policy"),
-            LifecycleSetting::ExitWithHerdr
-        );
-        for key in ["enabled", "AutoStart", "exit-with-herdr", "auto_start "] {
-            assert!(key.parse::<LifecycleSetting>().is_err());
+    fn existing_missing_or_explicit_owner_policy_is_not_initialized() {
+        for explicit in [None, Some(false), Some(true)] {
+            for operation in ["set", "save", "startup"] {
+                let fixture = Fixture::new();
+                let profile = fixture.profile();
+                profile
+                    .update(|object, _| {
+                        object.insert("auto_start".into(), Value::Bool(false));
+                        object.insert("future".into(), serde_json::json!({"kept": 9}));
+                        if let Some(value) = explicit {
+                            object.insert("owner_setting".into(), Value::Bool(value));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                let owner = owner(false);
+                let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner.clone()];
+                let before = fs::read(fixture.state()).unwrap();
+                assert_eq!(
+                    owner
+                        .settings(&profile, &ObservationSelection::Auto, "en")
+                        .unwrap()[0]
+                        .value,
+                    explicit.unwrap_or(false),
+                );
+                assert_eq!(fs::read(fixture.state()).unwrap(), before);
+
+                first_common_write(&profile, &extensions, operation).unwrap();
+                let object = profile.read_object_with_presence().unwrap().0;
+                assert_eq!(
+                    object.get("owner_setting").and_then(Value::as_bool),
+                    explicit
+                );
+                assert_eq!(object["future"], serde_json::json!({"kept": 9}));
+                assert!(!object.contains_key("owner_future"));
+                assert_eq!(owner.initializations.load(Ordering::SeqCst), 0);
+            }
         }
+    }
+
+    #[test]
+    fn concurrent_first_common_writes_share_initialization_and_preserve_owner_data() {
+        let fixture = Fixture::new();
+        let profile = fixture.profile();
+        let owner = owner(false);
+        let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner.clone()];
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let startup_profile = profile.clone();
+            let startup_extensions = extensions.clone();
+            let startup_barrier = barrier.clone();
+            scope.spawn(move || {
+                startup_barrier.wait();
+                begin_startup(&startup_profile, &startup_extensions)
+                    .unwrap()
+                    .unwrap();
+            });
+            scope.spawn(|| {
+                barrier.wait();
+                update_setting(&profile, &extensions, LifecycleSetting::AutoStart, false).unwrap();
+            });
+        });
+        let object = profile.read_object_with_presence().unwrap().0;
+        assert_eq!(object["auto_start"], false);
+        assert_eq!(object["owner_setting"], true);
+        assert_eq!(object["owner_future"], serde_json::json!({"token": 7}));
+        assert!(object["startup"]["token"].is_string());
+        assert_eq!(owner.initializations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rejected_initialization_does_not_write_and_unregistered_owners_stay_absent() {
+        for operation in ["set", "save", "startup"] {
+            let fixture = Fixture::new();
+            let profile = fixture.profile();
+            let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner(true)];
+            assert!(first_common_write(&profile, &extensions, operation).is_err());
+            assert!(!fixture.state().exists());
+            first_common_write(&profile, &[], operation).unwrap();
+            let object = profile.read_object_with_presence().unwrap().0;
+            assert!(!object.contains_key("owner_setting"));
+            assert!(!object.contains_key("owner_future"));
+        }
+    }
+
+    #[test]
+    fn explicit_readonly_profile_does_not_create_directories() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(fixture.path()).expect("physical fixture");
+        let config = root.join("absent-config");
+        let state = root.join("absent-state");
+        let paths = Paths::resolve_readonly(Some(&config), Some(&state)).expect("readonly paths");
+        assert_eq!(paths.config_dir, config);
+        assert_eq!(paths.state_dir, state);
+        assert!(!paths.config_dir.exists() && !paths.state_dir.exists());
+        assert_eq!(paths.record().version, 1);
+    }
+
+    #[test]
+    fn adoption_rejects_invalid_and_symlink_target_before_any_mutation() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(fixture.path()).expect("physical fixture");
+        let config = root.join("config");
+        let state = root.join("state");
+        fs::create_dir(&config).expect("config fixture");
+        fs::create_dir(&state).expect("state fixture");
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).expect("fixture mode");
+        let alias = root.join("alias");
+        symlink(&config, &alias).expect("fixture alias");
+        assert!(adopt_profile(Path::new("relative"), &state).is_err());
+        assert!(adopt_profile(&alias, &state).is_err());
+        assert_eq!(
+            fs::metadata(&config)
+                .expect("unchanged config")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert!(fs::read_dir(&config)
+            .expect("config entries")
+            .next()
+            .is_none());
+        assert!(fs::read_dir(&state)
+            .expect("state entries")
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn common_lifecycle_write_preserves_integration_owned_keys() {
+        let fixture = Fixture::new();
+        validate_directory(fixture.path(), true).expect("private profile");
+        atomic_write(&fixture.state(), br#"{"enabled":false,"owner_setting":true,"endpoints":["/opaque"],"future":{"kept":7}}"#).expect("initial profile");
+        let profile = fixture.profile();
+        update_setting(&profile, &[], LifecycleSetting::AutoStart, true).expect("common setting");
+        let object = read_object(fixture.path()).expect("preserved profile");
+        assert_eq!(object["auto_start"], true);
+        assert_eq!(object["owner_setting"], true);
+        assert_eq!(object["endpoints"], serde_json::json!(["/opaque"]));
+        assert_eq!(object["future"], serde_json::json!({"kept":7}));
+        assert!(!object.contains_key("enabled"));
     }
 
     #[test]
     fn startup_handoff_remains_owned_until_control_is_bound() {
         let fixture = Fixture::new();
-        let lease = begin_startup(fixture.path())
+        let profile = fixture.profile();
+        let lease = begin_startup(&profile, &[])
             .expect("startup reservation")
             .expect("first launcher owns reservation");
         assert!(startup_pending(fixture.path()).expect("pending marker"));
@@ -1057,14 +940,15 @@ mod tests {
         use std::process::Command;
 
         let fixture = Fixture::new();
-        let lease = begin_startup(fixture.path())
+        let profile = fixture.profile();
+        let lease = begin_startup(&profile, &[])
             .expect("startup reservation")
             .expect("first launcher owns reservation");
         let mut dead = Command::new("/usr/bin/true").spawn().expect("spawn child");
         dead.wait().expect("reap child");
         set_startup_child(fixture.path(), &lease.token, dead.id()).expect("record child");
         assert!(!startup_pending(fixture.path()).expect("dead child marker"));
-        let replacement = begin_startup(fixture.path())
+        let replacement = begin_startup(&profile, &[])
             .expect("startup reservation")
             .expect("dead child no longer owns reservation");
         assert_ne!(replacement.token, lease.token);
@@ -1075,7 +959,7 @@ mod tests {
             .expect("spawn child");
         set_startup_child(fixture.path(), &replacement.token, live.id()).expect("record child");
         let pending = startup_pending(fixture.path()).expect("live child marker");
-        let reserved = begin_startup(fixture.path()).expect("startup reservation");
+        let reserved = begin_startup(&profile, &[]).expect("startup reservation");
         let _ = live.kill();
         live.wait().expect("reap child");
         assert!(pending);
@@ -1097,7 +981,10 @@ mod tests {
     fn cancelled_startup_cannot_be_claimed_or_published() {
         let fixture = Fixture::new();
         fs::write(fixture.state(), r#"{"enabled":false,"other":7}"#).expect("legacy state");
-        let lease = begin_startup(fixture.path())
+        fs::set_permissions(fixture.state(), fs::Permissions::from_mode(0o600))
+            .expect("private legacy state");
+        let profile = fixture.profile();
+        let lease = begin_startup(&profile, &[])
             .expect("reserve")
             .expect("lease");
         cancel_startup(fixture.path()).expect("cancel");

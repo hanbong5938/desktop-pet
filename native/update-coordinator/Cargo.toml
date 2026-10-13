@@ -1,10 +1,11 @@
 [package]
-name = "herdr-update-coordinator"
-version = "0.2.0"
+name = "desktop-pet-update-coordinator"
+version = "0.4.0"
 edition = "2021"
 publish = false
 
 [dependencies]
+desktop-pet-contracts = { path = "../contracts" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

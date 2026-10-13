@@ -7,9 +7,11 @@ import { fileURLToPath } from "node:url"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const rigRoot = join(root, "native", "rig")
-const profile = process.env.HERDR_RIG_BUILD_PROFILE?.trim() || "release"
-if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(profile)) throw new Error(`invalid HERDR_RIG_BUILD_PROFILE: ${profile}`)
-const outputRoot = join(root, "native", "target", "rig-native", profile)
+const distribution = process.env.DESKTOP_PET_DISTRIBUTION ?? "neutral"
+if (distribution !== "neutral" && distribution !== "legacy-0.3.7") throw new Error("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.7")
+const profile = process.env.DESKTOP_PET_RIG_BUILD_PROFILE?.trim() || "release"
+if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(profile)) throw new Error(`invalid DESKTOP_PET_RIG_BUILD_PROFILE: ${profile}`)
+const outputRoot = join(root, "native", "target", distribution, "rig-native", profile)
 const runtimeRoot = join(outputRoot, "Resources", "rig")
 const swiftHeader = join(rigRoot, "RigBridge.h")
 const workerEntitlements = join(rigRoot, "RigDecodeWorker.entitlements.plist")
@@ -87,7 +89,7 @@ const decoderSources = [
   "web/rig/node_modules/pako/LICENSE",
 ].map((path) => join(root, path))
 
-const jsRuntime = process.env.HERDR_RIG_JS_RUNTIME?.trim() || "bun"
+const jsRuntime = process.env.DESKTOP_PET_RIG_JS_RUNTIME?.trim() || "bun"
 await requireFile(workerEntitlements, "rig decode worker entitlements")
 const codesign = await output("xcrun", ["--find", "codesign"])
 const swiftc = await output("xcrun", ["--find", "swiftc"])
@@ -150,7 +152,7 @@ const manifest = {
   probe_faults: false,
   notices: ["Resources/rig/NOTICE.txt", "Resources/rig/vendor"],
   build: {
-    profile, platform: process.platform, architecture: process.arch,
+    distribution, profile, platform: process.platform, architecture: process.arch,
     target: "arm64-apple-macos13.0",
     swift_compiler: output(swiftc, ["--version"]),
     macos_sdk_version: output("xcrun", ["--sdk", "macosx", "--show-sdk-version"]),

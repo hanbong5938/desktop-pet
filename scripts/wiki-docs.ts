@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:f
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  fetchReleases, isPublishedRelease, parseStableTag, rewriteRelativeLinks,
+  CORE_REPOSITORY, fetchReleases, isPublishedRelease, parseStableTag, releaseHeading, releaseRepository, rewriteRelativeLinks,
   type ReleaseRecord,
 } from "./release-docs";
 
@@ -11,6 +11,7 @@ export const MANAGED_STATIC_PAGES = [
   "Home", "Home-ko", "Versioning-and-Compatibility", "Unreleased", "Publishing",
   "Migration-v0.1.4-to-v0.1.6", "Upgrade-Unreleased", "Upgrade-Unreleased-ko",
   "Migration-v0.1.11-to-v0.2.0",
+  "Migration-Desktop-Pet",
   "Release-Status", "Older-Releases", "_Sidebar",
 ] as const;
 const MANIFEST = ".wiki-managed-pages";
@@ -89,6 +90,7 @@ function sourceSlug(path: string): string | undefined {
     "docs/releases/publishing.md": "Publishing",
     "docs/migrations/v0.1.4-to-v0.1.6.md": "Migration-v0.1.4-to-v0.1.6",
     "docs/migrations/v0.1.11-to-v0.2.0.md": "Migration-v0.1.11-to-v0.2.0",
+    "docs/migrations/desktop-pet.md": "Migration-Desktop-Pet",
     "docs/migrations/unreleased.md": "Upgrade-Unreleased",
     "docs/migrations/unreleased.ko.md": "Upgrade-Unreleased-ko",
   };
@@ -111,7 +113,7 @@ function sourceURL(repository: string, ref: string, path: string, directory = fa
 function wikiURL(repository: string, slug: string): string {
   return `https://github.com/${repository}/wiki/${slug}`;
 }
-function validateCatalog(value: unknown): ReleaseRecord[] {
+function validateCatalog(value: unknown, repository: string): ReleaseRecord[] {
   if (!Array.isArray(value)) throw new Error("Release catalog must be an array");
   const tags = new Set<string>();
   const records: ReleaseRecord[] = [];
@@ -125,6 +127,11 @@ function validateCatalog(value: unknown): ReleaseRecord[] {
       || !("published_at" in record) || !(record.published_at === null || typeof record.published_at === "string")
       || !("assets" in record) || !Array.isArray(record.assets)) {
       throw new Error("Malformed release catalog record");
+    }
+    let authority = repository;
+    try { authority = releaseRepository(record.tag_name); } catch { /* Nonstable records remain visible but never shipped. */ }
+    if (record.html_url !== `https://github.com/${authority}/releases/tag/${record.tag_name}`) {
+      throw new Error(`Release catalog URL does not match canonical authority for ${record.tag_name}`);
     }
     const assets: ReleaseRecord["assets"] = [];
     for (const candidateAsset of record.assets) {
@@ -171,7 +178,7 @@ async function scanSources(root: string): Promise<Map<string, string>> {
 }
 function noteHeading(text: string, tag: string): void {
   const firstHeading = text.split(/\r?\n/).find((line) => /^#{1,6}\s/.test(line));
-  if (firstHeading !== `# Herdr Desktop Pet ${tag} release notes` || !text.trim()) {
+  if (firstHeading !== releaseHeading(tag) || !text.trim()) {
     throw new Error(`Invalid release note heading for ${tag}`);
   }
 }
@@ -218,7 +225,7 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
   if (options.releases && options.releasesJson) throw new Error("Choose only one release catalog input");
   const catalog = validateCatalog(options.releases ?? (options.releasesJson
     ? JSON.parse(await readFile(options.releasesJson, "utf8"))
-    : await fetchReleases(options.repository, process.env.GITHUB_TOKEN)));
+    : await fetchReleases(options.repository, process.env.GITHUB_TOKEN)), options.repository);
   if (options.requireRelease) requirePublishedRelease(options.requireRelease, catalog);
   const sources = await scanSources(root);
   const records = new Map<string, ReleaseRecord>();
@@ -261,6 +268,7 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
       backfill = !!tag && Object.hasOwn(historicalTags, tag);
     }
     if (tag) noteHeading(text, tag);
+    const sourceRepository = frozen && tag ? releaseRepository(tag) : options.repository;
     const rewritten = rewriteRelativeLinks(text, path, (repoPath, fragment, isImage) => {
       let directory = false;
       if (frozen) {
@@ -274,8 +282,8 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
       }
       const mapped = sourceSlug(repoPath);
       if (!isImage && mapped && sources.has(mapped)) return `${wikiURL(options.repository, mapped)}${fragment}`;
-      if (isImage) return `https://raw.githubusercontent.com/${options.repository}/${encodeURIComponent(ref)}/${repoPath.split("/").map(encodeURIComponent).join("/")}${fragment}`;
-      return `${sourceURL(options.repository, ref, repoPath, directory)}${fragment}`;
+      if (isImage) return `https://raw.githubusercontent.com/${sourceRepository}/${encodeURIComponent(ref)}/${repoPath.split("/").map(encodeURIComponent).join("/")}${fragment}`;
+      return `${sourceURL(sourceRepository, ref, repoPath, directory)}${fragment}`;
     });
     let status = "";
     if (tag) {
@@ -284,7 +292,7 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
       if (publicRecord(record)) status += ` [GitHub Release](${record.html_url}); published at \`${record.published_at}\`.`;
       status += "\n\n";
     }
-    pages.set(`${slug}.md`, status + rewritten.trimEnd() + attribution(options.repository, ref, path, backfill));
+    pages.set(`${slug}.md`, status + rewritten.trimEnd() + attribution(sourceRepository, ref, path, backfill));
   }
   const row = (tag: string): string => {
     const record = records.get(tag);
@@ -295,7 +303,7 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
     return `| ${note} | ${stateLabel(state)} | ${date} | ${release} |`;
   };
   const tableHeader = "| Version | State | Actual publication timestamp | GitHub record |\n| --- | --- | --- | --- |\n";
-  const indexFooter = `\n\n---\nGenerated from the current GitHub release catalog and current reviewed documentation at \`${head}\`. Requested source ref: \`${options.sourceRef}\`. Stable versions are ordered by numeric semantic version, not publication date. A published label requires a public non-draft, non-prerelease record and all three uploaded, nonzero binary/checksum assets.\n`;
+  const indexFooter = `\n\n---\nGenerated from the current GitHub release catalog and current reviewed documentation at \`${head}\`. Requested source ref: \`${options.sourceRef}\`. Stable versions are ordered by numeric semantic version, not publication date. A published label requires the canonical repository's public non-draft, non-prerelease record and every required uploaded, nonzero asset: six archive/checksum/provenance/installer assets for core releases, or the frozen historical binary/checksum contract.\n`;
   pages.set("Release-Status.md", "# Release status\n\nThis live index is not a snapshot of an older release tag. Pending documentation is not a shipped feature; partial, draft and prerelease records are not stable binary downloads.\n\n"
     + tableHeader + orderedTags.map(row).join("\n") + indexFooter);
   const published = orderedTags.filter((tag) => publicationState(tag, records.get(tag)) === "published");
@@ -311,6 +319,7 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
     "- [Upgrade unreleased](Upgrade-Unreleased)", "- [미출시 업그레이드](Upgrade-Unreleased-ko)",
     "- [v0.1.4 → v0.1.6 migration](Migration-v0.1.4-to-v0.1.6)",
     ...(sources.has("Migration-v0.1.11-to-v0.2.0") ? ["- [v0.1.11 / beta3 → v0.2.0 migration](Migration-v0.1.11-to-v0.2.0)"] : []),
+    ...(sources.has("Migration-Desktop-Pet") ? ["- [Desktop Pet migration](Migration-Desktop-Pet)"] : []),
     ...lineSlugs.map((slug) => `- [Release line ${slug.slice(13)}](${slug})`),
     ...orderedTags.filter((tag) => sources.has(`Release-${tag}`)).map((tag) => `- [${tag} — ${publicationState(tag, records.get(tag))}](Release-${tag})`),
     "- [Older releases](Older-Releases)", "- [Publishing](Publishing)",
@@ -380,7 +389,7 @@ async function main(): Promise<void> {
   const output = values.get("--output");
   const sourceRef = values.get("--source-ref");
   if (!output || !sourceRef) throw new Error("Usage: bun scripts/wiki-docs.ts --output DIR --source-ref REF [--root ROOT] [--repository OWNER/REPO] [--releases-json FILE] [--require-release TAG]");
-  const repository = values.get("--repository") ?? "hanbong5938/herdr-desktop-pet";
+  const repository = values.get("--repository") ?? CORE_REPOSITORY;
   const pages = await generateWiki({
     root: values.get("--root") ?? resolve(import.meta.dir, ".."), output, repository, sourceRef,
     releasesJson: values.get("--releases-json"), requireRelease: values.get("--require-release"),

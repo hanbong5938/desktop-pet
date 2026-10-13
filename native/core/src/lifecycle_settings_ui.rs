@@ -1,12 +1,14 @@
 use crate::i18n::{text, Message, UiLocale};
 use crate::lifecycle::{LifecycleSetting, LifecycleSettings};
-use herdr_update_coordinator::ObservationMode;
+use desktop_pet_contracts::{LifecycleActionView, LifecycleSettingView};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message as ObjcMessage,
+};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSFont,
-    NSSwitch, NSTextField, NSView,
+    NSBezierPath, NSButton, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn,
+    NSFont, NSSwitch, NSTextField, NSUserInterfaceItemIdentification, NSView,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -80,15 +82,31 @@ pub(crate) struct LifecycleSettingsCard {
     auto_label: Retained<NSTextField>,
     auto_help: Retained<NSTextField>,
     auto_switch: Retained<NSSwitch>,
-    exit_label: Retained<NSTextField>,
-    exit_help: Retained<NSTextField>,
-    exit_switch: Retained<NSSwitch>,
     quit_help: Retained<NSTextField>,
-    persistent_help: Retained<NSTextField>,
-    observation_host: ObservationMode,
     error: Retained<NSTextField>,
     locale: UiLocale,
     error_detail: Option<String>,
+    target: Retained<AnyObject>,
+    mtm: MainThreadMarker,
+    extension_rows: Vec<SettingRow>,
+    action_rows: Vec<ActionRow>,
+    settings_snapshot: Vec<(String, LifecycleSettingView)>,
+    actions_snapshot: Vec<(String, LifecycleActionView)>,
+}
+
+struct SettingRow {
+    provider: String,
+    key: String,
+    label: Retained<NSTextField>,
+    help: Retained<NSTextField>,
+    toggle: Retained<NSSwitch>,
+}
+
+struct ActionRow {
+    provider: String,
+    key: String,
+    help: Retained<NSTextField>,
+    button: Retained<NSButton>,
 }
 
 impl LifecycleSettingsCard {
@@ -100,10 +118,7 @@ impl LifecycleSettingsCard {
         let heading = label("", 12.5, true, false, mtm);
         let auto_label = label("", 12.0, true, false, mtm);
         let auto_help = label("", 10.5, false, true, mtm);
-        let exit_label = label("", 12.0, true, false, mtm);
-        let exit_help = label("", 10.5, false, true, mtm);
         let quit_help = label("", 10.5, false, true, mtm);
-        let persistent_help = label("", 10.5, false, true, mtm);
         let error = label("", 10.5, false, false, mtm);
         error.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
             1.0, 0.54, 0.50, 1.0,
@@ -121,17 +136,12 @@ impl LifecycleSettingsCard {
             switch
         };
         let auto_switch = make_switch(sel!(toggleLifecycleAutoStart:));
-        let exit_switch = make_switch(sel!(toggleLifecycleExit:));
         for child in [
             &*heading as &NSView,
             &*auto_label,
             &*auto_help,
             &*auto_switch,
-            &*exit_label,
-            &*exit_help,
-            &*exit_switch,
             &*quit_help,
-            &*persistent_help,
             &*error,
         ] {
             view.addSubview(child);
@@ -142,15 +152,16 @@ impl LifecycleSettingsCard {
             auto_label,
             auto_help,
             auto_switch,
-            exit_label,
-            exit_help,
-            exit_switch,
             quit_help,
-            persistent_help,
-            observation_host: ObservationMode::Both,
             error,
             locale,
             error_detail: None,
+            target: target.retain(),
+            mtm,
+            extension_rows: Vec::new(),
+            action_rows: Vec::new(),
+            settings_snapshot: Vec::new(),
+            actions_snapshot: Vec::new(),
         };
         card.set_locale(locale);
         card
@@ -205,19 +216,29 @@ impl LifecycleSettingsCard {
         y += 2.0;
         place(&self.auto_help, full_width, 0.0, &mut y);
         y += 6.0;
-        if self.observation_host == ObservationMode::Herdr {
-            let exit_y = y;
-            place(&self.exit_label, text_width, 32.0, &mut y);
+        for row in &self.extension_rows {
+            let row_y = y;
+            place(&row.label, text_width, 32.0, &mut y);
             if apply {
-                self.exit_switch.setFrame(NSRect::new(
-                    NSPoint::new(width - 58.0, exit_y),
+                row.toggle.setFrame(NSRect::new(
+                    NSPoint::new(width - 58.0, row_y),
                     NSSize::new(46.0, 30.0),
                 ));
             }
             y += 2.0;
-            place(&self.exit_help, full_width, 0.0, &mut y);
-        } else {
-            place(&self.persistent_help, full_width, 0.0, &mut y);
+            place(&row.help, full_width, 0.0, &mut y);
+            y += 6.0;
+        }
+        for row in &self.action_rows {
+            place(&row.help, full_width, 0.0, &mut y);
+            y += 4.0;
+            if apply {
+                row.button.setFrame(NSRect::new(
+                    NSPoint::new(14.0, y),
+                    NSSize::new(full_width, 28.0),
+                ));
+            }
+            y += 34.0;
         }
         y += 6.0;
         place(&self.quit_help, full_width, 0.0, &mut y);
@@ -228,14 +249,114 @@ impl LifecycleSettingsCard {
         y + 10.0
     }
 
-    pub(crate) fn set_observation_host(&mut self, host: ObservationMode) {
-        self.observation_host = host;
-        let herdr_only = host == ObservationMode::Herdr;
-        self.exit_label.setHidden(!herdr_only);
-        self.exit_help.setHidden(!herdr_only);
-        self.exit_switch.setHidden(!herdr_only);
-        self.exit_switch.setEnabled(herdr_only);
-        self.persistent_help.setHidden(herdr_only);
+    pub(crate) fn sync_extensions(&mut self, settings: &[(String, LifecycleSettingView)]) {
+        if self.settings_snapshot == settings {
+            return;
+        }
+        self.settings_snapshot = settings.to_vec();
+        let mut old = std::mem::take(&mut self.extension_rows);
+        for (provider, setting) in settings {
+            let row = if let Some(index) = old
+                .iter()
+                .position(|row| row.provider == *provider && row.key == setting.key)
+            {
+                old.remove(index)
+            } else {
+                let toggle: Retained<NSSwitch> = unsafe {
+                    msg_send![NSSwitch::alloc(self.mtm), initWithFrame: NSRect::default()]
+                };
+                toggle.setControlSize(NSControlSize::Small);
+                toggle.setRefusesFirstResponder(false);
+                unsafe {
+                    toggle.setTarget(Some(&*self.target));
+                    toggle.setAction(Some(sel!(toggleIntegrationSetting:)));
+                }
+                let setting_label = label("", 12.0, true, false, self.mtm);
+                let help = label("", 10.5, false, true, self.mtm);
+                for child in [&*toggle as &NSView, &*setting_label, &*help] {
+                    self.view.addSubview(child);
+                }
+                SettingRow {
+                    provider: provider.clone(),
+                    key: setting.key.clone(),
+                    label: setting_label,
+                    help,
+                    toggle,
+                }
+            };
+            row.label
+                .setStringValue(&NSString::from_str(&setting.label));
+            row.help.setStringValue(&NSString::from_str(&setting.help));
+            row.toggle.setIdentifier(Some(&NSString::from_str(
+                &serde_json::to_string(&(provider, &setting.key)).expect("setting identifier"),
+            )));
+            row.toggle.setState(if setting.value {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+            row.toggle.setEnabled(setting.enabled);
+            accessibility(&row.toggle, &setting.label);
+            accessibility(&row.help, &setting.help);
+            self.extension_rows.push(row);
+        }
+        for row in old {
+            row.label.removeFromSuperview();
+            row.help.removeFromSuperview();
+            row.toggle.removeFromSuperview();
+        }
+    }
+
+    pub(crate) fn sync_actions(&mut self, actions: &[(String, LifecycleActionView)]) {
+        if self.actions_snapshot == actions {
+            return;
+        }
+        self.actions_snapshot = actions.to_vec();
+        let mut old = std::mem::take(&mut self.action_rows);
+        for (provider, action) in actions {
+            let row = if let Some(index) = old
+                .iter()
+                .position(|row| row.provider == *provider && row.key == action.key)
+            {
+                old.remove(index)
+            } else {
+                let button = unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        &NSString::from_str(""),
+                        Some(&*self.target),
+                        Some(sel!(copyIntegrationAction:)),
+                        self.mtm,
+                    )
+                };
+                let help = label("", 10.5, false, true, self.mtm);
+                self.view.addSubview(&button);
+                self.view.addSubview(&help);
+                ActionRow {
+                    provider: provider.clone(),
+                    key: action.key.clone(),
+                    help,
+                    button,
+                }
+            };
+            row.button.setTitle(&NSString::from_str(&action.label));
+            row.button
+                .setEnabled(action.enabled && action.copy_text.is_some());
+            row.button.setIdentifier(
+                action
+                    .copy_text
+                    .as_ref()
+                    .map(|text| NSString::from_str(text))
+                    .as_deref(),
+            );
+            row.help.setStringValue(&NSString::from_str(&action.help));
+            accessibility(&row.button, &action.label);
+            accessibility(&row.help, &action.help);
+            self.action_rows.push(row);
+        }
+        for row in old {
+            row.button.removeFromSuperview();
+            row.help.removeFromSuperview();
+        }
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
@@ -244,25 +365,15 @@ impl LifecycleSettingsCard {
             (&self.heading, Message::LifecycleHeading),
             (&self.auto_label, Message::LifecycleAutoStart),
             (&self.auto_help, Message::LifecycleAutoStartHelp),
-            (&self.exit_label, Message::LifecycleExit),
-            (&self.exit_help, Message::LifecycleExitHelp),
             (&self.quit_help, Message::LifecycleQuitHelp),
-            (&self.persistent_help, Message::LifecyclePersistentHelp),
         ] {
             field.setStringValue(&NSString::from_str(text(locale, message)));
         }
         accessibility(&self.auto_switch, text(locale, Message::LifecycleAutoStart));
-        accessibility(&self.exit_switch, text(locale, Message::LifecycleExit));
         accessibility(
             &self.auto_help,
             text(locale, Message::LifecycleAutoStartHelp),
         );
-        accessibility(&self.exit_help, text(locale, Message::LifecycleExitHelp));
-        accessibility(
-            &self.persistent_help,
-            text(locale, Message::LifecyclePersistentHelp),
-        );
-        self.set_observation_host(self.observation_host);
         self.display_error();
     }
 
@@ -272,17 +383,11 @@ impl LifecycleSettingsCard {
         } else {
             NSControlStateValueOff
         });
-        self.exit_switch.setState(if settings.exit_with_herdr {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
     }
 
     pub(crate) fn value(&self, key: LifecycleSetting) -> bool {
         match key {
             LifecycleSetting::AutoStart => self.auto_switch.state() == NSControlStateValueOn,
-            LifecycleSetting::ExitWithHerdr => self.exit_switch.state() == NSControlStateValueOn,
         }
     }
 

@@ -4,6 +4,7 @@ use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,13 +16,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "desktop-pet-contracts-{}-{}",
+            "desktop-pet-contracts-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         let config = root.join("config");
         let state = root.join("state");
@@ -126,6 +129,129 @@ fn failed_owner_mutation_preserves_original_bytes() {
     });
     assert!(result.is_err());
     assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn preference_owners_and_lifecycle_updates_share_one_writer() {
+    let fixture = Fixture::new();
+    let lock = Arc::new(LifecycleLock::acquire(&fixture.state).unwrap());
+    let core = ProfileStore::with_lock(&fixture.config, lock.clone()).unwrap();
+    let adapter = ProfileStore::with_lock(&fixture.config, lock).unwrap();
+    let path = fixture.config.join("preferences.json");
+    profile_store::atomic_write(
+        &path,
+        &serde_json::to_vec(&json!({
+            "unknown": { "future": [1, 2, 3] },
+            "common_count": 0,
+            "owner_count": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let barrier = Barrier::new(4);
+    let active = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for (store, key) in [(&core, "common_count"), (&adapter, "owner_count")] {
+            let path = &path;
+            let barrier = &barrier;
+            let active = &active;
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..20 {
+                    store
+                        .with_writer_lock(|| {
+                            assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                            let mut object: serde_json::Map<String, serde_json::Value> =
+                                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                            std::thread::yield_now();
+                            let next = object[key].as_u64().unwrap() + 1;
+                            object.insert(key.into(), json!(next));
+                            let bytes = serde_json::to_vec(&object).unwrap();
+                            profile_store::atomic_write(path, &bytes).unwrap();
+                            assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            });
+        }
+        let barrier = &barrier;
+        let active = &active;
+        let core = &core;
+        scope.spawn(move || {
+            barrier.wait();
+            for _ in 0..20 {
+                core.update(|object, _| {
+                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                    std::thread::yield_now();
+                    object.insert("auto_start".into(), json!(true));
+                    assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        barrier.wait();
+    });
+    let object: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(object["common_count"], json!(20));
+    assert_eq!(object["owner_count"], json!(20));
+    assert_eq!(object["unknown"], json!({ "future": [1, 2, 3] }));
+    assert_eq!(
+        core.read_object_with_presence().unwrap().0["auto_start"],
+        json!(true)
+    );
+}
+
+#[test]
+fn rejected_preference_candidate_does_not_commit_other_owner_changes() {
+    let fixture = Fixture::new();
+    let store = ProfileStore::acquire(&fixture.config, &fixture.state).unwrap();
+    let path = fixture.config.join("preferences.json");
+    profile_store::atomic_write(&path, br#"{"common":false,"owner":["kept"],"unknown":7}"#)
+        .unwrap();
+    let before = fs::read(&path).unwrap();
+    let result: Result<(), String> = store.with_writer_lock(|| {
+        let mut candidate: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        candidate.insert("common".into(), json!(true));
+        // The second owner's validation rejects before the sole atomic write.
+        Err("owner selection rejected".into())
+    });
+    assert!(result.is_err());
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn poisoned_writer_rejects_all_store_wrappers_without_invoking_callbacks() {
+    let fixture = Fixture::new();
+    let lock = Arc::new(LifecycleLock::acquire(&fixture.state).unwrap());
+    let core = ProfileStore::with_lock(&fixture.config, lock.clone()).unwrap();
+    let adapter = ProfileStore::with_lock(&fixture.config, lock).unwrap();
+    core.update(|object, _| {
+        object.insert("kept".into(), json!(true));
+        Ok(())
+    })
+    .unwrap();
+    let before = fs::read(fixture.config.join(LIFECYCLE_FILE)).unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), String> = core.with_writer_lock(|| panic!("owner panicked"));
+    }));
+    assert!(panic.is_err());
+    let mut called = false;
+    let result: Result<(), String> = adapter.with_writer_lock(|| {
+        called = true;
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert!(!called);
+    assert!(core.read_object_with_presence().is_err());
+    assert!(adapter.update(|_, _| Ok(())).is_err());
+    assert_eq!(
+        fs::read(fixture.config.join(LIFECYCLE_FILE)).unwrap(),
+        before
+    );
 }
 
 #[test]

@@ -1,13 +1,15 @@
 use crate::helper_ui::{Attention, Phase};
+use coordinator::identity::OBSERVATION_ENV as OBSERVATION_MODE_ENV;
 use coordinator::protocol::{
     self, ExecutionFence, InstallationReservation, OperationLease, UpdateCommand,
     UpdateControlReply, UpdateControlRequest,
 };
 use coordinator::{
-    ExecutableIdentity, InstallOrigin, ObservationMode, OperationPhase, OperationRecord,
-    UpdatePlan, VerifiedInstallation, OBSERVATION_MODE_ENV,
+    identity, ExecutableIdentity, InstallOrigin, OperationPhase, OperationRecord, UpdatePlan,
+    VerifiedInstallation,
 };
-use herdr_update_coordinator as coordinator;
+use desktop_pet_contracts::ObservationSelection;
+use desktop_pet_update_coordinator as coordinator;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -87,7 +89,7 @@ fn historical_original_allowed(
         None => {
             // An unselected reproducible Local candidate can be byte-for-byte A.
             // Equality is not evidence that its purpose was Original.
-            !matches!(plan.action, coordinator::UpdateAction::LocalRebuild)
+            !matches!(plan.action, coordinator::UpdateAction::SourceRebuild)
                 || image != &plan.running
         }
         Some(selected) => {
@@ -170,10 +172,120 @@ struct Status {
     executable_path: PathBuf,
     config_dir: PathBuf,
     state_dir: PathBuf,
+    app_version: String,
+    updater_protocol: u32,
+    observation_capability: u32,
+    integration_api: u32,
+    #[cfg(desktop_pet_legacy)]
     herdr_socket: PathBuf,
     #[serde(default)]
-    observation_mode: Option<ObservationMode>,
+    #[cfg_attr(
+        desktop_pet_legacy,
+        serde(deserialize_with = "deserialize_legacy_selection")
+    )]
+    observation_mode: Option<ObservationSelection>,
     assets_override: Option<PathBuf>,
+}
+
+#[cfg(desktop_pet_legacy)]
+fn deserialize_legacy_selection<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ObservationSelection>, D::Error> {
+    let token = Option::<String>::deserialize(deserializer)?;
+    token
+        .map(|token| {
+            ObservationSelection::migrate_legacy_input(Some(&token))
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+fn context_endpoint(plan: &UpdatePlan) -> PathBuf {
+    #[cfg(desktop_pet_legacy)]
+    {
+        plan.context.herdr_socket.clone()
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        socket(plan)
+    }
+}
+fn status_endpoint(live: &Status) -> PathBuf {
+    #[cfg(desktop_pet_legacy)]
+    {
+        live.herdr_socket.clone()
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        live.state_dir.join("control.sock")
+    }
+}
+fn status_contract_matches(response: &Status, expected_version: &str) -> bool {
+    response.app_version == expected_version
+        && response.updater_protocol == identity::PROTOCOL
+        && response.observation_capability == identity::OBSERVATION_CAPABILITY
+        && response.integration_api == identity::INTEGRATION_API
+}
+fn visible_consent(plan: &UpdatePlan, panel: &crate::helper_ui::Panel) -> Result<(), String> {
+    coordinator::recheck_plan(plan)?;
+    let live = status(plan)?;
+    verify_status(plan, &live)?;
+    let owner = read_lifecycle(plan)?;
+    if !same_original(&owner, &live) || !live.ui_ready || !live.control_ready {
+        return Err(
+            "prepared source instance/profile/image no longer authorizes this operation".into(),
+        );
+    }
+    panel.pump();
+    if !panel.visible() {
+        panel.activate();
+    }
+    if !panel.visible() {
+        return Err("independent native updater window is not visible".into());
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplacementEvidence {
+    version: u32,
+    operation_id: String,
+    original: ExecutableIdentity,
+    staged: ExecutableIdentity,
+    installed: Option<ExecutableIdentity>,
+}
+fn replacement_path(plan: &UpdatePlan) -> Result<PathBuf, String> {
+    Ok(protocol::private_updates(&plan.context.state_dir)?
+        .join(format!("{}.replacement.json", plan.operation_id)))
+}
+fn write_replacement(plan: &UpdatePlan, proof: &ReplacementEvidence) -> Result<(), String> {
+    let bytes = serde_json::to_vec(proof).map_err(|e| e.to_string())?;
+    protocol::write_private_bytes(&replacement_path(plan)?, &bytes, 0o600)
+}
+fn replacement_completed(plan: &UpdatePlan, record: &OperationRecord) -> Result<bool, String> {
+    if !matches!(plan.action, coordinator::UpdateAction::StandaloneReplace)
+        || record.execution_fence != ExecutionFence::ManagerExited
+    {
+        return Ok(false);
+    }
+    let proof: ReplacementEvidence = serde_json::from_slice(&coordinator::owned_private_file(
+        &replacement_path(plan)?,
+        8192,
+    )?)
+    .map_err(|e| e.to_string())?;
+    if proof.version != protocol::UPDATER_PROTOCOL
+        || proof.operation_id != plan.operation_id
+        || proof.original != plan.running
+    {
+        return Err("replacement evidence differs from captured operation".into());
+    }
+    let installed = candidate(plan)?;
+    Ok(proof.installed.as_ref() == Some(&installed.image)
+        && proof.staged.sha256 == installed.image.sha256)
+}
+fn source_stage_path(plan: &UpdatePlan) -> Result<PathBuf, String> {
+    Ok(protocol::private_updates(&plan.context.state_dir)?
+        .join(format!("{}.source", plan.operation_id)))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -244,7 +356,7 @@ fn lifecycle(plan: &UpdatePlan, live: &Status, stop_generation: u64) -> Result<(
         original_image: plan.running.clone(),
         original_config_dir: live.config_dir.clone(),
         original_state_dir: live.state_dir.clone(),
-        original_socket: live.herdr_socket.clone(),
+        original_socket: status_endpoint(live),
         original_assets: live.assets_override.clone(),
         helper_pid: std::process::id(),
         helper_image: coordinator::executable_identity(
@@ -263,7 +375,7 @@ fn read_lifecycle(plan: &UpdatePlan) -> Result<LifecycleEvidence, String> {
         || owner.original_image != plan.running
         || owner.original_config_dir != plan.context.config_dir
         || owner.original_state_dir != plan.context.state_dir
-        || !same_endpoint(&owner.original_socket, &plan.context.herdr_socket)
+        || !same_endpoint(&owner.original_socket, &context_endpoint(plan))
         || owner.original_assets != plan.context.assets_override
         || owner.helper_pid == 0
         || owner.helper_image.path
@@ -285,7 +397,7 @@ fn same_original(owner: &LifecycleEvidence, live: &Status) -> bool {
         && owner.original_image.sha256 == live.running_sha256
         && owner.original_config_dir == live.config_dir
         && owner.original_state_dir == live.state_dir
-        && same_endpoint(&owner.original_socket, &live.herdr_socket)
+        && same_endpoint(&owner.original_socket, &status_endpoint(live))
         && owner.original_assets == live.assets_override
 }
 
@@ -324,8 +436,11 @@ fn read_evidence(plan: &UpdatePlan) -> Result<Option<ManagerEvidence>, String> {
 }
 fn manager_artifacts_absent(plan: &UpdatePlan) -> Result<bool, String> {
     let base = protocol::private_updates(&plan.context.state_dir)?;
-    for suffix in ["json", "stdout", "stderr"] {
-        let path = base.join(format!("{}.manager.{suffix}", plan.operation_id));
+    for path in ["json", "stdout", "stderr"]
+        .map(|suffix| base.join(format!("{}.manager.{suffix}", plan.operation_id)))
+        .into_iter()
+        .chain(std::iter::once(replacement_path(plan)?))
+    {
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
@@ -434,8 +549,11 @@ fn same_endpoint(actual: &Path, captured: &Path) -> bool {
 }
 fn status_mode_matches(plan: &UpdatePlan, response: &Status) -> Result<bool, String> {
     let expected = plan.context.observation_mode()?;
-    Ok(response.observation_mode == Some(expected)
-        || expected == ObservationMode::Herdr && response.observation_mode.is_none())
+    #[cfg(desktop_pet_legacy)]
+    if response.observation_mode.is_none() {
+        return Ok(expected == ObservationSelection::Provider("herdr".into()));
+    }
+    Ok(response.observation_mode.as_ref() == Some(&expected))
 }
 fn verify_status(plan: &UpdatePlan, response: &Status) -> Result<(), String> {
     let c = &plan.context;
@@ -448,7 +566,8 @@ fn verify_status(plan: &UpdatePlan, response: &Status) -> Result<(), String> {
         || response.executable_path != plan.running.path
         || response.config_dir != c.config_dir
         || response.state_dir != c.state_dir
-        || !same_endpoint(&response.herdr_socket, &c.herdr_socket)
+        || !same_endpoint(&status_endpoint(response), &context_endpoint(plan))
+        || !status_contract_matches(response, &c.version)
         || response.assets_override != c.assets_override
         || !status_mode_matches(plan, response)?
     {
@@ -522,10 +641,9 @@ fn process_live(pid: u32) -> bool {
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 fn installation_process_in_scope(path: &Path, root: &Path) -> Result<bool, String> {
-    if path
-        .file_name()
-        .is_none_or(|name| name != "herdr-desktop-pet")
-    {
+    if path.file_name().is_none_or(|name| {
+        name != identity::BINARY && name != "desktop-pet" && name != "herdr-desktop-pet"
+    }) {
         return Ok(false);
     }
     if !path.is_absolute()
@@ -750,6 +868,13 @@ fn stage_command(
 // The signed release is downloaded only once for this operation. This is a
 // pre-Stop capability proof, not a manager invocation or a persistent cache.
 fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
+    #[cfg(not(desktop_pet_legacy))]
+    if matches!(plan.action, coordinator::UpdateAction::StandaloneReplace) {
+        let staged = coordinator::installation::stage_standalone_release(plan)?;
+        coordinator::validate_candidate_for_context(&staged.image.path, &plan.context)?;
+        let bytes = serde_json::to_vec(&staged.image).map_err(|e| e.to_string())?;
+        return protocol::write_private_bytes(&staged_release_path(plan)?, &bytes, 0o600);
+    }
     let Some(target) = &plan.target else {
         return Ok(());
     };
@@ -842,8 +967,8 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
         30,
     )?;
     let app = match release.channel {
-        coordinator::ReleaseChannel::Stable => "HerdrDesktopPet.app",
-        coordinator::ReleaseChannel::Beta => "HerdrDesktopPetBeta.app",
+        coordinator::ReleaseChannel::Stable => identity::APP_NAME,
+        coordinator::ReleaseChannel::Beta => identity::BETA_APP_NAME,
     };
     let mut has_app = false;
     for name in listing.lines() {
@@ -887,7 +1012,10 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
         4096,
         60,
     )?;
-    let binary = extracted.join(app).join("Contents/MacOS/herdr-desktop-pet");
+    let binary = extracted
+        .join(app)
+        .join("Contents/MacOS")
+        .join(identity::BINARY);
     let image = coordinator::validate_candidate_for_context(&binary, &plan.context)?;
     let actual_version = stage_command(
         &image.path,
@@ -896,7 +1024,7 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
         4096,
         5,
     )?;
-    if actual_version.trim() != format!("herdr-desktop-pet {}", release.version) {
+    if actual_version.trim() != format!("{} {}", identity::BINARY, release.version) {
         return Err("staged signed app version differs from approved release".into());
     }
     let helper = coordinator::helper_path_for_context(&image.path, &plan.context)?;
@@ -1173,63 +1301,67 @@ fn start_command(
     generation: u64,
 ) -> Result<Command, String> {
     let c = &plan.context;
-    let mode = c.observation_mode()?;
-    let managed_host = if let InstallOrigin::Herdr { host, .. } = &plan.origin {
-        let captured = c
-            .environment
-            .get("HERDR_BIN_PATH")
-            .ok_or("managed host route missing from captured profile")?;
-        if fs::canonicalize(captured).map_err(|e| e.to_string())? != *host {
-            return Err(
-                "captured host routing changed; refusing incidental PATH or source conversion"
-                    .into(),
-            );
-        }
-        Some(host)
-    } else {
-        None
-    };
+    let selection = c.observation_mode()?;
+    #[cfg(desktop_pet_legacy)]
+    let selection_token = coordinator::legacy_codec::observation_token(&selection)?;
+    #[cfg(not(desktop_pet_legacy))]
+    let selection_token = selection.as_str();
     let mut cmd = Command::new(&installed.image.path);
     cmd.arg("start")
         .arg("--config-dir")
         .arg(&c.config_dir)
         .arg("--state-dir")
         .arg(&c.state_dir)
-        .arg("--socket")
-        .arg(&c.herdr_socket);
-    if mode.supports_tern() {
-        cmd.arg("--host").arg(mode.as_str());
+        .arg("--host")
+        .arg(selection_token);
+    #[cfg(desktop_pet_legacy)]
+    {
+        cmd.arg("--socket").arg(&c.herdr_socket);
+        if let InstallOrigin::Herdr { host, .. } = &plan.origin {
+            let captured = c
+                .environment
+                .get("HERDR_BIN_PATH")
+                .ok_or("managed host route missing")?;
+            if fs::canonicalize(captured).map_err(|e| e.to_string())? != *host {
+                return Err("captured host routing changed; refusing source conversion".into());
+            }
+        }
     }
     if let Some(assets) = &c.assets_override {
         cmd.arg("--assets").arg(assets);
     }
     cmd.env_clear()
         .envs(&c.environment)
-        .env("HERDR_PLUGIN_CONFIG_DIR", &c.config_dir)
-        .env("HERDR_PLUGIN_STATE_DIR", &c.state_dir)
-        .env("HERDR_SOCKET_PATH", &c.herdr_socket)
-        .env(OBSERVATION_MODE_ENV, mode.as_str())
-        .env("HERDR_DESKTOP_PET_UPDATER_TOKEN", token)
-        .env(
-            "HERDR_DESKTOP_PET_UPDATER_GENERATION",
-            generation.to_string(),
-        )
+        .env(OBSERVATION_MODE_ENV, selection_token)
+        .env(identity::UPDATER_TOKEN_ENV, token)
+        .env(identity::UPDATER_GENERATION_ENV, generation.to_string())
         .current_dir(&c.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(original_host_config) = &c.host_plugin_config_dir {
-        cmd.env(
-            "HERDR_DESKTOP_PET_CAPTURED_HOST_PLUGIN_CONFIG_DIR",
-            original_host_config,
-        );
-    } else {
-        cmd.env_remove("HERDR_DESKTOP_PET_CAPTURED_HOST_PLUGIN_CONFIG_DIR");
-    }
-    if let Some(host) = managed_host {
-        cmd.env("HERDR_BIN_PATH", host);
+    #[cfg(not(desktop_pet_legacy))]
+    cmd.env("DESKTOP_PET_CONFIG_DIR", &c.config_dir)
+        .env("DESKTOP_PET_STATE_DIR", &c.state_dir);
+    #[cfg(desktop_pet_legacy)]
+    {
+        cmd.env("HERDR_PLUGIN_CONFIG_DIR", &c.config_dir)
+            .env("HERDR_PLUGIN_STATE_DIR", &c.state_dir)
+            .env("HERDR_SOCKET_PATH", &c.herdr_socket);
+        if let Some(original) = &c.host_plugin_config_dir {
+            cmd.env(
+                "HERDR_DESKTOP_PET_CAPTURED_HOST_PLUGIN_CONFIG_DIR",
+                original,
+            );
+        }
     }
     Ok(cmd)
+}
+
+fn expected_start_version(plan: &UpdatePlan, purpose: StartupPurpose) -> Result<String, String> {
+    match purpose {
+        StartupPurpose::Original => Ok(plan.context.version.clone()),
+        StartupPurpose::Candidate => coordinator::executable_version(&candidate(plan)?.image),
+    }
 }
 fn new_ready(
     plan: &UpdatePlan,
@@ -1251,7 +1383,8 @@ fn new_ready(
         && reply.executable_path == image.path
         && reply.config_dir == plan.context.config_dir
         && reply.state_dir == plan.context.state_dir
-        && same_endpoint(&reply.herdr_socket, &plan.context.herdr_socket)
+        && same_endpoint(&status_endpoint(reply), &context_endpoint(plan))
+        && status_contract_matches(reply, &expected_start_version(plan, purpose)?)
         && reply.assets_override == plan.context.assets_override
         && status_mode_matches(plan, reply)?
         && process_path(reply.pid)?.as_deref() == Some(image.path.as_path())
@@ -1388,7 +1521,7 @@ fn preflight(plan: &UpdatePlan) -> Result<LifecycleEvidence, String> {
     }
     read_lifecycle(plan)
 }
-fn stage_with_panel(
+fn stage_reserved_release(
     plan: &UpdatePlan,
     reservation: &InstallationReservation,
     panel: &crate::helper_ui::Panel,
@@ -1470,12 +1603,8 @@ fn prepare(
     if reservation.user_stop_requested()? {
         return Err("user stop superseded update".into());
     }
-    // Closing a nonmodal panel is not a stop request. Restore visible ownership
-    // before native Prepare so the final ACK can truthfully transfer it.
-    panel.activate();
-    if !panel.visible() {
-        return Err("native updater window cannot be made visible".into());
-    }
+    // The helper owns visible progress independently of the replaceable source.
+    visible_consent(plan, panel)?;
     if !snapshot(plan)?
         .is_some_and(|scope| scope.markers_complete && scope.startup_origin.is_none())
     {
@@ -1483,13 +1612,7 @@ fn prepare(
     }
     *uncertain = true;
     control(plan, reservation, UpdateCommand::Prepare)?;
-    panel.pump();
-    if !panel.visible() {
-        panel.activate();
-    }
-    if !panel.visible() {
-        return Err("native updater window cannot be made visible after preparation".into());
-    }
+    visible_consent(plan, panel)?;
     if reservation.user_stop_requested()? {
         return Err("user stop superseded preparation".into());
     }
@@ -1618,7 +1741,7 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
     };
     panel.show(Phase::Preparing, Some(&record.detail));
     let mut prepare_uncertain = false;
-    let prepared = stage_with_panel(&plan, &reservation, &panel).and_then(|_| {
+    let prepared = stage_reserved_release(&plan, &reservation, &panel).and_then(|_| {
         prepare(&plan, &reservation, &owner, &panel, &mut prepare_uncertain)
             .map_err(|e| (e, prepare_uncertain))
     });
@@ -1659,13 +1782,14 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
             return Err(error);
         }
     };
-    // ACK is the transfer of visible UI ownership. No Stop is sent until ACK has been flushed.
-    panel.pump();
-    if !panel.visible() {
-        panel.activate();
-    }
-    if !panel.visible() {
-        let error = "native updater window is not visible".to_string();
+    // Transfer actual helper-window ownership only after source authorization
+    // and native Prepare. No reserved Stop precedes this proof and ACK flush.
+    if let Err(error) = visible_consent(&plan, &panel).and_then(|_| {
+        if reservation.user_stop_requested()? {
+            return Err("user stop superseded visible handoff".into());
+        }
+        Ok(())
+    }) {
         fail(&plan, &mut record, error.clone(), true, Some(reservation))?;
         let _ = ack(&plan, false, false, Some(&error));
         return Err(error);
@@ -1688,11 +1812,11 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
         }
         if retain(&panel) {
             panel.close();
-            let restored = recover_locked(plan, true, &lease)?;
-            return if restored.phase == OperationPhase::Completed {
+            let recovered = recover_locked(plan, true, &lease)?;
+            return if recovered.phase == OperationPhase::Completed {
                 Ok(())
             } else {
-                Err(format!("update was not applied: {}", restored.detail))
+                Err(format!("update was not applied: {}", recovered.detail))
             };
         }
         return Err(error);
@@ -1738,11 +1862,11 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
                 }
                 if retain(&panel) {
                     panel.close();
-                    let reconciled = recover_locked(plan, true, &lease)?;
-                    return if reconciled.phase == OperationPhase::Completed {
+                    let recovered = recover_locked(plan, true, &lease)?;
+                    return if recovered.phase == OperationPhase::Completed {
                         Ok(())
                     } else {
-                        Err(format!("update was not finalized: {}", reconciled.detail))
+                        Err(format!("update was not finalized: {}", recovered.detail))
                     };
                 }
                 return Err(error);
@@ -1758,11 +1882,11 @@ pub fn run(plan: UpdatePlan) -> Result<(), String> {
                 panel.offer_recovery();
                 if retain(&panel) {
                     panel.close();
-                    let reconciled = recover_locked(plan, true, &lease)?;
-                    return if reconciled.phase == OperationPhase::Completed {
+                    let recovered = recover_locked(plan, true, &lease)?;
+                    return if recovered.phase == OperationPhase::Completed {
                         Ok(())
                     } else {
-                        Err(format!("update was not finalized: {}", reconciled.detail))
+                        Err(format!("update was not finalized: {}", recovered.detail))
                     };
                 }
                 return Err(error);
@@ -1857,6 +1981,13 @@ fn perform(
     if reservation.user_stop_requested().map_err(|e| (e, true))? {
         return Err(("user stopped the application".into(), false));
     }
+    #[cfg(not(desktop_pet_legacy))]
+    if matches!(plan.action, coordinator::UpdateAction::SourceRebuild) {
+        let stage = source_stage_path(plan).map_err(|e| (e, false))?;
+        fs::create_dir(&stage).map_err(|e| (e.to_string(), false))?;
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700))
+            .map_err(|e| (e.to_string(), false))?;
+    }
     if let Some(cmd) = manager_command {
         step(
             transition(
@@ -1869,6 +2000,55 @@ fn perform(
         )?;
         panel.show(Phase::Installing, None);
         step(manager(plan, reservation, cmd, panel, record), true)?;
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    if matches!(plan.action, coordinator::UpdateAction::StandaloneReplace) {
+        step(
+            transition(
+                plan,
+                record,
+                OperationPhase::Installing,
+                "Replacing validated standalone bundle exactly once",
+            ),
+            true,
+        )?;
+        let staged = coordinator::installation::load_staged_standalone_release(plan)
+            .map_err(|e| (e, true))?;
+        let mut replacement = ReplacementEvidence {
+            version: protocol::UPDATER_PROTOCOL,
+            operation_id: plan.operation_id.clone(),
+            original: plan.running.clone(),
+            staged: staged.image.clone(),
+            installed: None,
+        };
+        step(write_replacement(plan, &replacement), true)?;
+        record.execution_fence = ExecutionFence::ManagerIntent;
+        step(journal(plan, record), true)?;
+        if reservation.user_stop_requested().map_err(|e| (e, true))? {
+            return Err(("user stop superseded standalone replacement".into(), false));
+        }
+        let installed = coordinator::installation::commit_standalone_release(plan, &staged)
+            .map_err(|e| (e, true))?;
+        replacement.installed = Some(installed.image);
+        step(write_replacement(plan, &replacement), true)?;
+        record.execution_fence = ExecutionFence::ManagerExited;
+        step(journal(plan, record), true)?;
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    if matches!(plan.action, coordinator::UpdateAction::SourceRebuild) {
+        let stage = source_stage_path(plan)
+            .map_err(|e| (e, true))?
+            .join(identity::APP_NAME);
+        let staged =
+            coordinator::installation::validate_staged_app(&stage).map_err(|e| (e, true))?;
+        record.execution_fence = ExecutionFence::ManagerIntent;
+        step(journal(plan, record), true)?;
+        if reservation.user_stop_requested().map_err(|e| (e, true))? {
+            return Err(("user stop superseded source replacement".into(), false));
+        }
+        coordinator::installation::commit_source_release(plan, &staged).map_err(|e| (e, true))?;
+        record.execution_fence = ExecutionFence::ManagerExited;
+        step(journal(plan, record), true)?;
     }
     step(
         transition(
@@ -2062,7 +2242,7 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
             }
         }
     }
-    let mut manager_safe = false;
+    let mut manager_safe = replacement_completed(plan, &record)?;
     let mut manager_failed_quiet = false;
     match read_evidence(plan)? {
         Some(manager) if record.execution_fence == ExecutionFence::ManagerExited => {
@@ -2094,6 +2274,7 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
         {
             manager_safe = true;
         }
+        None if manager_safe => {}
         None if record.execution_fence == ExecutionFence::ManagerIntent => {
             record.detail =
                 "Manager spawn/PID evidence gap; reservation retained, no replay".into();
@@ -2383,8 +2564,10 @@ fn recover_locked(
             if record.execution_fence == ExecutionFence::ManagerIntent {
                 return Err("manager spawn/PID or exit/drain evidence is not durable; reservation retained, no replay".into());
             }
-            if manager.is_some() != (record.execution_fence == ExecutionFence::ManagerExited)
-                || record.execution_fence == ExecutionFence::NoSpawn && !no_spawn
+            let internal_complete = replacement_completed(&plan, &record)?;
+            if !internal_complete
+                && (manager.is_some() != (record.execution_fence == ExecutionFence::ManagerExited)
+                    || record.execution_fence == ExecutionFence::NoSpawn && !no_spawn)
             {
                 return Err(
                     "manager artifacts and durable execution fence disagree; reservation retained"
@@ -2771,10 +2954,10 @@ mod tests {
         fs::create_dir_all(&config).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
         let running = ExecutableIdentity {
-            path: root.join("original/Contents/MacOS/herdr-desktop-pet"),
+            path: root.join("original/Contents/MacOS").join(identity::BINARY),
             sha256: "a".repeat(64),
         };
-        let origin = InstallOrigin::Local {
+        let origin = InstallOrigin::Source {
             root: root.join("original"),
         };
         UpdatePlan {
@@ -2785,8 +2968,10 @@ mod tests {
                 version: "0.2.0".into(),
                 instance_id: "original-instance".into(),
                 config_dir: config,
+                #[cfg(desktop_pet_legacy)]
                 host_plugin_config_dir: None,
                 state_dir: state.clone(),
+                #[cfg(desktop_pet_legacy)]
                 herdr_socket: root.join("host.sock"),
                 running: running.clone(),
                 running_origin: Some(Box::new(origin.clone())),
@@ -2796,7 +2981,7 @@ mod tests {
             },
             origin,
             target: None,
-            action: UpdateAction::LocalRebuild,
+            action: UpdateAction::SourceRebuild,
             running,
             candidate: None,
         }
@@ -2817,8 +3002,13 @@ mod tests {
             executable_path: plan.running.path.clone(),
             config_dir: c.config_dir.clone(),
             state_dir: c.state_dir.clone(),
+            app_version: c.version.clone(),
+            updater_protocol: identity::PROTOCOL,
+            observation_capability: identity::OBSERVATION_CAPABILITY,
+            integration_api: identity::INTEGRATION_API,
+            #[cfg(desktop_pet_legacy)]
             herdr_socket: c.herdr_socket.clone(),
-            observation_mode: None,
+            observation_mode: c.observation_mode().ok(),
             assets_override: c.assets_override.clone(),
         }
     }
@@ -2864,124 +3054,108 @@ mod tests {
     }
 
     #[test]
-    fn tern_status_and_readiness_keep_configured_socket_proof_without_herdr_listener() {
+    fn provider_status_preserves_exact_profile_without_host_socket_authority() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        plan.context.herdr_socket = root.path().join("absent/host.sock");
         plan.context
             .environment
             .insert(OBSERVATION_MODE_ENV.into(), "tern".into());
-        // Use the actual test process image to exercise the complete live proof.
         plan.running.path = process_path(std::process::id()).unwrap().unwrap();
         plan.context.executable = plan.running.path.clone();
         plan.context.running = plan.running.clone();
         let mut reply = live_status(&plan);
-        reply.observation_mode = Some(ObservationMode::Tern);
         assert!(verify_status(&plan, &reply).is_ok());
-        let installed = VerifiedInstallation {
-            image: plan.running.clone(),
-            origin: plan.origin.clone(),
-        };
-        reply.instance_id = "fresh-instance".into();
         for invalid in [
             PathBuf::new(),
-            PathBuf::from("relative.sock"),
-            root.path().join("absent/other.sock"),
+            PathBuf::from("relative"),
+            root.path().join("other-state"),
         ] {
-            reply.herdr_socket = invalid;
-            for purpose in [StartupPurpose::Original, StartupPurpose::Candidate] {
-                assert!(!new_ready(&plan, &installed, purpose, None, &reply).unwrap());
-            }
-            reply.instance_id = plan.context.instance_id.clone();
+            reply.state_dir = invalid;
             assert!(verify_status(&plan, &reply).is_err());
-            reply.instance_id = "fresh-instance".into();
         }
     }
 
     #[test]
-    fn captured_mode_controls_launch_and_live_proof_without_legacy_tern_fallback() {
-        for mode in [
-            ObservationMode::Herdr,
-            ObservationMode::Tern,
-            ObservationMode::Both,
-        ] {
+    fn captured_selection_controls_launch_and_exact_live_proof() {
+        let mut selections = vec![
+            ObservationSelection::Auto,
+            ObservationSelection::Provider("herdr".into()),
+            ObservationSelection::Provider("tern".into()),
+        ];
+        #[cfg(not(desktop_pet_legacy))]
+        selections.push(ObservationSelection::Provider("opaque-provider".into()));
+        for selection in selections {
             let root = tempfile::tempdir().unwrap();
             let mut plan = plan(root.path());
-            if mode != ObservationMode::Herdr {
-                plan.context
-                    .environment
-                    .insert(OBSERVATION_MODE_ENV.into(), mode.as_str().into());
-            }
+            #[cfg(desktop_pet_legacy)]
+            let token = coordinator::legacy_codec::observation_token(&selection).unwrap();
+            #[cfg(not(desktop_pet_legacy))]
+            let token = selection.as_str();
+            plan.context
+                .environment
+                .insert(OBSERVATION_MODE_ENV.into(), token.into());
             let installed = VerifiedInstallation {
                 image: plan.running.clone(),
                 origin: plan.origin.clone(),
             };
             let cmd = start_command(&plan, &installed, "captured-token", 7).unwrap();
-            let args: Vec<_> = cmd.get_args().collect();
-            if mode.supports_tern() {
-                assert!(args.windows(2).any(|pair| {
-                    pair[0].to_str() == Some("--host") && pair[1].to_str() == Some(mode.as_str())
-                }));
-            } else {
-                assert!(!args.iter().any(|arg| arg.to_str() == Some("--host")));
-            }
+            assert!(cmd
+                .get_args()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] == "--host" && pair[1] == token));
             assert_eq!(
                 cmd.get_envs()
-                    .find(|(key, _)| key.to_str() == Some(OBSERVATION_MODE_ENV))
+                    .find(|(key, _)| *key == OBSERVATION_MODE_ENV)
                     .and_then(|(_, value)| value),
-                Some(std::ffi::OsStr::new(mode.as_str()))
+                Some(std::ffi::OsStr::new(token))
+            );
+            assert_eq!(
+                cmd.get_envs()
+                    .find(|(key, _)| *key == identity::UPDATER_TOKEN_ENV)
+                    .and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new("captured-token"))
             );
             let mut reply = live_status(&plan);
-            assert_eq!(
-                status_mode_matches(&plan, &reply).unwrap(),
-                !mode.supports_tern()
-            );
-            if mode.supports_tern() {
-                assert!(verify_status(&plan, &reply)
-                    .unwrap_err()
-                    .contains("observation mode"));
-                assert!(
-                    !new_ready(&plan, &installed, StartupPurpose::Original, None, &reply).unwrap()
-                );
-            }
-            reply.observation_mode = Some(mode);
             assert!(status_mode_matches(&plan, &reply).unwrap());
-            reply.observation_mode = Some(if mode == ObservationMode::Herdr {
-                ObservationMode::Tern
+            reply.observation_mode = None;
+            #[cfg(not(desktop_pet_legacy))]
+            assert!(!status_mode_matches(&plan, &reply).unwrap());
+            reply.observation_mode = Some(selection.clone());
+            assert!(status_mode_matches(&plan, &reply).unwrap());
+            reply.observation_mode = Some(if selection == ObservationSelection::Auto {
+                ObservationSelection::Provider("tern".into())
             } else {
-                ObservationMode::Herdr
+                ObservationSelection::Auto
             });
             assert!(!status_mode_matches(&plan, &reply).unwrap());
-            assert!(verify_status(&plan, &reply)
-                .unwrap_err()
-                .contains("observation mode"));
-            assert!(
-                !new_ready(&plan, &installed, StartupPurpose::Candidate, None, &reply).unwrap()
-            );
         }
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
-    fn migrated_both_launches_only_canonical_auto_and_keeps_exact_live_proof() {
+    fn legacy_both_is_preserved_only_at_compiled_boundary() {
         let root = tempfile::tempdir().unwrap();
-        let original = plan(root.path());
-        let mut legacy = serde_json::to_value(&original).unwrap();
-        legacy["context"]["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
-        let plan: UpdatePlan = serde_json::from_value(legacy).unwrap();
-        assert_eq!(plan.context.environment[OBSERVATION_MODE_ENV], "auto");
+        let mut plan = plan(root.path());
+        plan.context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "both".into());
+        assert_eq!(
+            plan.context.observation_mode().unwrap(),
+            ObservationSelection::Auto
+        );
         let installed = VerifiedInstallation {
             image: plan.running.clone(),
             origin: plan.origin.clone(),
         };
         let cmd = start_command(&plan, &installed, "captured-token", 7).unwrap();
-        let args: Vec<_> = cmd.get_args().collect();
-        assert!(args.windows(2).any(|pair| {
-            pair[0].to_str() == Some("--host") && pair[1].to_str() == Some("auto")
-        }));
-        assert!(!args.iter().any(|arg| arg.to_str() == Some("both")));
+        assert!(cmd
+            .get_args()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0] == "--host" && pair[1] == "both"));
         let mut reply = live_status(&plan);
-        assert!(!status_mode_matches(&plan, &reply).unwrap());
-        reply.observation_mode = Some(ObservationMode::Both);
+        reply.observation_mode = Some(ObservationSelection::Auto);
         assert!(status_mode_matches(&plan, &reply).unwrap());
         reply.config_dir = root.path().join("other-profile");
         assert!(verify_status(&plan, &reply).is_err());
@@ -2993,7 +3167,7 @@ mod tests {
         let mut plan = plan(root.path());
         plan.context
             .environment
-            .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
+            .insert(OBSERVATION_MODE_ENV.into(), "".into());
         let installed = VerifiedInstallation {
             image: plan.running.clone(),
             origin: plan.origin.clone(),
@@ -3002,6 +3176,7 @@ mod tests {
         assert!(verify_status(&plan, &live_status(&plan)).is_err());
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn captured_managed_host_drift_cannot_be_replaced_by_socket_or_path() {
         let root = tempfile::tempdir().unwrap();
@@ -3050,101 +3225,42 @@ mod tests {
     }
 
     #[test]
-    fn release_helper_capability_follows_captured_encoding_before_stop() {
+    fn release_helper_requires_exact_compiled_contract_before_stop() {
         let root = tempfile::tempdir().unwrap();
-        let mut plan = plan(root.path());
-        let legacy = r#"{"protocol":3}"#;
-        assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_ok());
-        for capability in [1, 2] {
-            assert!(coordinator::validate_helper_capabilities(
-                &format!(r#"{{"protocol":3,"observation_mode":{capability}}}"#),
-                &plan.context
-            )
-            .is_ok());
-        }
-        for incompatible in [
-            r#"{"protocol":3,"observation_mode":0}"#,
-            r#"{"protocol":3,"observation_mode":3}"#,
-            r#"{"protocol":3,"observation_mode":"1"}"#,
-            r#"{"protocol":3,"observation_mode":"2"}"#,
-            r#"{"protocol":3,"observation_mode":null}"#,
-        ] {
-            assert!(
-                coordinator::validate_helper_capabilities(incompatible, &plan.context).is_err()
-            );
-        }
+        let plan = plan(root.path());
+        let exact = identity::capabilities();
         assert!(
-            coordinator::validate_helper_capabilities(r#"{"protocol":2}"#, &plan.context).is_err()
+            coordinator::validate_helper_capabilities(&exact.to_string(), &plan.context).is_ok()
         );
-        for mode in [
-            ObservationMode::Herdr,
-            ObservationMode::Tern,
-            ObservationMode::Both,
-        ] {
-            plan.context
-                .environment
-                .insert(OBSERVATION_MODE_ENV.into(), mode.as_str().into());
-            assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_err());
-            assert_eq!(
-                coordinator::validate_helper_capabilities(
-                    r#"{"protocol":3,"observation_mode":1}"#,
+        for key in ["protocol", "observation_mode", "integration_api"] {
+            if identity::LEGACY && key == "integration_api" {
+                continue;
+            }
+            for invalid in [
+                serde_json::Value::Null,
+                serde_json::json!(0),
+                serde_json::json!("2"),
+            ] {
+                let mut changed = exact.clone();
+                changed[key] = invalid;
+                assert!(coordinator::validate_helper_capabilities(
+                    &changed.to_string(),
                     &plan.context
                 )
-                .is_ok(),
-                mode != ObservationMode::Both
-            );
-            assert!(coordinator::validate_helper_capabilities(
-                r#"{"protocol":3,"observation_mode":2}"#,
-                &plan.context
-            )
-            .is_ok());
-            assert!(coordinator::validate_helper_capabilities(
-                r#"{"protocol":2,"observation_mode":1}"#,
-                &plan.context
-            )
-            .is_err());
-            for incompatible in [
-                r#"{"protocol":3,"observation_mode":0}"#,
-                r#"{"protocol":3,"observation_mode":3}"#,
-                r#"{"protocol":3,"observation_mode":"1"}"#,
-                r#"{"protocol":3,"observation_mode":"2"}"#,
-                r#"{"protocol":3,"observation_mode":null}"#,
-            ] {
-                assert!(
-                    coordinator::validate_helper_capabilities(incompatible, &plan.context).is_err()
-                );
+                .is_err());
             }
-            assert_eq!(
-                plan.context.environment[OBSERVATION_MODE_ENV],
-                mode.as_str()
-            );
         }
-        plan.context
-            .environment
-            .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
-        assert!(coordinator::validate_helper_capabilities(
-            r#"{"protocol":3,"observation_mode":1}"#,
-            &plan.context
-        )
-        .is_err());
     }
 
-    fn herdr_pair(plan: &UpdatePlan, commit: char, hash: char) -> VerifiedInstallation {
+    fn installation_pair(plan: &UpdatePlan, revision: char, hash: char) -> VerifiedInstallation {
         let root = plan.context.state_dir.parent().unwrap();
         VerifiedInstallation {
             image: ExecutableIdentity {
-                path: root.join("checkout/plugin/Contents/MacOS/herdr-desktop-pet"),
+                path: root.join("app/Contents/MacOS").join(identity::BINARY),
                 sha256: hash.to_string().repeat(64),
             },
-            origin: InstallOrigin::Herdr {
-                host: root.join("host"),
-                host_config_dir: root.join("host-config"),
-                checkout_root: root.join("checkout"),
-                plugin_root: root.join("checkout/plugin"),
-                source: "owner/repository".into(),
-                requested_ref: Some("beta".into()),
-                resolved_commit: Some(commit.to_string().repeat(40)),
-                enabled: true,
+            origin: InstallOrigin::Source {
+                root: root.join(format!("checkout-{revision}")),
             },
         }
     }
@@ -3153,8 +3269,8 @@ mod tests {
     fn durable_candidate_pair_rejects_commit_only_image_only_and_path_drift() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        let source = herdr_pair(&plan, 'a', 'a');
-        let installed = herdr_pair(&plan, 'b', 'b');
+        let source = installation_pair(&plan, 'a', 'a');
+        let installed = installation_pair(&plan, 'b', 'b');
         plan.origin = source.origin;
         plan.context.running_origin = Some(Box::new(plan.origin.clone()));
         let mut saved = record(&plan);
@@ -3176,8 +3292,8 @@ mod tests {
         )
         .is_ok());
         for changed in [
-            herdr_pair(&plan, 'c', 'b'),
-            herdr_pair(&plan, 'b', 'c'),
+            installation_pair(&plan, 'c', 'b'),
+            installation_pair(&plan, 'b', 'c'),
             VerifiedInstallation {
                 image: ExecutableIdentity {
                     path: root.path().join("different/herdr-desktop-pet"),
@@ -3208,8 +3324,8 @@ mod tests {
     fn incomplete_candidate_pair_never_reconstructs_origin_or_image() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        let source = herdr_pair(&plan, 'a', 'a');
-        let installed = herdr_pair(&plan, 'b', 'b');
+        let source = installation_pair(&plan, 'a', 'a');
+        let installed = installation_pair(&plan, 'b', 'b');
         plan.origin = source.origin.clone();
         let mut saved = record(&plan);
         saved.candidate = Some(installed.image.clone());
@@ -3241,7 +3357,7 @@ mod tests {
             &plan
         )
         .is_err());
-        let changed = herdr_pair(&plan, 'c', 'b');
+        let changed = installation_pair(&plan, 'c', 'b');
         assert!(pin_state(
             pinned.candidate.as_ref(),
             Some(&unselected),
@@ -3331,8 +3447,8 @@ mod tests {
     fn unselected_exact_original_remains_eligible_for_safe_reconciliation() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        let source = herdr_pair(&plan, 'a', 'a');
-        let candidate = herdr_pair(&plan, 'b', 'b');
+        let source = installation_pair(&plan, 'a', 'a');
+        let candidate = installation_pair(&plan, 'b', 'b');
         plan.origin = source.origin.clone();
         let original = VerifiedInstallation {
             image: plan.running.clone(),
@@ -3362,8 +3478,8 @@ mod tests {
     fn historical_image_only_reconciles_only_independently_verified_original() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        let source = herdr_pair(&plan, 'a', 'a');
-        let candidate = herdr_pair(&plan, 'b', 'b');
+        let source = installation_pair(&plan, 'a', 'a');
+        let candidate = installation_pair(&plan, 'b', 'b');
         plan.origin = source.origin.clone();
         plan.context.running_origin = Some(Box::new(plan.origin.clone()));
         let mut saved = record(&plan);
@@ -3494,8 +3610,8 @@ mod tests {
     fn stopped_candidate_settlement_needs_exact_complete_historical_pair() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
-        let source = herdr_pair(&plan, 'a', 'a');
-        let installed = herdr_pair(&plan, 'b', 'b');
+        let source = installation_pair(&plan, 'a', 'a');
+        let installed = installation_pair(&plan, 'b', 'b');
         plan.origin = source.origin;
         let mut saved = record(&plan);
         saved.candidate = Some(installed.image.clone());
@@ -3542,7 +3658,10 @@ mod tests {
             }),
             &installed
         ));
-        for drifted in [herdr_pair(&plan, 'c', 'b'), herdr_pair(&plan, 'b', 'c')] {
+        for drifted in [
+            installation_pair(&plan, 'c', 'b'),
+            installation_pair(&plan, 'b', 'c'),
+        ] {
             assert!(!complete_stopped_candidate(
                 pinned.candidate.as_ref(),
                 Some(&selected),
@@ -3577,9 +3696,23 @@ mod tests {
             "executable_path": plan.running.path,
             "config_dir": c.config_dir,
             "state_dir": c.state_dir,
-            "herdr_socket": c.herdr_socket,
+            "app_version": c.version,
+            "updater_protocol": identity::PROTOCOL,
+            "observation_capability": identity::OBSERVATION_CAPABILITY,
+            "integration_api": identity::INTEGRATION_API,
+            "observation_mode": c.observation_mode().unwrap(),
             "assets_override": c.assets_override,
         });
+        #[cfg(desktop_pet_legacy)]
+        let response = {
+            let mut response = response;
+            response["herdr_socket"] = serde_json::json!(c.herdr_socket);
+            response["observation_mode"] = serde_json::json!(
+                coordinator::legacy_codec::observation_token(&c.observation_mode().unwrap())
+                    .unwrap()
+            );
+            response
+        };
         let mut tern_response = response.clone();
         tern_response["observation_mode"] = serde_json::json!("tern");
         let mut tern_plan = plan.clone();
@@ -3589,9 +3722,14 @@ mod tests {
             .insert(OBSERVATION_MODE_ENV.into(), "tern".into());
         let proof: Status = serde_json::from_value(tern_response.clone()).unwrap();
         assert!(status_mode_matches(&tern_plan, &proof).unwrap());
-        tern_response["observation_mode"] = serde_json::json!("TERN");
+        tern_response["observation_mode"] = serde_json::json!("");
         assert!(serde_json::from_value::<Status>(tern_response).is_err());
-        let missing: Status = serde_json::from_value(response.clone()).unwrap();
+        let mut missing_response = response.clone();
+        missing_response
+            .as_object_mut()
+            .unwrap()
+            .remove("observation_mode");
+        let missing: Status = serde_json::from_value(missing_response).unwrap();
         assert!(!status_mode_matches(&tern_plan, &missing).unwrap());
         let server = thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
@@ -3601,8 +3739,7 @@ mod tests {
                 .read_to_end_until_newline(&mut request)
                 .unwrap();
             let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
-            // Read-only Native LegacyRequest admits version 1, independently
-            // of authenticated updater control frames (protocol 3).
+            // Read-only control version 1 is independent of authenticated updater control.
             assert_eq!(request["version"], 1);
             assert_eq!(request["command"], "status");
             let mut bytes = serde_json::to_vec(&response).unwrap();
@@ -3611,7 +3748,7 @@ mod tests {
         });
         let reply = status(&plan).unwrap();
         assert!(reply.ok && reply.running && reply.ready && reply.control_ready);
-        assert_eq!(reply.observation_mode, None);
+        assert_eq!(reply.observation_mode, Some(c.observation_mode().unwrap()));
         assert!(status_mode_matches(&plan, &reply).unwrap());
         server.join().unwrap();
     }
@@ -3680,7 +3817,7 @@ mod tests {
                 original_image: plan.running.clone(),
                 original_config_dir: plan.context.config_dir.clone(),
                 original_state_dir: plan.context.state_dir.clone(),
-                original_socket: plan.context.herdr_socket.clone(),
+                original_socket: context_endpoint(&plan),
                 original_assets: None,
                 helper_pid: 777_772,
                 helper_image: coordinator::executable_identity(&staged_helper).unwrap(),
@@ -3763,7 +3900,7 @@ mod tests {
             original_image: plan.running.clone(),
             original_config_dir: plan.context.config_dir.clone(),
             original_state_dir: plan.context.state_dir.clone(),
-            original_socket: plan.context.herdr_socket.clone(),
+            original_socket: context_endpoint(&plan),
             original_assets: None,
             helper_pid: 123,
             helper_image: plan.running.clone(),
@@ -3782,6 +3919,11 @@ mod tests {
             executable_path: original.original_image.path.clone(),
             config_dir: original.original_config_dir.clone(),
             state_dir: original.original_state_dir.clone(),
+            app_version: plan.context.version.clone(),
+            updater_protocol: identity::PROTOCOL,
+            observation_capability: identity::OBSERVATION_CAPABILITY,
+            integration_api: identity::INTEGRATION_API,
+            #[cfg(desktop_pet_legacy)]
             herdr_socket: original.original_socket.clone(),
             observation_mode: None,
             assets_override: None,
@@ -3812,7 +3954,7 @@ mod tests {
         let stopped_pid = stopped.id();
         assert!(stopped.wait().unwrap().success());
         assert!(!process_live(stopped_pid));
-        plan.action = UpdateAction::LocalRebuild;
+        plan.action = UpdateAction::SourceRebuild;
         plan.candidate = None;
         assert!(no_spawn_original_disk_unchanged(&plan).is_err());
         let mut state = record(&plan);
@@ -3854,7 +3996,7 @@ mod tests {
             original_image: plan.running.clone(),
             original_config_dir: plan.context.config_dir.clone(),
             original_state_dir: plan.context.state_dir.clone(),
-            original_socket: plan.context.herdr_socket.clone(),
+            original_socket: context_endpoint(&plan),
             original_assets: None,
             helper_pid: 77,
             helper_image: ExecutableIdentity {
@@ -3883,17 +4025,30 @@ mod tests {
     fn formula_conflicts_include_other_kegs_not_other_formulas() {
         let directory = tempfile::tempdir().unwrap();
         let cellar = fs::canonicalize(directory.path()).unwrap().join("Cellar");
-        let formula = cellar.join("herdr-desktop-pet");
+        let formula = cellar.join(identity::STABLE_FORMULA);
         let image = |keg: &str, app: &str| {
             cellar
                 .join(keg)
                 .join(app)
-                .join("Contents/MacOS/herdr-desktop-pet")
+                .join("Contents/MacOS")
+                .join(identity::BINARY)
         };
-        let stable_old = image("herdr-desktop-pet/0.1", "HerdrDesktopPet.app");
-        let stable_new = image("herdr-desktop-pet/0.2", "HerdrDesktopPet.app");
-        let beta = image("herdr-desktop-pet-beta/0.2", "HerdrDesktopPetBeta.app");
-        let sibling = image("herdr-desktop-pet-old/0.2", "HerdrDesktopPet.app");
+        let stable_old = image(
+            &format!("{}/0.1", identity::STABLE_FORMULA),
+            identity::APP_NAME,
+        );
+        let stable_new = image(
+            &format!("{}/0.2", identity::STABLE_FORMULA),
+            identity::APP_NAME,
+        );
+        let beta = image(
+            &format!("{}/0.2", identity::BETA_FORMULA),
+            identity::BETA_APP_NAME,
+        );
+        let sibling = image(
+            &format!("{}-old/0.2", identity::STABLE_FORMULA),
+            identity::APP_NAME,
+        );
         for executable in [&stable_old, &stable_new, &beta, &sibling] {
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
             fs::write(executable, b"test-owned image").unwrap();
@@ -3902,7 +4057,7 @@ mod tests {
             brew: directory.path().join("bin/brew"),
             prefix: directory.path().to_path_buf(),
             cellar_formula_root: fs::canonicalize(&formula).unwrap(),
-            formula: "herdr-desktop-pet".into(),
+            formula: identity::STABLE_FORMULA.into(),
             locator: stable_new.clone(),
         };
         let root = coordinator::physical_install_root(&stable).unwrap();
@@ -3918,7 +4073,10 @@ mod tests {
                 channel: coordinator::ReleaseChannel::Beta,
                 tag: "beta/0.3.3-beta.1".into(),
                 release_id: 1,
-                asset_name: "HerdrDesktopPet-v0.3.3-beta.1-macos-arm64.tar.gz".into(),
+                asset_name: format!(
+                    "{}-v0.3.3-beta.1-macos-arm64.tar.gz",
+                    identity::ARCHIVE_PREFIX
+                ),
                 archive_url: String::new(),
                 archive_size: 1,
                 sha256: "b".repeat(64),
@@ -3927,9 +4085,8 @@ mod tests {
             origin: InstallOrigin::Homebrew {
                 brew: directory.path().join("bin/brew"),
                 prefix: directory.path().to_path_buf(),
-                cellar_formula_root: fs::canonicalize(cellar.join("herdr-desktop-pet-beta"))
-                    .unwrap(),
-                formula: "herdr-desktop-pet-beta".into(),
+                cellar_formula_root: fs::canonicalize(cellar.join(identity::BETA_FORMULA)).unwrap(),
+                formula: identity::BETA_FORMULA.into(),
                 locator: beta.clone(),
             },
             resolved_commit: None,
@@ -3950,21 +4107,71 @@ mod tests {
         let alias = directory.path().join("opt-stable");
         std::os::unix::fs::symlink(formula.join("0.1"), &alias).unwrap();
         assert!(installation_process_in_scope(
-            &alias.join("HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+            &alias
+                .join(identity::APP_NAME)
+                .join("Contents/MacOS")
+                .join(identity::BINARY),
             root,
         )
         .unwrap());
         fs::remove_file(&stable_old).unwrap();
         assert!(installation_process_in_scope(&stable_old, root).unwrap());
         assert!(installation_process_in_scope(
-            &alias.join("HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+            &alias
+                .join(identity::APP_NAME)
+                .join("Contents/MacOS")
+                .join(identity::BINARY),
             root,
         )
         .is_err());
         assert!(installation_process_in_scope(
-            &directory.path().join("missing/herdr-desktop-pet"),
+            &directory.path().join("missing").join(identity::BINARY),
             root,
         )
         .is_err());
+    }
+
+    #[test]
+    fn candidate_readiness_requires_the_exact_compiled_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(root.path());
+        let live = live_status(&plan);
+        assert!(status_contract_matches(&live, &plan.context.version));
+        assert!(!status_contract_matches(&live, "0.0.1"));
+        let mut changed = live_status(&plan);
+        changed.updater_protocol = identity::PROTOCOL + 1;
+        assert!(!status_contract_matches(&changed, &plan.context.version));
+        changed = live_status(&plan);
+        changed.observation_capability = identity::OBSERVATION_CAPABILITY + 1;
+        assert!(!status_contract_matches(&changed, &plan.context.version));
+        changed = live_status(&plan);
+        changed.integration_api = identity::INTEGRATION_API + 1;
+        assert!(!status_contract_matches(&changed, &plan.context.version));
+    }
+
+    #[test]
+    fn replacement_intent_cannot_be_reclassified_as_no_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(root.path());
+        let record = record(&plan);
+        assert!(manager_artifacts_absent(&plan).unwrap());
+        write_replacement(
+            &plan,
+            &ReplacementEvidence {
+                version: protocol::UPDATER_PROTOCOL,
+                operation_id: plan.operation_id.clone(),
+                original: plan.running.clone(),
+                staged: plan.running.clone(),
+                installed: None,
+            },
+        )
+        .unwrap();
+        assert!(!manager_artifacts_absent(&plan).unwrap());
+        assert!(!no_spawn_proved(
+            &record,
+            None,
+            manager_artifacts_absent(&plan).unwrap()
+        ));
+        assert!(!replacement_completed(&plan, &record).unwrap());
     }
 }

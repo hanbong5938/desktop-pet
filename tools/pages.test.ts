@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const prefix = '/herdr-desktop-pet/';
+const prefix = '/desktop-pet/';
 const korean = '<h1>한국어 fixture</h1>';
 const english = '<h1>English fixture</h1>';
 const chinese = '<h1>简体中文 fixture</h1>';
@@ -111,7 +111,7 @@ test('serve CLI keeps public responses safe when requested paths and 404 fallbac
     verify(await get(port, `${prefix}ja/`, 'HEAD'), 200, 'text/html; charset=utf-8', '');
     verify(await get(port, `${prefix}assets/css/site.css`), 200, 'text/css; charset=utf-8', 'body { color: blue; }');
     for (const [path, location] of [
-      ['/herdr-desktop-pet?source=test', `${prefix}?source=test`],
+      ['/desktop-pet?source=test', `${prefix}?source=test`],
       [`${prefix}en?source=test`, `${prefix}en/?source=test`],
       [`${prefix}zh-Hans?source=test`, `${prefix}zh-Hans/?source=test`],
       [`${prefix}ja?source=test`, `${prefix}ja/?source=test`],

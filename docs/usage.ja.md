@@ -1,56 +1,59 @@
-# Herdr Desktop Pet 利用ガイド
+# Desktop Pet — 利用ガイド
 
-[English](usage.md) · [한국어](usage.ko.md) · [简体中文](usage.zh-Hans.md) · **日本語** · [インストールと要件](../readme.ja.md) · [CLI 仕様（英語）](cli.md)
+独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
-[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は公開済みの最新安定版で、公開 arm64 資産・チェックサムと更新済み安定版 Homebrew formula は検証済みです。対応するアプリ／ヘルパーの能力は `protocol: 3` と `observation_mode: 1` です。過去の v0.3.5 とベータ資産は変更しません。
+[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-## 最初の起動：ローカルホストまたは単独のペット
+**公開状態:** 既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / observation capability 1 の公開版です。独立 Desktop Pet v0.4.0（protocol 4 / capability 2 / integration API 1）、bridge v0.3.7、中立 formula、連携タグは **未公開**です。実際の候補 package／VM 検査は公開導入の可否とは別で、最終受入表は未完了です。以下は中立 cutover の案内であり、検証済み公開導入ではありません。過去の文書、タグ、アセットは変更不可です。
 
-以下の安定版 formula で公開済みビルドを導入します。Rust/Cargo、Bun、Node.js、ソースチェックアウトは不要です。既存の Brew 利用者は下記の更新コマンドを使います。既存のプロファイルと設定は保持されます。 更新前に `herdr-desktop-pet stop`、続いて `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`、明示的な `start` と `status` を実行します。
+## 動作要件
+
+Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、Node.js/npm、Xcode Command Line Tools が必要ですが、プリビルドには不要です。ad-hoc 署名で、公証されていません。Herdr スナップショットは互換ローカルサーバー（0.9.0+）、返信は別途 `agent.prompt` が必要です。任意の client-attach 自動起動には公式 Herdr 0.9.3 に[連携所有のパッチとホスト手順](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)を適用するか、実際にフック対応のホストが必要です。標準 0.9.0/0.9.3 にはフックがなく、プラグイン導入はホストをパッチしません。
+
+## インストールと任意の連携
+
+中立リリースと formula が実際に公開された後の公開コマンド:
 
 ```sh
-brew install hanbong5938/tap/herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
+brew install hanbong5938/tap/desktop-pet
+desktop-pet --version
+desktop-pet start
+desktop-pet status
 ```
 
-実際の [v0.3.6 Release アセット](https://github.com/hanbong5938/herdr-desktop-pet/releases)と tap formula は、このチェックアウトとは別に確認してください。`--version` はインストール済み CLI、`status` は実行中デーモンの `app_version` と実行ファイルを識別します。`start` は旧デーモンを再利用し得るので、更新またはバックエンド変更の前に停止します。吹き出しを開くとローカルのカードが見えます。Herdr 0.9.0 以降で実際のエージェントセッションが観測可能なスナップショットを提供します。ネイティブの手動観測にプラグイン、パッチ、`client.attached` フックは不要です。ローカル返信には別途サーバーの `agent.prompt` が必要で、その ACK は送信受付であって完了ではありません。サーバーのバックエンドソケットが継承環境／既定値と異なる場合は**実際の**パスを調べて指定します（例示パスは置き換え、推測しないでください）。
+プリビルド・ソース導入は Herdr 連携ではなく **core** チェックアウトで実行します。既定はプリビルドのみで、取得・検証失敗からソースビルドへ黙って切り替えません。`--source` は現在の core だけを構築し、その `dist/DesktopPet.app` を使用します。
 
 ```sh
-herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
-herdr-desktop-pet status
+git clone https://github.com/hanbong5938/desktop-pet.git
+cd desktop-pet
+# Requires neutral public assets; not yet published:
+bash scripts/install.sh --prebuilt
+# Explicit source alternative:
+bash scripts/install.sh --source
+# Replace with the installer-reported executable and your actual profile paths:
+/absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-`--socket` は Herdr バックエンドを選び、`<state-dir>/control.sock` **ではありません**。`HERDR_SOCKET_PATH`／`HERDR_CLIENT_SOCKET_PATH`、`PATH` 上の Herdr CLI、ソケットを所有するサーバーを調べてください。バックエンドを切り替える前には既存のペットデーモンを停止します。**健全な Herdr サーバーがない**単独のキャラクターには、起動前にライフサイクルスイッチを設定して確認します。
+既定／`--prebuilt` は固定された中立公開アセットを要求し、現在は未公開です。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
+
+必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 
 ```sh
-herdr-desktop-pet settings set exit_with_herdr off
-herdr-desktop-pet settings get
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-起動**後**に `herdr-desktop-pet hide_bubble` を実行すれば空の吹き出しなしでキャラクターを表示できます。Herdr のインストール／プラグインは不要です。約 30 秒で消えた場合は `settings get` と `status` を確認します。新規プロファイルでは `exit_with_herdr` が既定でオンのため、健全なサーバーがないと猶予時間後に終了します。同じ設定／状態プロファイルでオフにしてから再起動してください。ただし登録済みのローカルプラグインエンドポイントがすべて明示的に無効化／リンク解除されたと確定すれば、オフでも終了します。リモート観測は[独立した任意の経路](#観測元)です。管理下の attach による自動起動には[パッチ適用済みホスト連携（英語）](../integrations/herdr/README.md#build-in-separate-checkouts)が必要です。
-
-
-## Tern の導入と独立プロファイル
-
-まずネイティブアプリ、次に独立した公開プラグインを明示的に導入します。プラグインはアプリをダウンロード、ビルド、起動しません。
-
-```sh
-brew install hanbong5938/tap/herdr-desktop-pet
+herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
-PET="$(command -v herdr-desktop-pet)"
-PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
-PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
-"$PET" --version
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 ```
 
-既定のホストは Herdr のままです。`--host tern` に Herdr サーバー、ソケット、プラグインは不要です。実際の Tern ウィンドウで **Configure desktop pet connection** に絶対実行ファイル `PET` と上記の設定・状態の両方のパスを指定し、**Connect to desktop pet** を実行します。変数名ではなく実際のパスを入力してください。ウィンドウの接続と同じプロファイルのネイティブ `status` を確認します。プラグインの検出だけでは接続の証明になりません。バイナリやモードを変える前に同じプロファイルを停止します。ソース開発は任意です。現在のチェックアウトで `bash scripts/install.sh --source` を実行し、`PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"` を指定できます。特別なブランチは不要です。アプリ／ヘルパーは対応する protocol 3 のペアで、追加 JSON 能力は `protocol: 3` と `observation_mode: 1` です。英語・韓国語・簡体字中国語・日本語を維持します。**ベータ更新を受け取る**は既定でオフで明示的な選択が必要です。確認だけではインストールや再起動をしません。
+## プロファイル・接続・移行
+
+新規プロファイルは Auto です。Connection は登録されたプロバイダーの実際の接続を示し、インストール有無を接続と扱いません。ID は不透明な値で、権限は名前の接頭辞やパスではなく capability で判断します。Auto は同時観測で、fallback ではありません。リモートは読み取り専用、Tern は返信のみで worktree 削除は不可です。受付はエージェントの完了ではありません。
+
+[利用ガイド](usage.ja.md)、[正確なプロファイル・探索契約](development.md#profiles-and-installation-discovery)、[A→B 移行](migrations/desktop-pet.md)を参照してください。status / Connection の実際の実行ファイル・config・state を Tern Configure に指定し Connect します。既存の Tern・beta・custom プロファイルはその場で保持し、マージしません。
+
+```sh
+desktop-pet profile show --json
+desktop-pet --herdr-socket /actual/path/to/herdr-api.sock start
+desktop-pet preferences set --observation-host auto
+```
 
 ## 操作
 
@@ -89,7 +92,9 @@ PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
 
 変換中は選択、フィルタ、構造的な行交換を待たせ、マーク中の文字を失いません。マーク解除後、最新のフィルタとまだ表示できる有効な選択だけを適用します。確定文字は元のセッションと接続世代に所属します。ライブ状態／送信可能かどうかは更新します。欄は視認できる枠とパレット由来の不透明背景を持ち、小型のネイティブ送信ボタンは可否に連動し、テーマ変更では下書き／未確定文字を維持します。
 
-配送は選択した**ローカル** Herdr 観測元の `agent.prompt` API **のみ**を使い、グローバル CLI、シェル、SSH、生の pane 入力には頼りません。ローカル観測の除外、オフライン元、古い／未準備セッション、非対応サーバーでは送信できません。`unsupported_method` は通知し、迂回しません。保持されたリモートカードも送信不可です。承認／質問は実際のターミナルで処理します。`agent.prompt` の検証は Herdr 0.9.2 で行われ、本地観測の最低 0.9.0 は実際のサーバーが対応する証明ではありません。提出 ACK は**エージェントの完了ではありません**。自動再試行はなく、不確実なら確認してから手動で再送します。API は現在の pane 使用者に宛て、期待セッションの原子的条件を持たないため、瞬時の使用者／セッション入れ替わりは残ります。自動操作は[CLI のセッション識別と配送（英語）](cli.md#sessions-and-agent-prompt)を参照してください。GUI の代替経路ではありません。
+Herdr カードの配送は選択した**ローカル** Herdr 観測元の `agent.prompt` API **のみ**を使い、グローバル CLI、シェル、SSH、生の pane 入力には頼りません。ローカル観測の除外、オフライン元、古い／未準備セッション、非対応サーバーでは送信できません。`unsupported_method` は通知し、迂回しません。保持されたリモートカードも送信不可です。承認／質問は実際のターミナルで処理します。`agent.prompt` の検証は Herdr 0.9.2 で行われ、本地観測の最低 0.9.0 は実際のサーバーが対応する証明ではありません。提出 ACK は**エージェントの完了ではありません**。自動再試行はなく、不確実なら確認してから手動で再送します。API は現在の pane 使用者に宛て、期待セッションの原子的条件を持たないため、瞬時の使用者／セッション入れ替わりは残ります。自動操作は[CLI のセッション識別と配送（英語）](cli.md#sessions-and-agent-prompt)を参照してください。GUI の代替経路ではありません。
+
+Tern の返信は登録アダプターが再検証した **１回限りの `agents:ask`** を使い、Herdr fallback、shell、PTY 入力を使いません。`prompt_accepted` / `accepted_may_be_queued` は SDK の受付だけを示し、モデルへの配送や完了ではありません。提示済み／不確実な ask を再送しません。ローカルのウィンドウ／グループ化したホスト一覧はアダプター承認の locality を維持し、遠隔カードは読み取り専用、Tern に worktree 削除権限はありません。ウィンドウ元は５秒で期限切れとなり Offline になりますが Auto／アダプターなしのアプリは継続します。一覧取得は４つの協調的 zero-delay callback に分け、ask の結果後に新しい交換を直ちに始めます。単一 SDK 呼出しや OS の先取りは予算を超え得るため、遅延／安定性の保証ではありません。
 
 ## 表示とメニューバーからの復旧
 
@@ -110,6 +115,8 @@ PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
 確認画面はリポジトリ、**正確なチェックアウトパス**、そのカードだけでなく**ワークスペース全体**のタブ／pane 数を示します。削除すると全タブ／pane が閉じ、エージェント／プロセスが終了し、結びついたチェックアウトを**無視対象ファイル／ビルド出力も含めて**消去します。主リポジトリや Git ブランチは消さず、ゴミ箱／取り消しもありません。**キャンセル**が先頭で既定です。Return、テンキー Enter、Escape はキャンセルし、**ワークツリーを削除**は別の第２操作です。配置後のネイティブ警告でキャンセルを既定にできなければ削除を中止します。所有する使い捨てのチェックアウトと影響を受けるファイル／プロセスを確認してください。
 
 対象は稼働し整合するローカル観測元と、一意で有効なリンク済みワークツリーメタデータを持つ場合だけです。主ルート、リモート／保持済み／オフラインカード、欠落／不正なメタデータ、非対応の旧サーバーは対象外。`worktree.remove` が非対応なら Git／shell／SSH に迂回して強制削除せずエラーにします。IME 中は削除できず、送信前にも再確認します。一度に１件の操作が対象を固定し、確認後に新しいスナップショットで再検証し、`force: false` の `worktree.remove` を**１回だけ**送り、再試行や楽観的な行削除はしません。追跡済み／未追跡ファイルの変更やロックは拒否要因ですが、**無視対象ファイルは削除され得ます**。表示行は５秒の watcher 更新に従い、選択／行／ウィンドウが変わっても結果表示は残ります。不確実な書き込みは手動再試行**前に**サーバーとワークツリーを独立して確認します。リクエストの `workspace_id` に原子的な期待チェックアウト／世代 CAS はなく、クライアントの再検証でも再起動／再結合の競合は残ります。[CLI の検査／トークン仕様（英語）](cli.md#worktree-removal)は検査済み対象の 60 秒の１回用トークンを追加し、上流 ACK、後から確認した pane＋セッションの不在、実ファイルシステムの証明を区別します。稼働中のチェックアウトで試さないでください。過去のベータ版観測は安定版の実入力認証ではありません（[記録、英語](releases/unreleased.md)）。
+
+対象は登録元の local／worktree 削除 capability も必要です。提供者名やローカル風のパスでは権限を得られず、Tern に削除 capability はありません。
 
 ## 吹き出しとキャラクターの設定
 
@@ -141,43 +148,51 @@ Rubelia（`default@0`）が**唯一同梱のキャラクター**です。任意�
 
 ## 観測元
 
-リモート観測は v0.1.6 で初めて提供され、安定版 v0.2.0 に簡潔な設定、再接続コマンドのコピーのみの機能、単独リモートでの watcher 起動修正が含まれます。**設定 → 観測元**では**この Mac**が既定でオン、**リモートのマシン**はオフ。リモート利用にはまず**対話式のターミナル**で [Herdr の保存マシン案内（英語）](https://herdr.dev/docs/0.9.2/connecting-machines/)に沿い SSH マシンを登録・認証します（例：`herdr machine add workbox`）。求められた遠隔サーバー設定も完了してください。その後リモートをオンにし、**観測するマシン**で有効な保存済みプロファイルを明示的に選びます。１プロファイルが観測するのは**１つの保存済み遠隔 Herdr セッション**で、ホスト全体ではありません。登録／attach だけでは選ばれません。ペットは表示したいデスクトップの**ローカル Mac**で起動します。互換の遠隔 Herdr サーバーにはペットアプリ／プラグインは**不要**で、ローカル CLI が選択済み遠隔プロファイルをポーリングします。
+現在のソースでは、最初は折りたたまれた **接続 → 観察範囲**を開きます。公開 v0.3.6 は **設定 → 観測元**です。リモートは Auto/Herdr で利用でき、Tern 専用では操作を隠すだけで保存済み選択は維持します。
 
-ローカルに健全なサーバーのないリモート専用利用では、初回起動**前に**導入済みネイティブ CLI で `herdr-desktop-pet settings set exit_with_herdr off` を設定できます。設定中に 30 秒で終了するのを避け、遠隔ポーリングが正常になれば必要に応じてオンに戻せます。この設定に遠隔プラグイン／Herdr プラグイン操作は不要です。**この Mac**をオフにするとローカルカードは除外されますが、ローカルのライフサイクルエンドポイントは登録解除されず、確定済みの無効化による終了を抑止しません。保存マシンのカタログはリモートがオフでも**５秒**ごとに更新し、選択済みで有効なプロファイルはオンのとき**５秒**ごとにポーリングします。選択は再起動／リモートオフをまたぎ、名前変更でも維持します。無効化／削除はカードの観測から除外するだけでプロセスを止めません。セッション ID が同じでもローカルと各遠隔元は別のラベル／識別子を持ちます。
+リモート観測は v0.1.6 で初めて提供され、安定版 v0.2.0 に簡潔な設定、再接続コマンドのコピーのみの機能、単独リモートでの watcher 起動修正が含まれます。ローカルの**この Mac**が既定でオン、**リモートのマシン**はオフです。リモート利用にはまず**対話式のターミナル**で [Herdr の保存マシン案内（英語）](https://herdr.dev/docs/0.9.2/connecting-machines/)に沿い SSH マシンを登録・認証します（例：`herdr machine add workbox`）。求められた遠隔サーバー設定も完了してください。その後リモートをオンにし、**観測するマシン**で有効な保存済みプロファイルを明示的に選びます。１プロファイルが観測するのは**１つの保存済み遠隔 Herdr セッション**で、ホスト全体ではありません。登録／attach だけでは選ばれません。ペットは表示したいデスクトップの**ローカル Mac**で起動します。互換の遠隔 Herdr サーバーにはペットアプリ／プラグインは**不要**で、ローカル CLI が選択済み遠隔プロファイルをポーリングします。
+
+次の 30 秒終了対策と確定済み無効化による終了は **Herdr 専用モード**（登録 Herdr アダプター）の説明です。Auto／アダプターなしはこの対策なしで動作を維持します。
+
+ローカルに健全なサーバーのないリモート専用利用では、初回起動**前に**導入済みネイティブ CLI で `desktop-pet settings set exit_with_herdr off` を設定できます。設定中に 30 秒で終了するのを避け、遠隔ポーリングが正常になれば必要に応じてオンに戻せます。この設定に遠隔プラグイン／Herdr プラグイン操作は不要です。**この Mac**をオフにするとローカルカードは除外されますが、ローカルのライフサイクルエンドポイントは登録解除されず、確定済みの無効化による終了を抑止しません。保存マシンのカタログはリモートがオフでも**５秒**ごとに更新し、選択済みで有効なプロファイルはオンのとき**５秒**ごとにポーリングします。選択は再起動／リモートオフをまたぎ、名前変更でも維持します。無効化／削除はカードの観測から除外するだけでプロセスを止めません。セッション ID が同じでもローカルと各遠隔元は別のラベル／識別子を持ちます。
 
 行には名前、保存セッション、状態を別々に示し、長い診断は折り返され、画面はスクロールできます。最初のカタログ取得中と空が確定した状態を区別し、更新失敗時は旧一覧を保持して古い旨を警告します。リモートオフは旧成功ではなく**観測オフ**と表示します。選択なし、一時停止、検査中、観測中、使用不能、無効も区別します。不透明なプロファイル ID に紐づく操作部はポーリング／名前変更中もフォーカス／スクロールを維持し、項目減少時にスクロールを制限します。ラベル／アクセシビリティ名は翻訳され、**登録方法**／折りたたみ診断は読み取り専用。観測元スイッチ／選択はカード、件数、全体状態、完了／結果の反応を決め、状態フィルタは対象カードの表示だけを変えます。全部オフなら**不明**となり、意図的に除外した観測元の切断警告にはなりません。
 
-５秒間隔では短い変化や短時間の完了を見逃すことがあります。切断時の最後のカードは**オフライン**のまま不明として数え、ライブではありません。再接続／再選択後の最初の新しいスナップショットは基準で、過去の完了を再生しません。認証には `herdr machine list` で ID を調べ、引用したプレースホルダを正確な ID に置き換え、**自分で**対話ターミナルから `herdr machine reconnect '<profile-id>'` を実行します。**エラー詳細を表示**は読み取り専用の診断を展開し、**再接続コマンドをコピー**は安全に引用したコマンドをコピーして結果を表示するだけで実行しません。アプリは認証情報を答えず、遠隔インストールせず、失敗した遠隔元をローカルポーリングに切り替えず、遠隔カードは読み取り専用です。ローカル観測は Herdr ≥0.9.0 が必要。遠隔には保存マシン API 転送対応の**ローカル CLI**（`herdr --machine <profile-id> api snapshot`、[Herdr 0.9.2 CLI、英語](https://herdr.dev/docs/0.9.2/cli-reference/#saved-ssh-machines)）と互換の動作中遠隔サーバーが必要です。CLI の欠如／非互換は設定に示し、ローカル最低版を引き上げません。`client.attached` 自動起動には**別途パッチ適用したホスト**が必要で、0.9.3 の manifest 最低条件だけでは足りません（[ホスト連携、英語](../integrations/herdr/README.md)）。
+５秒間隔では短い変化や短時間の完了を見逃すことがあります。切断時の最後のカードは**オフライン**のまま不明として数え、ライブではありません。再接続／再選択後の最初の新しいスナップショットは基準で、過去の完了を再生しません。認証には `herdr machine list` で ID を調べ、引用したプレースホルダを正確な ID に置き換え、**自分で**対話ターミナルから `herdr machine reconnect '<profile-id>'` を実行します。**エラー詳細を表示**は読み取り専用の診断を展開し、**再接続コマンドをコピー**は安全に引用したコマンドをコピーして結果を表示するだけで実行しません。アプリは認証情報を答えず、遠隔インストールせず、失敗した遠隔元をローカルポーリングに切り替えず、遠隔カードは読み取り専用です。ローカル観測は Herdr ≥0.9.0 が必要。遠隔には保存マシン API 転送対応の**ローカル CLI**（`herdr --machine <profile-id> api snapshot`、[Herdr 0.9.2 CLI、英語](https://herdr.dev/docs/0.9.2/cli-reference/#saved-ssh-machines)）と互換の動作中遠隔サーバーが必要です。CLI の欠如／非互換は設定に示し、ローカル最低版を引き上げません。`client.attached` 自動起動には**別途パッチ適用したホスト**が必要で、0.9.3 の manifest 最低条件だけでは足りません（[ホスト連携、英語](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)）。
 
 ## ライフサイクルとプラグイン操作
 
-設定には**Herdr 起動時に自動起動**（`auto_start`）と**すべての Herdr サーバーとの接続が切れたら終了**（`exit_with_herdr`）が別々にあり、新しいプロファイルでは両方オン。旧 `lifecycle.json` の真偽値 `enabled` は false も含め `auto_start` へ移行し、既存プロファイルで `exit_with_herdr` がなければ従来の単独動作を維持するためオフです。これらは `preferences.json` ではなく `lifecycle.json` だけに保存し、エンドポイント、起動メタデータ、無関係のフィールドを残します。不正な JSON／値は既定値に戻さずエラーとなり、保存失敗ならスイッチ／実行ポリシーを維持し通知します。
+Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追加キーは登録連携が所有します。Herdr 所有者は **`lifecycle.json` が存在しない場合だけ**、最初の lifecycle 書込みで共有 profile writer 内に `exit_with_herdr:true` を原子的に初期化します。既存ファイルにキーがなければ false、明示的 false も維持します。旧真偽値 `enabled` は false を含め `auto_start` に移行します。端点、起動メタデータ、他所有者のフィールドは保持し、`preferences.json` ではなく `lifecycle.json` に保存します。不正 JSON／値は既定化せずエラー、保存失敗は既存ポリシーを維持します。Auto／アダプターなしは Herdr がなくても動作を維持し、以下の Herdr 端点／切断規則は Herdr 専用選択だけに適用します。
 
-自動起動オンならサーバー起動または**成功したシェル／ターミナルクライアントの attach** が不在のペットを起動します。オフの場合、自動 `ensure` は不在なら正常スキップと報告し、既存のペットにエンドポイントを登録することはあっても、隠したペットを表示しません。手動 `start` はオフでも動作し設定を変えません。`stop`／ネイティブの**終了**は起動待機中も含めその実行だけを終え、`restart` は手動起動で設定／位置／拡大率を維持します。自動起動がオンのままなら次の対象イベントで再起動するため、避けたい場合はオフにしてください。Herdr プラグインの無効化／リンク解除は設定ではなく**別のホスト操作**です。標準の Herdr 0.9.0／0.9.3 には `client.attached` の実装が**なく**、公式 0.9.3 に付属パッチを適用するか、実際にフック対応の将来版が必要です。未知フックの link 警告を成功と見なさず、[ホスト連携（英語）](../integrations/herdr/README.md)に従ってください。
+自動起動オンならサーバー起動または**成功したシェル／ターミナルクライアントの attach** が不在のペットを起動します。オフの場合、自動 `ensure` は不在なら正常スキップと報告し、既存のペットにエンドポイントを登録することはあっても、隠したペットを表示しません。手動 `start` はオフでも動作し設定を変えません。`stop`／ネイティブの**終了**は起動待機中も含めその実行だけを終え、`restart` は手動起動で設定／位置／拡大率を維持します。自動起動がオンのままなら次の対象イベントで再起動するため、避けたい場合はオフにしてください。Herdr プラグインの無効化／リンク解除は設定ではなく**別のホスト操作**です。標準の Herdr 0.9.0／0.9.3 には `client.attached` の実装が**なく**、公式 0.9.3 に付属パッチを適用するか、実際にフック対応の将来版が必要です。未知フックの link 警告を成功と見なさず、[ホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)に従ってください。
 
 **新しい**ローカルエンドポイントで有効な `plugin_list` に `desktop-pet` がなければ、未インストールであって**無効化ではありません**。ローカルスナップショット／選択した遠隔元は観測できます。明示的 `enabled: false` はそのエンドポイントを外します。このデーモンがあるエンドポイントで有効**または無効**の登録を一度観測した後に消えた場合はリンク解除として扱います。記憶は今回の検査／再接続をまたぎますが新デーモンではリセットします。**登録済みのローカルエンドポイントすべて**が明示的に無効化／解除されたと確定すれば、遠隔が健全または `exit_with_herdr` オフでも**即時**終了します。最初から登録がないものは対象外です。それ以外で終了スイッチがオンなら、**最後の健全なサーバー接続**を失う（初めから接続できない場合も含む）と**30 秒**の再接続猶予があります。クライアント detach はサーバー喪失ではなく、古いエンドポイント／失敗した再試行は猶予を延ばしません。スイッチをオフにするとカウントダウンを取消し、切断中にオンにすると新たに 30 秒を開始します。別の健全な接続があれば継続し、終了オフの手動ペットは Herdr なしで動作できます。自動起動変更は現在のペットを停止／表示せず、`show`／`hide`／`toggle` は表示だけを変えます。
 
-稼働して有効な Herdr ホストには `herdr plugin action invoke status --plugin desktop-pet` の形式を使い、`settings`、`restart`、`stop` も同じ action-invoke 形式です。グローバル `settings` はペットが停止中でも**ライフサイクル設定のみ**を開きますがホストが必要です。ネイティブ実行ファイルはホストがなくても `settings`、`settings get`、`settings set auto_start off`、`settings set exit_with_herdr on` が使えます。get／set は構造化 JSON を返し、set は２キーと正確な `on|off` のみ受付け、ペットを起動せず、不正入力／保存失敗で他の設定を初期化しません。`status` は両方を表示します。ほかの action ID はライフサイクル `start`、`ensure`、`stop`、`restart`、`status`、`settings`、表示 `show`、`hide`、`toggle`、`passthrough`、`alpha_passthrough`、吹き出し `show_bubble`、`hide_bubble`、`bubble_above|below|left|right|auto`、配置 `reset`、`bigger`、`smaller`。[ネイティブ自動操作仕様（英語）](cli.md#english)は命令操作、絶対的な表示／設定値、私有ソケット、操作系統ごとの状態復旧を区別します。公開 `orchestrate`／HTTP サービスはありません。
+稼働して有効な Herdr ホストには `herdr plugin action invoke status --plugin desktop-pet` の形式を使い、`settings`、`restart`、`stop` も同じ action-invoke 形式です。**現在のソース:** 引数なしのネイティブ `desktop-pet settings` と既存の Herdr プラグイン Settings 操作は、独立したライフサイクル専用ウィンドウではなく、**同じ統合設定タブ**を開きます。停止中なら明示的な `settings` は選択プロファイルの保存済みホストで起動し、キャラクター／吹き出しの非表示状態を保持します。ソースの停止中 `settings` は `--assets PATH` も指定できます。同じ設定／状態パスを使ってください。ネイティブ操作に Herdr ホストは不要ですが、プラグイン操作には必要です。**公開 v0.3.6** は停止中にも独立したライフサイクル専用設定ウィンドウを開く旧動作のままです。
+
+ネイティブ `settings get`、`settings set auto_start off`、`settings set exit_with_herdr on` のライフサイクル専用 CLI 規約は変わりません。get／set は構造化 JSON を返し、set は core `auto_start` または登録アダプター所有キーと正確な `on|off` のみ受付け、ペットを起動せず、不正入力／保存失敗で他の設定を初期化しません。`status` は両方を表示します。ほかの action ID はライフサイクル `start`、`ensure`、`stop`、`restart`、`status`、`settings`、表示 `show`、`hide`、`toggle`、`passthrough`、`alpha_passthrough`、吹き出し `show_bubble`、`hide_bubble`、`bubble_above|below|left|right|auto`、配置 `reset`、`bigger`、`smaller`。[ネイティブ自動操作仕様（英語）](cli.md#english)は命令操作、絶対的な表示／設定値、私有ソケット、操作系統ごとの状態復旧を区別します。公開 `orchestrate`／HTTP サービスはありません。
 
 ## アプリ内更新
 
 **設定 → アプリ更新**には独立した自動チェック（既定オン）、**ベータ更新を受け取る**（既定オフ）、**今すぐ確認**、現在版／インストール元、ポリシー別の最後の成功確認、インストール元に応じた明示的な操作があります。安定版のみなら公式の安定リリース、ベータを含めるなら対象の安定／ベータの最高 SemVer を選び、同じ基底版の正式版がベータより優先です。ベータ解除でダウングレードしません。開いている間の自動確認は１日最大１回、安定のみ／ベータ含む確認には別々の時刻があります。ベータ設定変更で以前の候補は失効し、自動確認オンの場合だけ新方針で確認します。設定や確認だけではインストール／再起動、Brew メタデータ更新、Git 変更は行わず、別のネイティブの同意が必要です。
 
-- **Herdr 管理下：**指定ソケットの親や上書きペットプロファイルではなく、*元々注入されたホストプラグイン設定とグローバル Herdr レジストリ*を利用します。有効なソース／参照、チェックアウトのルート、プラグインのサブディレクトリは区別され、サブディレクトリ内のプラグインでも置換範囲をそこだけに限定しません。提示時と Stop 直前に**同じ互換で稼働中のホスト**が更新機能の ≥0.9.3 と対象の最低版の両方を満たす必要があります。公式タグは不変コミットに解決し、独自／ローカル参照は勝手に移行しません。
+- **Standalone:** 固定された中立リリースのバイトを検証／stage し、native installation admission の下で実 OS アカウント home のアプリを原子的に置換します。共有 locator が実際の導入元を識別し、host manifest／socket の親から推測しません。検証済み既存所有者は再利用でき、live profile／予約は危険な置換を阻止します。通常更新は Herdr plugin manager を呼びません。旧 Herdr 管理は別同意の [A→B 移行](migrations/desktop-pet.md)のみです。
 - **Homebrew：**取得した管理ツール／prefix を維持し、対象 formula／版を明示します。物理置換範囲は prefix 全体ではなく、各 keg にまたがる formula の **Cellar サブツリー**です。適格と確認した安定 ↔ ベータ移行は両方の物理インストール根を確保し、新しい対象メタデータを検証して導入／更新し、元 formula を密かにアンインストールしません。確認だけならキャッシュ済みメタデータを読みます。
 - **ローカルチェックアウト：**現在のディスク上のファイルを明示的に再ビルドし、Git pull／reset／参照変更はしません。再ビルドした実行ファイルが同一でも、置換したインスタンスが本当に準備完了なら構いません。
-- **検証済み外部インストール：**署名済みで protocol-3 互換の導入済みパッケージはインストーラを再実行せず**導入済み更新を適用**できます。安定版のみの方針でも明示的に受け入れた適格な導入済みベータは対象です。手動／不明の出所を Herdr／Homebrew と密かに再分類しません。
+- **検証済み外部インストール：**署名済みで protocol-4 互換の導入済みパッケージはインストーラを再実行せず**導入済み更新を適用**できます。安定版のみの方針でも明示的に受け入れた適格な導入済みベータは対象です。手動／不明の出所を Herdr／Homebrew と密かに再分類しません。
 
 同意と Prepare は未保存の下書き、IME、処理中の仕事、ジェスチャーを再確認し、**元のインスタンスが確実に稼働している間**に変更操作を固定します。AX／内部コールバック経由のセリフの取り消し／やり直し、ブラウザ検索／フィルタ／ローカルフォルダ操作も含め、安全なキャンセル／整合処理でネイティブ操作状態と履歴を戻します。ヘルパー所有権の **ACK はインストール、Stop、Quit ではありません**。受理済み Prepare の後、対応する最後の表示済み／準備済み ACK が届いて初めて同意を移譲し、対応する予約済み Stop への承認返信が完全に配送されて初めて更新用停止を確定します。遅い準備は作業スレッドで進みヘルパー UI は応答し、ネイティブの 30 秒期限は待機を意味してキャンセルではありません。返信失敗は元を解凍しインストーラは起動せず、通常の利用者 Stop／Quit は更新用再起動に優先します。**ヘルパー起動前**と証明できる失敗なら修復後の新たな確認で再試行でき、起動済み／所有権不明なら証拠に基づく復旧まで阻止します。
 
-独立した**署名済みヘルパー**、選択済み設定／状態、独自アセットは物理的に変更されるインストールの外側に置きます。同じインストールを使う別の生きたプロファイルは置換を阻止します。ヘルパーは選択済みプロファイル／バックエンド／アセットを維持し、新インスタンスが実際に準備完了か検証し、**導入済み**と**適用済み**を区別します。適用済みは公開最新版という意味ではありません。候補起動には現在のディスクから復元した pin ではなく、正確に永続化された**イメージと導入元**の組が必要です。互換の部分マーカーは管理ツールを再実行せず修復可能ですが、不完全な pin、ドリフト、管理ツール実行の不確実性は阻止したままです。独立検証済み Original は永続化された更新失敗の目的でのみ復元でき、アップグレードと報告しません。利用者 Stop は復活を禁じますが、十分に安全な停止が証明された取引の整合と解放は許します。証明された **NoSpawn** 中断で元インスタンスが正確に準備完了なら稼働／解凍を維持し、後の新しい成功確認では履歴を消さず別の計画を提示できます。管理ツールを自動で再実行したり記録を黙って削除したりしません。オフライン `update-status` は保存記録を報告するだけでライブプロセス／署名の証明ではありません。検証済み私有ヘルパーの `status` と明示的なリース付き `recover` を[更新状態／復旧仕様（英語）](cli.md#app-update-status-and-recovery)に従って使います。旧 protocol-1／2 の記録は保持し阻止したまま、対応する元ヘルパーを使います。公開済み v0.3.6 の対応する protocol-3/observation-mode-1 ペアは安定版 Brew の導入／更新または固定 `--prebuilt` インストーラーで導入します。ソース開発は任意です。ソースの manifest／版だけではアセット公開もチャンネル変更も行われません。
+独立した**署名済みヘルパー**、選択済み設定／状態、独自アセットは物理的に変更されるインストールの外側に置きます。同じインストールを使う別の生きたプロファイルは置換を阻止します。ヘルパーは選択済みプロファイル／バックエンド／アセットを維持し、新インスタンスが実際に準備完了か検証し、**導入済み**と**適用済み**を区別します。適用済みは公開最新版という意味ではありません。候補起動には現在のディスクから復元した pin ではなく、正確に永続化された**イメージと導入元**の組が必要です。互換の部分マーカーは管理ツールを再実行せず修復可能ですが、不完全な pin、ドリフト、管理ツール実行の不確実性は阻止したままです。独立検証済み Original は永続化された更新失敗の目的でのみ復元でき、アップグレードと報告しません。利用者 Stop は復活を禁じますが、十分に安全な停止が証明された取引の整合と解放は許します。証明された **NoSpawn** 中断で元インスタンスが正確に準備完了なら稼働／解凍を維持し、後の新しい成功確認では履歴を消さず別の計画を提示できます。管理ツールを自動で再実行したり記録を黙って削除したりしません。オフライン `update-status` は保存記録を報告するだけでライブプロセス／署名の証明ではありません。検証済み私有ヘルパーの `status` と明示的なリース付き `recover` を[更新状態／復旧仕様（英語）](cli.md#app-update-status-and-recovery)に従って使います。
+
+旧 protocol-1/2/3 証拠は保存／阻止したまま、保留した署名済み matching helper だけで照会／復旧し、v4 に変換しません。新 `updates-v4/` と実 OS アカウント home の `.desktop-pet-updates` は旧 `updates/`／`.herdr-updates` と共存します。lock 順は old global → new global → ソートした installation roots、legacy stop-generation も検査します。bridge A→neutral B は別同意と検証済み v4 `migrate-legacy --plan ABS` が必要です。文書／候補 package は公開や最終受入完了の証拠ではありません。[移行／復旧](migrations/desktop-pet.md)。
 
 ## 設定とトラブルシューティング
 
-- `HERDR_PLUGIN_CONFIG_DIR` は `lifecycle.json`（２つのスイッチ）、`preferences.json`（その他設定／セリフ）、管理下の `characters/` と `menu-bar-icons/` を選びます。`HERDR_PLUGIN_STATE_DIR` はプロセスロック、`<state-dir>/control.sock`、デーモン `desktop-pet.log`、更新状態を選びます。注入パスがなければ Herdr の XDG プラグイン設定／状態ディレクトリを使います。ネイティブ `--config-dir`／`--state-dir` でプロファイルを分けられますが、注入された環境パスが優先です。起動、コマンド、停止、バックアップでは**実際に対応する両パス**を使い、特に安定／ベータ併用時に注意します。`--socket PATH` は Herdr バックエンドであり、私有 CLI 制御ソケット**ではありません**（[CLI 接続、英語](cli.md#connection-identity-and-operations)）。
-- 単独利用で健全なサーバーがないまま約 30 秒で消えた場合は `settings get` と `status` を確認し、同じ設定／状態プロファイルで再起動する前に `exit_with_herdr off` を設定します。ウィンドウ非表示とデーモン終了を区別してください。登録済みの全ローカルエンドポイントの明示的な無効化／リンク解除による即時終了は、このスイッチでは防げません。
-- ウィンドウ非表示や全体クリック透過は起動失敗を意味しません。前述のメニューバー復旧を使います。`plugin link` 後に実行されなければ `client.attached` 警告を調べ、手動 `start` を呼び、デーモンの `status`／ログを確認します。`auto_start` オフは自動起動を意図してスキップします。稼働中のホストをリンクするだけでは起動しません。attach 用ホストパッチの分離配置と実際のフック確認は[ホスト連携（英語）](../integrations/herdr/README.md)。
+- プロファイル優先順位は **明示的 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 中立 XDG 既定値**（未指定なら `~/.config/desktop-pet`、`~/.local/state/desktop-pet`）です。core は `HERDR_PLUGIN_*` を暗黙使用せず、Herdr wrapper だけがホスト注入を明示引数に変換します。config は lifecycle/preferences、characters、menu-bar-icons、state は lock、私有 `control.sock`、daemon log、更新証拠を保持します。実際の両パスを合わせてバックアップします。`--herdr-socket ABS` は登録 Herdr アダプターの backend オプションで制御 socket ではなく、アダプターなしで core は正規化／登録しません。[正確なプロファイル・探索契約](development.md#profiles-and-installation-discovery)。
+- Herdr 専用モード（登録 Herdr アダプター）で健全なサーバーがないまま約 30 秒で消えた場合は `settings get` と `status` を確認し、同じ設定／状態プロファイルで再起動前に `exit_with_herdr off` を設定します。ウィンドウ非表示とデーモン終了を区別してください。Herdr 専用で登録済みの全ローカルエンドポイントの無効化／リンク解除による即時終了は、このスイッチでは防げません。Auto/Tern／アダプターなしはこの Herdr 終了規則を使いません。
+- ウィンドウ非表示や全体クリック透過は起動失敗を意味しません。前述のメニューバー復旧を使います。`plugin link` 後に実行されなければ `client.attached` 警告を調べ、手動 `start` を呼び、デーモンの `status`／ログを確認します。`auto_start` オフは自動起動を意図してスキップします。稼働中のホストをリンクするだけでは起動しません。attach 用ホストパッチの分離配置と実際のフック確認は[ホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - `Herdr watchers are shutting down` なら、継承した `HERDR_SOCKET_PATH`／`HERDR_CLIENT_SOCKET_PATH`、`PATH` 上の実際の CLI／版、ソケットのサーバーを確認します。**別のサーバー**に対する `herdr plugin list` はデーモンのエンドポイントの診断になりません。同じ CLI／ソケット／セッションを対象にし、遠隔エラーなら保存マシン転送／版／選択も確認します。パッチ済みホストは自動起動を可能にしますが、全サーバーにこのプラグインを導入しません。
 - 遠隔のエラーは[観測元](#観測元)のプロファイル状態、対話認証／再接続、対応する転送 CLI を確認します。GUI は遠隔に SSH してローカル画面を期待せず、ローカル Mac で起動します。`agent.prompt` の制限と遠隔の読み取り専用は[上記](#インライン返信とメッセージ配送)を参照してください。
-- リリースの取得失敗時は `github.com` と実際の Release アセットを確認します。明示した `--prebuilt` は**絶対に**フォールバックしません。オプションなしのインストールはソースへフォールバック可能でツールチェーンが必要です。公開済み formula も別途確認します。便宜的な署名検証は Developer ID 署名／公証を意味しません（[インストール案内](../readme.ja.md)）。
-- プロバイダ連携は Herdr 上流側の責任です。上流ライフサイクルフック導入後、既存のプロバイダセッションを再起動／再読み込みしてください。ペットは観測状態を表示し、プロバイダの結果を推測しません。版ごとの動作は[リリース履歴（英語）](releases/README.md)、ホストの詳細は[ホスト連携（英語）](../integrations/herdr/README.md)を参照してください。
+- 既定／明示 `--prebuilt` は prebuilt-only で、取得／検証失敗でも source fallback しません。現在の検証済み core checkout は明示 `--source` で構築し、admission が示す実際の導入選択を確認します。中立 v0.4.0／formula／連携タグは未公開です。ad-hoc 署名検証は Developer ID／公証ではありません（[導入](../readme.ja.md)）。
+- プロバイダ連携は Herdr 上流側の責任です。上流ライフサイクルフック導入後、既存のプロバイダセッションを再起動／再読み込みしてください。ペットは観測状態を表示し、プロバイダの結果を推測しません。版ごとの動作は[リリース履歴（英語）](releases/README.md)、ホストの詳細は[ホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)を参照してください。

@@ -3,23 +3,21 @@ use crate::automation::{
 };
 use crate::bubble::BubblePlacement;
 use crate::lifecycle::LifecycleSettings;
-use crate::session::{AgentRecord, AgentStatus, CompletionObservation, OutcomeObservation};
 use crate::session_view::{
-    CardDisplay, PromptTarget, PromptTargetError, SessionKey, SessionListOptions,
-    SessionPageCursor, SessionPageError, SessionPageRequest, SessionSnapshot, SessionStore,
-    SessionView, SourceAdmission, WorktreeRemoveTarget, WorktreeRemoveTargetError,
+    CardDisplay, SessionListOptions, SessionPageCursor, SessionPageError, SessionPageRequest,
+    SessionSnapshot, SessionStore, SessionView,
 };
-use crate::sources::{
-    remote_machine_id, remote_source, HostConnections, ObservationPreferences, SourceCatalog,
-    SourceRoute,
+use crate::sources::ObservationPreferences;
+use desktop_pet_contracts::{
+    AgentRecord, AgentStatus, CompletionObservation, DomainAccess, HostConnections, Integration,
+    LifecycleExtension, ObservationSelection, OutcomeObservation, ProfileStore, PromptError,
+    PromptTarget, SessionKey, SessionStatusUpdate, SourceAdmission, SourceCounts, SourceDescriptor,
+    SourceLocality, WorktreeRemoveTarget, WorktreeRemoveTargetError,
 };
-use crate::tern::{
-    TernExchangeErrorCode, TernExchangeReply, TernExchangeRequest, TernRegistry, Window,
-};
-use herdr_update_coordinator::{ObservationMode, UpdateContext, OBSERVATION_MODE_ENV};
+use desktop_pet_update_coordinator::UpdateContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,7 +51,7 @@ const COMPLETION_MAX_AGE: Duration = Duration::from_secs(30);
 /// Only export stored, displayable metadata. In particular, raw source paths,
 /// full working directories, and worktree root/checkout paths are not session wire data.
 fn automation_session_row(instance_id: &str, view: &SessionView) -> Value {
-    use crate::agent_outcome::AgentOutcome;
+    use desktop_pet_contracts::AgentOutcome;
     let status = match view.status {
         AgentStatus::Idle => "idle",
         AgentStatus::Working => "working",
@@ -165,52 +163,11 @@ impl Scene {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SourceCounts {
-    pub sessions: usize,
-    pub working: usize,
-    pub blocked: usize,
-    pub done: usize,
-    pub unknown: usize,
-}
-
-impl SourceCounts {
-    pub(crate) fn disconnected(self) -> Self {
-        let sessions = self.sessions.min(MAX_COUNT as usize);
-        Self {
-            sessions,
-            working: 0,
-            blocked: 0,
-            done: 0,
-            unknown: sessions,
-        }
-    }
-
-    fn bounded(self) -> Self {
-        let max = MAX_COUNT as usize;
-        Self {
-            sessions: self.sessions.min(max),
-            working: self.working.min(max),
-            blocked: self.blocked.min(max),
-            done: self.done.min(max),
-            unknown: self.unknown.min(max),
-        }
-    }
-}
-pub(crate) struct SessionStatusUpdate<'a> {
-    pub(crate) source: &'a str,
-    pub(crate) generation: u64,
-    pub(crate) terminal_id: &'a str,
-    pub(crate) pane_id: &'a str,
-    pub(crate) status: AgentStatus,
-    pub(crate) counts: SourceCounts,
-    pub(crate) completion: bool,
-    pub(crate) observed_at: Instant,
-}
-
 #[derive(Clone, Debug)]
 struct SourceState {
+    descriptor: SourceDescriptor,
     generation: u64,
+    observed: bool,
     connected: bool,
     coherent: bool,
     counts: SourceCounts,
@@ -219,7 +176,6 @@ struct SourceState {
     pane_ids: Option<Arc<[String]>>,
 }
 
-#[derive(Debug)]
 pub struct AppState {
     visible: bool,
     passthrough: bool,
@@ -232,7 +188,11 @@ pub struct AppState {
     shutdown: bool,
     updater_stopping: bool,
     update_context: Option<UpdateContext>,
+    migration_gate: Option<(String, String)>,
+    pending_migration_plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
     pending_update: Option<PendingUpdate>,
+    update_ui_operation_id: Option<String>,
+    update_ui_visible: bool,
     cancelled_updates: VecDeque<String>,
     lifecycle_settings: LifecycleSettings,
     ui_ready: bool,
@@ -240,10 +200,10 @@ pub struct AppState {
     coherent_snapshot_revision: u64,
     sources: HashMap<String, SourceState>,
     observation: ObservationPreferences,
-    observation_mode: ObservationMode,
-    tern: TernRegistry,
-    observation_catalog: SourceCatalog,
-    observation_epoch: u64,
+    integrations: Arc<[Arc<dyn Integration>]>,
+    provider_labels: Arc<BTreeMap<String, String>>,
+    lifecycle_extensions: Vec<Arc<dyn LifecycleExtension>>,
+    profile_store: Option<ProfileStore>,
     retired_generations: HashMap<String, u64>,
     session_store: SessionStore,
     completions: VecDeque<CompletionObservation>,
@@ -268,6 +228,8 @@ impl AppState {
             bubble_visible: true,
             bubble_placement: BubblePlacement::default(),
             scale: DEFAULT_SCALE,
+            migration_gate: None,
+            pending_migration_plan: None,
             reset_position_revision: 0,
             automation: None,
             shutdown: false,
@@ -275,18 +237,17 @@ impl AppState {
             update_context: None,
             pending_update: None,
             cancelled_updates: VecDeque::new(),
+            update_ui_operation_id: None,
+            update_ui_visible: false,
             coherent_snapshot_revision: 0,
-            lifecycle_settings: LifecycleSettings {
-                auto_start: true,
-                exit_with_herdr: true,
-            },
+            lifecycle_settings: LifecycleSettings { auto_start: true },
             ui_ready: false,
             sources: HashMap::new(),
             observation: ObservationPreferences::default(),
-            observation_mode: ObservationMode::Both,
-            tern: TernRegistry::default(),
-            observation_catalog: SourceCatalog::default(),
-            observation_epoch: 0,
+            integrations: Arc::from([]),
+            provider_labels: Arc::new(BTreeMap::new()),
+            lifecycle_extensions: Vec::new(),
+            profile_store: None,
             retired_generations: HashMap::new(),
             session_store: SessionStore::new(),
             completions: VecDeque::new(),
@@ -302,46 +263,38 @@ impl AppState {
             host_connections: HostConnections::default(),
         }
     }
-    #[cfg(test)]
-    pub(crate) fn set_observation_mode(&mut self, mode: ObservationMode) {
-        if self.observation_mode == mode || self.update_mutation_allowed().is_err() {
-            return;
-        }
-        let Some(epoch) = self.observation_epoch.checked_add(1) else {
-            return;
-        };
-        self.observation.host = mode;
-        self.finish_observation_change(epoch);
+    pub(crate) fn observation_mode(&self) -> ObservationSelection {
+        self.observation.host.clone()
     }
 
-    pub(crate) fn observation_mode(&self) -> ObservationMode {
-        self.observation_mode
+    pub(crate) fn set_observation_selection(
+        &mut self,
+        selection: ObservationSelection,
+    ) -> Result<(), String> {
+        self.apply_observation_preferences(ObservationPreferences { host: selection })
     }
 
-    pub(crate) fn set_update_context(&mut self, mut context: UpdateContext) {
-        if self.update_mutation_allowed().is_err() {
-            return;
-        }
-        Self::set_context_host(&mut context, self.observation_mode);
+    pub(crate) fn set_update_context(&mut self, mut context: UpdateContext) -> Result<(), String> {
+        self.update_mutation_allowed()?;
+        context.set_observation_selection(&self.observation.host)?;
         self.update_context = Some(context);
-    }
-
-    fn set_context_host(context: &mut UpdateContext, mode: ObservationMode) {
-        if mode == ObservationMode::Herdr {
-            context.environment.remove(OBSERVATION_MODE_ENV);
-        } else if context
-            .environment
-            .get(OBSERVATION_MODE_ENV)
-            .is_none_or(|value| value != mode.as_str())
-        {
-            context
-                .environment
-                .insert(OBSERVATION_MODE_ENV.to_owned(), mode.as_str().to_owned());
-        }
+        Ok(())
     }
 
     pub(crate) fn update_context(&self) -> Option<&UpdateContext> {
         self.update_context.as_ref()
+    }
+
+    pub(crate) fn set_update_ui_visibility(&mut self, operation_id: Option<String>, visible: bool) {
+        self.update_ui_visible = visible;
+        self.update_ui_operation_id = operation_id;
+    }
+
+    pub(crate) fn update_ui_visible(&self) -> bool {
+        self.update_ui_visible
+    }
+    pub(crate) fn update_ui_operation_id(&self) -> Option<&str> {
+        self.update_ui_operation_id.as_deref()
     }
 
     pub(crate) fn updater_stopping(&self) -> bool {
@@ -355,11 +308,128 @@ impl AppState {
     }
 
     pub(crate) fn update_mutation_allowed(&self) -> Result<(), String> {
-        if self.pending_update.is_some() {
+        if self.shutdown {
+            Err("application is shutting down".to_owned())
+        } else if self.migration_gate.is_some() {
+            Err("profile migration is awaiting commit authorization".to_owned())
+        } else if self.pending_update.is_some() {
             Err("application update is preparing or in progress; retry later".to_owned())
         } else {
             Ok(())
         }
+    }
+
+    pub(crate) fn set_pending_migration_plan(
+        &mut self,
+        plan: desktop_pet_update_coordinator::migration::MigrationPlan,
+    ) -> Result<(), String> {
+        self.update_mutation_allowed()?;
+        if self
+            .pending_migration_plan
+            .as_ref()
+            .is_some_and(|existing| existing != &plan)
+        {
+            return Err("another immutable migration plan is already pending".into());
+        }
+        self.pending_migration_plan = Some(plan);
+        Ok(())
+    }
+
+    pub(crate) fn pending_migration_plan(
+        &self,
+    ) -> Option<&desktop_pet_update_coordinator::migration::MigrationPlan> {
+        self.pending_migration_plan.as_ref()
+    }
+
+    fn disable_integrations(&mut self) {
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.set_enabled(false, self);
+        }
+        self.retire_integrations();
+    }
+
+    pub(crate) fn set_migration_gate(
+        &mut self,
+        operation_id: String,
+        token: String,
+    ) -> Result<(), String> {
+        self.update_mutation_allowed()?;
+        self.migration_gate = Some((operation_id, token));
+        self.retire_integrations();
+        Ok(())
+    }
+
+    pub(crate) fn migration_operation(&self) -> Option<&str> {
+        self.migration_gate
+            .as_ref()
+            .map(|(operation, _)| operation.as_str())
+    }
+
+    pub(crate) fn migration_gated(&self) -> bool {
+        self.migration_gate.is_some()
+    }
+
+    pub(crate) fn release_migration_gate(
+        &mut self,
+        operation_id: &str,
+        token: &str,
+    ) -> Result<(), String> {
+        if self.shutdown {
+            return Err("application is shutting down".into());
+        }
+        if !self
+            .migration_gate
+            .as_ref()
+            .is_some_and(|(operation, secret)| operation == operation_id && secret == token)
+        {
+            return Err("migration commit authorization does not match".into());
+        }
+        self.migration_gate = None;
+        self.pending_migration_plan = None;
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.set_enabled(
+                self.observation.host.includes_provider(integration.id()),
+                self,
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn promote_prepared_migration(
+        &mut self,
+        operation_id: &str,
+        token: &str,
+    ) -> Result<(), String> {
+        self.expire_update_prepare();
+        if self.shutdown
+            || self.migration_gate.is_some()
+            || !self
+                .pending_migration_plan
+                .as_ref()
+                .is_some_and(|plan| plan.operation_id == operation_id && plan.token == token)
+            || !self.pending_update.as_ref().is_some_and(|pending| {
+                pending.matches(operation_id, token) && pending.prepared && !pending.stop_claimed
+            })
+        {
+            return Err(
+                "migration Prepare requires the exact accepted main-thread operation".into(),
+            );
+        }
+        let pending = self
+            .pending_update
+            .take()
+            .expect("matched prepared migration");
+        self.migration_gate = Some((pending.request.operation_id, pending.request.token));
+        self.retire_integrations();
+        Ok(())
+    }
+
+    pub(crate) fn migration_authorized(&self, operation_id: &str, token: &str) -> bool {
+        self.migration_gate
+            .as_ref()
+            .is_some_and(|(operation, secret)| operation == operation_id && secret == token)
     }
 
     pub(crate) fn queue_update_prepare(
@@ -371,8 +441,18 @@ impl AppState {
         if !self.ui_ready || self.shutdown {
             return Err("desktop pet is not ready for an update".into());
         }
+        if self.migration_gate.is_some() {
+            return Err("profile migration is awaiting commit authorization".into());
+        }
         if self.pending_update.is_some() {
             return Err("another application update is preparing".into());
+        }
+        if self
+            .pending_migration_plan
+            .as_ref()
+            .is_some_and(|plan| plan.operation_id != operation_id || plan.token != token)
+        {
+            return Err("update Prepare does not match the immutable migration plan".into());
         }
         self.pending_update = Some(PendingUpdate {
             request: UpdatePrepare {
@@ -385,6 +465,7 @@ impl AppState {
             stop_claimed: false,
             expires: Instant::now() + UPDATE_PREPARE_LIFETIME,
         });
+        self.retire_integrations();
         Ok(())
     }
 
@@ -423,6 +504,7 @@ impl AppState {
             pending.prepared = true;
         } else {
             self.pending_update = None;
+            self.pending_migration_plan = None;
         }
         success && delivered
     }
@@ -463,6 +545,13 @@ impl AppState {
                 self.cancelled_updates
                     .push_back(pending.request.operation_id);
             }
+        }
+        if self
+            .pending_migration_plan
+            .as_ref()
+            .is_some_and(|plan| plan.operation_id == operation_id && plan.token == token)
+        {
+            self.pending_migration_plan = None;
         }
     }
 
@@ -511,8 +600,7 @@ impl AppState {
         }
         self.pending_update = None;
         self.updater_stopping = true;
-        self.tern
-            .reject_all_pending(crate::herdr::PromptError::Offline);
+        self.disable_integrations();
         self.shutdown = true;
         Ok(())
     }
@@ -524,6 +612,12 @@ impl AppState {
             .is_some_and(|p| !p.stop_claimed && Instant::now() >= p.expires)
         {
             let pending = self.pending_update.take().expect("expired pending update");
+            if self.pending_migration_plan.as_ref().is_some_and(|plan| {
+                plan.operation_id == pending.request.operation_id
+                    && plan.token == pending.request.token
+            }) {
+                self.pending_migration_plan = None;
+            }
             if let Some(reply) = pending.reply {
                 let _ = reply.send(Err("update preparation timed out".into()));
             }
@@ -560,129 +654,116 @@ impl AppState {
         &self.observation
     }
 
-    pub(crate) fn observation_epoch(&self) -> u64 {
-        self.observation_epoch
+    pub(crate) fn host_connections(&self) -> &HostConnections {
+        &self.host_connections
     }
 
-    pub(crate) fn host_connections(&self) -> HostConnections {
-        self.host_connections
+    pub(crate) fn provider_labels(&self) -> &BTreeMap<String, String> {
+        &self.provider_labels
     }
 
-    pub(crate) fn observation_catalog(&self) -> &SourceCatalog {
-        &self.observation_catalog
+    pub(crate) fn set_integrations(
+        &mut self,
+        integrations: Vec<Arc<dyn Integration>>,
+        provider_labels: BTreeMap<String, String>,
+    ) {
+        self.integrations = integrations.into();
+        self.host_connections = provider_labels
+            .keys()
+            .map(|provider| (provider.clone(), 0))
+            .collect();
+        self.provider_labels = Arc::new(provider_labels);
+        self.session_store
+            .set_provider_labels(Arc::clone(&self.provider_labels));
+        self.recompute_aggregate();
     }
 
-    fn supports_source(&self, source: &str) -> bool {
-        if source.starts_with("tern:") {
-            self.observation_mode.supports_tern()
-        } else {
-            self.observation_mode.supports_herdr()
+    pub(crate) fn integration(&self, provider: &str) -> Option<Arc<dyn Integration>> {
+        self.integrations
+            .iter()
+            .find(|integration| integration.id() == provider)
+            .cloned()
+    }
+
+    pub(crate) fn retire_integrations(&mut self) {
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.retire(self);
         }
+    }
+
+    pub(crate) fn set_lifecycle_extensions(
+        &mut self,
+        extensions: Vec<Arc<dyn LifecycleExtension>>,
+        profile_store: ProfileStore,
+    ) {
+        self.lifecycle_extensions = extensions;
+        self.profile_store = Some(profile_store);
+    }
+
+    pub(crate) fn lifecycle_extensions(&self) -> &[Arc<dyn LifecycleExtension>] {
+        &self.lifecycle_extensions
+    }
+
+    pub(crate) fn profile_store(&self) -> Option<&ProfileStore> {
+        self.profile_store.as_ref()
     }
 
     fn accepts_source(&self, source: &str) -> bool {
-        self.supports_source(source)
-            && (remote_machine_id(source).is_none() || self.includes_source(source))
-    }
-
-    fn includes_source(&self, source: &str) -> bool {
-        if !self.observation.includes(source) {
-            return false;
-        }
-        remote_machine_id(source).is_none_or(|id| {
-            self.observation_catalog
-                .machines
-                .iter()
-                .any(|machine| machine.id == id && machine.enabled)
+        self.sources.get(source).is_some_and(|state| {
+            self.observation
+                .host
+                .includes_provider(&state.descriptor.provider)
         })
     }
 
-    fn reconcile_observation(&mut self) {
-        let retired_sources: Vec<(String, u64)> = self
-            .sources
-            .iter()
-            .filter(|(source, _)| !self.accepts_source(source))
-            .map(|(source, state)| (source.clone(), state.generation))
-            .collect();
-        for (source, generation) in retired_sources {
-            let _ = self.remove_source(&source, generation);
-        }
-        for source in self.sources.keys() {
-            let included = self.includes_source(source);
-            self.session_store.set_visibility(source, included);
-        }
-        if !self.observation.local {
-            self.tern
-                .reject_all_pending(crate::herdr::PromptError::StaleTarget);
-        }
-        self.completions.retain(|observation| {
-            self.observation.includes(&observation.source)
-                && remote_machine_id(&observation.source).is_none_or(|id| {
-                    self.observation_catalog
-                        .machines
-                        .iter()
-                        .any(|machine| machine.id == id && machine.enabled)
-                })
-        });
-        self.outcomes.retain(|observation| {
-            self.observation.includes(&observation.source)
-                && remote_machine_id(&observation.source).is_none_or(|id| {
-                    self.observation_catalog
-                        .machines
-                        .iter()
-                        .any(|machine| machine.id == id && machine.enabled)
-                })
-        });
-        self.recompute_aggregate();
+    fn includes_source(&self, source: &str) -> bool {
+        self.sources.get(source).is_some_and(|state| {
+            state.observed
+                && self
+                    .observation
+                    .host
+                    .includes_provider(&state.descriptor.provider)
+        })
     }
 
     pub(crate) fn apply_observation_preferences(
         &mut self,
-        mut preferences: ObservationPreferences,
-    ) {
-        preferences.sanitize();
-        if self.observation == preferences || self.update_mutation_allowed().is_err() {
-            return;
+        preferences: ObservationPreferences,
+    ) -> Result<(), String> {
+        if self.observation == preferences {
+            return Ok(());
         }
-        let Some(epoch) = self.observation_epoch.checked_add(1) else {
-            return;
-        };
-        self.observation = preferences;
-        self.finish_observation_change(epoch);
-    }
-
-    fn finish_observation_change(&mut self, epoch: u64) {
-        self.observation_mode = self.observation.host;
+        self.update_mutation_allowed()?;
         if let Some(context) = self.update_context.as_mut() {
-            Self::set_context_host(context, self.observation_mode);
+            context.set_observation_selection(&preferences.host)?;
         }
-        self.observation_epoch = epoch;
-        self.reconcile_observation();
-        self.session_store.invalidate();
-    }
-
-    pub(crate) fn set_observation_catalog(&mut self, catalog: SourceCatalog) {
-        if self.observation_catalog == catalog {
-            return;
+        self.observation = preferences;
+        // Provider retirement and selection commit share this domain lock.
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.set_enabled(
+                self.observation.host.includes_provider(integration.id()),
+                self,
+            );
         }
-        self.observation_catalog = catalog;
-        self.reconcile_observation();
-        for machine in &self.observation_catalog.machines {
-            self.session_store
-                .set_label(&remote_source(&machine.id), &machine.label);
-        }
-    }
-
-    /// A selected remote source is healthy after a coherent snapshot, even if
-    /// it has no agents. Local source visibility does not govern daemon exit.
-    pub(crate) fn has_healthy_observed_remote(&self) -> bool {
-        self.observation.remote
-            && self.sources.iter().any(|(source, state)| {
-                remote_machine_id(source).is_some()
-                    && state.connected
-                    && state.coherent
-                    && self.includes_source(source)
+        let retired: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|(_, source)| {
+                !self
+                    .observation
+                    .host
+                    .includes_provider(&source.descriptor.provider)
             })
+            .map(|(id, source)| (id.clone(), source.generation))
+            .collect();
+        for (source, generation) in retired {
+            self.remove_source(&source, generation);
+        }
+        self.session_store.invalidate();
+        self.recompute_aggregate();
+        Ok(())
     }
 
     pub(crate) fn session_revision(&self) -> u64 {
@@ -797,65 +878,43 @@ impl AppState {
         Ok(automation_session_row(&instance, &view))
     }
 
-    pub(crate) fn prompt_target(
-        &self,
-        key: &SessionKey,
-    ) -> Result<PromptTarget, crate::herdr::PromptError> {
+    pub(crate) fn prompt_target(&self, key: &SessionKey) -> Result<PromptTarget, PromptError> {
         self.prompt_route(key).map(|(target, _)| target)
     }
 
     pub(crate) fn prompt_route(
         &self,
         key: &SessionKey,
-    ) -> Result<(PromptTarget, SourceRoute), crate::herdr::PromptError> {
-        use crate::herdr::PromptError;
+    ) -> Result<(PromptTarget, String), PromptError> {
         if self.shutdown {
             return Err(PromptError::Offline);
         }
         let target = self
             .session_store
             .prompt_target(key)
-            .map_err(|error| match error {
-                PromptTargetError::ReadOnly => PromptError::ReadOnly,
-                PromptTargetError::Offline => PromptError::Offline,
-                PromptTargetError::Stale => PromptError::StaleTarget,
-            })?;
-        if !self.includes_source(&target.source) {
+            .map_err(PromptError::from)?;
+        let source = self
+            .sources
+            .get(&target.source)
+            .ok_or(PromptError::StaleTarget)?;
+        if !self.includes_source(&target.source) || source.generation != key.generation {
             return Err(PromptError::StaleTarget);
         }
-        let route = self
-            .source_route(&target.source, key.generation)
-            .ok_or(PromptError::StaleTarget)?;
-        if !self.sources.get(&target.source).is_some_and(|source| {
-            source.generation == key.generation && source.connected && source.coherent
-        }) {
+        if source.descriptor.locality == SourceLocality::Remote {
+            return Err(PromptError::ReadOnly);
+        }
+        if !source.descriptor.capabilities.prompt
+            || !self
+                .integrations
+                .iter()
+                .any(|integration| integration.id() == source.descriptor.provider)
+        {
+            return Err(PromptError::Unsupported);
+        }
+        if !source.connected || !source.coherent {
             return Err(PromptError::Offline);
         }
-        Ok((target, route))
-    }
-
-    fn source_route(&self, source: &str, generation: u64) -> Option<SourceRoute> {
-        if source.starts_with("tern:") {
-            return self
-                .tern
-                .route(source, generation)
-                .filter(|_| self.observation_mode.supports_tern());
-        }
-        if let Some(machine) = remote_machine_id(source) {
-            return self
-                .observation_mode
-                .supports_herdr()
-                .then(|| SourceRoute::HerdrRemote {
-                    machine: machine.to_owned(),
-                });
-        }
-        (self.observation_mode.supports_herdr()
-            && std::path::Path::new(source).is_absolute()
-            && self
-                .sources
-                .get(source)
-                .is_some_and(|entry| entry.generation == generation))
-        .then(|| SourceRoute::HerdrLocal(std::path::PathBuf::from(source)))
+        Ok((target, source.descriptor.provider.clone()))
     }
 
     pub(crate) fn worktree_remove_target(
@@ -868,15 +927,6 @@ impl AppState {
         let target = self.session_store.worktree_remove_target(key)?;
         if !self.includes_source(&target.source) {
             return Err(WorktreeRemoveTargetError::Stale);
-        }
-        if !std::path::Path::new(&target.source).is_absolute() {
-            return Err(WorktreeRemoveTargetError::Stale);
-        }
-        let route = self
-            .source_route(&target.source, key.generation)
-            .ok_or(WorktreeRemoveTargetError::Stale)?;
-        if !route.can_remove_worktree() {
-            return Err(WorktreeRemoveTargetError::ReadOnly);
         }
         if !self.sources.get(&target.source).is_some_and(|source| {
             source.generation == key.generation && source.connected && source.coherent
@@ -908,9 +958,13 @@ impl AppState {
         target: &WorktreeRemoveTarget,
     ) -> Option<Value> {
         if self.shutdown
-            || remote_machine_id(&target.source).is_some()
-            || !std::path::Path::new(&target.source).is_absolute()
             || !self.includes_source(&target.source)
+            || self
+                .source_descriptor(&target.source)
+                .is_none_or(|descriptor| {
+                    descriptor.locality != SourceLocality::Local
+                        || !descriptor.capabilities.remove_worktree
+                })
         {
             return None;
         }
@@ -936,10 +990,7 @@ impl AppState {
         }))
     }
 
-    pub(crate) fn prompt_available(
-        &self,
-        key: &SessionKey,
-    ) -> Result<(), crate::herdr::PromptError> {
+    pub(crate) fn prompt_available(&self, key: &SessionKey) -> Result<(), PromptError> {
         self.prompt_target(key).map(|_| ())
     }
 
@@ -969,7 +1020,7 @@ impl AppState {
     /// Queue ownership remains in AppState so source disconnects can discard
     /// pending UI reactions atomically with their status transition.
     pub(crate) fn push_completion(&mut self, observation: CompletionObservation) {
-        if !self.includes_source(&observation.source) {
+        if !self.includes_source(&observation.source) || self.shutdown {
             return;
         }
         let Some(source) = self.sources.get(&observation.source) else {
@@ -1006,7 +1057,7 @@ impl AppState {
     }
 
     pub(crate) fn push_outcome(&mut self, observation: OutcomeObservation) {
-        if !self.includes_source(&observation.source) {
+        if !self.includes_source(&observation.source) || self.shutdown {
             return;
         }
         if !self.sources.get(&observation.source).is_some_and(|source| {
@@ -1198,316 +1249,8 @@ impl AppState {
             }
         }
         self.updater_stopping = false;
-        self.tern
-            .reject_all_pending(crate::herdr::PromptError::Offline);
+        self.disable_integrations();
         self.shutdown = true;
-    }
-    /// Age complete window inventories from the control loop's monotonic tick.
-    pub(crate) fn expire_tern(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        for (source, generation) in self.tern.expire(now) {
-            if self
-                .sources
-                .get(&source)
-                .is_some_and(|entry| entry.connected)
-            {
-                changed |= self.update_source(&source, generation, false, SourceCounts::default());
-            }
-        }
-        changed
-    }
-    pub(crate) fn queue_tern_prompt(
-        &mut self,
-        key: SessionKey,
-        window: &str,
-        epoch: u64,
-        pane: &str,
-        text: &str,
-    ) -> Result<
-        (
-            String,
-            mpsc::Receiver<Result<crate::herdr::PromptReceipt, crate::herdr::PromptError>>,
-        ),
-        crate::herdr::PromptError,
-    > {
-        self.update_mutation_allowed()
-            .map_err(crate::herdr::PromptError::Other)?;
-        let (target, route) = self.prompt_route(&key)?;
-        if target.pane_id != pane
-            || !matches!(&route, SourceRoute::TernWindow { window: current, epoch: current_epoch }
-            if current.as_str() == window && *current_epoch == epoch)
-        {
-            return Err(crate::herdr::PromptError::StaleTarget);
-        }
-        let instance_id = self
-            .update_context
-            .as_ref()
-            .map(|context| context.instance_id.as_str())
-            .ok_or(crate::herdr::PromptError::NotReady)?;
-        self.tern.queue(window, epoch, key, pane, text, instance_id)
-    }
-
-    pub(crate) fn cancel_tern_prompt(&mut self, window: &str, operation_id: &str) {
-        self.tern.cancel(window, operation_id);
-    }
-
-    pub(crate) fn tern_exchange(&mut self, request: TernExchangeRequest) -> TernExchangeReply {
-        let instance_id = self
-            .update_context
-            .as_ref()
-            .map(|context| context.instance_id.clone())
-            .unwrap_or_default();
-        let error =
-            |code, message: String| TernExchangeReply::error(instance_id.clone(), code, message);
-        if !self.observation_mode.supports_tern() || self.shutdown {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "Tern observation is unavailable".into(),
-            );
-        }
-        if instance_id.is_empty() {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "daemon instance is not ready".into(),
-            );
-        }
-        let (records, counts) = match request.normalize() {
-            Ok(snapshot) => snapshot,
-            Err(detail) => return error(TernExchangeErrorCode::Rejected, detail),
-        };
-        let source = crate::tern::source_id(&request.window);
-        if self
-            .tern
-            .retired_epoch(&request.window)
-            .is_some_and(|epoch| request.epoch <= epoch)
-        {
-            return error(
-                TernExchangeErrorCode::SourceRetired,
-                "stale retired Tern window epoch".into(),
-            );
-        }
-        if self.tern.get(&request.window).is_none() && request.instance_id.is_some() {
-            return error(
-                TernExchangeErrorCode::SourceRetired,
-                "Tern source is retired".into(),
-            );
-        }
-        if self.tern.get(&request.window).is_some() && request.instance_id.is_none() {
-            return error(
-                TernExchangeErrorCode::BindingRequired,
-                "missing bound daemon instance".into(),
-            );
-        }
-        if request
-            .instance_id
-            .as_deref()
-            .is_some_and(|id| id != instance_id)
-        {
-            return error(
-                TernExchangeErrorCode::InstanceChanged,
-                "daemon instance changed".into(),
-            );
-        }
-        let now = Instant::now();
-        let (generation, new_epoch) = match self.tern.get(&request.window) {
-            Some(previous) if request.epoch < previous.epoch => {
-                return error(
-                    TernExchangeErrorCode::Rejected,
-                    "stale Tern window epoch".into(),
-                );
-            }
-            Some(previous) if request.epoch == previous.epoch => {
-                if request.sequence <= previous.sequence {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "stale Tern window sequence".into(),
-                    );
-                }
-                if let Err(detail) = self.tern.validate_result(&request) {
-                    return error(TernExchangeErrorCode::ReceiptRejected, detail);
-                }
-                (previous.generation, false)
-            }
-            Some(previous) => {
-                if !request.results.is_empty() {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "results from a retired Tern window".into(),
-                    );
-                }
-                let Some(generation) = previous
-                    .generation
-                    .checked_add(1)
-                    .filter(|generation| *generation <= crate::tern::MAX_SAFE_INTEGER)
-                else {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "Tern source generation exhausted".into(),
-                    );
-                };
-                (generation, true)
-            }
-            None => {
-                if !request.results.is_empty() {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "unrecognized Tern command result".into(),
-                    );
-                }
-                let Some(generation) = self
-                    .retired_source_generation(&source)
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .filter(|generation| *generation <= crate::tern::MAX_SAFE_INTEGER)
-                else {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "Tern source generation exhausted".into(),
-                    );
-                };
-                (generation, true)
-            }
-        };
-        if self.coherent_snapshot_revision.checked_add(1).is_none() {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "snapshot revision exhausted".into(),
-            );
-        }
-        if new_epoch
-            && self
-                .sources
-                .get(&source)
-                .is_some_and(|entry| generation <= entry.generation)
-        {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "stale Tern source generation".into(),
-            );
-        }
-        let needs_registry_slot = self.tern.get(&request.window).is_none();
-        if new_epoch
-            && (!self.ensure_source_capacity(&source, generation, needs_registry_slot, now)
-                || !self.begin_source(source.clone(), generation))
-        {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "cannot register Tern window".into(),
-            );
-        }
-        let pane_ids: Arc<[String]> = records
-            .iter()
-            .map(|record| record.pane_id.clone())
-            .collect();
-        if !self.publish_source_snapshot(
-            &source,
-            generation,
-            records.iter(),
-            counts,
-            pane_ids,
-            &[],
-            now,
-        ) {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "cannot publish Tern window snapshot".into(),
-            );
-        }
-        if new_epoch {
-            self.tern
-                .reject_pending(&request.window, crate::herdr::PromptError::StaleTarget);
-            self.tern.insert(
-                request.window.clone(),
-                Window::new(&request.window, request.epoch, generation, now),
-            );
-            self.session_store.set_label(&source, "Tern");
-        }
-        let window = self
-            .tern
-            .get_mut(&request.window)
-            .expect("registered window");
-        window.sequence = request.sequence;
-        window.last_seen = now;
-        window.offline = false;
-        self.tern.settle(&request.window, request.results.first());
-        // The initial unbound snapshot establishes identity only. Commands are
-        // offered on a later exchange carrying that exact daemon binding.
-        let command = request.instance_id.as_ref().and_then(|_| {
-            self.tern
-                .pending_target(&request.window)
-                .and_then(|(key, pane)| match self.prompt_route(&key) {
-                    Ok((target, SourceRoute::TernWindow { window, epoch }))
-                        if window == request.window
-                            && epoch == request.epoch
-                            && target.pane_id == pane
-                            && target.source == source
-                            && self.update_mutation_allowed().is_ok() =>
-                    {
-                        self.tern.offer(&request.window, &instance_id)
-                    }
-                    _ => {
-                        self.tern.reject_pending(
-                            &request.window,
-                            crate::herdr::PromptError::StaleTarget,
-                        );
-                        None
-                    }
-                })
-        });
-        TernExchangeReply {
-            ok: true,
-            instance_id,
-            generation,
-            command,
-            error: None,
-            error_code: None,
-        }
-    }
-
-    /// Reclaim only registrations whose registry, aggregate and retained rows
-    /// all agree on an expired offline generation. Pending work is finalized
-    /// by expiry before any source identity is removed.
-    fn ensure_source_capacity(
-        &mut self,
-        source: &str,
-        generation: u64,
-        needs_registry_slot: bool,
-        now: Instant,
-    ) -> bool {
-        if self.session_store.source_admission(source, generation) == SourceAdmission::Rejected {
-            return false;
-        }
-        if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed
-            && (!needs_registry_slot || self.tern.len() < crate::tern::MAX_WINDOWS)
-        {
-            return true;
-        }
-        self.expire_tern(now);
-        loop {
-            if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed
-                && (!needs_registry_slot || self.tern.len() < crate::tern::MAX_WINDOWS)
-            {
-                return true;
-            }
-            let retired = self
-                .tern
-                .expired_registrations(now)
-                .filter(|(_, entry)| {
-                    self.sources.get(&entry.source).is_some_and(|current| {
-                        current.generation == entry.generation && !current.connected
-                    }) && self
-                        .session_store
-                        .is_offline_generation(&entry.source, entry.generation)
-                })
-                .min_by_key(|(_, entry)| entry.last_seen)
-                .map(|(_, entry)| (entry.source.clone(), entry.generation));
-            let Some((retired_source, retired_generation)) = retired else {
-                return false;
-            };
-            if !self.remove_source(&retired_source, retired_generation) {
-                return false;
-            }
-        }
     }
 
     /// Inspect registration without beginning or resetting its generation.
@@ -1519,56 +1262,151 @@ impl AppState {
         self.retired_generations.get(source).copied()
     }
 
-    /// Begin a new connection generation for a canonical endpoint.  Any
-    /// previous live counts become unknown until the new generation provides a
-    /// coherent snapshot.
-    pub(crate) fn begin_source(&mut self, source: String, generation: u64) -> bool {
-        if !self.accepts_source(&source)
+    pub(crate) fn instance_id(&self) -> &str {
+        self.update_context
+            .as_ref()
+            .map_or("", |context| context.instance_id.as_str())
+    }
+
+    pub(crate) fn source_descriptor(&self, source: &str) -> Option<&SourceDescriptor> {
+        self.sources.get(source).map(|state| &state.descriptor)
+    }
+
+    pub(crate) fn set_source_label(&mut self, source: &str, generation: u64, label: &str) -> bool {
+        let Some(state) = self.sources.get_mut(source) else {
+            return false;
+        };
+        if state.generation != generation {
+            return false;
+        }
+        if state.descriptor.label != label {
+            state.descriptor.label.clear();
+            state.descriptor.label.push_str(label);
+            self.session_store.set_label(source, label);
+        }
+        true
+    }
+
+    pub(crate) fn set_source_observed(
+        &mut self,
+        source: &str,
+        generation: u64,
+        observed: bool,
+    ) -> bool {
+        if self.update_mutation_allowed().is_err() {
+            return false;
+        }
+        let Some(state) = self.sources.get_mut(source) else {
+            return false;
+        };
+        if state.generation != generation {
+            return false;
+        }
+        if state.observed != observed {
+            state.observed = observed;
+            self.session_store.set_visibility(source, observed);
+            if !observed {
+                purge_completions_for_source(&mut self.completions, source);
+                self.outcomes
+                    .retain(|observation| observation.source != source);
+            }
+            self.recompute_aggregate();
+        }
+        true
+    }
+
+    pub(crate) fn source_admission(&self, source: &str, generation: u64) -> SourceAdmission {
+        if self.shutdown
+            || self.coherent_snapshot_revision.checked_add(1).is_none()
             || self
                 .retired_generations
-                .get(&source)
+                .get(source)
                 .is_some_and(|retired| generation <= *retired)
+        {
+            return SourceAdmission::Rejected;
+        }
+        self.session_store.source_admission(source, generation)
+    }
+
+    /// Dispatch pressure to each owner before the requesting adapter takes its
+    /// registry lock. Owners may retire only expired, offline, settled sources.
+    pub(crate) fn ensure_source_capacity(
+        &mut self,
+        source: &str,
+        generation: u64,
+        now: Instant,
+    ) -> SourceAdmission {
+        let admission = self.source_admission(source, generation);
+        if admission != SourceAdmission::Capacity {
+            return admission;
+        }
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.reclaim_expired_sources(now, self);
+            let admission = self.source_admission(source, generation);
+            if admission != SourceAdmission::Capacity {
+                return admission;
+            }
+        }
+        SourceAdmission::Capacity
+    }
+
+    /// Capacity eviction is distinct from retirement: the candidate must still
+    /// be the exact offline generation in both aggregate and retained records.
+    pub(crate) fn remove_offline_source(&mut self, source: &str, generation: u64) -> bool {
+        if !self
+            .sources
+            .get(source)
+            .is_some_and(|state| state.generation == generation && !state.connected)
+            || !self.session_store.is_offline_generation(source, generation)
         {
             return false;
         }
-        if generation == 0 {
-            return false;
-        }
-        if let Some(existing) = self.sources.get(&source) {
-            if generation <= existing.generation {
-                return false;
-            }
-        }
-        if !self.ensure_source_capacity(&source, generation, false, Instant::now()) {
-            return false;
-        }
-        if !self.session_store.begin_source(&source, generation) {
-            return false;
-        }
-        self.session_store
-            .set_visibility(&source, self.includes_source(&source));
-        if let Some(id) = remote_machine_id(&source) {
-            if let Some(machine) = self
-                .observation_catalog
-                .machines
+        self.remove_source(source, generation)
+    }
+
+    /// A descriptor supplies all domain authority. IDs never encode locality,
+    /// routing, permissions or display labels.
+    pub(crate) fn begin_source(&mut self, descriptor: SourceDescriptor, generation: u64) -> bool {
+        let source = &descriptor.id;
+        if !self
+            .observation
+            .host
+            .includes_provider(&descriptor.provider)
+            || !self
+                .integrations
                 .iter()
-                .find(|machine| machine.id == id)
-            {
-                self.session_store.set_label(&source, &machine.label);
-            }
+                .any(|integration| integration.id() == descriptor.provider)
+            || self.source_admission(source, generation) != SourceAdmission::Allowed
+            || self.sources.get(source).is_some_and(|existing| {
+                generation <= existing.generation
+                    || existing.descriptor.provider != descriptor.provider
+            })
+        {
+            return false;
         }
-        purge_completions_for_source(&mut self.completions, &source);
+        if !self.session_store.begin_source(&descriptor, generation) {
+            return false;
+        }
+        let observed = self
+            .sources
+            .get(source)
+            .is_none_or(|existing| existing.observed);
+        self.session_store.set_visibility(source, observed);
+        purge_completions_for_source(&mut self.completions, source);
         self.outcomes
-            .retain(|observation| observation.source != source);
+            .retain(|observation| observation.source != *source);
         let counts = self
             .sources
-            .get(&source)
+            .get(source)
             .map(|existing| existing.counts.disconnected())
             .unwrap_or_default();
         self.sources.insert(
-            source,
+            descriptor.id.clone(),
             SourceState {
+                descriptor,
                 generation,
+                observed,
                 connected: false,
                 coherent: false,
                 counts,
@@ -1660,7 +1498,7 @@ impl AppState {
     where
         I: IntoIterator<Item = &'a AgentRecord>,
     {
-        if !self.accepts_source(source) {
+        if !self.accepts_source(source) || self.shutdown {
             return false;
         }
         let Some(existing) = self.sources.get(source) else {
@@ -1719,7 +1557,7 @@ impl AppState {
             completion,
             observed_at,
         } = update;
-        if !self.accepts_source(source) {
+        if !self.accepts_source(source) || self.shutdown {
             return false;
         }
         let Some(existing) = self.sources.get(source) else {
@@ -1759,17 +1597,9 @@ impl AppState {
         if existing.generation != generation {
             return false;
         }
-        if self
-            .tern
-            .source_generation(source)
-            .is_some_and(|current| current != generation)
-        {
-            return false;
-        }
         if !self.session_store.remove_source(source, generation) {
             return false;
         }
-        self.tern.remove_source(source, generation);
         purge_completions_for_source(&mut self.completions, source);
         self.outcomes
             .retain(|observation| observation.source != source);
@@ -1786,16 +1616,20 @@ impl AppState {
         let mut aggregate = SourceCounts::default();
         let mut connected_sources = 0usize;
         let mut disconnected_sources = 0usize;
-        let mut host_connections = HostConnections::default();
-        for (source_id, source) in &self.sources {
-            if source.connected && source.coherent && self.supports_source(source_id) {
-                if source_id.starts_with("tern:") {
-                    host_connections.tern = host_connections.tern.saturating_add(1);
-                } else {
-                    host_connections.herdr = host_connections.herdr.saturating_add(1);
+        for count in self.host_connections.values_mut() {
+            *count = 0;
+        }
+        for source in self.sources.values() {
+            let selected = self
+                .observation
+                .host
+                .includes_provider(&source.descriptor.provider);
+            if source.connected && source.coherent && selected {
+                if let Some(count) = self.host_connections.get_mut(&source.descriptor.provider) {
+                    *count = count.saturating_add(1);
                 }
             }
-            if !self.includes_source(source_id) {
+            if !selected || !source.observed {
                 continue;
             }
             if source.connected {
@@ -1831,7 +1665,6 @@ impl AppState {
         self.unknown = aggregate.unknown;
         self.connected_sources = connected_sources;
         self.disconnected_sources = disconnected_sources;
-        self.host_connections = host_connections;
         self.phase = if connected_sources == 0 {
             Phase::Unknown
         } else if aggregate.blocked > 0 {
@@ -1846,11 +1679,169 @@ impl AppState {
     }
 }
 
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppState")
+            .field("scene", &self.scene())
+            .field("sources", &self.sources)
+            .field("observation", &self.observation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DomainAccess for AppState {
+    fn instance_id(&self) -> &str {
+        AppState::instance_id(self)
+    }
+    fn mutation_allowed(&self) -> Result<(), String> {
+        self.update_mutation_allowed()
+    }
+    fn source_generation(&self, source: &str) -> Option<u64> {
+        AppState::source_generation(self, source)
+    }
+    fn retired_source_generation(&self, source: &str) -> Option<u64> {
+        AppState::retired_source_generation(self, source)
+    }
+    fn source_descriptor(&self, source: &str) -> Option<&SourceDescriptor> {
+        AppState::source_descriptor(self, source)
+    }
+    fn set_source_label(&mut self, source: &str, generation: u64, label: &str) -> bool {
+        AppState::set_source_label(self, source, generation, label)
+    }
+    fn set_source_observed(&mut self, source: &str, generation: u64, observed: bool) -> bool {
+        AppState::set_source_observed(self, source, generation, observed)
+    }
+    fn source_admission(&self, source: &str, generation: u64) -> SourceAdmission {
+        AppState::source_admission(self, source, generation)
+    }
+    fn ensure_source_capacity(
+        &mut self,
+        source: &str,
+        generation: u64,
+        now: Instant,
+    ) -> SourceAdmission {
+        AppState::ensure_source_capacity(self, source, generation, now)
+    }
+    fn remove_offline_source(&mut self, source: &str, generation: u64) -> bool {
+        AppState::remove_offline_source(self, source, generation)
+    }
+    fn begin_source(&mut self, descriptor: SourceDescriptor, generation: u64) -> bool {
+        AppState::begin_source(self, descriptor, generation)
+    }
+    fn publish_source_snapshot(
+        &mut self,
+        source: &str,
+        generation: u64,
+        records: &mut dyn Iterator<Item = &AgentRecord>,
+        counts: SourceCounts,
+        pane_ids: Arc<[String]>,
+        completions: &[(String, String)],
+        observed_at: Instant,
+    ) -> bool {
+        AppState::publish_source_snapshot(
+            self,
+            source,
+            generation,
+            records,
+            counts,
+            pane_ids,
+            completions,
+            observed_at,
+        )
+    }
+    fn update_session_status(&mut self, update: SessionStatusUpdate<'_>) -> bool {
+        AppState::update_session_status(self, update)
+    }
+    fn mark_source_offline(&mut self, source: &str, generation: u64) -> bool {
+        AppState::mark_source_offline(self, source, generation)
+    }
+    fn remove_source(&mut self, source: &str, generation: u64) -> bool {
+        AppState::remove_source(self, source, generation)
+    }
+    fn invalidate_session_outcome(
+        &mut self,
+        source: &str,
+        generation: u64,
+        terminal_id: &str,
+        pane_id: &str,
+    ) {
+        AppState::invalidate_session_outcome(self, source, generation, terminal_id, pane_id);
+    }
+    fn push_outcome(&mut self, observation: OutcomeObservation) {
+        AppState::push_outcome(self, observation);
+    }
+    fn push_completion(&mut self, observation: CompletionObservation) {
+        AppState::push_completion(self, observation);
+    }
+    fn prompt_target(&self, key: &SessionKey) -> Result<PromptTarget, PromptError> {
+        AppState::prompt_target(self, key)
+    }
+    fn prompt_route(&self, key: &SessionKey) -> Result<(PromptTarget, String), PromptError> {
+        AppState::prompt_route(self, key)
+    }
+    fn worktree_remove_target(
+        &self,
+        key: &SessionKey,
+    ) -> Result<WorktreeRemoveTarget, WorktreeRemoveTargetError> {
+        AppState::worktree_remove_target(self, key)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::session_view::SessionFilter;
     use std::time::{Duration, Instant};
+
+    fn descriptor(source: &str) -> SourceDescriptor {
+        crate::transport_tests::fixture::descriptor(source, "fixture")
+    }
+
+    fn register_fixture(state: &mut AppState) {
+        if state.integration("fixture").is_none() {
+            let integration: Arc<dyn Integration> = Arc::new(
+                crate::transport_tests::fixture::TestIntegration::new("fixture"),
+            );
+            // Empty presentation labels keep isolated historical UI fixtures
+            // independent of composition-provided provider names.
+            state.set_integrations(
+                vec![integration],
+                BTreeMap::from([("fixture".into(), String::new())]),
+            );
+        }
+    }
+
+    pub(crate) fn observed_test_state(selection: ObservationSelection) -> AppState {
+        use desktop_pet_update_coordinator::ExecutableIdentity;
+        use std::path::PathBuf;
+        let executable = PathBuf::from("/isolated/pet");
+        let mut state = AppState::new();
+        register_fixture(&mut state);
+        state.set_observation_selection(selection).unwrap();
+        state
+            .set_update_context(UpdateContext {
+                executable: executable.clone(),
+                version: "0.4.0".into(),
+                instance_id: "daemon-a".into(),
+                config_dir: PathBuf::from("/isolated/config"),
+                state_dir: PathBuf::from("/isolated/state"),
+                #[cfg(desktop_pet_legacy)]
+                host_plugin_config_dir: None,
+                #[cfg(desktop_pet_legacy)]
+                herdr_socket: PathBuf::from("/isolated/herdr.sock"),
+                running: ExecutableIdentity {
+                    path: executable,
+                    sha256: "binary".into(),
+                },
+                running_origin: None,
+                assets_override: None,
+                environment: BTreeMap::new(),
+                locale: "en".into(),
+            })
+            .unwrap();
+        state
+    }
     #[test]
     fn updater_prepare_admission_requires_main_thread_acceptance_and_matching_stop() {
         let mut state = AppState::new();
@@ -1921,7 +1912,7 @@ pub(crate) mod tests {
 
     #[test]
     fn recovered_prepare_only_releases_exact_live_original_and_never_a_claimed_stop() {
-        use herdr_update_coordinator::ExecutableIdentity;
+        use desktop_pet_update_coordinator::ExecutableIdentity;
         use std::collections::BTreeMap;
         use std::path::PathBuf;
 
@@ -1929,24 +1920,31 @@ pub(crate) mod tests {
             path: PathBuf::from("/isolated/app"),
             sha256: "original image".into(),
         };
-        let context = UpdateContext {
+        let mut context = UpdateContext {
             executable: image.path.clone(),
             version: "0.2.0".into(),
             instance_id: "original".into(),
             config_dir: PathBuf::from("/isolated/profile"),
-            host_plugin_config_dir: None,
             state_dir: PathBuf::from("/isolated/state"),
-            herdr_socket: PathBuf::from("/isolated/original.sock"),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: PathBuf::from("/isolated/herdr.sock"),
             running: image,
             running_origin: None,
             assets_override: None,
             environment: BTreeMap::new(),
             locale: "en".into(),
         };
+        context
+            .set_observation_selection(&ObservationSelection::Auto)
+            .unwrap();
         let mut state = AppState::new();
-        state.set_observation_mode(ObservationMode::Herdr);
+        state
+            .set_observation_selection(ObservationSelection::Auto)
+            .unwrap();
         state.set_ui_ready();
-        state.set_update_context(context.clone());
+        state.set_update_context(context.clone()).unwrap();
         let (sender, receiver) = mpsc::channel();
         state
             .queue_update_prepare("old".into(), "secret".into(), sender)
@@ -2012,7 +2010,8 @@ pub(crate) mod tests {
     }
 
     fn connect(state: &mut AppState, source: &str, generation: u64) {
-        assert!(state.begin_source(source.to_owned(), generation));
+        register_fixture(state);
+        assert!(state.begin_source(descriptor(source), generation));
     }
 
     fn observation(source: &str, generation: u64, observed_at: Instant) -> CompletionObservation {
@@ -2029,36 +2028,9 @@ pub(crate) mod tests {
             terminal_id: terminal_id.to_owned(),
             pane_id: pane_id.to_owned(),
             status,
-            metadata: crate::session::SessionMetadata::default(),
+            metadata: desktop_pet_contracts::SessionMetadata::default(),
             outcome_authoritative: false,
             outcome: None,
-        }
-    }
-
-    fn policy(local: bool, remote: bool, ids: &[&str]) -> ObservationPreferences {
-        ObservationPreferences {
-            host: herdr_update_coordinator::ObservationMode::Herdr,
-            local,
-            remote,
-            machines: ids.iter().map(|id| (*id).to_owned()).collect(),
-        }
-    }
-
-    fn catalog(profiles: &[(&str, &str, bool)]) -> SourceCatalog {
-        SourceCatalog {
-            initialized: true,
-            machines: profiles
-                .iter()
-                .map(|(id, label, enabled)| crate::sources::MachineInfo {
-                    id: (*id).to_owned(),
-                    label: (*label).to_owned(),
-                    remote_session: "session".to_owned(),
-                    enabled: *enabled,
-                    status: crate::sources::MachineStatus::Online,
-                    error: None,
-                })
-                .collect(),
-            error: None,
         }
     }
 
@@ -2204,7 +2176,7 @@ pub(crate) mod tests {
 
     #[test]
     fn automation_detail_retains_offline_metadata_and_rejects_hidden_or_reconnected_key() {
-        use crate::agent_outcome::{AgentOutcome, OutcomeReport};
+        use desktop_pet_contracts::{AgentOutcome, OutcomeReport};
         let mut state = AppState::new();
         let automation =
             crate::automation::test_automation(PresentationTarget::from_scene(&state.scene()));
@@ -2302,9 +2274,9 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(offline["display_status"], "offline");
-        state.apply_observation_preferences(policy(false, false, &[]));
+        state.session_store.set_visibility("local.sock", false);
         assert!(state.automation_session_detail(&identity).is_err());
-        state.apply_observation_preferences(policy(true, false, &[]));
+        state.session_store.set_visibility("local.sock", true);
         assert!(state.automation_session_detail(&identity).is_ok());
         connect(&mut state, "local.sock", 2);
         assert!(state.automation_session_detail(&identity).is_err());
@@ -2319,7 +2291,7 @@ pub(crate) mod tests {
             generation,
             terminal_id: "same-terminal".to_owned(),
             pane_id: "same-pane".to_owned(),
-            outcome: crate::agent_outcome::AgentOutcome::Succeeded,
+            outcome: desktop_pet_contracts::AgentOutcome::Succeeded,
             at_unix_ms: 1,
             observed_at: Instant::now(),
         }
@@ -2359,25 +2331,27 @@ pub(crate) mod tests {
             crate::session_view::DisplayStatus::Offline
         );
         assert!(state.prompt_available(&key).is_err());
-        assert!(state.begin_source("local.sock".to_owned(), 2));
+        assert!(state.begin_source(descriptor("local.sock"), 2));
         assert_eq!(state.session_view_for_key(&key), None);
     }
 
     #[test]
-    fn worktree_target_requires_current_included_coherent_absolute_local_source() {
+    fn worktree_target_requires_current_included_coherent_descriptor_capability() {
         let mut state = AppState::new();
         let source = "/private/local.sock";
         let mut row = record("t", "p", AgentStatus::Working);
         row.metadata.workspace_id = Some("w".into());
-        row.metadata.worktree = Some(std::sync::Arc::new(crate::session::WorkspaceWorktreeInfo {
-            repo_key: "repo".into(),
-            repo_name: "Project".into(),
-            repo_root: "/repo".into(),
-            checkout_path: "/checkout".into(),
-            is_linked_worktree: true,
-            pane_count: 1,
-            tab_count: 1,
-        }));
+        row.metadata.worktree = Some(std::sync::Arc::new(
+            desktop_pet_contracts::WorkspaceWorktreeInfo {
+                repo_key: "repo".into(),
+                repo_name: "Project".into(),
+                repo_root: "/repo".into(),
+                checkout_path: "/checkout".into(),
+                is_linked_worktree: true,
+                pane_count: 1,
+                tab_count: 1,
+            },
+        ));
         connect(&mut state, source, 1);
         let counts = SourceCounts {
             sessions: 1,
@@ -2402,12 +2376,12 @@ pub(crate) mod tests {
             state.worktree_remove_target(&key).unwrap().workspace_id,
             "w"
         );
-        state.apply_observation_preferences(policy(false, false, &[]));
+        state.session_store.set_visibility(source, false);
         assert_eq!(
             state.worktree_remove_target(&key),
             Err(WorktreeRemoveTargetError::Stale)
         );
-        state.apply_observation_preferences(policy(true, false, &[]));
+        state.session_store.set_visibility(source, true);
         assert!(state.update_source(source, 1, false, counts));
         assert_eq!(
             state.worktree_remove_target(&key),
@@ -2455,8 +2429,11 @@ pub(crate) mod tests {
             .key
             .clone();
         assert_eq!(
-            relative.worktree_remove_target(&relative_key),
-            Err(WorktreeRemoveTargetError::Stale)
+            relative
+                .worktree_remove_target(&relative_key)
+                .unwrap()
+                .source,
+            "local.sock"
         );
     }
 
@@ -2466,7 +2443,7 @@ pub(crate) mod tests {
         let mut state = AppState::new();
         let mut row = record("target-terminal", "target-pane", AgentStatus::Working);
         row.metadata.workspace_id = Some("workspace".into());
-        row.metadata.worktree = Some(Arc::new(crate::session::WorkspaceWorktreeInfo {
+        row.metadata.worktree = Some(Arc::new(desktop_pet_contracts::WorkspaceWorktreeInfo {
             repo_key: "repo".into(),
             repo_name: "Repo".into(),
             repo_root: "/repo".into(),
@@ -2607,48 +2584,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remote_health_requires_selected_coherent_source_even_with_no_sessions() {
-        let mut state = AppState::new();
-        let source = remote_source("east");
-        state.set_observation_catalog(catalog(&[("east", "East", true)]));
-        state.apply_observation_preferences(policy(false, true, &["east"]));
-        connect(&mut state, &source, 1);
-        assert!(!state.has_healthy_observed_remote());
-        let empty: [AgentRecord; 0] = [];
-        assert!(state.publish_source_snapshot(
-            &source,
-            1,
-            empty.iter(),
-            SourceCounts::default(),
-            Arc::from([]),
-            &[],
-            Instant::now(),
-        ));
-        assert!(state.has_healthy_observed_remote());
-        assert_eq!(state.scene().phase, Phase::Idle);
-        state.apply_observation_preferences(policy(false, false, &["east"]));
-        assert!(!state.has_healthy_observed_remote());
-        state.apply_observation_preferences(policy(false, true, &["east"]));
-        assert!(!state.has_healthy_observed_remote());
-        connect(&mut state, &source, 2);
-        assert!(!state.has_healthy_observed_remote());
-        assert!(state.publish_source_snapshot(
-            &source,
-            2,
-            empty.iter(),
-            SourceCounts::default(),
-            Arc::from([]),
-            &[],
-            Instant::now(),
-        ));
-        state.set_observation_catalog(catalog(&[("east", "East", false)]));
-        assert!(!state.has_healthy_observed_remote());
-    }
-
-    #[test]
     fn accepted_outcome_mirrors_only_eligible_current_source_without_consuming_reaction() {
-        use crate::agent_outcome::{AgentOutcome, OutcomeReport};
         use crate::session_view::DisplayStatus;
+        use desktop_pet_contracts::{AgentOutcome, OutcomeReport};
         let mut state = AppState::new();
         connect(&mut state, "local.sock", 1);
         let mut row = record("same-terminal", "same-pane", AgentStatus::Working);
@@ -2720,147 +2658,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn policy_filters_phase_rows_selection_and_pending_effects_without_discarding_local() {
-        let mut state = AppState::new();
-        let remote = remote_source("east");
-        state.set_observation_catalog(catalog(&[("east", "East", true)]));
-        assert!(!state.begin_source(remote.clone(), 1));
-        connect(&mut state, "local.sock", 1);
-        publish(&mut state, "local.sock", 1, AgentStatus::Working);
-        state.apply_observation_preferences(policy(true, true, &["east"]));
-        connect(&mut state, &remote, 1);
-        publish(&mut state, &remote, 1, AgentStatus::Blocked);
-        let both =
-            state.session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None);
-        assert_eq!(both.total, 2);
-        assert_eq!(state.scene().phase, Phase::Waiting);
-        assert_ne!(both.rows[0].key, both.rows[1].key);
-        let local_key = both.rows[0].key.clone();
-        state.push_completion(observation(&remote, 1, Instant::now()));
-        state.push_outcome(outcome(&remote, 1));
-        let revision = state.session_revision();
-        state.apply_observation_preferences(policy(true, false, &["east"]));
-        assert!(state.session_revision() > revision);
-        assert_eq!(state.scene().phase, Phase::Running);
-        let local = state.session_snapshot(
-            &SessionListOptions::with_filter(SessionFilter::Waiting),
-            Some(&local_key),
-        );
-        assert_eq!((local.total, local.matched, local.omitted), (1, 0, 0));
-        assert_eq!(local.selected, Some(local_key.clone()));
-        assert!(state.take_completions().is_empty());
-        state.push_completion(observation(&remote, 1, Instant::now()));
-        state.push_outcome(outcome(&remote, 1));
-        assert!(state.take_completions().is_empty());
-        assert!(state.take_outcomes().is_empty());
-        state.apply_observation_preferences(policy(false, false, &["east"]));
-        assert_eq!(state.scene().phase, Phase::Unknown);
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), Some(&local_key))
-                .selected,
-            None
-        );
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .total,
-            0
-        );
-        publish(&mut state, "local.sock", 1, AgentStatus::Done);
-        state.apply_observation_preferences(policy(true, false, &["east"]));
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .rows[0]
-                .status,
-            AgentStatus::Done
-        );
-    }
-
-    #[test]
-    fn catalog_disable_delete_rename_and_reinclude_reject_old_generations() {
-        let mut state = AppState::new();
-        let east = remote_source("east");
-        let west = remote_source("west");
-        state.set_observation_catalog(catalog(&[("east", "East", true), ("west", "West", true)]));
-        state.apply_observation_preferences(policy(false, true, &["east", "west"]));
-        connect(&mut state, &east, 1);
-        connect(&mut state, &west, 1);
-        publish(&mut state, &east, 1, AgentStatus::Working);
-        publish(&mut state, &west, 1, AgentStatus::Blocked);
-        let rows = state
-            .session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None)
-            .rows;
-        assert_eq!(
-            (rows[0].source_label.as_str(), rows[1].source_label.as_str()),
-            ("East", "West")
-        );
-        assert_ne!(rows[0].key, rows[1].key);
-        let previous = state.session_revision();
-        state.set_observation_catalog(catalog(&[
-            ("east", "Renamed", true),
-            ("west", "West", true),
-        ]));
-        assert!(state.session_revision() > previous);
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .rows[0]
-                .source_label,
-            "Renamed"
-        );
-        state.set_observation_catalog(catalog(&[("east", "Renamed", false)]));
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .total,
-            0
-        );
-        assert_eq!(state.scene().phase, Phase::Unknown);
-        assert!(!state.begin_source(east.clone(), 1));
-        let empty: [AgentRecord; 0] = [];
-        assert!(!state.publish_source_snapshot(
-            &west,
-            1,
-            empty.iter(),
-            SourceCounts::default(),
-            Arc::from([]),
-            &[],
-            Instant::now()
-        ));
-        state.set_observation_catalog(catalog(&[("east", "Renamed", true)]));
-        assert!(!state.begin_source(east.clone(), 1));
-        state.push_completion(observation(&east, 1, Instant::now()));
-        state.push_outcome(outcome(&east, 1));
-        assert!(state.take_completions().is_empty());
-        assert!(state.take_outcomes().is_empty());
-        connect(&mut state, &east, 2);
-        publish(&mut state, &east, 2, AgentStatus::Done);
-        assert!(!state.update_source(&east, 1, true, SourceCounts::default()));
-        assert!(!state.update_session_status(SessionStatusUpdate {
-            source: &east,
-            generation: 1,
-            terminal_id: "same-terminal",
-            pane_id: "same-pane",
-            status: AgentStatus::Blocked,
-            counts: SourceCounts::default(),
-            completion: true,
-            observed_at: Instant::now(),
-        }));
-        let revision = state.session_revision();
-        publish(&mut state, &east, 2, AgentStatus::Done);
-        assert_eq!(state.session_revision(), revision);
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .total,
-            1
-        );
-        assert!(state.take_completions().is_empty());
-    }
-
-    #[test]
     fn session_rows_remain_offline_until_coherent_replacement_or_empty_snapshot() {
         let mut state = AppState::new();
         connect(&mut state, "one.sock", 1);
@@ -2898,7 +2695,7 @@ pub(crate) mod tests {
         );
         assert_eq!(offline.rows[0].status, AgentStatus::Working);
 
-        assert!(state.begin_source("one.sock".to_owned(), 2));
+        assert!(state.begin_source(descriptor("one.sock"), 2));
         let restarted =
             state.session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None);
         assert_eq!(restarted.rows.len(), 1);
@@ -2980,7 +2777,7 @@ pub(crate) mod tests {
         assert_eq!(after_scene.done, before_scene.done);
         assert!(state.take_completions().is_empty());
 
-        assert!(state.begin_source("one.sock".to_owned(), 3));
+        assert!(state.begin_source(descriptor("one.sock"), 3));
         let empty: [AgentRecord; 0] = [];
         assert!(state.publish_source_snapshot(
             "one.sock",
@@ -3005,7 +2802,7 @@ pub(crate) mod tests {
         state.push_completion(observation("one.sock", 1, Instant::now()));
         assert_eq!(state.take_completions().len(), 1);
         state.push_completion(observation("one.sock", 1, Instant::now()));
-        assert!(state.begin_source("one.sock".to_owned(), 2));
+        assert!(state.begin_source(descriptor("one.sock"), 2));
         assert!(state.take_completions().is_empty());
         assert!(state.update_source("one.sock", 2, true, SourceCounts::default()));
         state.push_completion(observation("one.sock", 2, Instant::now()));
@@ -3084,7 +2881,7 @@ pub(crate) mod tests {
                 ..SourceCounts::default()
             },
         ));
-        assert!(state.begin_source("one.sock".to_owned(), 2));
+        assert!(state.begin_source(descriptor("one.sock"), 2));
         assert!(!state.update_source(
             "one.sock",
             1,
@@ -3124,7 +2921,7 @@ pub(crate) mod tests {
                 ..SourceCounts::default()
             },
         ));
-        assert!(state.begin_source("one.sock".to_owned(), 2));
+        assert!(state.begin_source(descriptor("one.sock"), 2));
         assert!(state.update_source(
             "one.sock",
             2,
@@ -3135,7 +2932,7 @@ pub(crate) mod tests {
                 ..SourceCounts::default()
             },
         ));
-        assert!(state.begin_source("one.sock".to_owned(), 3));
+        assert!(state.begin_source(descriptor("one.sock"), 3));
         let scene = state.scene();
         assert_eq!(scene.sessions, 2);
         assert_eq!(scene.unknown, 2);
@@ -3161,103 +2958,6 @@ pub(crate) mod tests {
         assert_eq!(scene.sessions, 2);
         assert_eq!(scene.working, 2);
         assert_eq!(scene.connected_sources, 2);
-    }
-
-    #[test]
-    fn remote_snapshot_preserves_title_provenance_and_source_on_status_and_rename() {
-        let mut state = AppState::new();
-        let east = remote_source("east");
-        let west = remote_source("west");
-        state.set_observation_catalog(catalog(&[("east", "East", true), ("west", "West", true)]));
-        state.apply_observation_preferences(policy(false, true, &["east", "west"]));
-        connect(&mut state, &east, 1);
-        connect(&mut state, &west, 1);
-        let mut east_record = record("shared", "pane-east", AgentStatus::Working);
-        east_record.metadata.title = Some("Build east".into());
-        east_record.metadata.cwd = Some("/projects/east".into());
-        east_record.metadata.tab_label = Some("2".into());
-        let mut west_record = record("shared", "pane-west", AgentStatus::Blocked);
-        west_record.metadata.title = Some("Build west".into());
-        let counts = SourceCounts {
-            sessions: 1,
-            working: 1,
-            ..SourceCounts::default()
-        };
-        assert!(state.publish_source_snapshot(
-            &east,
-            1,
-            [&east_record],
-            counts,
-            Arc::from(vec!["pane-east".to_owned()]),
-            &[],
-            Instant::now()
-        ));
-        let waiting = SourceCounts {
-            sessions: 1,
-            blocked: 1,
-            ..SourceCounts::default()
-        };
-        assert!(state.publish_source_snapshot(
-            &west,
-            1,
-            [&west_record],
-            waiting,
-            Arc::from(vec!["pane-west".to_owned()]),
-            &[],
-            Instant::now()
-        ));
-        let rows = state
-            .session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None)
-            .rows;
-        assert_ne!(rows[0].key, rows[1].key);
-        assert_eq!(rows[0].metadata, east_record.metadata);
-        assert_eq!(rows[1].metadata.title.as_deref(), Some("Build west"));
-        assert_eq!(rows[0].source_label, "East");
-        assert_eq!(rows[1].source_label, "West");
-
-        assert!(state.update_session_status(SessionStatusUpdate {
-            source: &east,
-            generation: 1,
-            terminal_id: "shared",
-            pane_id: "pane-east",
-            status: AgentStatus::Done,
-            counts: SourceCounts {
-                sessions: 1,
-                done: 1,
-                ..SourceCounts::default()
-            },
-            completion: false,
-            observed_at: Instant::now(),
-        }));
-        state.set_observation_catalog(catalog(&[
-            ("east", "Renamed", true),
-            ("west", "West", true),
-        ]));
-        let rows = state
-            .session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None)
-            .rows;
-        assert_eq!(rows[0].metadata, east_record.metadata);
-        assert_eq!(rows[0].source_label, "Renamed");
-        assert_eq!(rows[0].status, AgentStatus::Done);
-        assert_eq!(rows[1].metadata, west_record.metadata);
-        assert_eq!(
-            state
-                .session_snapshot(
-                    &SessionListOptions::with_filter(SessionFilter::Completed),
-                    None
-                )
-                .matched,
-            1
-        );
-        assert_eq!(
-            state
-                .session_snapshot(
-                    &SessionListOptions::with_filter(SessionFilter::Waiting),
-                    None
-                )
-                .matched,
-            1
-        );
     }
 
     #[test]
@@ -3406,10 +3106,7 @@ pub(crate) mod tests {
             state.bubble_placement = BubblePlacement::Left;
             state.scale = 0.873125;
             state.reset_position_revision = 7;
-            let lifecycle = LifecycleSettings {
-                auto_start: false,
-                exit_with_herdr: false,
-            };
+            let lifecycle = LifecycleSettings { auto_start: false };
             state.set_lifecycle_settings(lifecycle);
 
             state.recover_interaction();
@@ -3426,873 +3123,6 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn tern_test_state(mode: ObservationMode) -> AppState {
-        use herdr_update_coordinator::ExecutableIdentity;
-        use std::collections::BTreeMap;
-        use std::path::PathBuf;
-        let binary = ExecutableIdentity {
-            path: PathBuf::from("/isolated/pet"),
-            sha256: "binary".into(),
-        };
-        let mut state = AppState::new();
-        state.set_observation_mode(mode);
-        state.set_update_context(UpdateContext {
-            executable: binary.path.clone(),
-            version: "0.2.0".into(),
-            instance_id: "daemon-a".into(),
-            config_dir: PathBuf::from("/isolated/config"),
-            host_plugin_config_dir: None,
-            state_dir: PathBuf::from("/isolated/state"),
-            herdr_socket: PathBuf::from("/isolated/herdr.sock"),
-            running: binary,
-            running_origin: None,
-            assets_override: None,
-            environment: BTreeMap::new(),
-            locale: "en".into(),
-        });
-        state
-    }
-
-    pub(crate) fn tern_test_request(window: &str) -> TernExchangeRequest {
-        use crate::tern::{TernAgent, TernAgentState};
-        TernExchangeRequest {
-            version: 1,
-            kind: "tern".into(),
-            window: window.into(),
-            epoch: 1,
-            sequence: 1,
-            instance_id: None,
-            agents: vec![TernAgent {
-                pane: "pane-a".into(),
-                title: window.into(),
-                cwd: "/isolated/repo".into(),
-                session_id: Some("session-a".into()),
-                session_label: Some("Session".into()),
-                tab_id: None,
-                tab_label: None,
-                state: TernAgentState::Working,
-                delivery_error: None,
-            }],
-            results: vec![],
-        }
-    }
-
-    pub(crate) fn age_tern_test_source(state: &mut AppState, window: &str) {
-        state.tern.get_mut(window).unwrap().last_seen =
-            Instant::now() - crate::tern::FRESHNESS - Duration::from_millis(1);
-    }
-
-    fn tern_test_key(state: &AppState, window: &str) -> SessionKey {
-        state
-            .session_snapshot(&SessionListOptions::default(), None)
-            .rows
-            .into_iter()
-            .find(|row| row.metadata.title.as_deref() == Some(window))
-            .expect("registered Tern row")
-            .key
-    }
-
-    #[test]
-    fn auto_observes_both_providers_without_conflating_matching_sessions() {
-        let mut state = tern_test_state(ObservationMode::Both);
-        assert_eq!(AppState::new().observation_mode(), ObservationMode::Both);
-        assert_eq!(state.observation_preferences().host, ObservationMode::Both);
-        let local = "/isolated/herdr.sock";
-        let request = tern_test_request("shared-window");
-        let (records, counts) = request.normalize().unwrap();
-        connect(&mut state, local, 1);
-        assert!(state.update_source(local, 1, true, counts));
-        assert_eq!(state.host_connections(), HostConnections::default());
-        assert!(state.publish_source_snapshot(
-            local,
-            1,
-            records.iter(),
-            counts,
-            Arc::from(vec!["pane-a".to_owned()]),
-            &[],
-            Instant::now(),
-        ));
-        assert!(state.tern_exchange(request).ok);
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 1, tern: 1 }
-        );
-        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
-        assert_eq!(snapshot.total, 2);
-        assert_eq!(state.scene().sessions, 2);
-        assert_eq!(snapshot.rows[0].metadata, snapshot.rows[1].metadata);
-        assert_eq!(
-            snapshot.rows[0].key.terminal_id,
-            snapshot.rows[1].key.terminal_id
-        );
-        assert_ne!(
-            snapshot.rows[0].key.source_id,
-            snapshot.rows[1].key.source_id
-        );
-        assert!(matches!(
-            state.prompt_route(&snapshot.rows[0].key).unwrap().1,
-            SourceRoute::HerdrLocal(_)
-        ));
-        assert!(matches!(
-            state.prompt_route(&snapshot.rows[1].key).unwrap().1,
-            SourceRoute::TernWindow { .. }
-        ));
-        let epoch = state.observation_epoch();
-        state.set_observation_mode(ObservationMode::Herdr);
-        assert_eq!(state.observation_epoch(), epoch + 1);
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 1, tern: 0 }
-        );
-        assert_eq!(state.scene().sessions, 1);
-        assert!(state.session_view_for_key(&snapshot.rows[1].key).is_none());
-        assert!(state.prompt_route(&snapshot.rows[0].key).is_ok());
-        assert!(!state.scene().shutdown);
-        assert!(!state.mark_source_offline(local, 2));
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 1, tern: 0 }
-        );
-        assert!(state.mark_source_offline(local, 1));
-        assert_eq!(state.host_connections(), HostConnections::default());
-        assert_eq!(state.scene().sessions, 1);
-        assert_eq!(state.scene().unknown, 1);
-        assert_eq!(
-            state
-                .session_view_for_key(&snapshot.rows[0].key)
-                .unwrap()
-                .availability,
-            crate::session_view::Availability::Offline
-        );
-        assert_eq!(
-            state.prompt_route(&snapshot.rows[0].key),
-            Err(crate::herdr::PromptError::Offline)
-        );
-    }
-
-    #[test]
-    fn rapid_host_transitions_fence_local_generations_and_tern_incarnations() {
-        use crate::herdr::PromptError;
-        let mut state = tern_test_state(ObservationMode::Both);
-        let local = "/isolated/herdr.sock";
-        connect(&mut state, local, 41);
-        publish(&mut state, local, 41, AgentStatus::Working);
-        let mut request = tern_test_request("window-a");
-        assert!(state.tern_exchange(request.clone()).ok);
-        let key = tern_test_key(&state, "window-a");
-        state.set_observation_mode(ObservationMode::Tern);
-        assert_eq!(state.source_generation(local), None);
-        assert_eq!(state.retired_source_generation(local), Some(41));
-        assert_eq!(state.scene().sessions, 1);
-        assert!(!state.begin_source(local.to_owned(), 42));
-        assert!(!state.publish_source_snapshot(
-            local,
-            41,
-            std::iter::empty::<&AgentRecord>(),
-            SourceCounts::default(),
-            Arc::from(Vec::<String>::new()),
-            &[],
-            Instant::now(),
-        ));
-        state.set_observation_mode(ObservationMode::Herdr);
-        assert_eq!(state.host_connections(), HostConnections::default());
-        assert_eq!(state.scene().sessions, 0);
-        assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
-        state.set_observation_mode(ObservationMode::Both);
-        assert!(!state.begin_source(local.to_owned(), 41));
-        connect(&mut state, local, 42);
-        publish(&mut state, local, 42, AgentStatus::Working);
-        assert!(!state.update_source(local, 41, true, SourceCounts::default()));
-        assert!(!state.remove_source(local, 41));
-        request.instance_id = Some("daemon-a".into());
-        request.sequence = 2;
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::SourceRetired)
-        );
-        request.instance_id = None;
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::SourceRetired)
-        );
-        request.epoch = 2;
-        request.sequence = 1;
-        let fresh = state.tern_exchange(request.clone());
-        assert!(fresh.ok && fresh.command.is_none());
-        assert_eq!(fresh.generation, 2);
-        let fresh_key = tern_test_key(&state, "window-a");
-        assert_ne!(fresh_key.source_id, key.source_id);
-        assert!(matches!(
-            state.queue_tern_prompt(key, "window-a", 2, "pane-a", "stale ask"),
-            Err(PromptError::StaleTarget)
-        ));
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 1, tern: 1 }
-        );
-        assert_eq!(state.scene().sessions, 2);
-    }
-
-    #[test]
-    fn host_disable_finalizes_pending_tern_truthfully_without_reoffer_or_replay() {
-        use crate::herdr::PromptError;
-        for offered in [false, true] {
-            let mut state = tern_test_state(ObservationMode::Both);
-            let mut request = tern_test_request("window-a");
-            assert!(state.tern_exchange(request.clone()).ok);
-            let key = tern_test_key(&state, "window-a");
-            let (_, receipt) = state
-                .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "one ask")
-                .unwrap();
-            request.instance_id = Some("daemon-a".into());
-            request.sequence = 2;
-            if offered {
-                assert!(state.tern_exchange(request.clone()).command.is_some());
-            }
-            state.set_observation_mode(ObservationMode::Herdr);
-            assert_eq!(
-                receipt.try_recv(),
-                Ok(Err(if offered {
-                    PromptError::UnknownDelivery
-                } else {
-                    PromptError::StaleTarget
-                }))
-            );
-            state.set_observation_mode(ObservationMode::Both);
-            assert_eq!(
-                state.tern_exchange(request.clone()).error_code,
-                Some(TernExchangeErrorCode::SourceRetired)
-            );
-            request.instance_id = None;
-            request.epoch = 2;
-            request.sequence = 1;
-            assert!(state.tern_exchange(request.clone()).command.is_none());
-            request.instance_id = Some("daemon-a".into());
-            request.sequence = 2;
-            let poll = state.tern_exchange(request);
-            assert!(poll.ok && poll.command.is_none());
-            assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
-            assert!(receipt.try_recv().is_err());
-        }
-    }
-
-    #[test]
-    fn scope_pause_and_shutdown_preserve_honest_tern_prompt_outcomes() {
-        use crate::herdr::PromptError;
-        for offered in [false, true] {
-            for shutdown in [false, true] {
-                let mut state = tern_test_state(ObservationMode::Both);
-                let mut poll = tern_test_request("window-a");
-                assert!(state.tern_exchange(poll.clone()).ok);
-                let key = tern_test_key(&state, "window-a");
-                let (_, receipt) = state
-                    .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "one ask")
-                    .unwrap();
-                poll.instance_id = Some("daemon-a".into());
-                poll.sequence = 2;
-                if offered {
-                    assert!(state.tern_exchange(poll.clone()).command.is_some());
-                }
-                if shutdown {
-                    state.request_shutdown();
-                } else {
-                    let mut preferences = state.observation_preferences().clone();
-                    preferences.local = false;
-                    state.apply_observation_preferences(preferences.clone());
-                    preferences.local = true;
-                    state.apply_observation_preferences(preferences);
-                    poll.sequence += 1;
-                    let reply = state.tern_exchange(poll);
-                    assert!(reply.ok && reply.command.is_none());
-                    assert_eq!(state.prompt_available(&key), Ok(()));
-                }
-                assert_eq!(
-                    receipt.try_recv(),
-                    Ok(Err(if offered {
-                        PromptError::UnknownDelivery
-                    } else if shutdown {
-                        PromptError::Offline
-                    } else {
-                        PromptError::StaleTarget
-                    }))
-                );
-                assert!(receipt.try_recv().is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn host_and_scope_apply_once_preserving_choices_and_actual_connection_evidence() {
-        let mut state = tern_test_state(ObservationMode::Both);
-        state.set_observation_catalog(catalog(&[("east", "East", true)]));
-        let mut preferences = ObservationPreferences {
-            remote: true,
-            machines: vec!["east".into()],
-            ..ObservationPreferences::default()
-        };
-        state.apply_observation_preferences(preferences.clone());
-        let remote = remote_source("east");
-        connect(&mut state, &remote, 1);
-        assert!(state.publish_source_snapshot(
-            &remote,
-            1,
-            std::iter::empty::<&AgentRecord>(),
-            SourceCounts::default(),
-            Arc::from(Vec::<String>::new()),
-            &[],
-            Instant::now(),
-        ));
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 1, tern: 0 }
-        );
-        assert!(state.tern_exchange(tern_test_request("window-a")).ok);
-        let epoch = state.observation_epoch();
-        preferences.host = ObservationMode::Tern;
-        preferences.local = false;
-        state.apply_observation_preferences(preferences.clone());
-        assert_eq!(state.observation_epoch(), epoch + 1);
-        assert_eq!(state.observation_mode(), ObservationMode::Tern);
-        assert_eq!(state.observation_preferences(), &preferences);
-        assert_eq!(state.scene().sessions, 0);
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 0, tern: 1 }
-        );
-        assert_eq!(state.source_generation(&remote), None);
-        state.set_observation_mode(ObservationMode::Both);
-        assert!(!state.observation_preferences().local);
-        assert!(state.observation_preferences().remote);
-        assert_eq!(
-            state.observation_preferences().machines,
-            vec!["east".to_owned()]
-        );
-        assert!(!state.begin_source(remote.clone(), 1));
-        connect(&mut state, &remote, 2);
-        preferences.host = ObservationMode::Both;
-        preferences.local = true;
-        state.apply_observation_preferences(preferences);
-        assert_eq!(state.scene().sessions, 1);
-        assert_eq!(
-            state.host_connections(),
-            HostConnections { herdr: 0, tern: 1 }
-        );
-    }
-
-    #[test]
-    fn observation_transition_updates_canonical_restart_context_only_after_mutation_admission() {
-        let mut state = tern_test_state(ObservationMode::Both);
-        for mode in [
-            ObservationMode::Tern,
-            ObservationMode::Herdr,
-            ObservationMode::Both,
-        ] {
-            state.set_observation_mode(mode);
-            let context = state.update_context().unwrap();
-            assert_eq!(context.observation_mode().unwrap(), mode);
-            assert_eq!(
-                context
-                    .environment
-                    .get(OBSERVATION_MODE_ENV)
-                    .map(String::as_str),
-                (mode != ObservationMode::Herdr).then_some(mode.as_str())
-            );
-        }
-        state.set_ui_ready();
-        let context = state.update_context().unwrap().clone();
-        let preferences = state.observation_preferences().clone();
-        let epoch = state.observation_epoch();
-        let (sender, receiver) = mpsc::channel();
-        state
-            .queue_update_prepare("operation".into(), "secret".into(), sender)
-            .unwrap();
-        state.set_observation_mode(ObservationMode::Tern);
-        let mut changed = preferences.clone();
-        changed.host = ObservationMode::Herdr;
-        changed.local = false;
-        state.apply_observation_preferences(changed.clone());
-        let mut changed_context = context.clone();
-        changed_context.instance_id = "different".into();
-        state.set_update_context(changed_context);
-        assert_eq!(state.observation_mode(), ObservationMode::Both);
-        assert_eq!(state.observation_preferences(), &preferences);
-        assert_eq!(state.observation_epoch(), epoch);
-        assert_eq!(state.update_context(), Some(&context));
-        state.take_update_prepare().unwrap();
-        assert!(state.finish_update_prepare("operation", "secret", Ok(())));
-        receiver.recv().unwrap().unwrap();
-        state.apply_observation_preferences(changed.clone());
-        assert_eq!(state.update_context(), Some(&context));
-        state.cancel_update_prepare("operation", "secret");
-        state.apply_observation_preferences(changed);
-        assert_eq!(state.observation_mode(), ObservationMode::Herdr);
-        assert_eq!(state.observation_epoch(), epoch + 1);
-        assert_eq!(
-            state.update_context().unwrap().observation_mode().unwrap(),
-            ObservationMode::Herdr
-        );
-    }
-
-    #[test]
-    fn tern_inventory_receipts_epochs_and_expiry_are_scoped() {
-        use crate::herdr::{PromptError, PromptReceipt};
-        use crate::tern::{TernResult, TernResultStatus};
-        let mut state = tern_test_state(ObservationMode::Tern);
-        let mut request = tern_test_request("window-a");
-        let first = state.tern_exchange(request.clone());
-        assert!(first.ok);
-        assert_eq!(first.generation, 1);
-        assert!(first.command.is_none());
-        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
-        assert_eq!(snapshot.rows.len(), 1);
-        assert_eq!(snapshot.rows[0].source_label, "Tern");
-        let key = snapshot.rows[0].key.clone();
-        assert_eq!(state.prompt_available(&key), Ok(()));
-
-        request.instance_id = Some("daemon-a".into());
-        request.sequence = 2;
-        request.agents.push(request.agents[0].clone());
-        let revision = state.session_revision();
-        assert!(!state.tern_exchange(request.clone()).ok);
-        assert_eq!(state.session_revision(), revision);
-        request.agents.pop();
-        let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "question")
-            .unwrap();
-        assert!(matches!(
-            state.queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "another"),
-            Err(PromptError::Busy)
-        ));
-        let offered = state.tern_exchange(request.clone());
-        assert!(offered.ok);
-        let command = offered.command.expect("one command offered");
-        assert_eq!(command.operation_id, operation_id);
-        assert_eq!(command.pane, "pane-a");
-        assert_eq!(command.text, "question");
-        request.sequence = 3;
-        request.results.push(TernResult {
-            operation_id,
-            pane: "pane-a".into(),
-            status: TernResultStatus::Accepted,
-            error: None,
-        });
-        assert!(state.tern_exchange(request.clone()).ok);
-        assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
-        request.sequence = 4;
-        let revision = state.session_revision();
-        assert!(!state.tern_exchange(request.clone()).ok);
-        assert_eq!(state.session_revision(), revision);
-        request.results.clear();
-        request.epoch = 2;
-        request.sequence = 1;
-        let renewed = state.tern_exchange(request.clone());
-        assert!(renewed.ok);
-        assert_eq!(renewed.generation, 2);
-        assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
-        let current_key = state
-            .session_snapshot(&SessionListOptions::default(), None)
-            .rows[0]
-            .key
-            .clone();
-        let (lost_operation, lost_receipt) = state
-            .queue_tern_prompt(current_key, "window-a", 2, "pane-a", "second")
-            .unwrap();
-        request.sequence = 2;
-        assert!(state.tern_exchange(request.clone()).command.is_some());
-        request.sequence = 3;
-        assert!(state.tern_exchange(request.clone()).ok);
-        assert_eq!(
-            lost_receipt.try_recv(),
-            Ok(Err(PromptError::UnknownDelivery))
-        );
-        request.sequence = 4;
-        request.results.push(TernResult {
-            operation_id: lost_operation,
-            pane: "pane-a".into(),
-            status: TernResultStatus::Accepted,
-            error: None,
-        });
-        assert!(!state.tern_exchange(request.clone()).ok);
-        request.results.clear();
-        request.epoch = 1;
-        request.sequence = 5;
-        assert!(!state.tern_exchange(request).ok);
-        state.tern.get_mut("window-a").unwrap().last_seen =
-            Instant::now() - crate::tern::FRESHNESS - Duration::from_millis(1);
-        state.expire_tern(Instant::now());
-        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
-        assert_eq!(
-            snapshot.rows[0].availability,
-            crate::session_view::Availability::Offline
-        );
-        assert_eq!(snapshot.rows[0].outcome, None);
-    }
-
-    #[test]
-    fn tern_lost_binding_and_retired_sources_never_mutate_or_replay() {
-        use crate::herdr::{PromptError, PromptReceipt};
-        use crate::tern::{TernResult, TernResultStatus};
-        let mut state = tern_test_state(ObservationMode::Tern);
-        let mut request = tern_test_request("lost-registration");
-        let first = state.tern_exchange(request.clone());
-        assert!(first.ok && first.command.is_none());
-        assert!(first.error_code.is_none());
-        let key = tern_test_key(&state, &request.window);
-        let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), &request.window, 1, "pane-a", "one ask")
-            .unwrap();
-        let revision = state.session_revision();
-        let last_seen = state.tern.get(&request.window).unwrap().last_seen;
-        request.sequence = 2;
-        let lost = state.tern_exchange(request.clone());
-        assert_eq!(
-            lost.error_code,
-            Some(TernExchangeErrorCode::BindingRequired)
-        );
-        assert_eq!(lost.generation, 0);
-        assert!(lost.command.is_none());
-        assert_eq!(state.session_revision(), revision);
-        assert_eq!(
-            state.tern.get(&request.window).unwrap().last_seen,
-            last_seen
-        );
-        assert!(receipt.try_recv().is_err());
-
-        request.instance_id = Some("different-daemon".into());
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::InstanceChanged)
-        );
-        request.instance_id = Some("daemon-a".into());
-        let command = state.tern_exchange(request.clone()).command.unwrap();
-        assert_eq!(command.operation_id, operation_id);
-        assert_eq!(command.text, "one ask");
-        request.sequence = 3;
-        request.results.push(TernResult {
-            operation_id: "wrong-operation".into(),
-            pane: "pane-a".into(),
-            status: TernResultStatus::Accepted,
-            error: None,
-        });
-        let revision = state.session_revision();
-        let last_seen = state.tern.get(&request.window).unwrap().last_seen;
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::ReceiptRejected)
-        );
-        assert_eq!(state.session_revision(), revision);
-        assert_eq!(
-            state.tern.get(&request.window).unwrap().last_seen,
-            last_seen
-        );
-        assert_eq!(state.tern.get(&request.window).unwrap().sequence, 2);
-        assert!(receipt.try_recv().is_err());
-        request.results[0].operation_id = operation_id;
-        request.results[0].pane = "wrong-pane".into();
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::ReceiptRejected)
-        );
-        request.results[0].pane = "pane-a".into();
-        request.epoch = 2;
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::Rejected)
-        );
-        request.epoch = 1;
-        request.sequence = 2;
-        assert_eq!(
-            state.tern_exchange(request.clone()).error_code,
-            Some(TernExchangeErrorCode::Rejected)
-        );
-        request.sequence = 3;
-        assert!(state.tern_exchange(request.clone()).ok);
-        assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
-        assert!(!state.remove_source(&crate::tern::source_id(&request.window), 2));
-        assert!(state.tern.get(&request.window).is_some());
-        assert!(state.remove_source(&crate::tern::source_id(&request.window), 1));
-        assert!(state.tern.get(&request.window).is_none());
-        request.sequence = 4;
-        let revision = state.session_revision();
-        for results in [request.results.clone(), vec![]] {
-            request.results = results;
-            assert_eq!(
-                state.tern_exchange(request.clone()).error_code,
-                Some(TernExchangeErrorCode::SourceRetired)
-            );
-            assert_eq!(state.session_revision(), revision);
-            assert!(state.tern.get(&request.window).is_none());
-            assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
-        }
-        let fresh = tern_test_request("fresh-registration");
-        assert!(state.tern_exchange(fresh.clone()).ok);
-        assert_ne!(
-            tern_test_key(&state, &fresh.window).source_id,
-            key.source_id
-        );
-    }
-
-    #[test]
-    fn tern_shared_capacity_reclaims_expired_only_and_keeps_live_pending_and_herdr() {
-        use crate::herdr::PromptError;
-        let mut state = tern_test_state(ObservationMode::Both);
-        connect(&mut state, "/isolated/live-herdr.sock", 1);
-        publish(
-            &mut state,
-            "/isolated/live-herdr.sock",
-            1,
-            AgentStatus::Working,
-        );
-        let herdr_key = state
-            .session_snapshot(&SessionListOptions::default(), None)
-            .rows[0]
-            .key
-            .clone();
-        for index in 0..63 {
-            assert!(
-                state
-                    .tern_exchange(tern_test_request(&format!("window-{index}")))
-                    .ok
-            );
-        }
-        let retired_key = tern_test_key(&state, "window-0");
-        let live_key = tern_test_key(&state, "window-1");
-        let (_, pending) = state
-            .queue_tern_prompt(live_key.clone(), "window-1", 1, "pane-a", "keep pending")
-            .unwrap();
-        let now = Instant::now();
-        state.tern.get_mut("window-0").unwrap().last_seen = now - crate::tern::FRESHNESS;
-        let mut malformed = tern_test_request("malformed");
-        malformed.agents.push(malformed.agents[0].clone());
-        let revision = state.session_revision();
-        assert!(!state.tern_exchange(malformed).ok);
-        assert_eq!(state.session_revision(), revision);
-        assert!(state.tern.get("window-0").is_some());
-        assert!(!state.begin_source("/isolated/invalid.sock".into(), 0));
-        assert!(state.tern.get("window-0").is_some());
-        let mut stale = tern_test_request("window-1");
-        stale.instance_id = Some("daemon-a".into());
-        assert!(!state.tern_exchange(stale).ok);
-        assert!(state.tern.get("window-0").is_some());
-        assert!(state.tern_exchange(tern_test_request("replacement")).ok);
-        assert!(state.tern.get("window-0").is_none());
-        assert_eq!(state.tern.len(), 63);
-        assert_eq!(
-            state.prompt_available(&retired_key),
-            Err(PromptError::StaleTarget)
-        );
-        assert_eq!(state.prompt_available(&live_key), Ok(()));
-        assert_eq!(state.prompt_available(&herdr_key), Ok(()));
-        assert!(pending.try_recv().is_err());
-        assert_ne!(
-            tern_test_key(&state, "replacement").source_id,
-            retired_key.source_id
-        );
-        assert!(!state.tern_exchange(tern_test_request("all-live-full")).ok);
-        assert!(state.tern.get("window-1").is_some());
-        let mut retired = tern_test_request("window-0");
-        retired.instance_id = Some("daemon-a".into());
-        assert_eq!(
-            state.tern_exchange(retired).error_code,
-            Some(TernExchangeErrorCode::SourceRetired)
-        );
-        state.cancel_tern_prompt("window-1", "not-the-operation");
-        assert!(pending.try_recv().is_err());
-    }
-
-    #[test]
-    fn reclamation_requires_matching_registry_store_and_aggregate_generations() {
-        for newer_store in [false, true] {
-            let mut state = tern_test_state(ObservationMode::Both);
-            for index in 0..crate::tern::MAX_WINDOWS {
-                assert!(
-                    state
-                        .tern_exchange(tern_test_request(&format!("window-{index}")))
-                        .ok
-                );
-            }
-            let source = crate::tern::source_id("window-0");
-            state.tern.get_mut("window-0").unwrap().last_seen =
-                Instant::now() - crate::tern::FRESHNESS;
-            if newer_store {
-                assert!(state.update_source(&source, 1, false, SourceCounts::default()));
-                assert!(state.session_store.begin_source(&source, 2));
-            } else {
-                state.sources.get_mut(&source).unwrap().generation = 2;
-            }
-            assert!(!state.begin_source("/isolated/new-herdr.sock".into(), 1));
-            assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS);
-            assert!(state.tern.get("window-0").is_some());
-            assert!(state.sources.contains_key(&source));
-            assert!(!state.remove_source(&source, 1));
-            assert!(state.tern.get("window-0").is_some());
-        }
-    }
-
-    #[test]
-    fn exhausted_tern_generation_rejects_before_capacity_expiry() {
-        let mut state = tern_test_state(ObservationMode::Tern);
-        for index in 0..crate::tern::MAX_WINDOWS {
-            assert!(
-                state
-                    .tern_exchange(tern_test_request(&format!("window-{index}")))
-                    .ok
-            );
-        }
-        state.tern.get_mut("window-0").unwrap().last_seen = Instant::now() - crate::tern::FRESHNESS;
-        state.tern.get_mut("window-1").unwrap().generation = crate::tern::MAX_SAFE_INTEGER;
-        let mut exhausted = tern_test_request("window-1");
-        exhausted.instance_id = Some("daemon-a".into());
-        exhausted.epoch = 2;
-        let revision = state.session_revision();
-        assert_eq!(
-            state.tern_exchange(exhausted).error_code,
-            Some(TernExchangeErrorCode::Rejected)
-        );
-        assert_eq!(state.session_revision(), revision);
-        assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS);
-        assert!(!state.tern.get("window-0").unwrap().offline);
-    }
-
-    #[test]
-    fn herdr_admission_finalizes_expired_tern_pending_before_reclamation() {
-        use crate::herdr::PromptError;
-        let mut state = tern_test_state(ObservationMode::Both);
-        for index in 0..crate::tern::MAX_WINDOWS {
-            assert!(
-                state
-                    .tern_exchange(tern_test_request(&format!("window-{index}")))
-                    .ok
-            );
-        }
-        let key = tern_test_key(&state, "window-0");
-        let (_, unoffered) = state
-            .queue_tern_prompt(key, "window-0", 1, "pane-a", "not offered")
-            .unwrap();
-        let key = tern_test_key(&state, "window-1");
-        let (_, offered) = state
-            .queue_tern_prompt(key, "window-1", 1, "pane-a", "offered once")
-            .unwrap();
-        let mut poll = tern_test_request("window-1");
-        poll.instance_id = Some("daemon-a".into());
-        poll.sequence = 2;
-        assert!(state.tern_exchange(poll).command.is_some());
-        let now = Instant::now();
-        state.tern.get_mut("window-0").unwrap().last_seen =
-            now - crate::tern::FRESHNESS - Duration::from_millis(1);
-        state.tern.get_mut("window-1").unwrap().last_seen = now - crate::tern::FRESHNESS;
-        assert!(state.begin_source("/isolated/new-herdr.sock".into(), 1));
-        assert_eq!(unoffered.try_recv(), Ok(Err(PromptError::Offline)));
-        assert_eq!(offered.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
-        assert!(state.tern.get("window-0").is_none());
-        assert!(state.tern.get("window-1").unwrap().offline);
-        assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS - 1);
-        assert!(state.tern.get("window-2").is_some());
-        assert!(!state.begin_source("/isolated/new-herdr.sock".into(), 1));
-        assert!(state.tern.get("window-1").is_some());
-    }
-
-    #[test]
-    fn tern_freshness_revokes_authorization_before_presentation_tick() {
-        use crate::herdr::PromptError;
-        let mut state = tern_test_state(ObservationMode::Tern);
-        assert!(state.tern_exchange(tern_test_request("window-a")).ok);
-        let key = tern_test_key(&state, "window-a");
-        let now = Instant::now();
-        state.tern.get_mut("window-a").unwrap().last_seen = now - crate::tern::FRESHNESS;
-        assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
-        assert!(matches!(
-            state.queue_tern_prompt(key, "window-a", 1, "pane-a", "stale"),
-            Err(PromptError::StaleTarget)
-        ));
-        assert!(state.expire_tern(now));
-        assert_eq!(
-            state
-                .session_snapshot(&SessionListOptions::default(), None)
-                .rows[0]
-                .availability,
-            crate::session_view::Availability::Offline
-        );
-    }
-
-    #[test]
-    fn tern_large_ascii_and_escaped_utf8_use_the_actual_response_budget() {
-        use crate::herdr::PromptError;
-        let mut state = tern_test_state(ObservationMode::Tern);
-        let mut poll = tern_test_request("window-a");
-        assert!(state.tern_exchange(poll.clone()).ok);
-        let key = tern_test_key(&state, "window-a");
-        let oversized = "\"\\\n한🪶".repeat(50_000);
-        assert!(matches!(
-            state.queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", &oversized,),
-            Err(PromptError::TooLarge)
-        ));
-        let ascii = "a".repeat(300 * 1024);
-        let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", &ascii)
-            .unwrap();
-        poll.instance_id = Some("daemon-a".into());
-        poll.sequence = 2;
-        let reply = state.tern_exchange(poll.clone());
-        let encoded = crate::tern::serialize_response(&reply).unwrap();
-        assert!(encoded.len() <= crate::tern::MAX_RESPONSE_BYTES);
-        assert_eq!(reply.command.as_ref().unwrap().text, ascii);
-        assert_eq!(reply.command.as_ref().unwrap().operation_id, operation_id);
-        poll.sequence = 3;
-        assert!(state.tern_exchange(poll.clone()).command.is_none());
-        assert_eq!(receipt.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
-        let utf8 = "\"\\\n한🪶".repeat(10_000);
-        state
-            .queue_tern_prompt(key, "window-a", 1, "pane-a", &utf8)
-            .unwrap();
-        poll.sequence = 4;
-        let reply = state.tern_exchange(poll);
-        let encoded = crate::tern::serialize_response(&reply).unwrap();
-        assert_eq!(reply.command.unwrap().text, utf8);
-        assert!(encoded.len() <= crate::tern::MAX_RESPONSE_BYTES);
-    }
-
-    #[test]
-    fn tern_prompt_sender_uses_response_budget_before_starting_delivery() {
-        use crate::herdr::{PromptError, PromptSender, RequestOrigin};
-        use crate::tern::{TernResult, TernResultStatus};
-        let mut state = tern_test_state(ObservationMode::Tern);
-        let mut poll = tern_test_request("sender-window");
-        assert!(state.tern_exchange(poll.clone()).ok);
-        let key = tern_test_key(&state, "sender-window");
-        let shared = Arc::new(std::sync::Mutex::new(state));
-        let mut sender = PromptSender::new(Arc::clone(&shared));
-        assert_eq!(
-            sender.submit(key.clone(), "\"\\\n한🪶".repeat(50_000), RequestOrigin::Gui),
-            Err(PromptError::TooLarge)
-        );
-        assert!(!sender.is_pending());
-        let text = "a".repeat(500 * 1024);
-        assert_eq!(sender.submit(key, text.clone(), RequestOrigin::Gui), Ok(()));
-        poll.instance_id = Some("daemon-a".into());
-        poll.sequence = 2;
-        let mut state = match shared.lock() {
-            Ok(state) => state,
-            Err(_) => panic!("prompt worker poisoned shared state"),
-        };
-        let reply = state.tern_exchange(poll.clone());
-        assert!(
-            crate::tern::serialize_response(&reply).unwrap().len()
-                <= crate::tern::MAX_RESPONSE_BYTES
-        );
-        let command = reply.command.unwrap();
-        assert_eq!(command.text, text);
-        poll.sequence = 3;
-        poll.results.push(TernResult {
-            operation_id: command.operation_id,
-            pane: command.pane,
-            status: TernResultStatus::Accepted,
-            error: None,
-        });
-        let settled = state.tern_exchange(poll);
-        assert!(settled.ok && settled.command.is_none());
-    }
-
     #[test]
     fn show_control_does_not_disable_full_passthrough() {
         let mut state = AppState::new();
@@ -4307,5 +3137,485 @@ pub(crate) mod tests {
         assert!(scene.passthrough);
         assert!(!scene.bubble_visible);
         assert!(scene.needs_recovery_entry());
+    }
+
+    #[test]
+    fn descriptor_authority_ignores_local_looking_ids_and_metadata() {
+        let mut state = AppState::new();
+        register_fixture(&mut state);
+        let mut remote = descriptor("/private/looks-local.sock");
+        remote.label = "Remote host".into();
+        remote.locality = SourceLocality::Remote;
+        // Even a buggy advertised capability cannot make a remote source writable.
+        assert!(state.begin_source(remote.clone(), 1));
+        let mut row = record("t", "p", AgentStatus::Working);
+        row.metadata.cwd = Some("/private/local-checkout".into());
+        row.metadata.workspace_id = Some("w".into());
+        row.metadata.worktree = Some(Arc::new(desktop_pet_contracts::WorkspaceWorktreeInfo {
+            repo_key: "repo".into(),
+            repo_name: "Repo".into(),
+            repo_root: "/repo".into(),
+            checkout_path: "/checkout".into(),
+            is_linked_worktree: true,
+            pane_count: 1,
+            tab_count: 1,
+        }));
+        assert!(state.publish_source_snapshot(
+            &remote.id,
+            1,
+            [&row],
+            SourceCounts {
+                sessions: 1,
+                working: 1,
+                ..SourceCounts::default()
+            },
+            Arc::from(vec!["p".into()]),
+            &[],
+            Instant::now()
+        ));
+        let view = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .remove(0);
+        assert!(!view.is_local);
+        assert_eq!(view.source_label, "Remote host");
+        assert_eq!(state.prompt_route(&view.key), Err(PromptError::ReadOnly));
+        assert_eq!(
+            state.worktree_remove_target(&view.key),
+            Err(WorktreeRemoveTargetError::ReadOnly)
+        );
+        assert!(state
+            .automation_worktree_observation(&WorktreeRemoveTarget {
+                key: view.key,
+                source: remote.id,
+                pane_id: "p".into(),
+                workspace_id: "w".into(),
+                worktree: Arc::clone(row.metadata.worktree.as_ref().unwrap()),
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn opaque_registered_provider_routes_and_counts_never_conflate_equal_sessions() {
+        use crate::transport_tests::fixture::TestIntegration;
+        let mut state = AppState::new();
+        let first: Arc<dyn Integration> = Arc::new(TestIntegration::new("first-provider"));
+        let second: Arc<dyn Integration> = Arc::new(TestIntegration::new("second-provider"));
+        state.set_integrations(
+            vec![first, second],
+            BTreeMap::from([
+                ("first-provider".into(), "First".into()),
+                ("second-provider".into(), "Second".into()),
+            ]),
+        );
+        let mut first = descriptor("first-source");
+        first.provider = "first-provider".into();
+        let mut second = descriptor("second-source");
+        second.provider = "second-provider".into();
+        assert!(state.begin_source(first, 1));
+        assert!(state.begin_source(second, 1));
+        assert_eq!(
+            state
+                .host_connections()
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+        publish(&mut state, "first-source", 1, AgentStatus::Working);
+        publish(&mut state, "second-source", 1, AgentStatus::Working);
+        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
+        assert_eq!(snapshot.rows.len(), 2);
+        assert_ne!(
+            snapshot.rows[0].key.source_id,
+            snapshot.rows[1].key.source_id
+        );
+        assert_eq!(
+            snapshot.rows[0].key.terminal_id,
+            snapshot.rows[1].key.terminal_id
+        );
+        assert_eq!(
+            state.prompt_route(&snapshot.rows[0].key).unwrap().1,
+            "first-provider"
+        );
+        assert_eq!(
+            state.prompt_route(&snapshot.rows[1].key).unwrap().1,
+            "second-provider"
+        );
+        assert_eq!(state.host_connections()["first-provider"], 1);
+        assert_eq!(state.host_connections()["second-provider"], 1);
+        state
+            .set_observation_selection(ObservationSelection::Provider("first-provider".into()))
+            .unwrap();
+        assert_eq!(state.source_generation("second-source"), None);
+        assert_eq!(state.retired_source_generation("second-source"), Some(1));
+        assert_eq!(state.host_connections()["first-provider"], 1);
+        assert_eq!(state.host_connections()["second-provider"], 0);
+        state
+            .set_observation_selection(ObservationSelection::Auto)
+            .unwrap();
+        let mut second = descriptor("second-source");
+        second.provider = "second-provider".into();
+        assert!(!state.begin_source(second.clone(), 1));
+        assert!(state.begin_source(second, 2));
+        assert_eq!(
+            state.prompt_target(&snapshot.rows[1].key),
+            Err(PromptError::StaleTarget)
+        );
+    }
+
+    #[test]
+    fn descriptor_labels_refresh_without_mutating_generation_authority_or_shared_worktree() {
+        let mut state = AppState::new();
+        connect(&mut state, "opaque-source", 7);
+        let mut row = record("t", "p", AgentStatus::Working);
+        row.metadata.worktree = Some(Arc::new(desktop_pet_contracts::WorkspaceWorktreeInfo {
+            repo_key: "repo".into(),
+            repo_name: "Repo".into(),
+            repo_root: "/repo".into(),
+            checkout_path: "/checkout".into(),
+            is_linked_worktree: true,
+            pane_count: 1,
+            tab_count: 1,
+        }));
+        assert!(state.publish_source_snapshot(
+            "opaque-source",
+            7,
+            [&row],
+            SourceCounts::default(),
+            Arc::from(vec!["p".into()]),
+            &[],
+            Instant::now()
+        ));
+        let before = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .remove(0);
+        let authority = state.source_descriptor("opaque-source").unwrap().clone();
+        let revision = state.session_revision();
+        assert!(!state.set_source_label("opaque-source", 6, "stale"));
+        assert!(state.set_source_label("opaque-source", 7, "New host label"));
+        let after = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .remove(0);
+        assert_eq!(before.key, after.key);
+        assert_eq!(after.source_label, "New host label");
+        assert!(state.session_revision() > revision);
+        assert_eq!(
+            state.source_descriptor("opaque-source").unwrap().provider,
+            authority.provider
+        );
+        assert_eq!(
+            state.source_descriptor("opaque-source").unwrap().locality,
+            authority.locality
+        );
+        assert_eq!(
+            state
+                .source_descriptor("opaque-source")
+                .unwrap()
+                .capabilities,
+            authority.capabilities
+        );
+        assert!(Arc::ptr_eq(
+            before.metadata.worktree.as_ref().unwrap(),
+            after.metadata.worktree.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            row.metadata.worktree.as_ref().unwrap(),
+            after.metadata.worktree.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn offline_retirement_invalidates_selection_detail_cursor_and_filter_totals() {
+        use crate::i18n::UiLocale;
+        use crate::session_view::{DisplayStatus, SessionStatusSummary};
+
+        let mut state = AppState::new();
+        state.set_automation(crate::automation::test_automation(
+            PresentationTarget::from_scene(&state.scene()),
+        ));
+        for source in ["retained-offline", "surviving-live"] {
+            connect(&mut state, source, 1);
+            publish(&mut state, source, 1, AgentStatus::Idle);
+        }
+        let selected = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows[0]
+            .key
+            .clone();
+        let identity = SessionIdentity {
+            instance_id: "test".into(),
+            source_id: selected.source_id,
+            generation: selected.generation,
+            terminal_id: selected.terminal_id.clone(),
+        };
+        assert!(state.mark_source_offline("retained-offline", 1));
+        let options = SessionListOptions::with_filter(SessionFilter::Offline);
+        let retained = state.session_snapshot(&options, Some(&selected));
+        assert_eq!(retained.selected.as_ref(), Some(&selected));
+        assert_eq!(
+            (retained.total, retained.matched, retained.rows.len()),
+            (2, 1, 1)
+        );
+        assert_eq!(retained.status_summary.status, DisplayStatus::Offline);
+        assert_eq!(
+            state.automation_session_detail(&identity).unwrap()["availability"],
+            "offline"
+        );
+        let mut request = session_request(SessionFilter::All, 1);
+        let page = state.automation_session_page(&request).unwrap();
+        request.cursor = Some(serde_json::from_value(page["next_cursor"].clone()).unwrap());
+
+        assert!(!state.remove_offline_source("retained-offline", 2));
+        assert!(!state.remove_offline_source("surviving-live", 1));
+        assert!(state.automation_session_detail(&identity).is_ok());
+        assert!(state.automation_session_page(&request).is_ok());
+        assert!(state.remove_offline_source("retained-offline", 1));
+        let removed = state.session_snapshot(&options, Some(&selected));
+        assert!(removed.selected.is_none());
+        assert!(removed.rows.is_empty());
+        assert_eq!((removed.total, removed.matched, removed.omitted), (1, 0, 0));
+        assert_eq!(
+            removed.status_summary,
+            SessionStatusSummary {
+                status: DisplayStatus::Idle,
+                count: 1,
+                total: 1,
+            }
+        );
+        assert!(state.session_view_for_key(&selected).is_none());
+        assert!(state
+            .session_display_for_key(UiLocale::En, &selected)
+            .is_none());
+        assert_eq!(
+            state.prompt_available(&selected),
+            Err(PromptError::StaleTarget)
+        );
+        assert_eq!(
+            state.automation_session_detail(&identity).unwrap_err(),
+            "stale session key"
+        );
+        assert_eq!(
+            state.automation_session_page(&request).unwrap_err(),
+            "session revision changed"
+        );
+        request.cursor = None;
+        let fresh = state.automation_session_page(&request).unwrap();
+        assert_eq!(fresh["total"], 1);
+        assert_eq!(fresh["matched"], 1);
+        assert!(fresh["next_cursor"].is_null());
+        request.filter = SessionFilter::Offline;
+        let offline = state.automation_session_page(&request).unwrap();
+        assert_eq!(offline["total"], 1);
+        assert_eq!(offline["matched"], 0);
+        assert!(offline["rows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_offline_retirement_preserves_live_empty_source_and_status() {
+        use crate::session_view::DisplayStatus;
+
+        let mut state = AppState::new();
+        for source in ["empty-offline", "empty-live"] {
+            connect(&mut state, source, 1);
+            assert!(state.publish_source_snapshot(
+                source,
+                1,
+                std::iter::empty::<&AgentRecord>(),
+                SourceCounts::default(),
+                Arc::from(Vec::<String>::new()),
+                &[],
+                Instant::now(),
+            ));
+        }
+        let live = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(live.rows.is_empty());
+        assert_eq!(live.status_summary.status, DisplayStatus::Idle);
+        assert_eq!(state.host_connections()["fixture"], 2);
+        assert!(state.mark_source_offline("empty-offline", 1));
+        let offline = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(offline.rows.is_empty());
+        assert_eq!(offline.status_summary.status, DisplayStatus::Offline);
+        assert_eq!(state.host_connections()["fixture"], 1);
+        assert!(!state.remove_offline_source("empty-live", 1));
+        assert!(state.remove_offline_source("empty-offline", 1));
+        let pruned = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(pruned.rows.is_empty());
+        assert_eq!(pruned.status_summary.status, DisplayStatus::Idle);
+        assert_eq!(
+            (pruned.status_summary.count, pruned.status_summary.total),
+            (0, 0)
+        );
+        assert_eq!(state.host_connections()["fixture"], 1);
+        assert!(!state.remove_offline_source("empty-offline", 1));
+    }
+
+    #[test]
+    fn capacity_reclamation_rechecks_both_offline_generations_and_preserves_live_sources() {
+        use crate::transport_tests::fixture::TestIntegration;
+        let owner = Arc::new(TestIntegration::new("fixture"));
+        let integration: Arc<dyn Integration> = owner.clone();
+        let mut state = AppState::new();
+        state.set_integrations(
+            vec![integration],
+            BTreeMap::from([("fixture".into(), String::new())]),
+        );
+        for index in 0..desktop_pet_contracts::MAX_SOURCES {
+            let source = format!("source-{index}");
+            assert!(state.begin_source(descriptor(&source), 1));
+            owner.remember_source(&source, 1);
+            publish(&mut state, &source, 1, AgentStatus::Working);
+        }
+        assert_eq!(
+            state.source_admission("new-source", 1),
+            SourceAdmission::Capacity
+        );
+        assert!(!state.remove_offline_source("source-0", 1));
+        assert!(!state.remove_offline_source("source-0", 2));
+        assert!(state.mark_source_offline("source-0", 1));
+        // A stale store or aggregate cannot be evicted even when the other agrees.
+        assert!(state.session_store.begin_source(&descriptor("source-0"), 2));
+        assert!(!state.remove_offline_source("source-0", 1));
+        owner.expire("source-0", 1);
+        owner.expire("source-1", 1);
+        assert_eq!(
+            state.ensure_source_capacity("new-source", 1, Instant::now()),
+            SourceAdmission::Capacity
+        );
+        assert!(state.mark_source_offline("source-1", 1));
+        assert_eq!(
+            state.ensure_source_capacity("new-source", 1, Instant::now()),
+            SourceAdmission::Allowed
+        );
+        assert_eq!(state.source_generation("source-0"), Some(1));
+        assert_eq!(state.source_generation("source-1"), None);
+        assert_eq!(state.source_generation("source-2"), Some(1));
+        assert!(state.begin_source(descriptor("new-source"), 1));
+        assert_eq!(state.sources.len(), desktop_pet_contracts::MAX_SOURCES);
+        assert!(!state.begin_source(descriptor("source-1"), 1));
+    }
+
+    #[test]
+    fn snapshot_exhaustion_rejects_admission_before_reclamation_or_generation_changes() {
+        let mut state = AppState::new();
+        connect(&mut state, "source", 1);
+        state.coherent_snapshot_revision = u64::MAX;
+        assert_eq!(
+            state.source_admission("source", 1),
+            SourceAdmission::Rejected
+        );
+        assert_eq!(
+            state.ensure_source_capacity("new", 1, Instant::now()),
+            SourceAdmission::Rejected
+        );
+        assert!(!state.begin_source(descriptor("source"), 2));
+        assert_eq!(state.source_generation("source"), Some(1));
+        assert!(!state.publish_source_snapshot(
+            "source",
+            1,
+            std::iter::empty::<&AgentRecord>(),
+            SourceCounts::default(),
+            Arc::from([]),
+            &[],
+            Instant::now()
+        ));
+        assert_eq!(state.coherent_snapshot_revision, u64::MAX);
+    }
+
+    #[test]
+    fn migration_gate_never_times_out_or_accepts_another_operations_authorization() {
+        let mut state = AppState::new();
+        state.set_ui_ready();
+        state
+            .set_migration_gate("migration".into(), "secret".into())
+            .unwrap();
+        assert!(state.migration_gated());
+        assert_eq!(state.migration_operation(), Some("migration"));
+        state.expire_update_prepare();
+        assert!(state.update_mutation_allowed().is_err());
+        assert!(state.release_migration_gate("migration", "wrong").is_err());
+        assert!(state.release_migration_gate("other", "secret").is_err());
+        let (reply, _) = mpsc::channel();
+        assert!(state
+            .queue_update_prepare("update".into(), "update-secret".into(), reply)
+            .is_err());
+        state.release_migration_gate("migration", "secret").unwrap();
+        assert!(!state.migration_gated());
+        assert!(state.update_mutation_allowed().is_ok());
+    }
+
+    #[test]
+    fn unsupported_prompt_capability_preserves_distinct_error_from_remote_read_only() {
+        let mut state = AppState::new();
+        register_fixture(&mut state);
+        let mut source = descriptor("opaque-source");
+        source.capabilities.prompt = false;
+        assert!(state.begin_source(source, 1));
+        publish(&mut state, "opaque-source", 1, AgentStatus::Working);
+        let view = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .remove(0);
+        assert!(view.is_local);
+        assert!(!view.prompt_supported);
+        assert_eq!(state.prompt_route(&view.key), Err(PromptError::Unsupported));
+    }
+
+    #[test]
+    fn hidden_observation_choice_survives_reconnect_without_revealing_retained_rows() {
+        let mut state = AppState::new();
+        connect(&mut state, "source", 1);
+        publish(&mut state, "source", 1, AgentStatus::Working);
+        assert!(state.set_source_observed("source", 1, false));
+        assert_eq!(state.scene().sessions, 0);
+        assert_eq!(state.host_connections()["fixture"], 1);
+        connect(&mut state, "source", 2);
+        publish(&mut state, "source", 2, AgentStatus::Working);
+        assert_eq!(
+            state
+                .session_snapshot(&SessionListOptions::default(), None)
+                .total,
+            0
+        );
+        assert_eq!(state.scene().sessions, 0);
+        assert_eq!(state.host_connections()["fixture"], 1);
+        assert!(state.set_source_observed("source", 2, true));
+        assert_eq!(
+            state
+                .session_snapshot(&SessionListOptions::default(), None)
+                .total,
+            1
+        );
+    }
+
+    #[test]
+    fn observation_ingestion_stays_live_while_user_mutation_gate_is_closed() {
+        let mut state = AppState::new();
+        connect(&mut state, "source", 1);
+        state.set_ui_ready();
+        let (reply, _receiver) = mpsc::channel();
+        state
+            .queue_update_prepare("update".into(), "secret".into(), reply)
+            .unwrap();
+        assert!(state.update_mutation_allowed().is_err());
+        publish(&mut state, "source", 1, AgentStatus::Working);
+        assert_eq!(state.host_connections()["fixture"], 1);
+        assert_eq!(state.scene().sessions, 1);
+        assert!(state.apply_control("hide").is_err());
+        assert!(state
+            .set_observation_selection(ObservationSelection::Provider("other".into()))
+            .is_err());
+        state.request_shutdown();
+        assert!(!state.publish_source_snapshot(
+            "source",
+            1,
+            std::iter::empty::<&AgentRecord>(),
+            SourceCounts::default(),
+            Arc::from([]),
+            &[],
+            Instant::now()
+        ));
     }
 }

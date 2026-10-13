@@ -1,0 +1,73 @@
+name: Check independent Desktop Pet workspace
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-pet-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+      DESKTOP_PET_DISTRIBUTION: neutral
+      DESKTOP_PET_CARGO_TARGET: aarch64-apple-darwin
+    steps:
+      - name: Check out only the core repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: web/rig/package-lock.json
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install pinned JavaScript dependencies
+        run: bun install --frozen-lockfile && npm ci --prefix web/rig
+
+      - name: Install stable Rust and arm64 target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustup target add aarch64-apple-darwin
+
+      - name: Gate shared tooling and full workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run check
+          bun test scripts/release-docs.test.ts scripts/wiki-docs.test.ts tools/repair-hair-pockets.test.ts web/rig
+          cargo fmt --check --all --manifest-path native/Cargo.toml
+          cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml
+          cargo tree --locked --manifest-path native/Cargo.toml -p desktop-pet-core --prefix none --format '{p}' | node -e 'const s=require("node:fs").readFileSync(0,"utf8");if(/desktop-pet-(herdr|tern)\b/.test(s))throw Error("concrete host dependency in core graph");'
+          cargo metadata --locked --manifest-path native/Cargo.toml --format-version 1 | node -e 'const m=JSON.parse(require("node:fs").readFileSync(0,"utf8"));if(m.packages.filter(p=>p.name==="desktop-pet-contracts").length!==1)throw Error("contracts identity duplicated");'
+          bun run build:native
+
+      - name: Package zero-adapter real app, then restore full-feature release bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml -p desktop-pet --no-default-features
+          DESKTOP_PET_PACKAGE_STAGE_DIR="$RUNNER_TEMP/desktop-pet-hostless" bun run package:native
+          codesign --verify --deep --strict "$RUNNER_TEMP/desktop-pet-hostless/DesktopPet.app"
+          bun run build:native
+          bun run package:native
+          codesign --verify --deep --strict dist/DesktopPet.app
+          dist/DesktopPet.app/Contents/MacOS/desktop-pet update-capabilities | node -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8"));if(c.protocol!==4||c.observation_mode!==2||c.integration_api!==1)process.exit(1);'

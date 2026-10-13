@@ -1,460 +1,266 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
+# This file is also the self-contained, checksum-pinned release installer asset.
+# Prebuilt mode does not read a checkout, host manifest, HOME, or host environment.
+RELEASE_VERSION="0.4.0"
+REPOSITORY="hanbong5938/desktop-pet"
+APP_NAME="DesktopPet.app"
+BUNDLE_ID="io.github.hanbong5938.desktop-pet"
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SCRIPT_PATH="$ROOT_DIR/scripts/$(basename -- "${BASH_SOURCE[0]}")"
-APP_ROOT=""
-MANIFEST_PATH="$ROOT_DIR/herdr-plugin.toml"
-DEFAULT_REPOSITORY="hanbong5938/herdr-desktop-pet"
+TEMP_DIR=""
+SOURCE_STAGE=""
+stage_only=""
 
-fail() {
-  printf 'herdr desktop pet install: %s\n' "$*" >&2
-  exit 1
-}
-
+fail() { printf 'desktop pet install: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/install.sh [--prebuilt | --source]
+Usage: bash scripts/install.sh [--prebuilt | --source [--stage-only ABS]]
 
-Modes:
-  (default)   Download the release pinned to the manifest version over HTTPS,
-              verify it, and install it to dist/HerdrDesktopPet.app (or the
-              separate HerdrDesktopPetBeta.app for a beta manifest). An
-              unpinned stable download may fall back to a local source build.
-  --prebuilt  Install the pinned prebuilt release only; any failure is fatal.
-  --source    Build from local sources only (cargo, bun, npm); never download.
-              --local-build is an alias.
+  (default), --prebuilt  Install the pinned Desktop Pet 0.4.0 release only.
+                         A failed download never falls back to source.
+  --source               Build this verified core checkout, then admit the
+                         staged app at this checkout's dist/DesktopPet.app.
+                         Another healthy installation owner is not taken over.
+  --stage-only ABS       With --source only: leave the validated complete stage
+                         in an existing private empty directory. The updater's
+                         reserved transaction owns commit and stage cleanup.
 
-Environment:
-  HERDR_PET_INSTALL_MODE      auto (default), prebuilt, or source.
-  HERDR_PET_LOCAL_BUILD=1     Same as --source.
-  HERDR_PET_REPOSITORY        GitHub OWNER/REPO to download from (default: the
-                              checkout's GitHub origin, else
-                              hanbong5938/herdr-desktop-pet).
-  HERDR_PET_VERSION           Release version; must match the manifest version.
-  HERDR_PET_RELEASE_TAG       v<version> for stable or beta/<version> for beta.
-  HERDR_PET_APP_NAME          HerdrDesktopPet.app for stable or
-                              HerdrDesktopPetBeta.app for beta.
-  HERDR_PET_RELEASE_URL       Explicit HTTPS URL of the release archive.
-  HERDR_PET_RELEASE_BASE_URL  HTTPS base URL; the pinned asset name is appended.
-  HERDR_PET_CHECKSUM_URL      HTTPS URL of the SHA-256 checksum file
-                              (default: <release URL>.sha256).
-  HERDR_PET_SHA256            Expected archive SHA-256; skips the checksum download.
-  HERDR_PET_ASSET_NAME        Exact release archive filename
-                              (HerdrDesktopPet-v<version>-macos-arm64.tar.gz).
+The native coordinator serializes installation with the private OS-home install
+lock, both updater namespaces, installation roots, and live-profile admission.
+Compatible same/higher stable installations are reused. Beta/incompatible/live
+or reserved installations require an explicit native update/migration instead.
+
+DESKTOP_PET_INSTALL_MODE accepts prebuilt (default) or source.
+DESKTOP_PET_SHA256 may pin the archive digest in addition to the fixed authority.
+DESKTOP_PET_CARGO_TARGET selects the Rust target for an explicit source build.
+Development: bash scripts/run-native.sh --config-dir ABS --state-dir ABS start
 EOF
 }
-
-mode="${HERDR_PET_INSTALL_MODE:-auto}"
-case "$mode" in
-  auto|prebuilt|source) ;;
-  *) fail "HERDR_PET_INSTALL_MODE must be auto, prebuilt, or source (got '$mode')" ;;
-esac
-
-while (($# > 0)); do
-  case "$1" in
-    --prebuilt) mode=prebuilt ;;
-    --source|--local-build) mode=source ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      usage
-      fail "unknown option '$1'"
-      ;;
-  esac
-  shift
-done
-
-if [[ "${HERDR_PET_LOCAL_BUILD:-}" == "1" || "${HERDR_PET_LOCAL_BUILD:-}" == "true" ]]; then
-  mode=source
-fi
-
-[[ "$(uname -s)" == "Darwin" ]] || fail "native installation requires macOS"
-[[ "$(uname -m)" == "arm64" ]] || fail "native installation requires macOS arm64 (found $(uname -m))"
-
-INFERRED_REPOSITORY=""
-CLEANUP_DIR=""
-STAGING_DIR=""
-
 cleanup() {
-  if [[ -n "$CLEANUP_DIR" ]]; then
-    rm -rf "$CLEANUP_DIR"
-  fi
-  if [[ -n "$STAGING_DIR" ]]; then
-    rm -rf "$STAGING_DIR"
-  fi
+  [[ -z "$SOURCE_STAGE" || -n "$stage_only" ]] || rm -rf -- "$SOURCE_STAGE"
+  [[ -z "$TEMP_DIR" ]] || rm -rf -- "$TEMP_DIR"
 }
 trap cleanup EXIT
 
-infer_github_repository() {
-  local origin path
-  INFERRED_REPOSITORY=""
-  command -v git >/dev/null 2>&1 || return 0
-  origin="$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || true)"
-  [[ -n "$origin" ]] || return 0
-
-  case "$origin" in
-    https://github.com/*|http://github.com/*)
-      path="${origin#*github.com/}"
+mode="${DESKTOP_PET_INSTALL_MODE:-prebuilt}"
+while (($# > 0)); do
+  case "$1" in
+    --prebuilt) mode=prebuilt ;;
+    --source) mode=source ;;
+    --stage-only)
+      (($# >= 2)) || fail '--stage-only requires an absolute directory'
+      stage_only="$2"
+      shift
       ;;
-    git@github.com:*)
-      path="${origin#git@github.com:}"
-      ;;
-    ssh://git@github.com/*)
-      path="${origin#ssh://git@github.com/}"
-      ;;
-    *)
-      return 0
-      ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage; fail "unknown option '$1'" ;;
   esac
+  shift
+done
+case "$mode" in prebuilt|source) ;; *) fail 'DESKTOP_PET_INSTALL_MODE must be prebuilt or source' ;; esac
+[[ -z "$stage_only" || ( "$mode" == source && "$stage_only" == /* ) ]] || fail '--stage-only requires --source and an absolute output directory'
+[[ "$(/usr/bin/uname -s)" == Darwin ]] || fail 'native installation requires macOS'
+[[ "$(/usr/bin/uname -m)" == arm64 ]] || fail 'native installation requires macOS arm64'
+[[ "${DESKTOP_PET_DISTRIBUTION:-neutral}" == neutral ]] || fail 'the shared installer admits only the neutral distribution; use the authorized bridge envelope installer for legacy migration'
+[[ "${DESKTOP_PET_VERSION:-$RELEASE_VERSION}" == "$RELEASE_VERSION" ]] || fail 'requested version disagrees with this pinned release installer'
+[[ "${DESKTOP_PET_REPOSITORY:-$REPOSITORY}" == "$REPOSITORY" ]] || fail 'release authority is fixed to hanbong5938/desktop-pet'
 
-  path="${path%/}"
-  path="${path%.git}"
-  if [[ "$path" =~ ^([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*)$ ]]; then
-    INFERRED_REPOSITORY="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-  fi
+TEMP_DIR="$(/usr/bin/mktemp -d /private/tmp/desktop-pet-install.XXXXXX)" || fail 'cannot create private staging directory'
+
+json_integer() { /usr/bin/plutil -extract "$2" raw -expect integer -o - - <<< "$1"; }
+json_string() { /usr/bin/plutil -extract "$2" raw -expect string -o - - <<< "$1"; }
+require_private_directory() {
+  local path="$1" mode owner
+  [[ -d "$path" && ! -L "$path" ]] || fail "not a real directory: $path"
+  owner="$(/usr/bin/stat -f '%u' "$path")"
+  [[ "$owner" == "$(/usr/bin/id -u)" ]] || fail "directory has another owner: $path"
+  mode="$(/usr/bin/stat -f '%Lp' "$path")"
+  (( (8#$mode & 0022) == 0 )) || fail "directory is writable by another account: $path"
 }
 
-validate_repository() {
-  local repository="$1"
-  [[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
-    fail "GitHub repository must be OWNER/REPO, got '$repository'"
+validate_capabilities() {
+  local binary="$1" capabilities
+  capabilities="$("$binary" update-capabilities)" || fail "cannot read capabilities: $binary"
+  [[ "$(json_integer "$capabilities" protocol)" == 4 &&
+     "$(json_integer "$capabilities" observation_mode)" == 2 &&
+     "$(json_integer "$capabilities" integration_api)" == 1 ]] || fail "unsupported neutral updater/integration capabilities: $binary"
 }
-
-validate_https_url() {
-  local url="$1"
-  [[ "$url" == https://* ]] || fail "release URL must use https://"
-  [[ "$url" != *[[:space:]]* ]] || fail "release URL contains whitespace"
-}
-
-read_manifest_version() {
-  [[ -f "$MANIFEST_PATH" ]] || fail "missing plugin manifest: $MANIFEST_PATH"
-  awk -F'"' '/^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' "$MANIFEST_PATH"
-}
-
-select_bundle() {
-  local manifest_version version
-  manifest_version="$(read_manifest_version)"
-  [[ -n "$manifest_version" ]] || fail "plugin manifest has no version"
-  version="${HERDR_PET_VERSION-$manifest_version}"
-  [[ "$version" == "$manifest_version" ]] ||
-    fail "HERDR_PET_VERSION '$version' does not match manifest version '$manifest_version'"
-  if [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-    APP_NAME="HerdrDesktopPet.app"
-    EXPECTED_TAG="v$version"
-    BUNDLE_ID="dev.herdr.desktop-pet"
-  elif [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.(0|[1-9][0-9]*)$ ]]; then
-    APP_NAME="HerdrDesktopPetBeta.app"
-    EXPECTED_TAG="beta/$version"
-    BUNDLE_ID="dev.herdr.desktop-pet.beta"
+validate_entitlements() {
+  local binary="$1" expected="$2" plist json
+  plist="$TEMP_DIR/entitlements.plist"
+  /usr/bin/codesign -d --xml --entitlements - "$binary" > "$plist" 2>/dev/null || fail "cannot read entitlements: $binary"
+  if [[ ! -s "$plist" ]]; then
+    json='{}'
   else
-    fail "manifest version must be a stable or beta.N semantic version, got '$version'"
+    json="$(/usr/bin/plutil -convert json -o - "$plist" | /usr/bin/tr -d '[:space:]')" || fail "invalid entitlements: $binary"
   fi
-  [[ "${HERDR_PET_APP_NAME-$APP_NAME}" == "$APP_NAME" ]] ||
-    fail "HERDR_PET_APP_NAME does not match manifest version '$version'"
-  APP_ROOT="$ROOT_DIR/dist/$APP_NAME"
-  SELECTED_VERSION="$version"
+  [[ "$json" == "$expected" ]] || fail "unexpected entitlements: $binary"
 }
-
-official_release_url() {
-  local repository="$1" tag="$2" asset="$3"
-  # GitHub encodes the slash inside prerelease tags in asset download URLs.
-  printf 'https://github.com/%s/releases/download/%s/%s' "$repository" "${tag//\//%2F}" "$asset"
-}
-
 validate_native_pack() {
-  local binary="$1" path="$2" label="$3" expected_backend="$4" validation_root validation_output
-
-  validation_root="$(mktemp -d "${TMPDIR:-/tmp}/herdr-pack-validation.XXXXXX")" ||
-    fail "unable to create temporary state for native pack validation"
-  if ! validation_output="$(
-    "$binary" pack validate --path "$path" \
-      --config-dir "$validation_root/config" --state-dir "$validation_root/state" 2>&1
-  )"; then
-    rm -rf "$validation_root"
-    [[ -n "$validation_output" ]] && printf '%s\n' "$validation_output" >&2
-    fail "native pack validation failed for $label"
-  fi
-  if [[ -n "$expected_backend" && "$validation_output" != *"\"backend\":\"$expected_backend\""* ]]; then
-    rm -rf "$validation_root"
-    fail "native pack validation selected an unexpected renderer for $label"
-  fi
-  rm -rf "$validation_root"
+  local binary="$1" pack="$2" output
+  output="$("$binary" pack validate --path "$pack" --config-dir "$TEMP_DIR/validation-config" --state-dir "$TEMP_DIR/validation-state" 2>&1)" || {
+    printf '%s\n' "$output" >&2
+    fail 'full native Rubelia rig validation failed'
+  }
+  [[ "$output" == *'"backend":"rig"'* ]] || fail 'default pack selected an unexpected renderer'
 }
-
-
 validate_app() {
-  local app="$1" allow_legacy="${2:-0}" archs binary helper main_capabilities helper_capabilities main_protocol="" helper_protocol main_observation="" helper_observation="" commands dependencies library line bundle_id
-  [[ -d "$app" ]] || fail "packaged app is missing: $app"
-  binary="$app/Contents/MacOS/herdr-desktop-pet"
-  [[ -x "$binary" ]] ||
-    fail "packaged app has no executable herdr-desktop-pet binary"
-  archs="$(lipo -archs "$binary" 2>/dev/null)" ||
-    fail "unable to inspect packaged app architecture"
-  [[ "$archs" == "arm64" ]] || fail "packaged app is not an arm64-only binary (got $archs)"
-  command -v codesign >/dev/null 2>&1 || fail "packaged app validation requires codesign"
-  codesign --verify --deep --strict "$app" >/dev/null 2>&1 ||
-    fail "packaged app has an invalid or missing code signature"
-  [[ "$("$binary" --version 2>/dev/null)" == "herdr-desktop-pet $SELECTED_VERSION" ]] ||
-    fail "packaged app binary does not match expected version $SELECTED_VERSION"
-  [[ -f "$app/Contents/Info.plist" ]] || fail "packaged app is missing Contents/Info.plist"
-  [[ "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null)" == "$SELECTED_VERSION" ]] ||
-    fail "packaged app bundle does not match expected version $SELECTED_VERSION"
-  bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist" 2>/dev/null)" ||
-    fail "packaged app has no bundle identifier"
-  if main_capabilities="$("$binary" update-capabilities 2>/dev/null)"; then
-    main_protocol="$(plutil -extract protocol raw -expect integer -o - - <<< "$main_capabilities" 2>/dev/null)" ||
-      fail "packaged app does not advertise a numeric updater protocol"
-    [[ "$main_protocol" == 2 || "$main_protocol" == 3 ]] ||
-      fail "packaged app does not advertise supported updater protocol 2 or 3"
-    helper="$app/Contents/MacOS/herdr-update-coordinator"
-    [[ -x "$helper" && -f "$helper" && ! -L "$helper" ]] ||
-      fail "updater-capable app is missing its standalone executable update coordinator"
-    archs="$(lipo -archs "$helper" 2>/dev/null)" ||
-      fail "unable to inspect packaged update coordinator architecture"
-    [[ "$archs" == "arm64" ]] ||
-      fail "packaged update coordinator is not arm64-only (got $archs)"
-    codesign --verify --strict "$helper" >/dev/null 2>&1 ||
-      fail "packaged update coordinator has an invalid or missing code signature"
-    helper_capabilities="$("$helper" update-capabilities 2>/dev/null)" ||
-      fail "packaged update coordinator cannot advertise updater capabilities"
-    helper_protocol="$(plutil -extract protocol raw -expect integer -o - - <<< "$helper_capabilities" 2>/dev/null)" ||
-      fail "packaged update coordinator does not advertise a numeric updater protocol"
-    [[ "$helper_protocol" == "$main_protocol" ]] ||
-      fail "packaged update coordinator protocol does not match packaged app"
-    if plutil -type observation_mode - <<< "$main_capabilities" >/dev/null 2>&1; then
-      main_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$main_capabilities" 2>/dev/null)" ||
-        fail "packaged app does not advertise numeric observation-mode support"
-      [[ "$main_observation" == 1 ]] ||
-        fail "packaged app advertises unsupported observation-mode support"
-    fi
-    if plutil -type observation_mode - <<< "$helper_capabilities" >/dev/null 2>&1; then
-      helper_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$helper_capabilities" 2>/dev/null)" ||
-        fail "packaged update coordinator does not advertise numeric observation-mode support"
-      [[ "$helper_observation" == 1 ]] ||
-        fail "packaged update coordinator advertises unsupported observation-mode support"
-    fi
-    [[ "$helper_observation" == "$main_observation" ]] ||
-      fail "packaged update coordinator observation-mode support does not match packaged app"
-    commands="$(otool -l "$helper")" ||
-      fail "unable to inspect packaged update coordinator loader paths"
-    [[ "$commands" != *"cmd LC_RPATH"* ]] ||
-      fail "packaged update coordinator contains loader search paths"
-    dependencies="$(otool -L "$helper")" ||
-      fail "unable to inspect packaged update coordinator dependencies"
-    dependencies="${dependencies#*$'\n'}"
-    [[ -n "$dependencies" ]] || fail "packaged update coordinator has no system dependencies"
-    while IFS= read -r line; do
-      [[ -n "$line" ]] || continue
-      read -r library _ <<< "$line"
-      case "$library" in
-        /usr/lib/*|/System/Library/*) ;;
-        *) fail "packaged update coordinator has a non-system dependency: $library" ;;
-      esac
-    done <<< "$dependencies"
-  elif [[ "$allow_legacy" != 1 || "$SELECTED_VERSION" != "0.2.0" || "$APP_NAME" != "HerdrDesktopPet.app" ]]; then
-    fail "packaged app does not support updater protocol 2 or 3"
-  fi
-  if [[ "$main_protocol" == 2 && "$APP_NAME" == "HerdrDesktopPetBeta.app" ]]; then
-    # Published protocol-2 beta bundles predate the separate beta identifier.
-    [[ "$bundle_id" == "dev.herdr.desktop-pet" || "$bundle_id" == "$BUNDLE_ID" ]] ||
-      fail "packaged beta app has an unexpected bundle identifier"
-  else
-    [[ "$bundle_id" == "$BUNDLE_ID" ]] ||
-      fail "packaged app has an unexpected bundle identifier"
-  fi
-  [[ -f "$app/Contents/Resources/default/manifest.json" ]] ||
-    fail "packaged app is missing the default asset manifest"
-  [[ "$(plutil -extract id raw -o - "$app/Contents/Resources/default/manifest.json" 2>/dev/null)" == "rubelia-at12-multi-pose" ]] ||
-    fail "packaged default character is not Rubelia"
-  [[ -f "$app/Contents/Resources/LICENSE.txt" ]] ||
-    fail "packaged app is missing the license notice"
-  [[ -f "$app/Contents/Frameworks/libherdr_rig.dylib" ]] ||
-    fail "packaged app is missing the bundled native rig library"
-  [[ -x "$app/Contents/MacOS/rig-decode-worker" ]] ||
-    fail "packaged app is missing the executable native rig decode worker"
-  [[ -f "$app/Contents/Resources/rig/decoder.js" ]] ||
-    fail "packaged app is missing the bundled native rig decoder"
-
-  validate_native_pack "$binary" "$app/Contents/Resources/default" "the default Rubelia rig pack" "rig"
+  local app="$1" binary helper worker library dependencies line dependency commands
+  [[ -d "$app" && ! -L "$app" ]] || fail "missing real staged app: $app"
+  binary="$app/Contents/MacOS/desktop-pet"
+  helper="$app/Contents/MacOS/desktop-pet-update-coordinator"
+  worker="$app/Contents/MacOS/rig-decode-worker"
+  library="$app/Contents/Frameworks/libherdr_rig.dylib"
+  for executable in "$binary" "$helper" "$worker"; do
+    [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] || fail "missing regular executable: $executable"
+    [[ "$(/usr/bin/lipo -archs "$executable")" == arm64 ]] || fail "executable is not arm64-only: $executable"
+    /usr/bin/codesign --verify --strict "$executable" || fail "invalid executable signature: $executable"
+  done
+  [[ -f "$library" && ! -L "$library" && "$(/usr/bin/lipo -archs "$library")" == arm64 ]] || fail 'missing arm64 rig library'
+  /usr/bin/codesign --verify --deep --strict "$app" || fail 'invalid staged bundle signature'
+  commands="$(/usr/bin/otool -l "$helper")" || fail 'cannot inspect coordinator loader commands'
+  [[ "$commands" != *'cmd LC_RPATH'* ]] || fail 'coordinator must not have loader search paths'
+  dependencies="$(/usr/bin/otool -L "$helper")" || fail 'cannot inspect coordinator system dependencies'
+  dependencies="${dependencies#*$'\n'}"
+  [[ -n "$dependencies" ]] || fail 'coordinator has no system dependencies'
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    read -r dependency _ <<< "$line"
+    case "$dependency" in /usr/lib/*|/System/Library/*) ;; *) fail "coordinator non-system dependency: $dependency" ;; esac
+  done <<< "$dependencies"
+  validate_entitlements "$worker" '{"com.apple.security.cs.allow-jit":true}'
+  for executable in "$binary" "$helper" "$library" "$app"; do validate_entitlements "$executable" '{}'; done
+  validate_capabilities "$helper"
+  validate_capabilities "$binary"
+  [[ "$("$binary" --version)" == "desktop-pet $RELEASE_VERSION" ]] || fail 'binary version disagrees with pinned release'
+  [[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" == "$BUNDLE_ID" &&
+     "$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")" == desktop-pet &&
+     "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" == "$RELEASE_VERSION" &&
+     "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist")" == "$RELEASE_VERSION" ]] || fail 'bundle identity/version disagrees with pinned neutral release'
+  local manifest="$app/Contents/Resources/default/manifest.json"
+  [[ "$(/usr/bin/plutil -extract id raw -o - "$manifest")" == rubelia-at12-multi-pose &&
+     "$(/usr/bin/plutil -extract version raw -expect integer -o - "$manifest")" == 5 &&
+     "$(/usr/bin/plutil -extract render_mode raw -o - "$manifest")" == rig ]] || fail 'default character is not the approved Rubelia v5 rig'
+  for resource in "$app/Contents/Resources/LICENSE.txt" "$app/Contents/Resources/rig/decoder.js" "$app/Contents/Resources/rig/RigLimits.swift" "$app/Contents/Resources/rig/RigLimits.rs" "$app/Contents/Resources/rig/NOTICE.txt" "$app.rig-native.json"; do
+    [[ -f "$resource" && ! -L "$resource" ]] || fail "missing regular release resource: $resource"
+  done
+  # The paired native coordinator independently checks every deployed sidecar
+  # hash, source identity, signed rig closure and origin again under admission.
+  validate_native_pack "$binary" "$app/Contents/Resources/default"
 }
 
-source_build() {
-  local -a cargo_args
-  command -v cargo >/dev/null 2>&1 ||
-    fail "source build requires cargo; use a pinned prebuilt release with --prebuilt"
-  command -v bun >/dev/null 2>&1 ||
-    fail "source build requires bun to package the app; use a pinned prebuilt release with --prebuilt"
-  command -v npm >/dev/null 2>&1 ||
-    fail "source build requires npm to install the pinned web/rig dependencies"
-  [[ -f "$ROOT_DIR/bun.lock" ]] ||
-    fail "source build is missing the pinned root Bun lockfile: $ROOT_DIR/bun.lock"
-  [[ -f "$ROOT_DIR/web/rig/package-lock.json" ]] ||
-    fail "source build is missing the pinned web/rig npm lockfile: $ROOT_DIR/web/rig/package-lock.json"
-
-  printf 'Installing pinned root JavaScript dependencies...\n'
-  (cd "$ROOT_DIR" && bun install --frozen-lockfile)
-  printf 'Installing pinned web/rig authoring and build dependencies...\n'
-  (cd "$ROOT_DIR/web/rig" && npm ci --no-audit --no-fund)
-
-  cargo_args=(build --release --locked --target-dir native/target)
-  if [[ -n "${HERDR_PET_CARGO_TARGET:-}" ]]; then
-    cargo_args+=(--target "$HERDR_PET_CARGO_TARGET")
-  fi
-  printf 'Building Herdr Desktop Pet from local Rust sources...\n'
-  (cd "$ROOT_DIR" && cargo "${cargo_args[@]}" --manifest-path native/Cargo.toml)
-  printf 'Building standalone update coordinator from local Rust sources...\n'
-  (cd "$ROOT_DIR" && cargo "${cargo_args[@]}" --manifest-path native/update-coordinator/Cargo.toml)
-  (cd "$ROOT_DIR" && HERDR_PET_APP_NAME="$APP_NAME" bun "$ROOT_DIR/scripts/package-native.ts")
-  validate_app "$APP_ROOT"
-}
-
-prebuilt_install() {
-  local repository version release_tag asset_name release_url checksum_url
-  local temp_dir archive checksum_file expected expected_candidate name actual
-  local archive_list archive_details extract_dir staging entry has_app allow_legacy
-
-  infer_github_repository
-  repository="${HERDR_PET_REPOSITORY:-${INFERRED_REPOSITORY:-$DEFAULT_REPOSITORY}}"
-  validate_repository "$repository"
-
-  version="$SELECTED_VERSION"
-  release_tag="${HERDR_PET_RELEASE_TAG-$EXPECTED_TAG}"
-  [[ "$release_tag" == "$EXPECTED_TAG" ]] ||
-    fail "release tag '$release_tag' is not the pinned version tag $EXPECTED_TAG"
-  asset_name="HerdrDesktopPet-v${version}-macos-arm64.tar.gz"
-  [[ "${HERDR_PET_ASSET_NAME-$asset_name}" == "$asset_name" ]] ||
-    fail "release asset name must match pinned version $version"
-  if [[ -n "${HERDR_PET_RELEASE_URL:-}" ]]; then
-    release_url="$HERDR_PET_RELEASE_URL"
-  elif [[ -n "${HERDR_PET_RELEASE_BASE_URL:-}" ]]; then
-    release_url="${HERDR_PET_RELEASE_BASE_URL%/}/$asset_name"
-  else
-    release_url="$(official_release_url "$repository" "$release_tag" "$asset_name")"
-  fi
-  checksum_url="${HERDR_PET_CHECKSUM_URL:-$release_url.sha256}"
-  validate_https_url "$release_url"
-  validate_https_url "$checksum_url"
-  if [[ "${HERDR_PET_SHA256+x}" == x ]]; then
-    [[ "$HERDR_PET_SHA256" =~ ^[[:xdigit:]]{64}$ ]] ||
-      fail "HERDR_PET_SHA256 must be a 64-character SHA-256 hex digest"
-  fi
-
-  command -v curl >/dev/null 2>&1 || fail "prebuilt installation requires curl for HTTPS release downloads"
-  command -v shasum >/dev/null 2>&1 || fail "prebuilt installation requires shasum"
-  command -v tar >/dev/null 2>&1 || fail "prebuilt installation requires tar"
-
-  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/herdr-desktop-pet.XXXXXX")" ||
-    fail "unable to create a temporary download directory"
-  CLEANUP_DIR="$temp_dir"
-  archive="$temp_dir/$asset_name"
-  checksum_file="$temp_dir/$asset_name.sha256"
-
-  printf 'Downloading Herdr Desktop Pet %s from %s...\n' "$version" "$release_url"
-  curl --fail --location --proto '=https' --proto-redir '=https' \
+fetch() {
+  /usr/bin/curl --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 1 \
-    --silent --show-error "$release_url" --output "$archive" ||
-    fail "unable to download pinned release asset from $release_url"
-
-  if [[ -n "${HERDR_PET_SHA256:-}" ]]; then
-    printf '%s  %s\n' "$HERDR_PET_SHA256" "$asset_name" > "$checksum_file" ||
-      fail "unable to record the expected checksum"
-  else
-    curl --fail --location --proto '=https' --proto-redir '=https' \
-      --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 1 \
-      --silent --show-error "$checksum_url" --output "$checksum_file" ||
-      fail "unable to download checksum for pinned release asset from $checksum_url"
-  fi
-
-  expected=""
-  while IFS= read -r entry || [[ -n "$entry" ]]; do
-    # Accept both `sha  file` and `sha *file` checksum formats.
-    read -r expected_candidate name _ <<<"$entry"
+    --silent --show-error "$1" --output "$2" || fail "cannot download pinned release asset: $1"
+}
+checksum_for() {
+  local file="$1" asset="$2" line digest name extra result=""
+  [[ -f "$file" && "$(/usr/bin/stat -f '%z' "$file")" -le 65536 ]] || fail 'invalid or oversized checksum asset'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    read -r digest name extra <<< "$line"
     name="${name#\*}"
-    expected_candidate="$(printf '%s' "$expected_candidate" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$expected_candidate" =~ ^[[:xdigit:]]{64}$ ]] &&
-      [[ -z "$name" || "$name" == "$asset_name" ]]; then
-      expected="$expected_candidate"
-      break
+    if [[ "$name" == "$asset" ]]; then
+      [[ "$digest" =~ ^[[:xdigit:]]{64}$ && -z "$extra" && -z "$result" ]] || fail "ambiguous or invalid checksum: $asset"
+      result="$(printf '%s' "$digest" | /usr/bin/tr '[:upper:]' '[:lower:]')"
     fi
-  done < "$checksum_file"
-  [[ -n "$expected" ]] || fail "checksum file does not contain a SHA-256 for $asset_name"
-
-  actual="$(shasum -a 256 "$archive" | awk '{ print tolower($1) }')" ||
-    fail "unable to compute the SHA-256 of $asset_name"
-  [[ "$actual" == "$expected" ]] ||
-    fail "checksum mismatch for $asset_name (expected $expected, got $actual)"
-  # Only the already-published v0.2.0 archive predates the update protocol.
-  # A new source build (even at 0.2.0) must include the coordinator.
-  allow_legacy=0
-  if [[ "$version" == 0.2.0 &&
-    "$actual" == 871096fc0993ac68d6afa9cce54198c033cae07db28202156b57f4fd23032cdf ]]; then
-    allow_legacy=1
+  done < "$file"
+  [[ -n "$result" ]] || fail "checksum asset has no exact entry: $asset"
+  printf '%s' "$result"
+}
+verify_digest() {
+  local output actual
+  output="$(/usr/bin/shasum -a 256 "$1")" || fail "cannot hash $1"
+  actual="${output%% *}"
+  [[ "$actual" == "$2" ]] || fail "SHA-256 mismatch for $1"
+}
+prebuilt_stage() {
+  local asset="DesktopPet-v${RELEASE_VERSION}-macos-arm64.tar.gz"
+  local sidecar="DesktopPet-v${RELEASE_VERSION}-rig-native.json"
+  local base="https://github.com/$REPOSITORY/releases/download/v$RELEASE_VERSION"
+  local archive="$TEMP_DIR/$asset" expected entry duplicates has_app=0
+  [[ "${DESKTOP_PET_RELEASE_TAG:-v$RELEASE_VERSION}" == "v$RELEASE_VERSION" &&
+     "${DESKTOP_PET_ASSET_NAME:-$asset}" == "$asset" &&
+     "${DESKTOP_PET_RELEASE_URL:-$base/$asset}" == "$base/$asset" &&
+     "${DESKTOP_PET_CHECKSUM_URL:-$base/$asset.sha256}" == "$base/$asset.sha256" ]] || fail 'release selection disagrees with the fixed core authority'
+  printf 'Downloading Desktop Pet %s from the core release authority...\n' "$RELEASE_VERSION" >&2
+  fetch "$base/$asset" "$archive"
+  fetch "$base/$asset.sha256" "$TEMP_DIR/archive.sha256"
+  expected="$(checksum_for "$TEMP_DIR/archive.sha256" "$asset")"
+  if [[ -n "${DESKTOP_PET_SHA256:-}" ]]; then
+    [[ "$DESKTOP_PET_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || fail 'DESKTOP_PET_SHA256 must contain 64 hex digits'
+    [[ "$(printf '%s' "$DESKTOP_PET_SHA256" | /usr/bin/tr '[:upper:]' '[:lower:]')" == "$expected" ]] || fail 'explicit archive digest disagrees with the release checksum'
   fi
-
-  archive_list="$temp_dir/archive.list"
-  tar -tzf "$archive" > "$archive_list" || fail "release asset is not a readable gzip tar archive"
-  has_app=0
+  verify_digest "$archive" "$expected"
+  /usr/bin/tar -tzf "$archive" > "$TEMP_DIR/archive.list" || fail 'release asset is not a readable gzip tar archive'
   while IFS= read -r entry || [[ -n "$entry" ]]; do
-    entry="${entry#./}"
-    [[ -n "$entry" ]] || continue
-    case "$entry" in
-      */../*|../*|/*) fail "release archive contains an unsafe path '$entry'" ;;
-      "$APP_NAME"|"$APP_NAME"/*) has_app=1 ;;
-      *) fail "release archive contains unexpected path '$entry'" ;;
-    esac
-  done < "$archive_list"
-  [[ "$has_app" == 1 ]] || fail "release archive does not contain $APP_NAME"
-
-  archive_details="$temp_dir/archive.details"
-  tar -tvzf "$archive" > "$archive_details" || fail "unable to inspect release archive entries"
+    [[ "$entry" != ./* ]] || fail 'archive contains a noncanonical ./ path alias'
+    [[ -n "$entry" ]] || fail 'archive has an empty entry'
+    case "$entry" in /*|../*|*/../*|*/..|*/./*|*//*|*$'\r'*) fail "unsafe archive path: $entry" ;; esac
+    case "$entry" in "$APP_NAME"|"$APP_NAME/"|"$APP_NAME"/*) has_app=1 ;; *) fail "unexpected archive entry: $entry" ;; esac
+  done < "$TEMP_DIR/archive.list"
+  [[ "$has_app" == 1 ]] || fail 'archive does not contain the neutral app'
+  duplicates="$(LC_ALL=C /usr/bin/sort "$TEMP_DIR/archive.list" | /usr/bin/uniq -d)"
+  [[ -z "$duplicates" ]] || fail 'archive contains duplicate entries'
+  /usr/bin/tar -tvzf "$archive" > "$TEMP_DIR/archive.details" || fail 'cannot inspect archive entry types'
   while IFS= read -r entry || [[ -n "$entry" ]]; do
-    case "${entry:0:1}" in
-      d|-) ;;
-      *) fail "release archive contains an unsupported link or special entry" ;;
-    esac
-  done < "$archive_details"
-
-  extract_dir="$temp_dir/extract"
-  mkdir -p "$extract_dir" || fail "unable to create the extraction directory"
-  tar -xzf "$archive" -C "$extract_dir" || fail "unable to extract verified release asset"
-  validate_app "$extract_dir/$APP_NAME" "$allow_legacy"
-
-  mkdir -p "$ROOT_DIR/dist" || fail "unable to create $ROOT_DIR/dist"
-  staging="$ROOT_DIR/dist/.$APP_NAME.install.$$.app"
-  STAGING_DIR="$staging"
-  rm -rf "$staging" || fail "unable to clear the staging directory $staging"
-  cp -R "$extract_dir/$APP_NAME" "$staging" ||
-    fail "unable to stage the verified app bundle"
-  validate_app "$staging" "$allow_legacy"
-  rm -rf "$APP_ROOT" || fail "unable to remove the previous app at $APP_ROOT"
-  mv "$staging" "$APP_ROOT" || fail "unable to move the verified app into $APP_ROOT"
-  STAGING_DIR=""
-  validate_app "$APP_ROOT" "$allow_legacy"
-  printf 'Installed Herdr Desktop Pet at %s\n' "$APP_ROOT"
+    case "${entry:0:1}" in d|-) ;; *) fail 'archive contains a link or special entry' ;; esac
+  done < "$TEMP_DIR/archive.details"
+  mkdir "$TEMP_DIR/extract"
+  /usr/bin/tar -xzf "$archive" --no-same-owner -C "$TEMP_DIR/extract" || fail 'cannot extract verified app'
+  fetch "$base/$sidecar" "$TEMP_DIR/extract/$APP_NAME.rig-native.json"
+  fetch "$base/SHA256SUMS" "$TEMP_DIR/SHA256SUMS"
+  verify_digest "$TEMP_DIR/extract/$APP_NAME.rig-native.json" "$(checksum_for "$TEMP_DIR/SHA256SUMS" "$sidecar")"
+  STAGED_APP="$TEMP_DIR/extract/$APP_NAME"
+}
+source_stage() {
+  local origin tool
+  for tool in cargo bun npm git; do command -v "$tool" >/dev/null 2>&1 || fail "source build requires $tool"; done
+  require_private_directory "$ROOT_DIR"
+  origin="$(git -C "$ROOT_DIR" remote get-url origin)" || fail 'source mode requires a core Git checkout'
+  case "$origin" in https://github.com/hanbong5938/desktop-pet|https://github.com/hanbong5938/desktop-pet.git|git@github.com:hanbong5938/desktop-pet.git|ssh://git@github.com/hanbong5938/desktop-pet.git) ;; *) fail 'source mode builds only the independent core checkout' ;; esac
+  [[ "$(/usr/bin/plutil -extract name raw -o - "$ROOT_DIR/package.json")" == desktop-pet &&
+     "$(/usr/bin/plutil -extract version raw -o - "$ROOT_DIR/package.json")" == "$RELEASE_VERSION" &&
+     -f "$ROOT_DIR/native/app/Cargo.toml" && -f "$ROOT_DIR/native/core/Cargo.toml" &&
+     -f "$ROOT_DIR/bun.lock" && -f "$ROOT_DIR/web/rig/package-lock.json" ]] || fail 'source mode requires the complete pinned core workspace'
+  if [[ ! -e "$ROOT_DIR/dist" ]]; then mkdir -m 700 "$ROOT_DIR/dist"; fi
+  require_private_directory "$ROOT_DIR/dist"
+  if [[ -n "$stage_only" ]]; then
+    require_private_directory "$stage_only"
+    local entry
+    for entry in "$stage_only"/* "$stage_only"/.[!.]* "$stage_only"/..?*; do
+      [[ ! -e "$entry" && ! -L "$entry" ]] || fail '--stage-only output must be empty'
+    done
+    SOURCE_STAGE="$stage_only"
+  else
+    SOURCE_STAGE="$(/usr/bin/mktemp -d "$ROOT_DIR/dist/.desktop-pet-stage.XXXXXX")"
+  fi
+  # Never overwrite an existing source app before native live/reservation and
+  # locator-owner admission. Only the helper promotes this complete stage.
+  (cd "$ROOT_DIR" && bun install --frozen-lockfile)
+  (cd "$ROOT_DIR/web/rig" && npm ci --no-audit --no-fund)
+  (cd "$ROOT_DIR" && DESKTOP_PET_DISTRIBUTION=neutral bun run build:native)
+  (cd "$ROOT_DIR" && DESKTOP_PET_DISTRIBUTION=neutral DESKTOP_PET_PACKAGE_STAGE_DIR="$SOURCE_STAGE" bun run package:native)
+  STAGED_APP="$SOURCE_STAGE/$APP_NAME"
 }
 
-select_bundle
-
-case "$mode" in
-  auto)
-    # An explicit release selection (including a beta manifest) must never
-    # turn into an unrelated local source build on a failed download.
-    if [[ "$APP_NAME" == "HerdrDesktopPetBeta.app" ||
-      "${HERDR_PET_REPOSITORY+x}" == x || "${HERDR_PET_VERSION+x}" == x ||
-      "${HERDR_PET_RELEASE_TAG+x}" == x || "${HERDR_PET_APP_NAME+x}" == x ||
-      "${HERDR_PET_ASSET_NAME+x}" == x || "${HERDR_PET_RELEASE_URL+x}" == x ||
-      "${HERDR_PET_RELEASE_BASE_URL+x}" == x || "${HERDR_PET_CHECKSUM_URL+x}" == x ||
-      "${HERDR_PET_SHA256+x}" == x ]]; then
-      prebuilt_install
-    elif ! bash "$SCRIPT_PATH" --prebuilt; then
-      printf 'herdr desktop pet install: prebuilt release unavailable or invalid; building from source instead.\n' >&2
-      source_build
-    fi
-    ;;
-  prebuilt) prebuilt_install ;;
-  source) source_build ;;
-  *) fail "unsupported installation mode '$mode'" ;;
-esac
+case "$mode" in prebuilt) prebuilt_stage ;; source) source_stage ;; esac
+validate_app "$STAGED_APP"
+if [[ -n "$stage_only" ]]; then
+  printf 'Validated Desktop Pet source stage: %s\n' "$STAGED_APP"
+  exit 0
+fi
+request="$TEMP_DIR/install-request.json"
+printf '{"version":1}\n' > "$request"
+/usr/bin/plutil -insert staged_app -string "$STAGED_APP" "$request"
+/usr/bin/plutil -insert kind -string "$([[ "$mode" == source ]] && printf source || printf standalone)" "$request"
+if [[ "$mode" == source ]]; then /usr/bin/plutil -insert source_root -string "$ROOT_DIR" "$request"; fi
+chmod 600 "$request"
+# The native transaction owns OS-account-home destination/locator validation,
+# rechecking after lock, no-live/no-reservation admission and atomic replacement.
+# A failed stage never removes the previous app or locator.
+result="$("$STAGED_APP/Contents/MacOS/desktop-pet-update-coordinator" install --request "$request")" || fail 'native installation admission failed; existing installation was preserved'
+executable="$(json_string "$result" executable)" || fail 'coordinator returned an invalid installation record'
+printf 'Desktop Pet installation: %s\n' "$executable"

@@ -1,5 +1,6 @@
 //! Desktop Pet's host-neutral boundary: normalized models, atomic domain
-//! access, registered integration/extension ports, and shared profile storage.
+//! access, registered integration/actions, opaque preference patches, and a
+//! shared profile writer for lifecycle and preference transactions.
 //! Host wire parsing, endpoints, registries, UI frameworks and updater protocols
 //! deliberately live outside this crate.
 

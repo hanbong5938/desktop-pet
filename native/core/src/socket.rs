@@ -1,63 +1,10 @@
-use std::collections::VecDeque;
-use std::ffi::OsString;
-use std::fs;
 use std::io::{self, Read};
 use std::mem::offset_of;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
-
-/// Keep an endpoint's identity stable while its listener (or symlink target)
-/// is absent; a lexical fallback alone would change /private/tmp back to /tmp.
-pub(crate) fn canonical_endpoint(path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
-        return Err("Herdr endpoint must be an absolute path without NUL".to_owned());
-    }
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical);
-    }
-    let mut pending: VecDeque<OsString> = owned_components(path).collect();
-    let mut resolved = PathBuf::from("/");
-    let mut followed = 0;
-    while let Some(component) = pending.pop_front() {
-        if component == ".." {
-            resolved.pop();
-            continue;
-        }
-        resolved.push(component);
-        match fs::symlink_metadata(&resolved) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                followed += 1;
-                if followed > 40 {
-                    return Err("Herdr endpoint contains too many symbolic links".to_owned());
-                }
-                let target = fs::read_link(&resolved)
-                    .map_err(|error| format!("cannot resolve Herdr endpoint: {error}"))?;
-                resolved.pop();
-                if target.is_absolute() {
-                    resolved = PathBuf::from("/");
-                }
-                for component in owned_components(&target).rev() {
-                    pending.push_front(component);
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("cannot resolve Herdr endpoint: {error}")),
-        }
-    }
-    Ok(resolved)
-}
-
-fn owned_components(path: &Path) -> impl DoubleEndedIterator<Item = OsString> + '_ {
-    path.components().filter_map(|component| match component {
-        Component::Normal(value) => Some(value.to_owned()),
-        Component::ParentDir => Some(OsString::from("..")),
-        Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
-    })
-}
 
 pub(crate) fn remaining(deadline: Instant) -> io::Result<Duration> {
     deadline
@@ -248,44 +195,5 @@ mod tests {
         let path = "/".repeat(std::mem::size_of::<libc::sockaddr_un>());
         let error = connect(Path::new(&path), Instant::now() + Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn endpoint_identity_survives_missing_listener_and_broken_alias() {
-        use std::os::unix::fs::symlink;
-        use std::os::unix::net::UnixListener;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = PathBuf::from(format!("/tmp/hdp-path-{}-{nonce}", std::process::id()));
-        fs::create_dir(&root).unwrap();
-        fs::create_dir(root.join("actual")).unwrap();
-        symlink("actual", root.join("alias")).unwrap();
-        symlink("actual/herdr.sock", root.join("socket-alias")).unwrap();
-        let path = root.join("actual/herdr.sock");
-        let expected = canonical_endpoint(&path).unwrap();
-        assert_eq!(
-            canonical_endpoint(&root.join("alias/herdr.sock")).unwrap(),
-            expected
-        );
-        assert_eq!(
-            canonical_endpoint(&root.join("socket-alias")).unwrap(),
-            expected
-        );
-        let listener = UnixListener::bind(&path).unwrap();
-        assert_eq!(
-            canonical_endpoint(&root.join("socket-alias")).unwrap(),
-            expected
-        );
-        drop(listener);
-        fs::remove_file(&path).unwrap();
-        assert_eq!(
-            canonical_endpoint(&root.join("socket-alias")).unwrap(),
-            expected
-        );
-        fs::remove_dir_all(root).unwrap();
     }
 }

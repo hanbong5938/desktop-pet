@@ -1,5 +1,80 @@
 //! The coordinator is outside the replaceable app and owns its own native window.
-use herdr_update_coordinator::{InstallOrigin, UpdatePlan};
+use desktop_pet_update_coordinator::migration::{
+    MigrationPhase, MigrationPlan, MigrationPresentation,
+};
+use desktop_pet_update_coordinator::{identity, InstallOrigin, UpdatePlan};
+use sha2::{Digest, Sha256};
+
+fn migration_digest(plan: &MigrationPlan) -> Result<[u8; 32], String> {
+    Ok(Sha256::digest(serde_json::to_vec(plan).map_err(|e| e.to_string())?).into())
+}
+
+fn migration_summary(plan: &MigrationPlan) -> String {
+    let source_manager = match &plan.source_origin {
+        desktop_pet_update_coordinator::migration::LegacyOrigin::Homebrew { brew, formula, cellar_formula_root, .. } =>
+            format!("{} uninstall {formula} (legacy root {})", brew.path.display(), cellar_formula_root.display()),
+        desktop_pet_update_coordinator::migration::LegacyOrigin::HerdrManaged { host, host_config_dir, plugin_root, integration_commit, .. } =>
+            format!("{} managed desktop-pet removal (host config {}, plugin {}), then integration-only retirement at {integration_commit}",
+                host.path.display(), host_config_dir.display(), plugin_root.display()),
+        desktop_pet_update_coordinator::migration::LegacyOrigin::Generated { bundle, .. } =>
+            format!("remove only verified generated bundle {} and captured aliases", bundle.display()),
+        desktop_pet_update_coordinator::migration::LegacyOrigin::Manual { bundle } =>
+            format!("remove only verified manual bundle {} and captured aliases", bundle.display()),
+    };
+    let mut summary = format!(
+        "Operation {}\nHerdr source: {}\nVerified source root: {}\nDesktop Pet target: {} ({})\nTarget image: {}\nTarget source: {}\nExisting config/state profiles preserved; credentials remain in their original namespaces.\nDefault profile adoption: {}\nLegacy retirement approved: {} — {source_manager}\n",
+        plan.operation_id, plan.source_image.path.display(), plan.source_origin.root().display(),
+        plan.target.release.version, plan.target.release.tag, plan.target.image.path.display(),
+        plan.target.origin.manager_label(), plan.adopt_as_default, plan.retirement_consent);
+    match &plan.target.origin {
+        InstallOrigin::Source { root } => {
+            summary.push_str(&format!("Exact target source root: {}\n", root.display()))
+        }
+        InstallOrigin::Standalone { bundle } => {
+            summary.push_str(&format!("Exact target bundle: {}\n", bundle.display()))
+        }
+        InstallOrigin::Homebrew {
+            formula,
+            cellar_formula_root,
+            ..
+        } => summary.push_str(&format!(
+            "Exact target formula: {formula}\nTarget Cellar root: {}\n",
+            cellar_formula_root.display()
+        )),
+        _ => {}
+    }
+    if let Some(manager) = &plan.target_manager_program {
+        summary.push_str(&format!(
+            "Verified target manager: {}\n",
+            manager.path.display()
+        ));
+    }
+    for alias in &plan.legacy_aliases {
+        summary.push_str(&format!(
+            "Verified legacy alias to retire: {}\n",
+            alias.display()
+        ));
+    }
+    for profile in &plan.profiles {
+        summary.push_str(&format!(
+            "\nProfile: {}\nState: {}\nInstance: {} · PID {}\nObservation: {:?}\n",
+            profile.config_dir.display(),
+            profile.state_dir.display(),
+            profile.instance_id,
+            profile.pid,
+            profile.observation
+        ));
+    }
+    if plan.tern_reconnect_required {
+        summary.push_str(
+            "\nTern reconnect confirmation is required separately after native readiness.\n",
+        );
+    }
+    summary.push_str(
+        "\nNo automatic manager replay or guaranteed rollback. Closing progress only hides it.",
+    );
+    summary
+}
 
 #[derive(Clone, Copy)]
 enum Locale {
@@ -19,13 +94,14 @@ impl Locale {
         }
     }
 
-    fn title(self) -> &'static str {
-        match self {
-            Self::En => "Herdr app update",
-            Self::Ko => "Herdr 앱 업데이트",
-            Self::ZhHans => "Herdr 应用更新",
-            Self::Ja => "Herdr アプリの更新",
-        }
+    fn title(self) -> String {
+        let suffix = match self {
+            Self::En => " app update",
+            Self::Ko => " 앱 업데이트",
+            Self::ZhHans => " 应用更新",
+            Self::Ja => " アプリの更新",
+        };
+        format!("{}{suffix}", identity::DISPLAY_NAME)
     }
 
     fn details(self, expanded: bool) -> &'static str {
@@ -53,6 +129,7 @@ impl Locale {
 
 fn source_label(origin: &InstallOrigin, locale: Locale) -> String {
     match origin {
+        #[cfg(desktop_pet_legacy)]
         InstallOrigin::Herdr { requested_ref, .. } => {
             let reference = requested_ref.as_deref().unwrap_or(match locale {
                 Locale::En | Locale::Ko => "(default)",
@@ -66,10 +143,16 @@ fn source_label(origin: &InstallOrigin, locale: Locale) -> String {
             }
         }
         InstallOrigin::Homebrew { formula, .. } => format!("Homebrew {formula}"),
-        InstallOrigin::Local { .. } => match locale {
+        InstallOrigin::Source { .. } => match locale {
             Locale::En | Locale::Ko => "local source",
             Locale::ZhHans => "本地来源",
             Locale::Ja => "ローカルの入手元",
+        }
+        .into(),
+        InstallOrigin::Standalone { .. } => match locale {
+            Locale::En | Locale::Ko => "standalone application",
+            Locale::ZhHans => "独立应用",
+            Locale::Ja => "スタンドアロンアプリ",
         }
         .into(),
         InstallOrigin::Manual { .. } => match locale {
@@ -99,6 +182,7 @@ fn release_summary(plan: &UpdatePlan, locale: Locale) -> String {
     };
     let original = source_label(&plan.origin, locale);
     let destination = match &target.origin {
+        #[cfg(desktop_pet_legacy)]
         InstallOrigin::Herdr { requested_ref, .. } => {
             let pinned = target
                 .resolved_commit
@@ -240,7 +324,7 @@ mod mac {
     }
     fn recovery_target() -> Result<Obj, String> {
         unsafe {
-            let name = CString::new("HerdrUpdateCoordinatorRecoveryTarget").unwrap();
+            let name = CString::new("DesktopPetUpdateCoordinatorRecoveryTarget").unwrap();
             let mut cls = objc_getClass(name.as_ptr());
             if cls.is_null() {
                 cls = objc_allocateClassPair(class("NSObject"), name.as_ptr(), 0);
@@ -555,9 +639,40 @@ mod mac {
         target: Obj,
         locale: super::Locale,
         expanded: std::cell::Cell<bool>,
+        migration_authorization: Option<[u8; 32]>,
+        migration_description: Option<String>,
     }
     impl Panel {
         pub fn new(locale: &str, plan: &UpdatePlan) -> Result<Self, String> {
+            desktop_pet_update_coordinator::protocol::validate_operation_id(&plan.operation_id)?;
+            Self::new_summary(
+                locale,
+                &super::release_summary(plan, super::Locale::from_token(locale)),
+                None,
+            )
+        }
+        pub fn for_migration(locale: &str, plan: &super::MigrationPlan) -> Result<Self, String> {
+            desktop_pet_update_coordinator::protocol::validate_operation_id(&plan.operation_id)?;
+            let footer = format!(
+                "Herdr → Desktop Pet {}\n{} profiles preserved · legacy retirement: {}",
+                plan.target.release.version,
+                plan.profiles.len(),
+                plan.retirement_consent
+            );
+            let mut panel =
+                Self::new_summary(locale, &footer, Some(super::migration_digest(plan)?))?;
+            panel.migration_description = Some(super::migration_summary(plan));
+            panel.show(Phase::Preparing, panel.migration_description.as_deref());
+            Ok(panel)
+        }
+        fn new_summary(
+            locale: &str,
+            summary: &str,
+            migration_authorization: Option<[u8; 32]>,
+        ) -> Result<Self, String> {
+            if unsafe { libc::pthread_main_np() } != 1 {
+                return Err("native updater UI must run on the main thread".into());
+            }
             unsafe {
                 let _pool = AutoreleasePool::new();
                 let locale = super::Locale::from_token(locale);
@@ -589,7 +704,7 @@ mod mac {
                     return Err("AppKit window unavailable".into());
                 }
                 send_bool(window, "setReleasedWhenClosed:", false);
-                send_object(window, "setTitle:", string(locale.title()));
+                send_object(window, "setTitle:", string(&locale.title()));
                 let content = object(window, "contentView");
                 let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
                     std::mem::transmute(objc_msgSend as *const ());
@@ -615,11 +730,7 @@ mod mac {
                 let heading = field(179., 27.);
                 let explanation = field(149., 25.);
                 let footer = field(52., 68.);
-                send_object(
-                    footer,
-                    "setStringValue:",
-                    string(&super::release_summary(plan, locale)),
-                );
+                send_object(footer, "setStringValue:", string(summary));
                 let progress = init_view(
                     object(class("NSProgressIndicator"), "alloc"),
                     selector("initWithFrame:"),
@@ -703,6 +814,8 @@ mod mac {
                     target,
                     locale,
                     expanded: std::cell::Cell::new(false),
+                    migration_authorization,
+                    migration_description: None,
                 };
                 panel.show(Phase::Preparing, None);
                 send_void(window, "center");
@@ -710,6 +823,82 @@ mod mac {
                 panel.pump();
                 Ok(panel)
             }
+        }
+        pub fn migration_diagnostics(&self, detail: Option<&str>) -> Option<String> {
+            self.migration_description
+                .as_ref()
+                .map(|description| match detail {
+                    Some(detail) => format!("{detail}\n\n{description}"),
+                    None => description.clone(),
+                })
+        }
+        pub fn confirm_migration(
+            &self,
+            plan: &super::MigrationPlan,
+            retirement_only: bool,
+        ) -> Result<bool, String> {
+            self.require_migration_visible(plan)?;
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                let alert = object(object(class("NSAlert"), "alloc"), "init");
+                if alert.is_null() {
+                    return Err("native migration consent alert unavailable".into());
+                }
+                send_object(
+                    alert,
+                    "setMessageText:",
+                    string(if retirement_only {
+                        "Resume approved legacy retirement?"
+                    } else {
+                        "Migrate Herdr to Desktop Pet?"
+                    }),
+                );
+                send_object(
+                    alert,
+                    "setInformativeText:",
+                    string(&super::migration_summary(plan)),
+                );
+                send_object(
+                    alert,
+                    "addButtonWithTitle:",
+                    string(if retirement_only {
+                        "Resume retirement"
+                    } else {
+                        "Migrate"
+                    }),
+                );
+                send_object(alert, "addButtonWithTitle:", string("Cancel"));
+                let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let accepted = modal(alert, selector("runModal")) == 1000;
+                send_void(alert, "release");
+                self.pump();
+                Ok(accepted)
+            }
+        }
+        pub fn require_migration_visible(&self, plan: &super::MigrationPlan) -> Result<(), String> {
+            if self.migration_authorization != Some(super::migration_digest(plan)?) {
+                return Err(
+                    "migration window is not bound to this source/target/profile authorization"
+                        .into(),
+                );
+            }
+            self.pump();
+            if !self.visible() {
+                self.activate();
+            }
+            if !self.visible() {
+                return Err("independent native migration window is not visible".into());
+            }
+            Ok(())
+        }
+        pub fn set_status(&self, heading: &str, explanation: &str) {
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                send_object(self.heading, "setStringValue:", string(heading));
+                send_object(self.explanation, "setStringValue:", string(explanation));
+            }
+            self.pump();
         }
         pub fn activate(&self) {
             unsafe {
@@ -894,6 +1083,19 @@ impl Panel {
     pub fn new(_: &str, _: &UpdatePlan) -> Result<Self, String> {
         Err("native updater requires macOS AppKit".into())
     }
+    pub fn for_migration(_: &str, _: &MigrationPlan) -> Result<Self, String> {
+        Err("native migration requires macOS AppKit".into())
+    }
+    pub fn confirm_migration(&self, _: &MigrationPlan, _: bool) -> Result<bool, String> {
+        Err("native migration requires macOS AppKit".into())
+    }
+    pub fn require_migration_visible(&self, _: &MigrationPlan) -> Result<(), String> {
+        Err("native migration requires macOS AppKit".into())
+    }
+    pub fn set_status(&self, _: &str, _: &str) {}
+    pub fn migration_diagnostics(&self, _: Option<&str>) -> Option<String> {
+        None
+    }
     pub fn activate(&self) {}
     pub fn show(&self, _: Phase, _: Option<&str>) {}
     pub fn pump(&self) {}
@@ -905,4 +1107,100 @@ impl Panel {
         false
     }
     pub fn close(&self) {}
+}
+
+impl MigrationPresentation for Panel {
+    fn show(&self, phase: MigrationPhase, detail: Option<&str>) {
+        let (progress, heading, explanation) = match phase {
+            MigrationPhase::Validating => (
+                Phase::Validating,
+                "Verifying migration",
+                "Checking exact source, target and profiles.",
+            ),
+            MigrationPhase::Staged => (
+                Phase::Preparing,
+                "Migration staged",
+                "Original app remains running.",
+            ),
+            MigrationPhase::Preparing => (
+                Phase::Preparing,
+                "Preparing migration",
+                "Preparing only authorized source instances.",
+            ),
+            MigrationPhase::Stopping => (
+                Phase::Stopping,
+                "Stopping legacy app",
+                "Stopping only prepared source profiles.",
+            ),
+            MigrationPhase::Adopting => (
+                Phase::Installing,
+                "Adopting Desktop Pet",
+                "Preserving captured config/state profiles.",
+            ),
+            MigrationPhase::Starting => (
+                Phase::Starting,
+                "Starting Desktop Pet",
+                "Checking native UI/control and exact profile readiness.",
+            ),
+            MigrationPhase::NativeReady => (
+                Phase::Finalizing,
+                "Desktop Pet native-ready",
+                "Legacy retirement and reconnect are not yet complete.",
+            ),
+            MigrationPhase::Retiring => (
+                Phase::Installing,
+                "Retiring legacy installation",
+                "Running only the explicitly authorized legacy removal.",
+            ),
+            MigrationPhase::RetirementFailed => (
+                Phase::Attention(Attention::Interrupted),
+                "Legacy retirement failed",
+                "Desktop Pet native-ready is not migration complete. Explicit resume only.",
+            ),
+            MigrationPhase::ManagerUnknown => (
+                Phase::Attention(Attention::Interrupted),
+                "Manager outcome unknown",
+                "No automatic replay; inspect the retained journal.",
+            ),
+            MigrationPhase::AwaitingReconnect => (
+                Phase::Attention(Attention::Completion),
+                "Awaiting Tern reconnect",
+                "Native readiness alone is not reconnect confirmation.",
+            ),
+            MigrationPhase::Complete => (
+                Phase::Finalizing,
+                "Migration complete",
+                "Native readiness, legacy retirement and required reconnect verified.",
+            ),
+            MigrationPhase::RollingBack => (
+                Phase::RestoringOriginal,
+                "Restoring original profile",
+                "Checking the exact captured source; no upgrade claimed.",
+            ),
+            MigrationPhase::RolledBack => (
+                Phase::Attention(Attention::OriginalUnchanged),
+                "Migration not applied",
+                "Original profile restored; Desktop Pet migration is not complete.",
+            ),
+            MigrationPhase::UserStopped => (
+                Phase::UserStopped,
+                "App stopped by user",
+                "No updater restart or manager replay.",
+            ),
+            MigrationPhase::Failed => (
+                Phase::Attention(Attention::Interrupted),
+                "Migration needs attention",
+                "Review diagnostics; no automatic retry.",
+            ),
+        };
+        let diagnostic = self.migration_diagnostics(detail);
+        Panel::show(self, progress, diagnostic.as_deref().or(detail));
+        self.set_status(heading, explanation);
+    }
+    fn pump(&self) {
+        Panel::pump(self);
+    }
+    fn require_visible(&self, plan: &MigrationPlan) -> Result<(), String> {
+        self.require_migration_visible(plan)
+    }
 }

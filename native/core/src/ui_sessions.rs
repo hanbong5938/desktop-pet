@@ -1,6 +1,6 @@
 use crate::automation::{lock_automation, DomainAction, DomainOperationState, DomainRequest};
-use crate::herdr::{PromptError, PromptReceipt, PromptResult, RequestOrigin};
 use crate::i18n::{cli_prompt_feedback, CliPromptFeedback};
+use desktop_pet_contracts::{PromptError, PromptReceipt, PromptResult, RequestOrigin};
 
 use super::Ui;
 

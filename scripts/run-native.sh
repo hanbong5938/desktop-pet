@@ -2,23 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-MANIFEST_PATH="$ROOT_DIR/herdr-plugin.toml"
+binary="$ROOT_DIR/dist/DesktopPet.app/Contents/MacOS/desktop-pet"
+helper="$ROOT_DIR/dist/DesktopPet.app/Contents/MacOS/desktop-pet-update-coordinator"
+fail() { printf 'desktop pet development: %s\n' "$*" >&2; exit 1; }
+[[ "${DESKTOP_PET_DISTRIBUTION:-neutral}" == neutral ]] || fail 'use the bounded legacy envelope launcher for a bridge build'
+[[ -f "$binary" && ! -L "$binary" && -x "$binary" && -f "$helper" && ! -L "$helper" && -x "$helper" ]] || fail "core app is not packaged; run bash scripts/install.sh --source first: $binary"
+/usr/bin/codesign --verify --deep --strict "$ROOT_DIR/dist/DesktopPet.app" || fail 'core development bundle has no valid signature'
 
-fail() {
-  printf 'herdr desktop pet: %s\n' "$*" >&2
-  exit 1
-}
-
-[[ -f "$MANIFEST_PATH" ]] || fail "missing plugin manifest: $MANIFEST_PATH"
-version="$(awk -F'"' '/^[[:space:]]*version[[:space:]]*=/ { print $2; exit }' "$MANIFEST_PATH")"
-if [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-  app_name="HerdrDesktopPet.app"
-elif [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.(0|[1-9][0-9]*)$ ]]; then
-  app_name="HerdrDesktopPetBeta.app"
-else
-  fail "manifest version must be a stable or beta.N semantic version, got '$version'"
-fi
-
-binary="$ROOT_DIR/dist/$app_name/Contents/MacOS/herdr-desktop-pet"
-[[ -x "$binary" ]] || fail "installed native binary is missing or not executable: $binary"
+# Development uses its actual absolute core image, never a plugin-local app or
+# PATH fallback, and must not silently attach to the shared/default profile.
+config="" state="" next=""
+for arg in "$@"; do
+  if [[ -n "$next" ]]; then
+    case "$next" in config) config="$arg" ;; state) state="$arg" ;; esac
+    next=""
+  else
+    case "$arg" in --config-dir) next=config ;; --state-dir) next=state ;; esac
+  fi
+done
+[[ -z "$next" && "$config" == /* && "$state" == /* ]] || fail 'pass both --config-dir ABS and --state-dir ABS for a separate development profile'
+default_profile="$(env -u DESKTOP_PET_CONFIG_DIR -u DESKTOP_PET_STATE_DIR "$binary" profile show --json)" || fail 'cannot inspect the default profile'
+default_config="$(/usr/bin/plutil -extract config_dir raw -expect string -o - - <<< "$default_profile")"
+default_state="$(/usr/bin/plutil -extract state_dir raw -expect string -o - - <<< "$default_profile")"
+[[ "$config" != "$default_config" && "$state" != "$default_state" ]] || fail 'development must use separate config and state directories, not the shared default profile'
+"$helper" discover --executable "$binary" --json >/dev/null || fail 'core development image failed native installation/origin validation'
 exec "$binary" "$@"

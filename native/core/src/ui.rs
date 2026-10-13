@@ -47,10 +47,6 @@ use crate::dialogue_editor::{
     DialogueChoice, DialogueDraftBaseline, DialogueEditor, HydrationSync,
 };
 use crate::display_geometry::{DisplayGeometry, BASE_HEIGHT, BASE_WIDTH};
-use crate::herdr::{
-    PromptError, PromptReceipt, PromptResult, PromptSender, RequestOrigin, WorktreeRemoveError,
-    WorktreeRemoveSender,
-};
 use crate::i18n::{
     default_dialogue, disconnected_sources, language_save_failure, resolve_language,
     status_indicator_summary, task_disclosure, task_status, text, worktree_remove_confirmation,
@@ -61,21 +57,26 @@ use crate::lifecycle::{LifecycleSetting, Paths};
 use crate::menu_bar_icon;
 use crate::menu_panel::MenuPanel;
 use crate::official_characters::OfficialCharacters;
+use crate::operations::{PromptSender, WorktreeRemoveSender};
 use crate::pointer_capture::{CaptureId, CaptureState, DownDecision, EventIdentity, PointerSource};
 use crate::preferences::{
     BubbleAppearance, BubbleColor, BubblePalette, BubbleSizes, BubbleTheme, MenuBarIconPreference,
     MenuBarMode, Preferences,
 };
 use crate::session_cards::{card_header_key_at_hit, minimum_selectable_height, SessionCards};
-use crate::session_view::{SessionKey, SessionStatusSummary, WorktreeRemoveTarget};
+use crate::session_view::SessionStatusSummary;
 use crate::sources::ObservationPreferences;
 use crate::state::{AppState, Phase, Scene, MAX_SCALE, MIN_SCALE};
 use crate::status_indicator::{
     semantic_color, StatusIcon, STATUS_ICON_GAP, STATUS_ICON_SIZE, STATUS_ROW_HEIGHT,
 };
 use block2::RcBlock;
+use desktop_pet_contracts::{
+    PromptError, PromptReceipt, PromptResult, RequestOrigin, SessionKey, WorktreeRemoveError,
+    WorktreeRemoveTarget,
+};
+use desktop_pet_update_coordinator::UpdatePolicy;
 use dispatch2::DispatchQueue;
-use herdr_update_coordinator::{ObservationMode, UpdatePolicy};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{
@@ -1444,6 +1445,20 @@ struct Ui {
     app_update: AppUpdateService,
     painted_app_update: Option<(u64, UiLocale, bool)>,
     update_frozen: Option<String>,
+    update_consent: Option<(String, Retained<NSAlert>)>,
+    migration_busy: bool,
+    migration_plan_receiver: Option<
+        mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationPlan, String>>,
+    >,
+    migration_launch_receiver: Option<
+        mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
+    >,
+    migration_plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
+    migration_record: Option<desktop_pet_update_coordinator::migration::MigrationRecord>,
+    migration_journal_receiver: Option<
+        mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
+    >,
+    migration_next_poll: Instant,
     update_composer_editable: Option<bool>,
     update_composer_send_enabled: Option<bool>,
     presentation: Presentation,
@@ -2286,6 +2301,11 @@ define_class!(
         fn apply_app_update(&self, _sender: Option<&AnyObject>) {
             schedule_app_update_confirmation();
         }
+
+        #[unsafe(method(migrateLegacyInstallation:))]
+        fn migrate_legacy_installation(&self, _sender: Option<&AnyObject>) {
+            with_ui_update_action(|ui| ui.begin_legacy_migration());
+        }
         #[unsafe(method(downloadAppUpdate:))]
         fn download_app_update(&self, _sender: Option<&AnyObject>) {
             with_ui_update_action(|ui| ui.download_app_update());
@@ -2300,10 +2320,6 @@ define_class!(
             });
         }
 
-        #[unsafe(method(toggleLifecycleExit:))]
-        fn toggle_lifecycle_exit(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| ui.save_lifecycle_setting(LifecycleSetting::ExitWithHerdr));
-        }
 
         #[unsafe(method(setLanguage:))]
         fn set_language(&self, sender: Option<&AnyObject>) {
@@ -2328,22 +2344,13 @@ define_class!(
         fn set_observation_host(&self, sender: Option<&AnyObject>) {
             let Some(popup) = sender.and_then(|sender| sender.downcast_ref::<NSPopUpButton>()) else { return };
             let Some(item) = popup.selectedItem() else { return };
-            let host = match item.tag() {
-                0 => ObservationMode::Both,
-                1 => ObservationMode::Herdr,
-                2 => ObservationMode::Tern,
-                _ => return,
-            };
-            with_ui_mut(|ui| ui.change_observation(|candidate| candidate.host = host));
-        }
-
-        #[unsafe(method(toggleConnectionScope:))]
-        fn toggle_connection_scope(&self, _sender: Option<&AnyObject>) {
             with_ui_mut(|ui| {
-                ui.menu_panel.toggle_observation_scope();
-                ui.reanchor_menu_panel();
+                if let Some(host) = ui.menu_panel.observation_selection(item.tag()) {
+                    ui.change_observation(|candidate| candidate.host = host);
+                }
             });
         }
+
 
         #[unsafe(method(toggleConnectionSettings:))]
         fn toggle_connection_settings(&self, _sender: Option<&AnyObject>) {
@@ -2361,71 +2368,25 @@ define_class!(
             });
         }
 
-        #[unsafe(method(setObservationLocal:))]
-        fn set_observation_local(&self, sender: Option<&AnyObject>) {
+        #[unsafe(method(toggleIntegrationSetting:))]
+        fn toggle_integration_setting(&self, sender: Option<&AnyObject>) {
             let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
-            with_ui_mut(|ui| ui.change_observation(|candidate| candidate.local = toggle.state() == NSControlStateValueOn));
+            let Some(identifier) = toggle.identifier() else { return };
+            let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
+            with_ui_mut(|ui| ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn));
         }
 
-        #[unsafe(method(setObservationRemote:))]
-        fn set_observation_remote(&self, sender: Option<&AnyObject>) {
-            let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
-            with_ui_mut(|ui| ui.change_observation(|candidate| candidate.remote = toggle.state() == NSControlStateValueOn));
-        }
-
-        #[unsafe(method(setObservationMachine:))]
-        fn set_observation_machine(&self, sender: Option<&AnyObject>) {
-            let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
-            let Some(id) = toggle.identifier().map(|id| id.to_string()) else { return };
-            with_ui_mut(|ui| ui.change_observation_machine(id, toggle.state() == NSControlStateValueOn));
-        }
-
-        #[unsafe(method(showObservationHelp:))]
-        fn show_observation_help(&self, _sender: Option<&AnyObject>) {
-            let Some((mtm, locale, host)) =
-                with_ui_read(|ui| (ui.mtm, ui.locale, ui.prefs.observation().host)) else { return };
-            let (title, details) = match host {
-                ObservationMode::Herdr => (
-                    Message::ObservationHelpTitle,
-                    text(locale, Message::ObservationHelpDetails).to_owned(),
-                ),
-                ObservationMode::Tern => (
-                    Message::ConnectionTernHelpTitle,
-                    text(locale, Message::ConnectionTernHelpDetails).to_owned(),
-                ),
-                ObservationMode::Both => (
-                    Message::ConnectionTitle,
-                    format!(
-                        "{}\n{}\n\n{}\n{}",
-                        text(locale, Message::ObservationHelpTitle),
-                        text(locale, Message::ObservationHelpDetails),
-                        text(locale, Message::ConnectionTernHelpTitle),
-                        text(locale, Message::ConnectionTernHelpDetails),
-                    ),
-                ),
-            };
-            let alert = NSAlert::new(mtm);
-            alert.setMessageText(&NSString::from_str(text(locale, title)));
-            alert.setInformativeText(&NSString::from_str(&details));
-            alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Close)));
-            let _ = alert.runModal();
-        }
-
-        #[unsafe(method(copyObservationReconnect:))]
-        fn copy_observation_reconnect(&self, sender: Option<&AnyObject>) {
+        #[unsafe(method(copyIntegrationAction:))]
+        fn copy_integration_action(&self, sender: Option<&AnyObject>) {
             let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else { return };
-            let Some(id) = button.identifier().map(|id| id.to_string()) else { return };
-            let Some(command) = with_ui_read(|ui| ui.menu_panel.observation_reconnect_command(&id)).flatten() else { return };
+            if !button.isEnabled() { return; }
+            let Some(payload) = button.identifier() else { return };
             let pasteboard = NSPasteboard::generalPasteboard();
             pasteboard.clearContents();
-            let success = pasteboard.setString_forType(
-                &NSString::from_str(&command),
-                unsafe { NSPasteboardTypeString },
-            );
-            with_ui_mut(|ui| {
-                ui.menu_panel.observation_copy_feedback(&id, success);
-                ui.sync_character_menu_frame();
-            });
+            let success = pasteboard.setString_forType(&payload, unsafe { NSPasteboardTypeString });
+            if let Some(locale) = with_ui_read(|ui| ui.locale) {
+                button.setTitle(&NSString::from_str(text(locale, if success { Message::ObservationCommandCopied } else { Message::ObservationCopyFailed })));
+            }
         }
 
         #[unsafe(method(setBubbleTheme:))]
@@ -2822,7 +2783,7 @@ define_class!(
                 .is_ok_and(|state| state.is_ui_ready() && !state.updater_stopping())
                 && !UI_USER_STOP_RECORDED.load(Ordering::Acquire);
             if app_termination_is_user_stop {
-                if let Err(error) = herdr_update_coordinator::protocol::record_user_stop(
+                if let Err(error) = desktop_pet_update_coordinator::protocol::record_user_stop(
                     &self.ivars().paths.state_dir,
                 ) {
                     eprintln!("desktop-pet: cannot record AppKit user termination: {error}");
@@ -3465,7 +3426,10 @@ fn launch_ui(
             .map_err(|_| "native state lock is poisoned".to_string())?;
         state.set_ui_ready();
     }
-    println!("HERDR_DESKTOP_PET_UI_READY");
+    println!(
+        "{}",
+        desktop_pet_update_coordinator::identity::UI_READY_MARKER
+    );
     Ok(())
 }
 
@@ -4166,6 +4130,7 @@ fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
             ui.sync_character_menu_frame();
             ui.menu_panel.show();
             if ui.menu_panel.is_visible() {
+                ui.sync_observation_panel();
                 ui.menu_panel.refresh_bubble_color_controls();
                 ui.queue_language_apply();
                 shown_on = Some(ui.mtm);
@@ -4201,6 +4166,219 @@ fn schedule_app_update_confirmation() {
     // before performClick returns. Confirmation belongs to the default mode.
     unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
 }
+pub(crate) fn confirm_migration_consent_visibility(operation_id: &str) -> Result<(), String> {
+    let operation_id = operation_id.to_owned();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    DispatchQueue::main().exec_async(move || {
+        let visible = with_ui_read(|ui| {
+            ui.update_frozen.as_deref() == Some(operation_id.as_str())
+                && ui
+                    .update_consent
+                    .as_ref()
+                    .is_some_and(|(id, alert)| id == &operation_id && alert.window().isVisible())
+        })
+        .unwrap_or(false);
+        with_ui_internal(|ui| ui.sync_update_consent_visibility());
+        let result = if visible {
+            Ok(())
+        } else {
+            Err(
+                "Migration source consent is not actually visible for this prepared operation"
+                    .to_owned(),
+            )
+        };
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|error| {
+            format!("Cannot obtain actual AppKit migration consent visibility: {error}")
+        })?
+}
+
+fn migration_consent_detail(
+    plan: &desktop_pet_update_coordinator::migration::MigrationPlan,
+    locale: UiLocale,
+) -> String {
+    let profiles = plan
+        .profiles
+        .iter()
+        .map(|profile| {
+            format!(
+                "{}: {}\n{}: {}\nObservation: {}",
+                text(locale, Message::ConnectionConfigDirectory),
+                profile.config_dir.display(),
+                text(locale, Message::ConnectionStateDirectory),
+                profile.state_dir.display(),
+                profile.observation.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "{}\n\n{}: {}\nSHA-256: {}\n{}\n\n{} {}: {}\nSHA-256: {}\n{}\n\n{}\n\n{}\n{}",
+        text(locale, Message::MigrationConsentExplanation),
+        text(locale, Message::AppUpdateSource),
+        plan.source_image.path.display(),
+        plan.source_image.sha256,
+        serde_json::to_string_pretty(&plan.source_origin).unwrap_or_else(|error| error.to_string()),
+        desktop_pet_update_coordinator::identity::neutral::DISPLAY_NAME,
+        plan.target.release.version,
+        plan.target.image.path.display(),
+        plan.target.image.sha256,
+        app_update::source_description(&plan.target.origin),
+        profiles,
+        text(
+            locale,
+            if plan.adopt_as_default {
+                Message::MigrationDefaultAdopt
+            } else {
+                Message::MigrationDefaultRetain
+            }
+        ),
+        text(locale, Message::MigrationRetirementConsent)
+    )
+}
+
+fn schedule_migration_confirmation(
+    plan: desktop_pet_update_coordinator::migration::MigrationPlan,
+    resume: bool,
+) {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(move || confirm_legacy_migration(plan.clone(), resume));
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn confirm_legacy_migration(
+    plan: desktop_pet_update_coordinator::migration::MigrationPlan,
+    resume: bool,
+) {
+    let Some((mtm, locale, admitted)) = with_ui_read(|ui| {
+        let admitted = ui.update_frozen.is_none()
+            && ui.shared.lock().is_ok_and(|state| {
+                state.update_mutation_allowed().is_ok()
+                    && state.update_context().is_some_and(|context| {
+                        let image = if resume {
+                            &plan.target.image
+                        } else {
+                            &plan.source_image
+                        };
+                        context.running == *image
+                            && plan.profiles.iter().any(|profile| {
+                                profile.config_dir == context.config_dir
+                                    && profile.state_dir == context.state_dir
+                            })
+                    })
+            });
+        (ui.mtm, ui.locale, admitted)
+    }) else {
+        return;
+    };
+    if !admitted {
+        with_ui_internal(|ui| {
+            ui.migration_busy = false;
+            ui.painted_app_update = None;
+            ui.app_update.set_problem(
+                "Migration source or target image/profile changed; review again".into(),
+            );
+            ui.refresh_app_update();
+        });
+        return;
+    }
+    let alert = NSAlert::new(mtm);
+    let title = if resume {
+        Message::MigrationResume
+    } else {
+        Message::MigrationTitle
+    };
+    alert.setMessageText(&NSString::from_str(text(locale, title)));
+    alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
+        &plan, locale,
+    )));
+    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
+    alert.addButtonWithTitle(&NSString::from_str(text(locale, title)));
+    if alert.runModal() != NSAlertSecondButtonReturn {
+        with_ui_internal(|ui| {
+            ui.migration_busy = false;
+            ui.painted_app_update = None;
+            ui.refresh_app_update();
+        });
+        return;
+    }
+    // Keep AppKit objects on the main thread. Only the approved plan crosses
+    // the potentially deferred update action; it creates and retains its own
+    // visible consent window before the helper can prepare the migration.
+    drop(alert);
+    with_ui_update_action(move |ui| {
+        let blockers = ui.restart_blockers_snapshot();
+        if !blockers.is_empty() {
+            ui.migration_busy = false;
+            ui.app_update.set_problem(blockers.join("; "));
+            return;
+        }
+        let alert = NSAlert::new(ui.mtm);
+        alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
+            &plan, ui.locale,
+        )));
+        alert.addButtonWithTitle(&NSString::from_str(text(
+            ui.locale,
+            Message::AppUpdateLater,
+        )));
+        alert.addButtonWithTitle(&NSString::from_str(text(ui.locale, title)));
+        for button in alert.buttons().iter() {
+            button.setEnabled(false);
+        }
+        alert.setMessageText(&NSString::from_str(text(
+            ui.locale,
+            Message::MigrationPreparing,
+        )));
+        alert.layout();
+        alert.window().orderFrontRegardless();
+        if !alert.window().isVisible() {
+            ui.migration_busy = false;
+            ui.app_update
+                .set_problem("Migration consent window is not visible".into());
+            return;
+        }
+        ui.clear_update_consent();
+        ui.update_consent = Some((plan.operation_id.clone(), alert));
+        ui.sync_update_consent_visibility();
+        ui.migration_plan = Some(plan.clone());
+        ui.migration_busy = true;
+        ui.painted_app_update = None;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        ui.migration_launch_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            use std::os::unix::process::CommandExt;
+            let result = (|| -> Result<desktop_pet_update_coordinator::migration::MigrationRecord, String> {
+                let directory = plan.profiles[0].state_dir.join("updates-v4");
+                let path = if resume { directory.join(format!("{}.migration-plan.json", plan.operation_id)) } else {
+                    let existing = directory.join(format!("{}.migration-consent.json", plan.operation_id));
+                    if existing.exists() {
+                        if desktop_pet_update_coordinator::migration::read_plan(&existing)? != plan { return Err("Migration consent evidence changed".into()); }
+                        existing
+                    } else { desktop_pet_update_coordinator::migration::write_new_plan(&plan)? }
+                };
+                let helper = plan.target.staged_bundle.join("Contents/MacOS").join(desktop_pet_update_coordinator::identity::neutral::HELPER);
+                let mut command = std::process::Command::new(helper);
+                command.arg("migrate-legacy").arg("--plan").arg(&path);
+                if resume { command.arg("--resume-retirement"); }
+                command.env_clear().envs(&plan.profiles[0].environment).stdin(std::process::Stdio::null()).stdout(if resume { std::process::Stdio::null() } else { std::process::Stdio::piped() }).stderr(std::process::Stdio::null());
+                unsafe { command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
+                let mut child = command.spawn().map_err(|error| format!("Verified migration helper could not start: {error}"))?;
+                if !resume {
+                    let mut stdout = child.stdout.take().ok_or("Migration helper ownership channel is missing")?;
+                    desktop_pet_update_coordinator::migration::read_final_visible_ack(&mut stdout, &plan, &path)?;
+                    std::io::copy(&mut stdout, &mut std::io::sink()).map_err(|error| format!("Migration helper result channel failed: {error}"))?;
+                }
+                child.wait().map_err(|error| format!("Migration helper wait failed; delivery is unknown: {error}"))?;
+                desktop_pet_update_coordinator::migration::read_record(&plan)
+            })();
+            let _ = sender.send(result);
+        });
+        ui.refresh_app_update();
+    });
+}
 
 fn confirm_app_update() {
     // Default-mode scheduling leaves native button tracking first; NSAlert
@@ -4217,7 +4395,7 @@ fn confirm_app_update() {
         let generation = ui.app_update.consent_generation();
         if matches!(
             &plan.action,
-            herdr_update_coordinator::UpdateAction::ApplyInstalled
+            desktop_pet_update_coordinator::UpdateAction::ApplyInstalled
         ) && plan.candidate.is_none()
         {
             return Err("Installed candidate identity is unavailable".into());
@@ -4259,69 +4437,59 @@ fn confirm_app_update() {
     let legacy_detail = || {
         let source = app_update::source_description(&plan.origin);
         let ref_note = match (&plan.origin, locale) {
-        (herdr_update_coordinator::InstallOrigin::Herdr { requested_ref: Some(reference), .. }, UiLocale::Ko) =>
-            format!("저장된 ref '{reference}'를 다시 설치합니다. 고정 ref는 최신 릴리스를 보장하지 않습니다."),
-        (herdr_update_coordinator::InstallOrigin::Herdr { requested_ref: Some(reference), .. }, UiLocale::En) =>
-            format!("Reinstalls recorded ref '{reference}'; a pinned ref does not guarantee the latest release."),
-        (herdr_update_coordinator::InstallOrigin::Herdr { requested_ref: Some(reference), .. }, UiLocale::ZhHans) =>
-            format!("重新安装记录的 ref“{reference}”；固定的 ref 不保证是最新版本。"),
-        (herdr_update_coordinator::InstallOrigin::Herdr { requested_ref: Some(reference), .. }, UiLocale::Ja) =>
-            format!("記録された ref「{reference}」を再インストールします。固定された ref が最新リリースとは限りません。"),
-        (herdr_update_coordinator::InstallOrigin::Local { .. }, UiLocale::Ko) =>
-            "현재 체크아웃만 빌드합니다. git pull 또는 ref 변경은 하지 않습니다.".into(),
-        (herdr_update_coordinator::InstallOrigin::Local { .. }, UiLocale::En) =>
-            "Builds the current checkout only. No git pull or ref change.".into(),
-        (herdr_update_coordinator::InstallOrigin::Local { .. }, UiLocale::ZhHans) =>
-            "仅构建当前检出的代码；不会执行 git pull 或更改 ref。".into(),
-        (herdr_update_coordinator::InstallOrigin::Local { .. }, UiLocale::Ja) =>
-            "現在のチェックアウトのみをビルドします。git pull や ref の変更は行いません。".into(),
-        _ => String::new(),
-    };
+            (desktop_pet_update_coordinator::InstallOrigin::Source { .. }, UiLocale::Ko) => {
+                "현재 체크아웃만 빌드합니다. git pull 또는 ref 변경은 하지 않습니다.".into()
+            }
+            (desktop_pet_update_coordinator::InstallOrigin::Source { .. }, UiLocale::En) => {
+                "Builds the current checkout only. No git pull or ref change.".into()
+            }
+            (desktop_pet_update_coordinator::InstallOrigin::Source { .. }, UiLocale::ZhHans) => {
+                "仅构建当前检出的代码；不会执行 git pull 或更改 ref。".into()
+            }
+            (desktop_pet_update_coordinator::InstallOrigin::Source { .. }, UiLocale::Ja) => {
+                "現在のチェックアウトのみをビルドします。git pull や ref の変更は行いません。"
+                    .into()
+            }
+            _ => String::new(),
+        };
         let action_note = match (&plan.action, locale) {
-        (herdr_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::Ko) => {
+        (desktop_pet_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::Ko) => {
             let candidate = plan.candidate.as_ref().expect("verified installed candidate");
             format!("설치 명령 없이 검증된 교체본만 적용합니다: {} · SHA-256 {}",
                 candidate.path.display(), candidate.sha256)
         }
-        (herdr_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::En) => {
+        (desktop_pet_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::En) => {
             let candidate = plan.candidate.as_ref().expect("verified installed candidate");
             format!("Applies only this verified installed image without an installer command: {} · SHA-256 {}",
                 candidate.path.display(), candidate.sha256)
         }
-        (herdr_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::ZhHans) => {
+        (desktop_pet_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::ZhHans) => {
             let candidate = plan.candidate.as_ref().expect("verified installed candidate");
             format!("不运行安装命令，仅应用此已验证的安装映像：{} · SHA-256 {}",
                 candidate.path.display(), candidate.sha256)
         }
-        (herdr_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::Ja) => {
+        (desktop_pet_update_coordinator::UpdateAction::ApplyInstalled, UiLocale::Ja) => {
             let candidate = plan.candidate.as_ref().expect("verified installed candidate");
             format!("インストーラーのコマンドを実行せず、検証済みのインストールイメージのみを適用します：{} · SHA-256 {}",
                 candidate.path.display(), candidate.sha256)
         }
-        (herdr_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::Ko) =>
+        (desktop_pet_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::Ko) =>
             "동의하면 이 formula에 대해서만 Homebrew 메타데이터 갱신 및 업그레이드를 실행할 수 있습니다.".into(),
-        (herdr_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::En) =>
+        (desktop_pet_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::En) =>
             "Only after this consent may Homebrew refresh metadata and upgrade this same formula.".into(),
-        (herdr_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::ZhHans) =>
+        (desktop_pet_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::ZhHans) =>
             "仅在您同意后，Homebrew 才会更新元数据并升级同一个 formula。".into(),
-        (herdr_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::Ja) =>
+        (desktop_pet_update_coordinator::UpdateAction::HomebrewUpgrade, UiLocale::Ja) =>
             "同意後に限り、Homebrew はメタデータを更新し、同じ formula をアップグレードできます。".into(),
-        (herdr_update_coordinator::UpdateAction::LocalRebuild, UiLocale::Ko) =>
+        (desktop_pet_update_coordinator::UpdateAction::SourceRebuild, UiLocale::Ko) =>
             "현재 디스크의 소스와 빌드 스크립트를 신뢰해야 합니다. 코드를 받거나 ref를 변경하지 않습니다.".into(),
-        (herdr_update_coordinator::UpdateAction::LocalRebuild, UiLocale::En) =>
+        (desktop_pet_update_coordinator::UpdateAction::SourceRebuild, UiLocale::En) =>
             "Trust the on-disk source and build scripts. No code is fetched or ref changed.".into(),
-        (herdr_update_coordinator::UpdateAction::LocalRebuild, UiLocale::ZhHans) =>
+        (desktop_pet_update_coordinator::UpdateAction::SourceRebuild, UiLocale::ZhHans) =>
             "您需要信任磁盘上的源代码和构建脚本；不会获取代码或更改 ref。".into(),
-        (herdr_update_coordinator::UpdateAction::LocalRebuild, UiLocale::Ja) =>
+        (desktop_pet_update_coordinator::UpdateAction::SourceRebuild, UiLocale::Ja) =>
             "ディスク上のソースとビルドスクリプトを信頼する必要があります。コードの取得や ref の変更は行いません。".into(),
-        (herdr_update_coordinator::UpdateAction::HerdrReinstall, UiLocale::Ko) =>
-            "등록된 Herdr 관리자와 소스의 빌드 스크립트를 실행합니다. 사전 빌드 파일 설치 실패 후에도 소스 빌드로 전환될 수 있습니다.".into(),
-        (herdr_update_coordinator::UpdateAction::HerdrReinstall, UiLocale::En) =>
-            "Runs the registered Herdr manager and source build scripts. Source fallback may follow even a failed prebuilt replacement.".into(),
-        (herdr_update_coordinator::UpdateAction::HerdrReinstall, UiLocale::ZhHans) =>
-            "将运行已注册的 Herdr 管理器和源代码构建脚本。即使预构建映像替换失败，也可能转为从源码构建。".into(),
-        (herdr_update_coordinator::UpdateAction::HerdrReinstall, UiLocale::Ja) =>
-            "登録済みの Herdr マネージャーとソースのビルドスクリプトを実行します。ビルド済みイメージの置き換えに失敗した場合も、ソースからのビルドに移ることがあります。".into(),
+        _ => plan.action.consent_notice(locale.tag()).to_owned(),
     };
         format!(
             "{}\n\n{}: {}\n{}\n{}\n\n{}\n{}",
@@ -4367,8 +4535,8 @@ fn confirm_app_update() {
     alert.setInformativeText(&NSString::from_str(&detail));
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
     let action = match &plan.action {
-        herdr_update_coordinator::UpdateAction::LocalRebuild => Message::AppUpdateRebuild,
-        herdr_update_coordinator::UpdateAction::ApplyInstalled => Message::AppUpdateApply,
+        desktop_pet_update_coordinator::UpdateAction::SourceRebuild => Message::AppUpdateRebuild,
+        desktop_pet_update_coordinator::UpdateAction::ApplyInstalled => Message::AppUpdateApply,
         _ => Message::AppUpdateInstall,
     };
     alert.addButtonWithTitle(&NSString::from_str(text(locale, action)));
@@ -5092,6 +5260,7 @@ impl Ui {
             .map_err(|_| "native state lock is poisoned".to_owned())?;
         let scene = state.scene();
         let update_context = state.update_context().cloned();
+        let migration_plan = state.pending_migration_plan().cloned();
         let automation = state
             .automation()
             .ok_or("presentation automation was not initialized")?;
@@ -5426,7 +5595,17 @@ impl Ui {
                 &context.executable,
                 &context.config_dir,
                 &context.state_dir,
-                &context.herdr_socket,
+                text(
+                    locale,
+                    if context.executable == context.running.path
+                        && context.config_dir == lifecycle_paths.config_dir
+                        && context.state_dir == lifecycle_paths.state_dir
+                    {
+                        Message::ConnectionIdentityMatched
+                    } else {
+                        Message::ConnectionIdentityMismatch
+                    },
+                ),
             );
         }
         menu_panel.set_bubble_appearance(bubble_appearance);
@@ -5643,6 +5822,14 @@ impl Ui {
             app_update,
             painted_app_update: None,
             update_frozen: None,
+            update_consent: None,
+            migration_busy: migration_plan.is_some(),
+            migration_plan_receiver: None,
+            migration_launch_receiver: None,
+            migration_plan,
+            migration_record: None,
+            migration_journal_receiver: None,
+            migration_next_poll: Instant::now(),
             update_composer_editable: None,
             update_composer_send_enabled: None,
             presentation: Presentation {
@@ -5704,6 +5891,22 @@ impl Ui {
         ui.clamp_panel();
         ui.update_bubble_frame();
         ui.prepare_initial_rig_surface()?;
+        if let Some(plan) = ui.migration_plan.as_ref() {
+            let alert = NSAlert::new(ui.mtm);
+            alert.setMessageText(&NSString::from_str(text(
+                ui.locale,
+                Message::MigrationPreparing,
+            )));
+            alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
+                plan, ui.locale,
+            )));
+            alert.layout();
+            alert.window().orderFrontRegardless();
+            if !alert.window().isVisible() {
+                return Err("Migration progress window is not visible".into());
+            }
+            ui.update_consent = Some((plan.operation_id.clone(), alert));
+        }
         ui.refresh();
         ui.start_update_timer();
         Ok(ui)
@@ -6635,7 +6838,7 @@ impl Ui {
                 &status,
                 state.lifecycle_settings(),
                 state.observation_preferences(),
-                state.observation_catalog(),
+                state.provider_labels(),
                 state.host_connections(),
             );
         }
@@ -7351,7 +7554,10 @@ impl Ui {
         }
         if self.reply_open && self.bubble_mode == BubbleMode::Expanded {
             if let Some(key) = next_key.as_ref() {
-                let readonly = matches!(available.as_ref(), Some(Err(PromptError::ReadOnly)));
+                let readonly = matches!(
+                    available.as_ref(),
+                    Some(Err(PromptError::ReadOnly | PromptError::Unsupported))
+                );
                 let height = if readonly {
                     COMPOSER_READONLY_HEIGHT
                 } else {
@@ -7545,6 +7751,13 @@ impl Ui {
         position: bool,
         reset: bool,
     ) {
+        if self
+            .shared
+            .lock()
+            .map_or(true, |state| state.migration_gated())
+        {
+            return;
+        }
         let mut candidate = self.prefs.candidate();
         let mut saved = self.saved_presentation;
         if let Some(value) = patch.visible {
@@ -7599,6 +7812,13 @@ impl Ui {
     }
 
     fn save_position_only(&mut self, standalone: Option<Option<(f64, f64)>>) -> Result<(), String> {
+        if self
+            .shared
+            .lock()
+            .map_or(true, |state| state.migration_gated())
+        {
+            return Err("migration target is not committed; position remains in memory".into());
+        }
         let mut candidate = self.prefs.candidate();
         if let Some(position) = standalone {
             candidate.set_standalone_bubble_position(position);
@@ -7698,6 +7918,7 @@ impl Ui {
     }
 
     fn refresh(&mut self) {
+        self.sync_update_consent_visibility();
         self.poll_composer();
         self.cards.set_composition_active(self.composer_marked());
         self.cards.sync_search_composition();
@@ -7726,15 +7947,15 @@ impl Ui {
         };
         if let Some(outcome) = outcomes.iter().max_by_key(|observation| {
             let priority = match observation.outcome {
-                crate::agent_outcome::AgentOutcome::Failed => 2,
-                crate::agent_outcome::AgentOutcome::Cancelled => 1,
+                desktop_pet_contracts::AgentOutcome::Failed => 2,
+                desktop_pet_contracts::AgentOutcome::Cancelled => 1,
                 _ => 0,
             };
             (observation.at_unix_ms, priority)
         }) {
             self.behavior
                 .accept_outcome(self.launch_time.elapsed(), &scene, outcome.outcome);
-            completed = outcome.outcome == crate::agent_outcome::AgentOutcome::Succeeded;
+            completed = outcome.outcome == desktop_pet_contracts::AgentOutcome::Succeeded;
         }
         let cards_height = self.cards.content_height();
         let was_focused = self.composer_has_focus();
@@ -8010,6 +8231,131 @@ impl Ui {
         self.update_pointer_policy(scene);
     }
 
+    fn begin_legacy_migration(&mut self) {
+        if self.migration_busy || self.update_frozen.is_some() {
+            return;
+        }
+        if let Some(plan) = self.migration_plan.clone() {
+            let resume = self.migration_record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed);
+            if resume || self.migration_record.is_none() {
+                self.migration_busy = true;
+                self.painted_app_update = None;
+                schedule_migration_confirmation(plan, resume);
+                return;
+            }
+        }
+        if !self.app_update.model(self.locale).migration_available {
+            return;
+        }
+        let context = self.shared.lock().ok().and_then(|state| {
+            state.update_mutation_allowed().ok()?;
+            state.update_context().cloned()
+        });
+        let Some(context) = context else {
+            return;
+        };
+        let blockers = self.restart_blockers_snapshot();
+        if !blockers.is_empty() {
+            self.app_update.set_problem(blockers.join("; "));
+            return;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.migration_plan_receiver = Some(receiver);
+        self.migration_busy = true;
+        self.painted_app_update = None;
+        std::thread::spawn(move || {
+            let result = desktop_pet_update_coordinator::migration::prepare_bridge_plan(
+                &context,
+                desktop_pet_update_coordinator::identity::herdr_migration_revision(),
+            );
+            let _ = sender.send(result);
+        });
+        self.refresh_app_update();
+    }
+
+    fn poll_legacy_migration(&mut self) {
+        if let Some(receiver) = &self.migration_plan_receiver {
+            let result = match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Migration staging worker ended without a result".into()))
+                }
+            };
+            if let Some(result) = result {
+                self.migration_plan_receiver = None;
+                self.painted_app_update = None;
+                match result {
+                    Ok(plan) => schedule_migration_confirmation(plan, false),
+                    Err(error) => {
+                        self.migration_busy = false;
+                        self.app_update.set_problem(error);
+                    }
+                }
+            }
+        }
+        if let Some(receiver) = &self.migration_launch_receiver {
+            let result = match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Migration helper outcome is unavailable; inspect the retained journal before another operation".into())),
+            };
+            if let Some(result) = result {
+                self.migration_launch_receiver = None;
+                self.migration_busy = false;
+                self.painted_app_update = None;
+                match result {
+                    Ok(record) => self.migration_record = Some(record),
+                    Err(error) => self.app_update.set_problem(error),
+                }
+            }
+        }
+        if let Some(receiver) = &self.migration_journal_receiver {
+            let result = match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Migration journal observation failed; no new operation is authorized".into(),
+                )),
+            };
+            if let Some(result) = result {
+                self.migration_journal_receiver = None;
+                self.migration_next_poll = Instant::now() + Duration::from_secs(1);
+                self.painted_app_update = None;
+                match result {
+                    Ok(record) => {
+                        self.migration_busy = !matches!(record.phase,
+                            desktop_pet_update_coordinator::migration::MigrationPhase::Complete
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::ManagerUnknown
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::AwaitingReconnect
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::UserStopped
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::Failed
+                            | desktop_pet_update_coordinator::migration::MigrationPhase::RolledBack);
+                        self.migration_record = Some(record);
+                        if self.migration_record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete) && self.update_frozen.is_none() {
+                            self.clear_update_consent();
+                        }
+                    }
+                    Err(error) => self
+                        .app_update
+                        .set_problem(format!("Migration journal: {error}")),
+                }
+            }
+        }
+        if self.migration_journal_receiver.is_none() && Instant::now() >= self.migration_next_poll {
+            if let Some(plan) = self.migration_plan.clone() {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                self.migration_journal_receiver = Some(receiver);
+                std::thread::spawn(move || {
+                    let _ = sender.send(desktop_pet_update_coordinator::migration::read_record(
+                        &plan,
+                    ));
+                });
+            }
+        }
+    }
+
     fn refresh_app_update(&mut self) {
         let painted = (
             self.app_update.revision(),
@@ -8019,8 +8365,146 @@ impl Ui {
         if self.painted_app_update == Some(painted) {
             return;
         }
-        self.menu_panel
-            .refresh_app_update(&self.app_update.model(self.locale));
+        if let Some((selected, matches)) = self.app_update.selected_executable() {
+            self.menu_panel.set_connection_profile(
+                selected,
+                &self.lifecycle_paths.config_dir,
+                &self.lifecycle_paths.state_dir,
+                text(
+                    self.locale,
+                    if matches {
+                        Message::ConnectionIdentityMatched
+                    } else {
+                        Message::ConnectionIdentityMismatch
+                    },
+                ),
+            );
+        }
+        let mut model = self.app_update.model(self.locale);
+        if let Some(plan) = &self.migration_plan {
+            if self.migration_record.as_ref().is_some_and(|record| {
+                record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
+            }) {
+                model.migration_visible = false;
+                model.migration_available = false;
+                model.history.push_str(&format!(
+                    "\n{} · {}",
+                    plan.operation_id,
+                    text(self.locale, Message::MigrationRetired)
+                ));
+            } else {
+                model.migration_visible = true;
+                model.action = None;
+                model.download_url = None;
+                model.source = plan.target.origin.manager_label().to_owned();
+                model.diagnostics.push_str(&format!(
+                    "\nMigration operation: {}\n{}",
+                    plan.operation_id,
+                    migration_consent_detail(plan, self.locale)
+                ));
+                if let Some(record) = &self.migration_record {
+                    use desktop_pet_update_coordinator::migration::MigrationPhase;
+                    let message = match record.phase {
+                        MigrationPhase::Complete => Message::MigrationRetired,
+                        MigrationPhase::RetirementFailed => Message::MigrationRetirementFailed,
+                        MigrationPhase::ManagerUnknown => Message::MigrationManagerUnknown,
+                        MigrationPhase::AwaitingReconnect => Message::MigrationReconnectPending,
+                        MigrationPhase::UserStopped => Message::AppUpdateUserStopped,
+                        MigrationPhase::Failed | MigrationPhase::RolledBack => {
+                            Message::AppUpdateFailed
+                        }
+                        _ if record.native_ready => Message::MigrationNativeReady,
+                        _ => Message::MigrationPreparing,
+                    };
+                    model.status_text = text(self.locale, message).to_owned();
+                    model.status = if record.phase == MigrationPhase::Complete {
+                        desktop_pet_update_coordinator::CheckStatus::Applied
+                    } else if matches!(
+                        record.phase,
+                        MigrationPhase::RetirementFailed
+                            | MigrationPhase::ManagerUnknown
+                            | MigrationPhase::Failed
+                            | MigrationPhase::RolledBack
+                            | MigrationPhase::UserStopped
+                    ) {
+                        desktop_pet_update_coordinator::CheckStatus::Failed
+                    } else {
+                        desktop_pet_update_coordinator::CheckStatus::Checking
+                    };
+                    model.migration_available = record.phase == MigrationPhase::RetirementFailed;
+                    if model.migration_available {
+                        model.migration_title =
+                            text(self.locale, Message::MigrationResume).to_owned();
+                    }
+                    model.detail = record
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| text(self.locale, message).to_owned());
+                    if record.native_ready {
+                        let pending_profiles = plan
+                            .profiles
+                            .iter()
+                            .filter(|profile| profile.tern_reconnect_required)
+                            .filter(|profile| {
+                                !record.reconnected_profiles.iter().any(|proof| {
+                                    proof.config_dir == profile.config_dir
+                                        && proof.state_dir == profile.state_dir
+                                })
+                            })
+                            .map(|profile| {
+                                format!(
+                                    "{}: {}\n{}: {}",
+                                    text(self.locale, Message::ConnectionConfigDirectory),
+                                    profile.config_dir.display(),
+                                    text(self.locale, Message::ConnectionStateDirectory),
+                                    profile.state_dir.display()
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if !pending_profiles.is_empty() {
+                            model.detail.push_str(&format!(
+                                "\n\n{}\n{}",
+                                text(self.locale, Message::MigrationReconnectPending),
+                                pending_profiles.join("\n\n")
+                            ));
+                        }
+                    }
+                    model.history = format!(
+                        "{} · {:?} · native ready {} · committed {}",
+                        plan.operation_id,
+                        record.phase,
+                        record.native_ready,
+                        record.target_committed
+                    );
+                } else {
+                    model.migration_available = !self.migration_busy;
+                }
+            }
+        }
+        if self.migration_busy {
+            model.busy = true;
+            model.migration_available = false;
+        }
+        if let Some((operation_id, alert)) = &self.update_consent {
+            if self
+                .migration_plan
+                .as_ref()
+                .is_some_and(|plan| &plan.operation_id == operation_id)
+            {
+                alert.setMessageText(&NSString::from_str(&model.status_text));
+                let plan = self
+                    .migration_plan
+                    .as_ref()
+                    .expect("matched migration consent");
+                alert.setInformativeText(&NSString::from_str(&format!(
+                    "{}\n\n{}",
+                    model.detail,
+                    migration_consent_detail(plan, self.locale)
+                )));
+                alert.layout();
+            }
+        }
+        self.menu_panel.refresh_app_update(&model);
         self.painted_app_update = Some(painted);
     }
 
@@ -8045,8 +8529,17 @@ impl Ui {
     }
 
     fn update_tick(&mut self) {
+        self.sync_observation_panel();
+        self.poll_legacy_migration();
+        self.sync_update_consent_visibility();
         self.process_update_prepare();
-        self.app_update.check_due();
+        if self
+            .shared
+            .lock()
+            .is_ok_and(|state| !state.migration_gated())
+        {
+            self.app_update.check_due();
+        }
         self.app_update.poll_operation();
         while let Some(event) = self.app_update.next_event() {
             match event {
@@ -8062,9 +8555,14 @@ impl Ui {
                     {
                         continue;
                     }
-                    if let Some(checked_at) =
-                        self.app_update
-                            .checked_at_for_save(request_id, policy_generation, &result)
+                    if let Some(checked_at) = self
+                        .app_update
+                        .checked_at_for_save(request_id, policy_generation, &result)
+                        .filter(|_| {
+                            self.shared
+                                .lock()
+                                .is_ok_and(|state| state.update_mutation_allowed().is_ok())
+                        })
                     {
                         let mut candidate = self.prefs.candidate();
                         candidate.set_update_check_time(
@@ -8084,6 +8582,7 @@ impl Ui {
                     }
                     self.app_update
                         .checked_event(request_id, policy_generation, result, settled);
+                    self.app_update.check_migration_eligibility();
                 }
                 app_update::Event::LaunchWaiting { operation_id } => {
                     self.app_update.launch_waiting(&operation_id);
@@ -8131,6 +8630,45 @@ impl Ui {
                     }
                 }
                 app_update::Event::LatestJournal(result) => self.app_update.latest_journal(result),
+                app_update::Event::MigrationEligibility { context, result } => {
+                    self.app_update.migration_eligibility(context, result)
+                }
+                app_update::Event::MigrationHistory { context, result } => {
+                    if !self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        continue;
+                    }
+                    self.app_update
+                        .migration_history_checked(&context, result.is_ok());
+                    match result {
+                        Ok(Some((plan, record)))
+                            if self.migration_plan.is_none() && !self.migration_busy =>
+                        {
+                            use desktop_pet_update_coordinator::migration::MigrationPhase;
+                            self.migration_busy = !matches!(
+                                record.phase,
+                                MigrationPhase::Complete
+                                    | MigrationPhase::RetirementFailed
+                                    | MigrationPhase::ManagerUnknown
+                                    | MigrationPhase::AwaitingReconnect
+                                    | MigrationPhase::UserStopped
+                                    | MigrationPhase::Failed
+                                    | MigrationPhase::RolledBack
+                            );
+                            self.migration_plan = Some(plan);
+                            self.migration_record = Some(record);
+                            self.migration_next_poll = Instant::now();
+                            self.painted_app_update = None;
+                        }
+                        Ok(_) => {}
+                        Err(error) => self
+                            .app_update
+                            .set_problem(format!("Migration history: {error}")),
+                    }
+                }
             }
         }
         self.refresh_app_update();
@@ -8277,23 +8815,91 @@ impl Ui {
         blocked
     }
 
+    fn sync_update_consent_visibility(&self) {
+        let (operation, visible) = self
+            .update_consent
+            .as_ref()
+            .map_or((None, false), |(id, alert)| {
+                (Some(id.clone()), alert.window().isVisible())
+            });
+        if let Ok(mut state) = self.shared.lock() {
+            state.set_update_ui_visibility(operation, visible);
+        }
+    }
+
+    fn clear_update_consent(&mut self) {
+        if let Some((_, alert)) = self.update_consent.take() {
+            alert.window().orderOut(None);
+        }
+        if let Ok(mut state) = self.shared.lock() {
+            state.set_update_ui_visibility(None, false);
+        }
+    }
+
     fn prepare_update(&mut self, operation_id: &str, _token: &str) -> Result<(), String> {
         if self.update_frozen.is_some() {
             return Err("another update is already prepared".into());
         }
-        let plan = self
-            .app_update
-            .preparing_plan(operation_id)
-            .ok_or("update plan or operation changed; check again")?;
-        let current = self
-            .shared
-            .lock()
-            .map_err(|_| "native state lock is poisoned")?
-            .update_context()
-            .cloned()
-            .ok_or("running update context unavailable")?;
-        if plan.context != current || plan.running != current.running {
-            return Err("running executable, instance or profile changed".into());
+        let (current, migration) = {
+            let state = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?;
+            (
+                state
+                    .update_context()
+                    .cloned()
+                    .ok_or("running update context unavailable")?,
+                state.pending_migration_plan().cloned(),
+            )
+        };
+        if let Some(plan) = migration {
+            let profile = plan
+                .profiles
+                .iter()
+                .find(|profile| {
+                    profile.instance_id == current.instance_id
+                        && profile.config_dir == current.config_dir
+                        && profile.state_dir == current.state_dir
+                })
+                .ok_or("migration does not authorize this source profile")?;
+            if plan.operation_id != operation_id
+                || plan.token != _token
+                || plan.source_image != current.running
+                || profile.pid != std::process::id()
+            {
+                return Err("migration source image, operation or profile changed".into());
+            }
+            if !self
+                .update_consent
+                .as_ref()
+                .is_some_and(|(id, alert)| id == operation_id && alert.window().isVisible())
+            {
+                let alert = NSAlert::new(self.mtm);
+                alert.setMessageText(&NSString::from_str(text(
+                    self.locale,
+                    Message::MigrationPreparing,
+                )));
+                alert.setInformativeText(&NSString::from_str(&migration_consent_detail(
+                    &plan,
+                    self.locale,
+                )));
+                alert.layout();
+                alert.window().orderFrontRegardless();
+                if !alert.window().isVisible() {
+                    return Err("Migration consent view is not visible".into());
+                }
+                self.update_consent = Some((operation_id.to_owned(), alert));
+                self.sync_update_consent_visibility();
+            }
+        } else {
+            let plan = self
+                .app_update
+                .preparing_plan(operation_id)
+                .ok_or("update plan or operation changed; check again")?;
+            if plan.context != current || plan.running != current.running {
+                return Err("running executable, instance or profile changed".into());
+            }
         }
         let blockers = self.restart_blockers_snapshot();
         if !blockers.is_empty() {
@@ -8336,6 +8942,7 @@ impl Ui {
             return;
         }
         self.update_frozen = None;
+        self.clear_update_consent();
         self.composer_view
             .setEditable(self.update_composer_editable.take().unwrap_or(true));
         self.composer_send
@@ -9375,6 +9982,7 @@ impl Ui {
     }
 
     fn shutdown(&mut self) {
+        self.clear_update_consent();
         self.invalidate_pointer_capture();
         self.stop_capture_timer();
         DEFERRED_POINTERS.with(|pending| pending.borrow_mut().clear());
@@ -12409,31 +13017,6 @@ impl Ui {
         });
     }
 
-    fn change_observation_machine(&mut self, id: String, selected: bool) {
-        if selected {
-            let enabled = self.shared.lock().ok().is_some_and(|state| {
-                state
-                    .observation_catalog()
-                    .machines
-                    .iter()
-                    .any(|machine| machine.id == id && machine.enabled)
-            });
-            if !enabled {
-                self.sync_observation_panel();
-                return;
-            }
-        }
-        self.change_observation(|candidate| {
-            if selected {
-                if !candidate.machines.contains(&id) {
-                    candidate.machines.push(id);
-                }
-            } else {
-                candidate.machines.retain(|machine| machine != &id);
-            }
-        });
-    }
-
     fn change_observation(&mut self, change: impl FnOnce(&mut ObservationPreferences)) {
         let mut candidate = self.prefs.observation().clone();
         change(&mut candidate);
@@ -12441,11 +13024,6 @@ impl Ui {
             let current = self.prefs.observation();
             let patch = crate::preferences::PreferencePatch {
                 observation_host: (candidate.host != current.host).then_some(candidate.host),
-                observation_local: (candidate.local != current.local).then_some(candidate.local),
-                observation_remote: (candidate.remote != current.remote)
-                    .then_some(candidate.remote),
-                observation_machines: (candidate.machines != current.machines)
-                    .then_some(candidate.machines),
                 ..Default::default()
             };
             if let Err(error) = self.commit_gui_observation_patch(patch) {
@@ -12469,14 +13047,94 @@ impl Ui {
     }
 
     fn sync_observation_panel(&mut self) {
-        if let Ok(state) = self.shared.lock() {
+        if !self.menu_panel.is_visible() {
+            return;
+        }
+        let settings_context = self.shared.lock().ok().map(|state| {
             self.menu_panel.sync_observation(
                 self.prefs.observation(),
-                state.observation_catalog(),
+                state.provider_labels(),
                 state.host_connections(),
             );
+            (
+                state.lifecycle_extensions().to_vec(),
+                state.profile_store().cloned(),
+            )
+        });
+        if let Some((extensions, Some(store))) = settings_context {
+            let mut views = Vec::new();
+            let mut actions = Vec::new();
+            let mut errors = Vec::new();
+            let selection = self.prefs.observation_host();
+            for extension in extensions {
+                match extension.settings(&store, &selection, self.locale.tag()) {
+                    Ok(settings) => views.extend(
+                        settings
+                            .into_iter()
+                            .map(|view| (extension.provider().to_owned(), view)),
+                    ),
+                    Err(error) => errors.push(error),
+                }
+                match extension.actions(&store, &selection, self.locale.tag()) {
+                    Ok(items) => actions.extend(
+                        items
+                            .into_iter()
+                            .map(|view| (extension.provider().to_owned(), view)),
+                    ),
+                    Err(error) => errors.push(error),
+                }
+            }
+            let error = errors.join("\n");
+            self.menu_panel.sync_integration_settings(
+                &views,
+                &actions,
+                (!error.is_empty()).then_some(error.as_str()),
+            );
+        } else {
+            self.menu_panel.sync_integration_settings(&[], &[], None);
         }
         self.reanchor_menu_panel();
+    }
+
+    fn apply_integration_setting(&mut self, provider: &str, key: &str, value: bool) {
+        let previous_owner = self.prefs.snapshot().owner;
+        let context = self
+            .shared
+            .lock()
+            .map_err(|_| "native state lock is poisoned".to_owned())
+            .and_then(|state| {
+                state.update_mutation_allowed()?;
+                let extension = state
+                    .lifecycle_extensions()
+                    .iter()
+                    .find(|extension| extension.provider() == provider)
+                    .cloned()
+                    .ok_or("integration setting owner is not registered")?;
+                let store = state
+                    .profile_store()
+                    .cloned()
+                    .ok_or("profile store is not available")?;
+                Ok((extension, store))
+            });
+        let result =
+            context.and_then(|(extension, store)| extension.apply_setting(&store, key, value));
+        if let Err(error) = result {
+            self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
+        }
+        if let Err(error) = self
+            .prefs
+            .refresh_owner_snapshot(&self.lifecycle_paths.config_dir)
+        {
+            self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
+        }
+        if previous_owner != self.prefs.snapshot().owner {
+            self.preference_revision = self
+                .preference_revision
+                .checked_add(1)
+                .expect("preference revision exhausted");
+        }
+        self.sync_observation_panel();
+        self.refresh();
     }
 
     fn select_menu_tab(&mut self, index: usize) {
@@ -12486,7 +13144,14 @@ impl Ui {
 
     fn save_lifecycle_setting(&mut self, key: LifecycleSetting) {
         let value = self.menu_panel.lifecycle_value(key);
-        let result = control::set_lifecycle_setting(&self.lifecycle_paths, key, value);
+        let extensions = self
+            .shared
+            .lock()
+            .map_err(|_| "native state lock is poisoned".to_owned())
+            .map(|state| state.lifecycle_extensions().to_vec());
+        let result = extensions.and_then(|extensions| {
+            control::set_lifecycle_setting(&self.lifecycle_paths, &extensions, key, value)
+        });
         match result {
             Ok(settings) => self.menu_panel.lifecycle_saved(settings),
             Err(error) => {
@@ -12511,9 +13176,9 @@ impl Ui {
 
     fn quit(&mut self) {
         // User stop must outlive both this UI and an in-flight helper reservation.
-        if let Err(error) =
-            herdr_update_coordinator::protocol::record_user_stop(&self.lifecycle_paths.state_dir)
-        {
+        if let Err(error) = desktop_pet_update_coordinator::protocol::record_user_stop(
+            &self.lifecycle_paths.state_dir,
+        ) {
             self.app_update.set_problem(format!(
                 "Cannot record user stop; application remains open: {error}"
             ));
@@ -15474,7 +16139,7 @@ mod tests {
             source: "/local.sock".into(),
             pane_id: "pane".into(),
             workspace_id: "workspace".into(),
-            worktree: Arc::new(crate::session::WorkspaceWorktreeInfo {
+            worktree: Arc::new(desktop_pet_contracts::WorkspaceWorktreeInfo {
                 repo_key: "key".into(),
                 repo_name: repo.clone(),
                 repo_root: "/parent".into(),

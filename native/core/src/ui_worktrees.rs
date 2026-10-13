@@ -1,8 +1,8 @@
 use crate::automation::{lock_automation, DomainAction, DomainOperationState, DomainRequest};
-use crate::herdr::{RequestOrigin, WorktreeRemoveError, WorktreeRemoveResult};
 use crate::i18n::{text, Message};
-use crate::session_view::{WorktreeRemoveTarget, WorktreeRemoveTargetError};
 use crate::worktree_confirmation::WorktreeConfirmations;
+use desktop_pet_contracts::{RequestOrigin, WorktreeRemoveError, WorktreeRemoveResult};
+use desktop_pet_contracts::{WorktreeRemoveTarget, WorktreeRemoveTargetError};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 
@@ -136,9 +136,10 @@ fn observation_settles(
 
 fn target_error(error: WorktreeRemoveTargetError) -> (&'static str, &'static str) {
     match error {
-        WorktreeRemoveTargetError::ReadOnly => {
-            ("worktree_read_only", "worktree source is not local")
-        }
+        WorktreeRemoveTargetError::ReadOnly => (
+            "worktree_read_only",
+            "worktree source does not permit removal",
+        ),
         WorktreeRemoveTargetError::Offline => ("worktree_offline", "worktree source is not live"),
         WorktreeRemoveTargetError::Stale => ("stale_worktree", "worktree target changed"),
         WorktreeRemoveTargetError::NotLinkedWorktree => (
@@ -163,7 +164,7 @@ fn removal_error(error: &WorktreeRemoveError) -> (DomainOperationState, &'static
         WorktreeRemoveError::ReadOnly => (
             DomainOperationState::Failed,
             "worktree_read_only",
-            "worktree source is not local",
+            "worktree source does not permit removal",
         ),
         WorktreeRemoveError::StaleTarget => (
             DomainOperationState::Failed,
@@ -604,8 +605,8 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::WorkspaceWorktreeInfo;
-    use crate::session_view::SessionKey;
+    use desktop_pet_contracts::SessionKey;
+    use desktop_pet_contracts::WorkspaceWorktreeInfo;
     use std::sync::Arc;
 
     fn target() -> WorktreeRemoveTarget {

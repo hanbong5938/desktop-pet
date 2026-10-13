@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import {
   fetchReleases, generateReleaseBody, isPublishedRelease, parseStableTag,
-  requiredAssetNames, rewriteRelativeLinks,
+  requiredAssetNames, releaseRepository, rewriteRelativeLinks, validateProductMetadata,
 } from "./release-docs.ts";
 import type { ReleaseRecord } from "./release-docs.ts";
 
-const tag = "v0.1.11";
-const heading = `# Herdr Desktop Pet ${tag} release notes`;
-const repository = "hanbong5938/herdr-desktop-pet";
+const tag = "v0.4.0";
+const heading = `# Desktop Pet ${tag} release notes`;
+const repository = "hanbong5938/desktop-pet";
 
 function published(overrides: Partial<ReleaseRecord> = {}): ReleaseRecord {
   return {
@@ -27,12 +27,16 @@ function published(overrides: Partial<ReleaseRecord> = {}): ReleaseRecord {
 
 async function fixture(note = `${heading}\n\nReviewed native-menu improvement.\n`): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "herdr-release-docs-"));
-  await mkdir(join(root, "native"));
+  for (const directory of ["app", "core", "update-coordinator"]) await mkdir(join(root, "native", directory), { recursive: true });
   await mkdir(join(root, "docs/releases"), { recursive: true });
-  await writeFile(join(root, "package.json"), JSON.stringify({ version: "0.1.11" }));
-  await writeFile(join(root, "native/Cargo.toml"), '[package]\nname = "herdr-desktop-pet"\nversion = "0.1.11"\n');
-  await writeFile(join(root, "herdr-plugin.toml"), 'version = "0.1.11"\n');
-  await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n[[package]]\nname = "herdr-desktop-pet"\nversion = "0.1.11"\n');
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "desktop-pet", version: "0.4.0" }));
+  await writeFile(join(root, "bun.lock"), '{"workspaces":{"":{"name":"desktop-pet",},},}\n');
+  await writeFile(join(root, "native/Cargo.toml"), '[workspace]\nmembers = ["app", "core", "update-coordinator"]\n');
+  const products = [["app", "desktop-pet"], ["core", "desktop-pet-core"], ["update-coordinator", "desktop-pet-update-coordinator"]];
+  for (const [directory, name] of products) {
+    await writeFile(join(root, `native/${directory}/Cargo.toml`), `[package]\nname = "${name}"\nversion = "0.4.0"\n`);
+  }
+  await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n' + products.map(([, name]) => `[[package]]\nname = "${name}"\nversion = "0.4.0"\n`).join(""));
   await writeFile(join(root, `docs/releases/${tag}.md`), note);
   return root;
 }
@@ -61,23 +65,31 @@ test("stable tags preserve zero versions and reject suffixes, leading zeros, and
     expect(() => parseStableTag(invalid)).toThrow();
   }
   expect(requiredAssetNames(tag)).toEqual([
-    "HerdrDesktopPet-v0.1.11-macos-arm64.tar.gz",
-    "HerdrDesktopPet-v0.1.11-macos-arm64.tar.gz.sha256",
+    "DesktopPet-v0.4.0-macos-arm64.tar.gz",
+    "DesktopPet-v0.4.0-macos-arm64.tar.gz.sha256",
     "SHA256SUMS",
+    "DesktopPet-v0.4.0-rig-native.json",
+    "desktop-pet-install-v0.4.0.sh",
+    "desktop-pet-install-v0.4.0.sh.sha256",
   ]);
 });
 
-test("publication requires an actual stable published release and all three uploaded nonempty assets", () => {
+test("publication requires a canonical stable release and all six uploaded nonempty assets", () => {
   const complete = published();
   expect(isPublishedRelease(complete)).toBe(true);
   for (const override of [
     { draft: true }, { prerelease: true }, { tag_name: "v0.1.11-rc.1" },
     { published_at: null }, { published_at: "not-a-date" }, { assets: [] },
+    { html_url: `https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/${tag}` },
+    { html_url: `https://github.com/${repository}/releases/tag/v0.4.1` },
     { assets: complete.assets.slice(0, 2) },
     { assets: complete.assets.map((asset, index) => ({ ...asset, size: index === 1 ? 0 : asset.size })) },
     { assets: complete.assets.map((asset, index) => ({ ...asset, state: index === 2 ? "starter" : "uploaded" })) },
   ]) expect(isPublishedRelease(published(override))).toBe(false);
   expect(isPublishedRelease(published({ assets: [{ name: "unrelated.zip", size: 100 }, ...complete.assets] }))).toBe(true);
+  for (const asset of complete.assets) {
+    expect(isPublishedRelease(published({ assets: complete.assets.filter((candidate) => candidate !== asset) }))).toBe(false);
+  }
 });
 
 test("catalog consumers exclude releases with unknown upload state for any required asset", () => {
@@ -199,10 +211,10 @@ test("refuses repository escapes, malformed encoding, and invalid source paths",
 test("catalog consumers retain published releases beyond the first 100-record page", async () => {
   const first = Array.from({ length: 100 }, (_, index) => {
     const pageTag = `v0.1.${index}`;
-    return published({ tag_name: pageTag, assets: requiredAssetNames(pageTag).map((name) => ({ name, size: 10, state: "uploaded" })) });
+    return published({ tag_name: pageTag, html_url: `https://github.com/${releaseRepository(pageTag)}/releases/tag/${pageTag}`, assets: requiredAssetNames(pageTag).map((name) => ({ name, size: 10, state: "uploaded" })) });
   });
   const nextTag = "v0.2.0";
-  const laterRelease = published({ tag_name: nextTag, assets: requiredAssetNames(nextTag).map((name) => ({ name, size: 10, state: "uploaded" })) });
+  const laterRelease = published({ tag_name: nextTag, html_url: `https://github.com/${releaseRepository(nextTag)}/releases/tag/${nextTag}`, assets: requiredAssetNames(nextTag).map((name) => ({ name, size: 10, state: "uploaded" })) });
   let firstPageRead = false;
   const fetchImplementation: typeof fetch = Object.assign(
     async (input: Parameters<typeof fetch>[0]) => {
@@ -235,26 +247,61 @@ test("catalog errors reject rather than invent publication evidence or expose to
   } finally { mock.mockRestore(); }
 });
 
-test("generates frozen tagged Markdown only after matching all manifest and root-lock versions", async () => {
+test("packaging metadata validation needs no release notes or distribution product version", async () => {
+  const root = await fixture();
+  try {
+    await rm(join(root, "docs"), { recursive: true });
+    await validateProductMetadata(root, "0.4.0");
+    await expect(validateProductMetadata(root, "0.3.7")).rejects.toThrow("must match");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("release body consumes core workspace metadata without a host plugin manifest", async () => {
   const root = await fixture(`${heading}\n\nReviewed change. [Guide](../../readme.md#install)\n`);
   try {
     await writeFile(join(root, "readme.md"), "# Guide\n");
     expect((await rendered(await generateReleaseBody(root, tag, repository))).links).toContainEqual({
       href: `https://github.com/${repository}/blob/${tag}/readme.md#install`, title: null,
     });
+    await writeFile(join(root, "herdr-plugin.toml"), 'version = "9.9.9"\n');
+    await generateReleaseBody(root, tag, repository);
+    await rm(join(root, "herdr-plugin.toml"));
     for (const [path, badContent] of [
-      ["package.json", '{"version":"0.1.10"}'],
-      ["native/Cargo.toml", '[package]\nname = "herdr-desktop-pet"\nversion = "0.1.10"'],
-      ["herdr-plugin.toml", 'version = "0.1.10"'],
-      ["native/Cargo.lock", 'version = 4\n[[package]]\nname = "herdr-desktop-pet"\nversion = "0.1.10"'],
+      ["package.json", '{"name":"desktop-pet","version":"0.3.6"}'],
+      ["bun.lock", '{"workspaces":{"":{"name":"herdr-desktop-pet"}}}'],
+      ["native/app/Cargo.toml", '[package]\nname = "desktop-pet"\nversion = "0.3.6"'],
+      ["native/core/Cargo.toml", '[package]\nname = "desktop-pet-core"\nversion = "0.3.6"'],
+      ["native/update-coordinator/Cargo.toml", '[package]\nname = "desktop-pet-update-coordinator"\nversion = "0.3.6"'],
+      ["native/Cargo.lock", 'version = 4\n[[package]]\nname = "desktop-pet"\nversion = "0.3.6"'],
     ]) {
       const previous = await readFile(join(root, path!), "utf8");
       await writeFile(join(root, path!), badContent!);
       await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("must match");
       await writeFile(join(root, path!), previous);
     }
-    await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n[[package]]\nname = "different-dependency"\nversion = "0.1.11"');
-    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("root crate");
+    const workspacePath = join(root, "native/Cargo.toml");
+    const workspace = await readFile(workspacePath, "utf8");
+    await writeFile(workspacePath, '[workspace]\nmembers = ["core", "update-coordinator"]\n');
+    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("core product workspace");
+    await writeFile(workspacePath, workspace);
+    const appPath = join(root, "native/app/Cargo.toml");
+    const app = await readFile(appPath, "utf8");
+    await writeFile(appPath, app + '\n[[bin]]\nname = "herdr-desktop-pet"\npath = "src/main.rs"\n');
+    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("must match");
+    await writeFile(appPath, app);
+    const bunPath = join(root, "bun.lock");
+    const bunLock = await readFile(bunPath, "utf8");
+    await writeFile(bunPath, '{"workspaces":{"":{"name":"desktop-pet","dependencies":{"unexpected":"1"}}}}');
+    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("root bun.lock metadata");
+    await writeFile(bunPath, bunLock);
+    const cargoLockPath = join(root, "native/Cargo.lock");
+    const cargoLock = await readFile(cargoLockPath, "utf8");
+    await writeFile(cargoLockPath, cargoLock + '[[package]]\nname = "desktop-pet"\nversion = "0.4.0"\n');
+    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("unique workspace crate");
+    await writeFile(cargoLockPath, cargoLock);
+    await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n[[package]]\nname = "desktop-pet"\nversion = "0.4.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"');
+    await expect(generateReleaseBody(root, tag, repository)).rejects.toThrow("unique workspace crate");
+    await expect(generateReleaseBody(root, tag, "hanbong5938/herdr-desktop-pet")).rejects.toThrow("New product releases");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

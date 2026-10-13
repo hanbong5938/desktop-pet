@@ -1,14 +1,12 @@
-# Herdr Desktop Pet
+# Desktop Pet
 
-[Herdr](https://herdr.dev) 向けのネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、観測したエージェントセッションをデスクトップに表示して、選択したローカルセッションへの返信を可能にします。
+独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
-[English](readme.md) · [한국어](readme.ko.md) · [简体中文](readme.zh-Hans.md) · **日本語** · [バージョン資料（英語）](docs/releases/README.md) · [リリース](https://github.com/hanbong5938/herdr-desktop-pet/releases)
+[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+
+**公開状態:** 既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / observation capability 1 の公開版です。独立 Desktop Pet v0.4.0（protocol 4 / capability 2 / integration API 1）、bridge v0.3.7、中立 formula、連携タグは **未公開**です。実際の候補 package／VM 検査は公開導入の可否とは別で、最終受入表は未完了です。以下は中立 cutover の案内であり、検証済み公開導入ではありません。過去の文書、タグ、アセットは変更不可です。
 
 <img src="assets/rubelia-thumbnail.png" alt="標準デスクトップコンパニオンのルベリア" width="220">
-
-[追加キャラクター・衣装ギャラリー](https://hanbong5938.github.io/herdr-characters/)（最初は英語表示、韓国語は KO を選択）· [キャラクターパックのソースとライセンス](https://github.com/hanbong5938/herdr-characters)。**同梱されるのはルベリア（`default@0`）だけです。**
-
-[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は公開済みの最新安定版で、公開 arm64 資産・チェックサムと更新済み安定版 Homebrew formula は検証済みです。対応するアプリ／ヘルパーの能力は `protocol: 3` と `observation_mode: 1` です。過去の v0.3.5 とベータ資産は変更しません。
 
 ## 機能
 
@@ -17,112 +15,60 @@
 - 選択した**ローカル**エージェントセッションへの一行返信。IME の変換中入力に配慮し、ネイティブの状態フィードバックを表示します。
 - キャラクター、バブル、セリフ、表示状態の設定。検証済み追加パックと公式カタログブラウザーに対応します。
 - Herdr のライフサイクル操作、保護付きの linked worktree 削除、インストール元を区別した明示的なアプリ更新。
+- **現在のソース限定：**統合された接続設定で Auto または登録されたプロバイダー（Herdr／Tern など）を選び、実際の接続状態を確認し、共有プロファイルへ稼働中の変更を保存します。公開 v0.3.6 にこの capability-2 UI は含まれません。
 
 ## 動作要件
 
-- **Apple Silicon 搭載 Mac、macOS 13 以降。** Intel Mac、Windows、Linux はネイティブ版の対応対象外です。
-- ローカル観測には既存のローカル Herdr サーバーを使用します（スナップショットには 0.9.0 以降）。プラグインやホストへのパッチは不要です。返信には別途そのサーバーの `agent.prompt` が必要です。**任意のクライアント接続時の自動起動だけ**は、提供される [`client.attached` パッチ](integrations/herdr/client-attached.patch)を適用した公式 Herdr 0.9.3 ソースから構築したホスト、または将来そのフックへの対応を実際に明示するリリースが必要です。無改変の Herdr 0.9.0／0.9.3 にそのフックはなく、マニフェストの最低バージョン指定だけでは使えません。管理下で運用する場合は[ホスト連携ガイド（英語）](integrations/herdr/README.md)に従い、未知のフックについての警告を見逃さないでください。
-- ソースからのビルドには Rust/Cargo、Bun、Node.js/npm、Xcode Command Line Tools が必要です。ビルド済み版にはソース用ツールチェーンは不要です。このアプリは **ad-hoc 署名であり、Developer ID 署名も公証もありません**。macOS Gatekeeper で明示的なローカル承認が必要になる場合があります。署名検証は公証を意味しません。
+Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、Node.js/npm、Xcode Command Line Tools が必要ですが、プリビルドには不要です。ad-hoc 署名で、公証されていません。Herdr スナップショットは互換ローカルサーバー（0.9.0+）、返信は別途 `agent.prompt` が必要です。任意の client-attach 自動起動には公式 Herdr 0.9.3 に[連携所有のパッチとホスト手順](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)を適用するか、実際にフック対応のホストが必要です。標準 0.9.0/0.9.3 にはフックがなく、プラグイン導入はホストをパッチしません。
 
-## Homebrew でのインストール：最初の接続
+## インストールと任意の連携
 
-以下の安定版 formula で公開済みビルドを導入します。Rust/Cargo、Bun、Node.js、ソースチェックアウトは不要です。既存の Brew 利用者は下記の更新コマンドを使います。既存のプロファイルと設定は保持されます。
+中立リリースと formula が実際に公開された後の公開コマンド:
 
 ```sh
-brew install hanbong5938/tap/herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
+brew install hanbong5938/tap/desktop-pet
+desktop-pet --version
+desktop-pet start
+desktop-pet status
 ```
 
-ネイティブの `start` は手動起動です。`herdr plugin install`、`plugin link`、パッチ適用済みホストは必要ありません。バブルを開くとそのサーバーのローカルセッションカードを確認できます（スナップショットには Herdr 0.9.0 以降が必要）。リアルタイムのカードには稼働中のエージェントセッションが必要です。返信にはさらにサーバーの `agent.prompt` が必要で、送信 ACK は処理完了を意味しません。カードが表示されない場合は実際に動いている Herdr CLI／サーバーと `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH` を調べてください。バックエンドソケットがキャラクター側の環境／既定値と異なるなら、推測したパスではなく**サーバーが実際に表示したソケットパス**を使用します。
+プリビルド・ソース導入は Herdr 連携ではなく **core** チェックアウトで実行します。既定はプリビルドのみで、取得・検証失敗からソースビルドへ黙って切り替えません。`--source` は現在の core だけを構築し、その `dist/DesktopPet.app` を使用します。
 
 ```sh
-herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
-herdr-desktop-pet status
+git clone https://github.com/hanbong5938/desktop-pet.git
+cd desktop-pet
+# Requires neutral public assets; not yet published:
+bash scripts/install.sh --prebuilt
+# Explicit source alternative:
+bash scripts/install.sh --source
+# Replace with the installer-reported executable and your actual profile paths:
+/absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-例のパスを確認済みの Herdr **バックエンド**ソケットに置き換えてください。`--socket` はキャラクター専用の制御ソケットではありません。`start` は実行中のデーモンを再利用するため、バックエンドの変更前には停止してください。`--version` だけでなく `status` で実際のデーモンのバージョンと実行ファイルを確認します。[接続トラブルシューティング](docs/usage.ja.md#設定とトラブルシューティング)を参照してください。
+既定／`--prebuilt` は固定された中立公開アセットを要求し、現在は未公開です。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
 
-既存インストールの更新前には**古いデーモンを停止**してください。`start` は稼働中のデーモンを再利用します。
-
-```sh
-herdr-desktop-pet stop
-brew update && brew upgrade herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-CLI が `0.3.6` を報告し、再起動後の `status` に `app_version: 0.3.6` **と想定した実行中の実行ファイル**が表示されることを確認します。formula はアプリを Homebrew のプレフィックス以下に置き、**`/Applications` には置きません**。CLI は `PATH` 上に配置されます。Herdr プラグインやパッチ済みホストは導入されません。古いデーモンは先に停止してください。プロファイルの分離と旧 cask からの移行については [0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta)を参照してください。
-
-### Herdr を使わない単独のキャラクター
-
-正常なローカル Herdr サーバーがなくてもキャラクターを表示し続けるには、新規プロファイルで標準で有効な「切断から 30 秒後に終了」を**起動前に**無効にします。
-
-```sh
-herdr-desktop-pet settings set exit_with_herdr off
-herdr-desktop-pet settings get
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-Herdr 本体、プラグイン、パッチは不要です。起動後、必要なら `herdr-desktop-pet hide_bubble` で空のバブルだけを隠し、キャラクターを残せます。約 30 秒で消えた場合は `settings get` と `status` を確認します。`exit_with_herdr` がオンで正常なサーバーがなければ猶予後に終了します。同じ実際の設定／状態プロファイルで、再起動前にオフにしてください。この設定は登録済みの全ローカルプラグイン接続先が確認済みの無効化／リンク解除となった場合の終了を**無効化しません**。[ライフサイクルの詳細](docs/usage.ja.md#ライフサイクルとプラグイン操作)。
-
-### 任意の上級設定：管理下の Herdr プラグインと接続時の自動起動
-
-対象となる互換性のある Herdr ホストで[プラグインのリポジトリ](https://github.com/hanbong5938/herdr-desktop-pet)をインストールし、明示的にキャラクターを起動します。
+必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 
 ```sh
 herdr plugin install hanbong5938/herdr-desktop-pet
-herdr plugin action invoke start --plugin desktop-pet
-```
-
-管理下でのインストールは `bash scripts/install.sh` を実行します。まずマニフェスト指定の v0.3.6 の `.app` 専用アーカイブを試し、チェックサム、アーカイブのエントリー、arm64 署名、同梱キャラクターを検証します。**公開済み v0.3.6 Release の完全なアーカイブ／チェックサムと対応インストーラー**を使用します。別途アップロードされる来歴サイドカーはインストーラーのアーカイブに含まれません。ビルド済み資産が存在しないか無効なら、標準のインストーラーはその旨を報告し、このチェックアウトをソースからビルドします。明示的な `--prebuilt` はフォールバックせず失敗し、`--source` はこのチェックアウトをビルドします。プラグインの導入は Herdr へのパッチ適用も Herdr のビルドも行いません。接続時の自動起動には[こちら（英語）](integrations/herdr/README.md#build-in-separate-checkouts)のパッチ済みホストを用意してください。前述の手動によるネイティブ観測には不要です。
-
-## 管理下の連携用にこのチェックアウトをソースからインストール
-
-**任意の管理下での接続ワークフローの場合**、リポジトリのルートから最初に[ホストのビルド手順（英語）](integrations/herdr/README.md#build-in-separate-checkouts)に従って別のチェックアウトにある公式 Herdr 0.9.3 にパッチを当ててビルドし、分離したサーバーを実行します。`PATCHED_HERDR` は**ビルドしたホストの実行ファイル**に設定します（例：`PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`）。以下のコマンドでは同じ対象ホスト／プロファイル／ソケットを使ってください。`PATH` にある無改変のバイナリは接続時の自動起動には代用できません。キャラクターをソースからビルドするだけならパッチ済みホストは不要です。
-
-```sh
-bash scripts/install.sh --source
-"$PATCHED_HERDR" plugin link "$PWD" --enabled
-"$PATCHED_HERDR" plugin action invoke start --plugin desktop-pet
-```
-
-`plugin link` はマニフェストのビルドを**実行しません**。先にキャラクターをビルドしてください。既に稼働中のホストでリンク／有効化しても、それだけではキャラクターは起動しません。一度 `start` を呼び出すか、`auto_start` を有効にした上で対象となる次の shell／ターミナルクライアントの接続を待ちます。リンク時の警告を確認してください。未知の `client.attached` フックは必要なパッチがホストにないことを示します。Herdr の操作には稼働中で有効なホストが必要です。サーバー起動時にも自動的に `ensure` が実行されます。
-マニフェストのライフサイクル／操作コマンドは `scripts/run-native.sh` を使用し、安定版のマニフェストバージョンなら `HerdrDesktopPet.app`、`-beta.N` なら `HerdrDesktopPetBeta.app` を選びます。対応するバンドルがなければ失敗し、別チャネルのバンドルは実行しません。直接ソースから自動化する場合は `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet` を使用します。古いデーモンを停止するか**設定と状態の両方**のパスを分離し、`status` で実際の実行ファイル／バージョンを確認してください。[ソース開発（英語）](docs/development.md#source-development)。
-
-
-## Tern の導入と独立プロファイル
-
-まずネイティブアプリ、次に独立した公開プラグインを明示的に導入します。プラグインはアプリをダウンロード、ビルド、起動しません。
-
-```sh
-brew install hanbong5938/tap/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
-PET="$(command -v herdr-desktop-pet)"
-PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
-PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
-"$PET" --version
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 ```
 
-既定のホストは Herdr のままです。`--host tern` に Herdr サーバー、ソケット、プラグインは不要です。実際の Tern ウィンドウで **Configure desktop pet connection** に絶対実行ファイル `PET` と上記の設定・状態の両方のパスを指定し、**Connect to desktop pet** を実行します。変数名ではなく実際のパスを入力してください。ウィンドウの接続と同じプロファイルのネイティブ `status` を確認します。プラグインの検出だけでは接続の証明になりません。バイナリやモードを変える前に同じプロファイルを停止します。ソース開発は任意です。現在のチェックアウトで `bash scripts/install.sh --source` を実行し、`PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"` を指定できます。特別なブランチは不要です。アプリ／ヘルパーは対応する protocol 3 のペアで、追加 JSON 能力は `protocol: 3` と `observation_mode: 1` です。英語・韓国語・簡体字中国語・日本語を維持します。**ベータ更新を受け取る**は既定でオフで明示的な選択が必要です。確認だけではインストールや再起動をしません。
+## プロファイル・接続・移行
 
-## 初回利用
+`--host auto|PROVIDER` は Auto または登録された不透明な提供者の選択で、固定 Herdr/Tern 列挙ではありません。観測選択の優先順位は CLI > `DESKTOP_PET_OBSERVATION_MODE` > 保存 `observation.host` > 新規 Auto です。旧 `both`→`auto`、host-less→Herdr は読み込み移行だけに適用します。実行中は Connection／`preferences set --observation-host auto|PROVIDER` で保存後に適用します。`--herdr-socket ABS` は登録 Herdr アダプターの backend オプションで core 制御 socket ではなく、アダプターなしでは登録しません。
 
-### アプリ内更新（このチェックアウトではプロトコル 3）
+新規プロファイルは Auto です。Connection は登録されたプロバイダーの実際の接続を示し、インストール有無を接続と扱いません。ID は不透明な値で、権限は名前の接頭辞やパスではなく capability で判断します。Auto は同時観測で、fallback ではありません。リモートは読み取り専用、Tern は返信のみで worktree 削除は不可です。受付はエージェントの完了ではありません。
 
-**設定 → アプリの更新**では、独立した**自動確認**（既定でオン）と**ベータ版の更新を受け取る**（既定でオフ）、**今すぐ確認**、実行中のバージョン／由来、ポリシー別の最終確認成功時刻、明示的な操作を表示します。安定版のみの確認では公式安定版を選びます。ベータ版を許可すると、対象となる安定版とベータ版からセマンティックバージョンが最高のものを選びます（同じ基本バージョンなら正式版がベータ版より優先）。ベータ版の許可を取り消しても、インストール済みベータ版をダウングレードしません。アプリ起動中の自動確認は最大でも一日一回で、安定版のみとベータ版を含む場合の時刻を別々に記録します。ベータ版ポリシーを切り替えると以前の候補は無効となり、自動確認がオンの場合だけ新ポリシーで確認します。オフの場合は**今すぐ確認**を使います。確認は読み取り専用です。設定の切り替えや確認だけでインストール、再起動、Brew メタデータの更新、Git の変更はしません。リリース／チャネル／ソースと更新先をまたぐ移動には、正確な提案に対するネイティブ画面での個別の同意が必要です。
+[利用ガイド](docs/usage.ja.md)、[正確なプロファイル・探索契約](docs/development.md#profiles-and-installation-discovery)、[A→B 移行](docs/migrations/desktop-pet.md)を参照してください。status / Connection の実際の実行ファイル・config・state を Tern Configure に指定し Connect します。既存の Tern・beta・custom プロファイルはその場で保持し、マージしません。
 
-カードは進行中の確認／引き継ぎと、保持された**前回の操作**の結果を区別します。**診断を表示**すると選択可能なパス、ハッシュ、ID、生のエラーを展開します。短い状態表示とヘルパーの案内は選択中の UI 言語に従います。候補がディスクにインストール済みでも適用済み・実行中とは限りません。ソースが現行または固定されているという結果は、公開版で最新であることを意味しません。Herdr 管理下での移行では、チェックアウトをリセットせず、同じ互換性のある稼働中のホスト上で公式リリースタグを不変のコミットに固定します。Homebrew は取得済みのマネージャー／プレフィックスを維持し、対象の formula／バージョンを明示します。確認された操作はメタデータを再検証し、両方のインストールルートを予約します。元の formula を黙ってアンインストールしません。ローカルのチェックアウトは Git pull/reset をせずにディスク上のファイルを再ビルドします。検証済みで互換性のあるインストール済みパッケージに限り、インストーラーを再実行せず**インストール済み更新を適用**できる場合があります。不明な由来を暗黙に管理下のインストールへ変えることはありません。
-
-ネイティブ画面での同意と Prepare は、変更可能な操作を凍結する前に、保留中の編集、IME 変換、操作を再確認します。元のアプリは引き継ぎ中も実行を続けます。所有権 ACK はインストールの完了でも Stop の許可でもありません。受理された Prepare の後で、一致する最終の表示済み／準備済み ACK だけが同意を移します。完全に送達され受理された予約済み Stop だけが更新用の終了を確定します。ステージングはワーカーで行われ、ヘルパーのウィンドウは応答を続けます。ネイティブ側の 30 秒の引き継ぎ期限を越えた場合は**待機であり、キャンセルではありません**。ヘルパーは置き換え先の準備状況を確認し、インストール済みと適用済みを別々に記録します。候補の起動には、現在のディスクや元のソーストークンから推測した由来ではなく、ジャーナル／予約内の正確に検証された**イメージとインストール元**の組を使用します。不確実な予約や旧プロトコルの予約は証拠を維持したまま処理を阻止します。復旧時にインストーラーを再実行したり、ジャーナルを密かに削除したり、元のアプリを自動再起動したりしません。利用者による Stop は復活を防ぎますが、安全に停止したと証明済みのトランザクションは整合処理を完了し、自身の予約を解除できます。不確実な操作をやり直す前に[更新動作と復旧](docs/usage.ja.md#アプリ内更新)および [CLI の状態と復旧（英語）](docs/cli.md#app-update-status-and-recovery)を参照してください。
-
-公開済みの安定版 `v0.3.3` と対になる `0.3.3-beta.1` のアーカイブは、不変のアプリ／ヘルパーのプロトコル 2 対応パッケージです。更新を確認しただけで、このチェックアウトのプロトコル 3 のベータ設定が**加わることはありません**。このチェックアウトのソースバージョンやネイティブ CLI のバージョンだけでは、公開済みのプロトコル 3 リリースを証明できません。導入にはこのプロトコル 3 チェックアウトからの明示的なソースビルドか、別途検証済みの公開プロトコル 3 パッケージが必要です。アプリとヘルパーで異なるプロトコルの組み合わせは使えません。従来のプロトコル 1／2 記録には、保存された対応するヘルパーが必要であり、新しい更新機能による変換はできません。公開版は実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)を確認してください。
+```sh
+desktop-pet profile show --json
+desktop-pet start
+# Only with the registered Herdr adapter; use its verified backend:
+# desktop-pet --herdr-socket /actual/path/to/herdr-api.sock start
+desktop-pet preferences set --observation-host auto
+```
 
 ## 操作
 
@@ -142,22 +88,22 @@ IME 変換中は**決して送信されません**。Escape はまず変換を�
 
 ## 安全上の注意と制限
 
-- 返信に使うのは選択した**ローカル** Herdr ソースの `agent.prompt` のみであり、SSH、shell、ペインへの生入力は使いません。リモートカードからは送信できません。Herdr の ACK は送信を意味し、**エージェントの処理完了ではありません**。承認や質問は実際のターミナルで扱ってください。手動で再送信する前に、不確実な送達状況を確認します。送信前後のセッション／ペイン置換には現在の利用者についての競合があり、セッションの原子的な保証はありません。[送達の詳細](docs/usage.ja.md#インライン返信とメッセージ配送)。
+- 返信には選択元の**ローカル prompt capability**が必要です。Herdr は `agent.prompt`、Tern は１回限りの `agents:ask` を使い、遠隔、SSH、shell、PTY 入力に迂回しません。受付 ACK は**モデルの完了ではなく**、Tern は queued の場合があります。承認／質問は実際のターミナルで扱い、不確実な配送は確認なく再送しません。Herdr の提出 API には現在 occupant の競合があり、セッションの原子的固定を保証しません。[配送詳細](docs/usage.ja.md#インライン返信とメッセージ配送)。
 - **Worktree を削除…**は元に戻せません。続行前に**正確なチェックアウトパス**と**ワークスペース全体**のタブ／ペインを確認してください。そこにあるプロセス／エージェントを終了し、**無視されているファイルも含めて**リンク済みチェックアウトを削除します。ゴミ箱への移動や取り消しはできません。メインのリポジトリとブランチは削除しません。[削除時の安全策](docs/usage.ja.md#ワークツリーの削除)。
 - リモート観測には、選択済みの保存されたマシン設定と互換性のあるリモート Herdr サーバーが必要ですが、**リモート側へのキャラクターのインストールは不要**です。ローカルアプリはリモートの状態をポーリングするため、見逃した短い状態遷移を復元したり、リモートのプロンプトを送ったりはできません。[観測ガイド](docs/usage.ja.md#観測元)。
 - アプリ更新の自動確認は読み取り専用です。更新のインストール／適用には明示的な同意が必要です。更新機能の所有権 ACK は**完了を意味しません**。結果が不明な場合は再試行前に[アプリ内更新の復旧](docs/usage.ja.md#アプリ内更新)と [CLI 更新状態と復旧（英語）](docs/cli.md#app-update-status-and-recovery)を参照してください。
 
 ## 設定とトラブルシューティング
 
-`HERDR_PLUGIN_CONFIG_DIR` には `preferences.json`、`lifecycle.json`、管理対象の `characters/` と `menu-bar-icons/`、`HERDR_PLUGIN_STATE_DIR` にはロック、制御ソケット、`desktop-pet.log` が保存されます。パスを注入していない場合は Herdr の XDG プラグイン用パスが使用されます。ネイティブの `--config-dir` / `--state-dir` でプロファイルを分離できますが、環境変数で注入したパスが優先します。更新やチャネル切り替え前に、実際の**両方のディレクトリ**をバックアップしてください。`lifecycle.json` は他の設定とは別に `auto_start` と `exit_with_herdr` を制御します。
+プロファイル優先順位は **明示的 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 中立 XDG 既定値**（未指定なら `~/.config/desktop-pet`、`~/.local/state/desktop-pet`）です。core は `HERDR_PLUGIN_*` を暗黙使用せず、Herdr wrapper だけがホスト注入を明示引数に変換します。config は lifecycle/preferences、characters、menu-bar-icons、state は lock、私有 `control.sock`、daemon log、更新証拠を保持します。実際の両パスを合わせてバックアップします。`--herdr-socket ABS` は登録 Herdr アダプターの backend オプションで制御 socket ではなく、アダプターなしで core は正規化／登録しません。[正確なプロファイル・探索契約](development.md#profiles-and-installation-discovery)。
 
-サーバーなしで起動して約 30 秒後にキャラクターが消えた場合、`settings get` で `exit_with_herdr` を確認し、単独使用するなら**再起動前に**オフにしてください。ただし登録済みのすべてのローカル接続先が確認済みの無効化／リンク解除となれば今回の実行は終了します。隠れているだけなら再インストールせず、前述のメニューバー操作で復旧してください。管理下のホストで表示されない場合は `client.attached` の警告、手動での `start`／`status`、実際の実行ファイル／バージョン、デーモンログを確認します。自動起動を無効にしていれば意図的に起動されない場合があります。接続エラーでは `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH` とバックエンドソケットを実際に所有するサーバーを、リモートエラーでは保存済み設定とローカル CLI を確認します。キャラクターは**表示させたい Mac**上で起動してください。プロバイダー連携は上流の Herdr に属し、そのフックをインストールした後は既存のプロバイダーセッションを再読み込みします。[トラブルシューティング](docs/usage.ja.md#設定とトラブルシューティング)と[ライフサイクル](docs/usage.ja.md#ライフサイクルとプラグイン操作)を参照してください。
+Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追加キーは登録連携が所有します。Herdr 所有者は **`lifecycle.json` が存在しない場合だけ**、最初の lifecycle 書込みで共有 profile writer 内に `exit_with_herdr:true` を原子的に初期化します。既存ファイルにキーがなければ false、明示的 false も維持します。旧真偽値 `enabled` は false を含め `auto_start` に移行します。端点、起動メタデータ、他所有者のフィールドは保持し、`preferences.json` ではなく `lifecycle.json` に保存します。不正 JSON／値は既定化せずエラー、保存失敗は既存ポリシーを維持します。Auto／アダプターなしは Herdr がなくても動作を維持し、以下の Herdr 端点／切断規則は Herdr 専用選択だけに適用します。
 
 ## 資料とウェブサイト
 
-- [使い方と復旧](docs/usage.ja.md) · [開発とインストール（英語）](docs/development.md) · [ネイティブ自動化 CLI 契約（英語）](docs/cli.md#english) · [パッチ済みホスト連携（英語）](integrations/herdr/README.md)。
+- [使い方と復旧](docs/usage.ja.md) · [開発とインストール（英語）](docs/development.md) · [ネイティブ自動化 CLI 契約（英語）](docs/cli.md#english) · [パッチ済みホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - [リリース履歴（英語）](docs/releases/README.md) · [v0.3.6 の変更点（英語／韓国語）](docs/releases/v0.3.6.md) · [v0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [過去のベータ／プレビュー案内（英語）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 移行（英語）](docs/migrations/v0.1.11-to-v0.2.0.md)。
-- 宣伝用の[日本語](https://hanbong5938.github.io/herdr-desktop-pet/ja/)・[韓国語](https://hanbong5938.github.io/herdr-desktop-pet/)・[英語](https://hanbong5938.github.io/herdr-desktop-pet/en/)・[簡体字中国語](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/)ウェブサイトはこの**ネイティブ**アプリを紹介しています。ブラウザー内でアプリを動かすものではありません。ウェブサイトの開発／公開は [GitHub Pages ガイド（英語）](docs/development.md#website-github-pages)を参照してください。別の[キャラクターギャラリー](https://hanbong5938.github.io/herdr-characters/)では追加パックを紹介しており、対応言語は英語と韓国語のみです。
+- 宣伝用の[日本語](https://hanbong5938.github.io/desktop-pet/ja/)・[韓国語](https://hanbong5938.github.io/desktop-pet/)・[英語](https://hanbong5938.github.io/desktop-pet/en/)・[簡体字中国語](https://hanbong5938.github.io/desktop-pet/zh-Hans/)ウェブサイトはこの**ネイティブ**アプリを紹介しています。ブラウザー内でアプリを動かすものではありません。中立 Pages の公開はここでは未確認です。ウェブサイトの開発／公開は [GitHub Pages ガイド（英語）](docs/development.md#website-github-pages)を参照してください。別の[キャラクターギャラリー](https://hanbong5938.github.io/herdr-characters/)では追加パックを紹介しており、対応言語は英語と韓国語のみです。
 
 ## アートとライセンス
 

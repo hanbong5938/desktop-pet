@@ -4,8 +4,8 @@ use crate::character_types::validate_pack_id;
 use crate::dialogue::DialogueTarget;
 use crate::dialogue_automation::{DialogueBaseline, DialogueIdentity, DialogueSelection};
 use crate::preferences::PreferencePatch;
-use crate::session_view::SessionKey;
 use crate::state::{normalize_scale, Scene};
+use desktop_pet_contracts::SessionKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1862,9 +1862,10 @@ mod tests {
                 "settings-large",
                 DomainAction::PreferencesSet {
                     patch: PreferencePatch {
-                        observation_machines: Some(
-                            vec!["x".repeat(MAX_DOMAIN_OTHER_REQUEST_BYTES)]
-                        ),
+                        owner: serde_json::Map::from_iter([(
+                            "registered-large-value".to_owned(),
+                            serde_json::json!(vec!["x".repeat(MAX_DOMAIN_OTHER_REQUEST_BYTES)]),
+                        )]),
                         ..Default::default()
                     },
                     expected_revision: None,

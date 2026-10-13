@@ -2,11 +2,11 @@
 //! AppKit never waits for a manager, hash, source probe, or helper stdout.
 use crate::i18n::{text, Message, UiLocale};
 use crate::update_card::UpdateCardModel;
-use herdr_update_coordinator::protocol::{
+use desktop_pet_update_coordinator::protocol::{
     latest_operation, lock_operation, private_updates, start_allowed, ExecutionFence,
     OperationPhase, OperationRecord, UPDATER_PROTOCOL,
 };
-use herdr_update_coordinator::{
+use desktop_pet_update_coordinator::{
     check, read_operation, read_plan, recheck_plan, stage_helper, write_plan, CheckSnapshot,
     CheckStatus, InstallOrigin, UpdateContext, UpdatePlan, UpdatePolicy,
 };
@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,6 +41,20 @@ pub(super) enum Event {
         prepared_recovery: Option<PreparedRecoveryProof>,
     },
     LatestJournal(Result<Option<OperationRecord>, String>),
+    MigrationEligibility {
+        context: UpdateContext,
+        result: Result<(), String>,
+    },
+    MigrationHistory {
+        context: UpdateContext,
+        result: Result<
+            Option<(
+                desktop_pet_update_coordinator::migration::MigrationPlan,
+                desktop_pet_update_coordinator::migration::MigrationRecord,
+            )>,
+            String,
+        >,
+    },
 }
 
 #[derive(Deserialize)]
@@ -102,6 +117,9 @@ pub(super) struct AppUpdateService {
     scheduled_due_before: Option<Option<u64>>,
     auto_failure_paused: bool,
     revision: u64,
+    migration_available: bool,
+    migration_problem: Option<String>,
+    migration_history_verified: bool,
 }
 
 impl AppUpdateService {
@@ -151,15 +169,85 @@ impl AppUpdateService {
             scheduled_due_before: None,
             auto_failure_paused: false,
             revision: 0,
+            migration_available: false,
+            migration_problem: None,
+            migration_history_verified: false,
         };
         service.check_due();
+        service.check_migration_eligibility();
+        service.check_migration_history();
         service
     }
+    pub(super) fn selected_executable(&self) -> Option<(&Path, bool)> {
+        let context = self.context.as_ref()?;
+        let candidate = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.plan.as_ref())
+            .and_then(|plan| plan.candidate.as_ref());
+        match candidate {
+            Some(candidate) => Some((&candidate.path, candidate == &context.running)),
+            None => Some((
+                &context.executable,
+                context.executable == context.running.path,
+            )),
+        }
+    }
+
     pub(super) fn revision(&self) -> u64 {
         self.revision
     }
     pub(super) fn policy(&self) -> UpdatePolicy {
         self.policy
+    }
+
+    pub(super) fn check_migration_eligibility(&mut self) {
+        self.migration_available = false;
+        self.migration_problem = None;
+        if !desktop_pet_update_coordinator::identity::LEGACY {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = desktop_pet_update_coordinator::migration::readonly_eligibility(&context);
+            let _ = sender.send(Event::MigrationEligibility { context, result });
+        });
+    }
+
+    pub(super) fn migration_eligibility(
+        &mut self,
+        context: UpdateContext,
+        result: Result<(), String>,
+    ) {
+        if self.context.as_ref() != Some(&context) {
+            return;
+        }
+        self.migration_available = result.is_ok();
+        self.migration_problem = result.err();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn check_migration_history(&mut self) {
+        self.migration_history_verified = false;
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = desktop_pet_update_coordinator::migration::latest_for_context(&context);
+            let _ = sender.send(Event::MigrationHistory { context, result });
+        });
+    }
+
+    pub(super) fn migration_history_checked(&mut self, context: &UpdateContext, verified: bool) {
+        if self.context.as_ref() != Some(context) {
+            return;
+        }
+        self.migration_history_verified = verified;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub(super) fn settings_admitted(&self) -> bool {
@@ -180,6 +268,8 @@ impl AppUpdateService {
             return;
         }
         self.context = context;
+        self.check_migration_eligibility();
+        self.check_migration_history();
         // Retire discovery and consent, not the immutable plan or journal owned
         // by an already launched helper. Native state gates host changes while
         // an actual preparation is active.
@@ -1032,6 +1122,9 @@ impl AppUpdateService {
         if let Some(error) = self.journal_error.as_ref() {
             let _ = writeln!(diagnostics, "Journal error: {error}");
         }
+        if let Some(error) = &self.migration_problem {
+            let _ = writeln!(diagnostics, "Migration unavailable: {error}");
+        }
         UpdateCardModel {
             auto_check: self.auto_check,
             receive_beta_updates: self.policy == UpdatePolicy::StableAndBeta,
@@ -1048,24 +1141,20 @@ impl AppUpdateService {
                 .context
                 .as_ref()
                 .map_or_else(String::new, |context| context.version.clone()),
-            source: match origin {
-                Some(InstallOrigin::Homebrew { formula, .. }) => {
-                    format!(
-                        "{} · {formula}",
-                        text(locale, Message::AppUpdateSourceHomebrew)
-                    )
-                }
-                _ => text(
-                    locale,
-                    origin.map_or(Message::AppUpdateSourceUnknown, source_message),
-                )
-                .into(),
-            },
+            source: origin.map_or_else(
+                || text(locale, Message::AppUpdateSourceUnknown).to_owned(),
+                |origin| origin.manager_label().to_owned(),
+            ),
             detail: text(locale, detail_message).into(),
             history,
             diagnostics,
             last_checked: self.last_checked,
             action: self.plan().map(|plan| plan.action.clone()),
+            migration_visible: desktop_pet_update_coordinator::identity::LEGACY,
+            migration_available: self.migration_available
+                && self.migration_history_verified
+                && self.settings_admitted(),
+            migration_title: text(locale, Message::MigrationTitle).to_owned(),
             download_url: self.download_url().map(str::to_owned),
             release: self
                 .snapshot
@@ -1202,16 +1291,6 @@ fn outcome_message(record: &OperationRecord) -> Message {
     }
 }
 
-fn source_message(origin: &InstallOrigin) -> Message {
-    match origin {
-        InstallOrigin::Herdr { .. } => Message::AppUpdateSourceHerdr,
-        InstallOrigin::Local { .. } => Message::AppUpdateSourceLocal,
-        InstallOrigin::Homebrew { .. } => Message::AppUpdateSourceHomebrew,
-        InstallOrigin::Manual { .. } => Message::AppUpdateSourceManual,
-        InstallOrigin::Unknown { .. } => Message::AppUpdateSourceUnknown,
-    }
-}
-
 fn check_status_message(status: CheckStatus) -> Message {
     match status {
         CheckStatus::NotChecked => Message::AppUpdateNotChecked,
@@ -1257,43 +1336,11 @@ fn append_operation_diagnostics(diagnostics: &mut String, label: &str, record: &
 }
 
 pub(super) fn source_description(origin: &InstallOrigin) -> String {
-    match origin {
-        InstallOrigin::Herdr {
-            host,
-            host_config_dir,
-            checkout_root,
-            plugin_root,
-            source,
-            requested_ref,
-            resolved_commit,
-            enabled,
-        } => format!(
-            "Herdr · host {} · host config {} · checkout {} · plugin {} · {source} · ref {} · commit {} · {}",
-            host.display(),
-            host_config_dir.display(),
-            checkout_root.display(),
-            plugin_root.display(),
-            requested_ref.as_deref().unwrap_or("default"),
-            resolved_commit.as_deref().unwrap_or("not observed"),
-            if *enabled { "enabled" } else { "disabled" }
-        ),
-        InstallOrigin::Local { root } => format!("Local checkout · {}", root.display()),
-        InstallOrigin::Homebrew {
-            brew,
-            formula,
-            cellar_formula_root,
-            prefix,
-            locator,
-        } => format!(
-            "Homebrew · {formula} · brew {} · prefix {} · formula root {} · app {}",
-            brew.display(),
-            prefix.display(),
-            cellar_formula_root.display(),
-            locator.display()
-        ),
-        InstallOrigin::Manual { locator } => format!("Manual · {}", locator.display()),
-        InstallOrigin::Unknown { reason } => format!("Unknown · {reason}"),
-    }
+    format!(
+        "{} · {}",
+        origin.manager_label(),
+        serde_json::to_string(origin).unwrap_or_else(|error| error.to_string())
+    )
 }
 
 fn now() -> Option<u64> {
@@ -1325,13 +1372,7 @@ fn stage_and_launch(plan: &UpdatePlan, on_waiting: impl FnOnce()) -> Result<(), 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(host_config_dir) = plan.context.host_plugin_config_dir.as_ref() {
-        command.env(
-            "HERDR_DESKTOP_PET_CAPTURED_HOST_PLUGIN_CONFIG_DIR",
-            host_config_dir,
-        );
-    }
-    // The helper owns its own AppKit loop and journal after this process exits.
+    // The detached helper owns its journal after this process exits.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -1347,7 +1388,7 @@ fn stage_and_launch(plan: &UpdatePlan, on_waiting: impl FnOnce()) -> Result<(), 
         .stdout
         .take()
         .ok_or_else(|| LaunchFailure::Spawned("Coordinator ownership channel missing".into()))?;
-    // The helper owns its journal and UI; after spawn, never kill it on timeout.
+    // After spawn, ownership is determined by the journal; never kill on timeout.
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let _ = sender.send(read_ownership_ack(stdout));
@@ -1411,7 +1452,7 @@ fn await_ownership_ack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use herdr_update_coordinator::{
+    use desktop_pet_update_coordinator::{
         ExecutableIdentity, ReleaseCandidate, ReleaseChannel, UpdateAction,
     };
     use std::collections::BTreeMap;
@@ -1428,16 +1469,18 @@ mod tests {
             version: "0.2.0".into(),
             instance_id: "isolated".into(),
             config_dir: PathBuf::from("/isolated/config"),
-            host_plugin_config_dir: None,
             state_dir: PathBuf::from("/isolated/state"),
-            herdr_socket: PathBuf::from("/isolated/socket"),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: PathBuf::from("/isolated/herdr.sock"),
             running: running.clone(),
             running_origin: None,
             assets_override: None,
             environment: BTreeMap::new(),
             locale: "en".into(),
         };
-        let origin = InstallOrigin::Local { root };
+        let origin = InstallOrigin::Source { root };
         CheckSnapshot {
             status: CheckStatus::Local,
             policy: UpdatePolicy::StableOnly,
@@ -1451,7 +1494,7 @@ mod tests {
                 operation_id: "e".repeat(32),
                 context,
                 origin,
-                action: UpdateAction::LocalRebuild,
+                action: UpdateAction::SourceRebuild,
                 running,
                 candidate: None,
                 target: None,
@@ -1470,8 +1513,10 @@ mod tests {
 
     #[test]
     fn host_commits_retire_old_checks_and_consent_and_capture_each_live_mode() {
-        use herdr_update_coordinator::ObservationMode;
-        let mut state = crate::state::tests::tern_test_state(ObservationMode::Herdr);
+        use desktop_pet_contracts::ObservationSelection;
+        let mut state = crate::state::tests::observed_test_state(ObservationSelection::Provider(
+            "herdr".into(),
+        ));
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         service.reconcile_context(state.update_context().cloned());
         let history = failed_record('a');
@@ -1483,16 +1528,16 @@ mod tests {
             Some(42)
         );
         for mode in [
-            ObservationMode::Tern,
-            ObservationMode::Both,
-            ObservationMode::Herdr,
+            ObservationSelection::Provider("tern".into()),
+            ObservationSelection::Auto,
+            ObservationSelection::Provider("herdr".into()),
         ] {
             let old_plan = service.plan().unwrap().clone();
             let old_consent = service.consent_generation();
             let (old_request, old_policy, _) = service.begin_check().unwrap();
             let mut observation = state.observation_preferences().clone();
-            observation.host = mode;
-            state.apply_observation_preferences(observation);
+            observation.host = mode.clone();
+            state.apply_observation_preferences(observation).unwrap();
             service.reconcile_context(state.update_context().cloned());
             assert!(!service.check_busy);
             assert!(service.plan().is_none());
@@ -1535,8 +1580,20 @@ mod tests {
 
     #[test]
     fn prepared_admission_protects_host_context_and_original_helper_ownership() {
-        use herdr_update_coordinator::ObservationMode;
-        let (mut service, plan) = pending_local_launch();
+        use desktop_pet_contracts::ObservationSelection;
+        let mut state = crate::state::tests::observed_test_state(ObservationSelection::Provider(
+            "herdr".into(),
+        ));
+        // Capture the observation identity before launching, just as the live
+        // state does before a check. Prepare must preserve this source context,
+        // not repair an already-owned plan that omitted its observation mode.
+        let mut source_context = local_check().plan.unwrap().context;
+        source_context
+            .set_observation_selection(&ObservationSelection::Provider("herdr".into()))
+            .unwrap();
+        state.set_update_context(source_context.clone()).unwrap();
+        assert_eq!(state.update_context(), Some(&source_context));
+        let (mut service, plan) = pending_launch(local_check_for_context(source_context));
         assert!(service.launch_result(&plan.operation_id, Ok(())));
         let mut active = failed_record('e');
         active.phase = OperationPhase::Installing;
@@ -1544,8 +1601,6 @@ mod tests {
         service.journal_in_flight = Some(plan.operation_id.clone());
         let history = failed_record('a');
         service.previous_outcome = Some(history.clone());
-        let mut state = crate::state::tests::tern_test_state(ObservationMode::Herdr);
-        state.set_update_context(plan.context.clone());
         state.set_ui_ready();
         let (sender, receiver) = mpsc::channel();
         state
@@ -1556,9 +1611,17 @@ mod tests {
         receiver.recv().unwrap().unwrap();
         assert!(state.update_mutation_allowed().is_err());
         let mut observation = state.observation_preferences().clone();
-        observation.host = ObservationMode::Tern;
-        state.apply_observation_preferences(observation);
-        assert_eq!(state.observation_mode(), ObservationMode::Herdr);
+        observation.host = ObservationSelection::Provider("tern".into());
+        assert!(state.apply_observation_preferences(observation).is_err());
+        let mut replacement_context = plan.context.clone();
+        replacement_context
+            .set_observation_selection(&ObservationSelection::Provider("tern".into()))
+            .unwrap();
+        assert!(state.set_update_context(replacement_context).is_err());
+        assert_eq!(
+            state.observation_mode(),
+            ObservationSelection::Provider("herdr".into())
+        );
         assert_eq!(state.update_context(), Some(&plan.context));
         service.reconcile_context(state.update_context().cloned());
         assert_eq!(service.context.as_ref(), Some(&plan.context));
@@ -1709,14 +1772,14 @@ mod tests {
         );
         assert_eq!(
             service.plan().map(|plan| &plan.action),
-            Some(&UpdateAction::LocalRebuild)
+            Some(&UpdateAction::SourceRebuild)
         );
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
         let history = service.model(UiLocale::En).history;
         assert!(!service.model(UiLocale::En).busy);
         assert_eq!(
             service.model(UiLocale::En).action,
-            Some(UpdateAction::LocalRebuild)
+            Some(UpdateAction::SourceRebuild)
         );
         service.latest_journal(Ok(Some(prior.clone())));
         let prior_id = prior.operation_id.clone();
@@ -1738,7 +1801,7 @@ mod tests {
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
         assert_eq!(
             service.plan().map(|plan| &plan.action),
-            Some(&UpdateAction::LocalRebuild)
+            Some(&UpdateAction::SourceRebuild)
         );
     }
 
@@ -1764,13 +1827,13 @@ mod tests {
         service.checked(Ok(local_check()), Some(SettledOperationProof(prior)));
         assert_eq!(
             service.plan().map(|plan| &plan.action),
-            Some(&UpdateAction::LocalRebuild)
+            Some(&UpdateAction::SourceRebuild)
         );
     }
 
     #[test]
     fn clearance_rejects_busy_lease_legacy_journal_and_retained_profile_marker() {
-        use herdr_update_coordinator::protocol::{
+        use desktop_pet_update_coordinator::protocol::{
             write_operation, write_private_bytes, write_private_new,
         };
         use std::fs;
@@ -1845,7 +1908,7 @@ mod tests {
     #[test]
     fn stopped_original_restoration_history_requires_independent_settlement_before_beta_admission()
     {
-        use herdr_update_coordinator::protocol::{
+        use desktop_pet_update_coordinator::protocol::{
             reserve_install, write_operation, write_private_new,
         };
         use std::fs;
@@ -1858,7 +1921,7 @@ mod tests {
         let root = temporary.path().join("source");
         fs::create_dir(&root).unwrap();
         let mut snapshot = local_check();
-        snapshot.origin = InstallOrigin::Local { root: root.clone() };
+        snapshot.origin = InstallOrigin::Source { root: root.clone() };
         let next_plan = snapshot.plan.as_mut().unwrap();
         next_plan.origin = snapshot.origin.clone();
         next_plan.running.path = root.join("app");
@@ -1913,7 +1976,7 @@ mod tests {
         assert_eq!(service.previous_outcome.as_ref(), Some(&stopped));
         assert_eq!(
             service.plan().map(|plan| &plan.action),
-            Some(&UpdateAction::LocalRebuild)
+            Some(&UpdateAction::SourceRebuild)
         );
         service.change_policy(UpdatePolicy::StableAndBeta, None);
         assert_eq!(service.policy(), UpdatePolicy::StableAndBeta);
@@ -1937,7 +2000,7 @@ mod tests {
 
     #[test]
     fn completed_current_check_without_candidate_unlocks_release_policy() {
-        use herdr_update_coordinator::protocol::{write_operation, write_private_new};
+        use desktop_pet_update_coordinator::protocol::{write_operation, write_private_new};
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1948,7 +2011,7 @@ mod tests {
         let root = temporary.path().join("source");
         fs::create_dir(&root).unwrap();
         let mut snapshot = local_check();
-        snapshot.origin = InstallOrigin::Local { root };
+        snapshot.origin = InstallOrigin::Source { root };
         snapshot.status = CheckStatus::Current;
         snapshot.policy = UpdatePolicy::StableAndBeta;
         let mut prior_plan = snapshot.plan.take().unwrap();
@@ -2149,7 +2212,7 @@ mod tests {
         let discovered = service.model(UiLocale::Ko);
         assert!(!discovered.busy);
         assert_eq!(discovered.status, CheckStatus::Local);
-        assert_eq!(discovered.action, Some(UpdateAction::LocalRebuild));
+        assert_eq!(discovered.action, Some(UpdateAction::SourceRebuild));
         assert_eq!(discovered.history, history);
         assert_eq!(
             discovered.running_version,
@@ -2188,31 +2251,6 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_source_shows_formula_without_exposing_install_paths() {
-        let mut snapshot = local_check();
-        let origin = InstallOrigin::Homebrew {
-            brew: PathBuf::from("/isolated/private/bin/brew"),
-            formula: "example/tap/herdr-pet".into(),
-            cellar_formula_root: PathBuf::from("/isolated/private/Cellar/herdr-pet"),
-            prefix: PathBuf::from("/isolated/private/prefix"),
-            locator: PathBuf::from("/isolated/private/app"),
-        };
-        snapshot.origin = origin.clone();
-        snapshot.plan = None;
-        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
-        service.checked(Ok(snapshot), None);
-        for locale in [UiLocale::En, UiLocale::Ko] {
-            let model = service.model(locale);
-            assert_eq!(model.source, "Homebrew · example/tap/herdr-pet");
-            assert!(!model.source.contains("/isolated/"));
-            assert!(model.diagnostics.contains("/isolated/private/bin/brew"));
-            assert!(model.diagnostics.contains("/isolated/private/app"));
-        }
-        assert!(source_description(&origin).contains("/isolated/private/bin/brew"));
-        assert!(source_description(&origin).contains("/isolated/private/app"));
-    }
-
-    #[test]
     fn newer_completed_operation_replaces_retained_history() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         let prior = failed_record('a');
@@ -2244,7 +2282,7 @@ mod tests {
         service.checked(Ok(local_check()), Some(SettledOperationProof(newer)));
         let retired = service.model(UiLocale::En);
         assert_eq!(retired.status, CheckStatus::Local);
-        assert_eq!(retired.action, Some(UpdateAction::LocalRebuild));
+        assert_eq!(retired.action, Some(UpdateAction::SourceRebuild));
         assert_eq!(retired.history, completed.history);
     }
 
@@ -2337,7 +2375,10 @@ mod tests {
         assert!(!failed.detail.contains("Stop reply failed"));
     }
     fn pending_local_launch() -> (AppUpdateService, UpdatePlan) {
-        let snapshot = local_check();
+        pending_launch(local_check())
+    }
+
+    fn pending_launch(snapshot: CheckSnapshot) -> (AppUpdateService, UpdatePlan) {
         let plan = snapshot.plan.as_ref().unwrap().clone();
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         service.context = Some(plan.context.clone());
@@ -2364,7 +2405,7 @@ mod tests {
         assert_eq!(service.plan(), Some(&plan));
         assert_eq!(
             service.model(UiLocale::En).action,
-            Some(UpdateAction::LocalRebuild)
+            Some(UpdateAction::SourceRebuild)
         );
         service.journal(&plan.operation_id, Err("late poll".into()), None);
         assert_eq!(service.plan(), Some(&plan));
@@ -2581,12 +2622,12 @@ mod tests {
         let generation = service.consent_generation();
         assert!(service.consent_matches(&plan, generation));
         let mut replacement = local_check();
-        let asset = "HerdrDesktopPet-v0.3.3-macos-arm64.tar.gz";
-        let base = "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.3/";
+        let asset = "DesktopPet-v0.4.1-macos-arm64.tar.gz";
+        let base = "https://github.com/hanbong5938/desktop-pet/releases/download/v0.4.1/";
         replacement.release = Some(ReleaseCandidate {
-            version: "0.3.3".into(),
+            version: "0.4.1".into(),
             channel: ReleaseChannel::Stable,
-            tag: "v0.3.3".into(),
+            tag: "v0.4.1".into(),
             release_id: 42,
             asset_name: asset.into(),
             archive_url: format!("{base}{asset}"),

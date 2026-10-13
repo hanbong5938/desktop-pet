@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SITE = join(ROOT, 'site');
 const ORIGIN = 'https://hanbong5938.github.io';
-const PREFIX = '/herdr-desktop-pet/';
+const PREFIX = '/desktop-pet/';
 const LOCALES = new Map([
   ['ko', `${ORIGIN}${PREFIX}`], ['en', `${ORIGIN}${PREFIX}en/`],
   ['zh-Hans', `${ORIGIN}${PREFIX}zh-Hans/`], ['ja', `${ORIGIN}${PREFIX}ja/`],

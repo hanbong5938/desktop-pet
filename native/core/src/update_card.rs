@@ -1,6 +1,6 @@
 use crate::i18n::{text, Message, UiLocale};
 use crate::ui::MenuTarget;
-use herdr_update_coordinator::{CheckStatus, ReleaseCandidate, UpdateAction};
+use desktop_pet_update_coordinator::{CheckStatus, ReleaseCandidate, UpdateAction};
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
@@ -69,6 +69,9 @@ pub(crate) struct UpdateCardModel {
     pub(crate) action: Option<UpdateAction>,
     pub(crate) release: Option<ReleaseCandidate>,
     pub(crate) download_url: Option<String>,
+    pub(crate) migration_available: bool,
+    pub(crate) migration_visible: bool,
+    pub(crate) migration_title: String,
 }
 
 pub(crate) struct AppUpdateCard {
@@ -94,6 +97,7 @@ pub(crate) struct AppUpdateCard {
     check: Retained<NSButton>,
     apply: Retained<NSButton>,
     download: Retained<NSButton>,
+    migration: Retained<NSButton>,
     third_separator: Retained<NSBox>,
     last_checked: Retained<NSTextField>,
     locale: UiLocale,
@@ -153,6 +157,8 @@ impl AppUpdateCard {
         let apply = button(target, sel!(applyAppUpdate:), mtm);
         let download = button(target, sel!(downloadAppUpdate:), mtm);
         download.setHidden(true);
+        let migration = button(target, sel!(migrateLegacyInstallation:), mtm);
+        migration.setHidden(true);
         let third_separator = separator(mtm);
         let last_checked = label(10.0, false, true, mtm);
         for child in [
@@ -176,6 +182,7 @@ impl AppUpdateCard {
             &*check,
             &*apply,
             &*download,
+            &*migration,
             &*third_separator,
             &*last_checked,
         ] {
@@ -204,6 +211,7 @@ impl AppUpdateCard {
             check,
             apply,
             download,
+            migration,
             third_separator,
             last_checked,
             locale,
@@ -249,6 +257,9 @@ impl AppUpdateCard {
             &self.download,
             text(locale, Message::AppUpdateDownloadRelease),
         );
+        self.migration
+            .setTitle(&NSString::from_str(text(locale, Message::MigrationTitle)));
+        accessibility(&self.migration, text(locale, Message::MigrationTitle));
         accessibility(&self.heading, text(locale, Message::AppUpdateTitle));
         accessibility(&self.auto_switch, text(locale, Message::AppUpdateAutoCheck));
         accessibility(
@@ -337,6 +348,11 @@ impl AppUpdateCard {
         self.download.setHidden(model.download_url.is_none());
         self.download
             .setEnabled(!busy && !model.settings_locked && model.download_url.is_some());
+        self.migration
+            .setTitle(&NSString::from_str(&model.migration_title));
+        self.migration.setHidden(!model.migration_visible);
+        self.migration
+            .setEnabled(!busy && model.migration_available);
         self.model = Some(model.clone());
     }
 
@@ -430,11 +446,13 @@ impl AppUpdateCard {
         accessibility(&self.running, &running);
         accessibility(&self.source, &origin);
         let action_message = match action {
-            Some(UpdateAction::HerdrReinstall | UpdateAction::HomebrewUpgrade) => {
+            Some(UpdateAction::StandaloneReplace | UpdateAction::HomebrewUpgrade) => {
                 Some(Message::AppUpdateInstall)
             }
-            Some(UpdateAction::LocalRebuild) => Some(Message::AppUpdateRebuild),
+            Some(UpdateAction::SourceRebuild) => Some(Message::AppUpdateRebuild),
             Some(UpdateAction::ApplyInstalled) => Some(Message::AppUpdateApply),
+            #[cfg(desktop_pet_legacy)]
+            Some(UpdateAction::HerdrReinstall) => Some(Message::AppUpdateInstall),
             None => None,
         };
         self.apply.setHidden(action_message.is_none());
@@ -530,6 +548,14 @@ impl AppUpdateCard {
             (&self.check, check_width),
             (&self.apply, apply_width),
             (&self.download, download_width),
+            (
+                &self.migration,
+                if self.migration.isHidden() {
+                    0.0
+                } else {
+                    button_width(&self.migration, full)
+                },
+            ),
         ] {
             if button_width == 0.0 {
                 continue;

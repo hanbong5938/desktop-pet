@@ -1,8 +1,12 @@
-# Herdr Desktop Pet 버전 안내
+# Desktop Pet 버전 안내
+
+**게시 경계:** 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / observation capability 1로 출시되었습니다. 독립 Desktop Pet v0.4.0(protocol 4 / capability 2 / integration API 1)과 이전용 bridge v0.3.7은 검토된 후보이며 공개 설치·런타임 검증은 아직 완료되지 않았습니다. 아래 명령은 중립 제품 cutover 안내이며 문서·태그·소스 버전은 게시 증거가 아닙니다.
+
+[Desktop Pet v0.4.0 reviewed candidate](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
 
 [English](README.md) · **한국어**
 
-이 저장소에서 검토한 Markdown이 버전 문서의 원본입니다. GitHub Wiki는 원본에서 생성한 읽기용 화면이며 따로 편집하는 원본이 아닙니다. 개요·설치는 [한국어 루트 안내](../../readme.ko.md), 현행 조작·운영은 [사용 안내](../usage.ko.md), 소스·웹사이트 개발은 [개발 안내](../development.ko.md), Herdr 호스트 연동은 [연동 안내(영어)](../../integrations/herdr/README.md)를 기준으로 합니다.
+이 저장소에서 검토한 Markdown이 버전 문서의 원본입니다. GitHub Wiki는 원본에서 생성한 읽기용 화면이며 따로 편집하는 원본이 아닙니다. 개요·설치는 [한국어 루트 안내](../../readme.ko.md), 현행 조작·운영은 [사용 안내](../usage.ko.md), 소스·웹사이트 개발은 [개발 안내](../development.ko.md), Herdr 호스트 연동은 [연동 안내(영어)](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)를 기준으로 합니다.
 
 ## 목적에 맞는 문서 선택
 
@@ -18,7 +22,7 @@
 | 같은 원본을 Wiki와 새 Release 본문에 게시하는 방법 | [게시 절차](publishing.md) |
 | 실제 공개 릴리스와 자산 상태 | [GitHub Releases](https://github.com/hanbong5938/herdr-desktop-pet/releases), 생성된 Wiki의 **Release-Status** 및 **Older-Releases** 페이지 |
 
-**v0.3.6은 공개 안정판이며 비초안·비프리릴리스이고 GitHub의 관측된 `latest`입니다.** [정확한 Release](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)에 자산 4개가 모두 게시되어 있으며 [현행 게시·소비자 증거](0.3.md#v036-실제-게시-확인)에 익명 다운로드 대조·압축 파일 SHA-256·stable tap 전환·실제 v0.3.5 → v0.3.6 Homebrew 업그레이드·Cargo/Bun/Node/npm 없는 고정 사전 빌드 설치를 기록했습니다. 동결된 [정본 노트](v0.3.6.md)는 Tern 연동·4개 언어·protocol-3 베타 명시적 동의를 설명하며 게시 전 표현은 당시 기록으로 보존합니다. 소비자 경로는 `brew install hanbong5938/tap/herdr-desktop-pet`로 Rust 없이 네이티브 사전 빌드 앱을 설치하고 `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`로 Tern 연결 플러그인을 명시적으로 설치합니다. 같은 앱의 기본 호스트는 Herdr이며 Tern은 [사용 안내](../usage.ko.md)의 명시적 `--host tern` 시작과 별도 설정 **및** 상태 경로를 사용합니다. 플러그인은 앱을 몰래 다운로드·빌드·실행하지 않습니다. 소비자 smoke는 네이티브 Tern 전용 시작과 빈 snapshot 교환을 점검했으며 공개 플러그인의 실제 CLI 설치는 발견 증거이지 GUI 창 연결이나 실제 에이전트 전달 증거가 아닙니다. [이전 v0.3.5 게시 기록](0.3.md)과 기존 베타 기록은 과거 증거로 보존합니다.
+역사적 Herdr 게시 기록 — **v0.3.6은 공개 안정판이며 비초안·비프리릴리스이고 GitHub의 관측된 `latest`입니다.** [정확한 Release](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)에 자산 4개가 모두 게시되어 있으며 [현행 게시·소비자 증거](0.3.md#v036-실제-게시-확인)에 익명 다운로드 대조·압축 파일 SHA-256·stable tap 전환·실제 v0.3.5 → v0.3.6 Homebrew 업그레이드·Cargo/Bun/Node/npm 없는 고정 사전 빌드 설치를 기록했습니다. 동결된 [정본 노트](v0.3.6.md)는 Tern 연동·4개 언어·protocol-3 베타 명시적 동의를 설명하며 게시 전 표현은 당시 기록으로 보존합니다. 소비자 경로는 `brew install hanbong5938/tap/herdr-desktop-pet`로 Rust 없이 네이티브 사전 빌드 앱을 설치하고 `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`로 Tern 연결 플러그인을 명시적으로 설치합니다. 같은 앱의 기본 호스트는 Herdr이며 Tern은 [사용 안내](../usage.ko.md)의 명시적 `--host tern` 시작과 별도 설정 **및** 상태 경로를 사용합니다. 플러그인은 앱을 몰래 다운로드·빌드·실행하지 않습니다. 소비자 smoke는 네이티브 Tern 전용 시작과 빈 snapshot 교환을 점검했으며 공개 플러그인의 실제 CLI 설치는 발견 증거이지 GUI 창 연결이나 실제 에이전트 전달 증거가 아닙니다. [이전 v0.3.5 게시 기록](0.3.md)과 기존 베타 기록은 과거 증거로 보존합니다.
 
 생성된 Wiki의 릴리스 상태는 GitHub의 실제 Release 목록과 모두 업로드된 자산으로 판단하며 문서 파일이나 태그만으로 게시 완료를 판단하지 않습니다. 연결된 v0.3.6 증거는 관측된 게시 기록이며 계속 갱신되는 API 상태표는 아닙니다. 과거 0.1 계열의 **v0.1.5는 태그만 있고 공개 바이너리가 없습니다.**
 

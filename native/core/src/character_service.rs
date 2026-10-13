@@ -152,6 +152,7 @@ pub struct PackService {
     worker_done: (Mutex<bool>, Condvar),
     started: AtomicBool,
     stopping: AtomicBool,
+    read_only: AtomicBool,
 }
 
 impl PackService {
@@ -180,6 +181,7 @@ impl PackService {
             worker_done: (Mutex::new(true), Condvar::new()),
             started: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            read_only: AtomicBool::new(false),
         })
     }
 
@@ -202,7 +204,7 @@ impl PackService {
                 guard
             }
         };
-        PackStore::new(self.config_dir.clone(), Some(self.builtin_assets.clone()))
+        self.store(Some(self.builtin_assets.clone()))
             .load_preview(reference, generation)
             .map_err(bound_diagnostic)
     }
@@ -236,6 +238,31 @@ impl PackService {
         true
     }
 
+    fn store(&self, builtin_assets: Option<PathBuf>) -> PackStore {
+        if self.read_only.load(Ordering::Acquire) {
+            PackStore::new_read_only(self.config_dir.clone(), builtin_assets)
+        } else {
+            PackStore::new(self.config_dir.clone(), builtin_assets)
+        }
+    }
+
+    pub fn start_read_only(self: &Arc<Self>) -> Result<(), String> {
+        if self.started.load(Ordering::Acquire) {
+            return Err("pack service has already started".into());
+        }
+        self.read_only.store(true, Ordering::Release);
+        self.start()
+    }
+
+    pub fn finish_read_only_startup(&self) -> Result<(), String> {
+        let _io = lock_unpoisoned(&self.io_gate);
+        if !self.started.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire) {
+            return Err("pack service is not running".into());
+        }
+        self.read_only.store(false, Ordering::Release);
+        Ok(())
+    }
+
     /// Start exactly one serial worker.
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
         if self.stopping.load(Ordering::Acquire) {
@@ -246,7 +273,7 @@ impl PackService {
         }
         let initial_listing = {
             let _io = lock_unpoisoned(&self.io_gate);
-            let store = PackStore::new(self.config_dir.clone(), None);
+            let store = self.store(None);
             store.list().map_err(bound_diagnostic)
         };
         let initial_listing = match initial_listing {
@@ -293,7 +320,7 @@ impl PackService {
     /// holding the store gate; the UI uses `cached_list` instead.
     pub fn list(&self) -> Result<PackListing, String> {
         let _io = self.try_lock_io_gate()?;
-        let store = PackStore::new(self.config_dir.clone(), None);
+        let store = self.store(None);
         let listing = store.list().map_err(bound_diagnostic)?;
         self.cache_listing(listing);
         Ok(self.cached_list())
@@ -476,7 +503,7 @@ impl PackService {
             return Ok(vec![(CharacterRef::builtin(), path, true)]);
         }
         let _io = self.try_lock_io_gate()?;
-        let store = PackStore::new(self.config_dir.clone(), Some(self.builtin_assets.clone()));
+        let store = self.store(Some(self.builtin_assets.clone()));
         Ok(store
             .startup_candidates()
             .map_err(bound_diagnostic)?
@@ -490,7 +517,7 @@ impl PackService {
         reference: &CharacterRef,
     ) -> Result<crate::assets::ValidatedCharacter, String> {
         let _io = self.try_lock_io_gate()?;
-        PackStore::new(self.config_dir.clone(), Some(self.builtin_assets.clone()))
+        self.store(Some(self.builtin_assets.clone()))
             .load_revision(reference)
             .map_err(bound_diagnostic)
     }
@@ -615,7 +642,7 @@ impl PackService {
             }
         }
         let _io = self.try_lock_io_gate()?;
-        let store = PackStore::new(self.config_dir.clone(), None);
+        let store = self.store(None);
         if let Some(operation) = store
             .operation_status(operation_id)
             .map_err(bound_diagnostic)?
@@ -800,13 +827,11 @@ fn worker_loop(weak: Weak<PackService>) {
             WorkerItem::Metadata(key) => {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     let _io = lock_unpoisoned(&service.io_gate);
-                    PackStore::new(
-                        service.config_dir.clone(),
-                        Some(service.builtin_assets.clone()),
-                    )
-                    .dialogue_metadata(&key.reference, key.generation)
-                    .map(|(_, metadata)| DialogueMetadata { metadata })
-                    .map_err(bound_diagnostic)
+                    service
+                        .store(Some(service.builtin_assets.clone()))
+                        .dialogue_metadata(&key.reference, key.generation)
+                        .map(|(_, metadata)| DialogueMetadata { metadata })
+                        .map_err(bound_diagnostic)
                 }))
                 .unwrap_or_else(|_| Err("character metadata lookup aborted".to_string()));
                 service.publish_dialogue_metadata(key, result);
@@ -826,8 +851,7 @@ fn worker_loop(weak: Weak<PackService>) {
         }
         if catch_unwind(AssertUnwindSafe(|| service.execute(item))).is_err() {
             let _io = lock_unpoisoned(&service.io_gate);
-            let recovered =
-                PackStore::new(service.config_dir.clone(), None).listing_and_status(&operation_id);
+            let recovered = service.store(None).listing_and_status(&operation_id);
             service.recover_aborted_operation(
                 &operation_id,
                 recovered,
@@ -880,8 +904,7 @@ impl PackService {
             let verified = if let PackAction::ImportAndSelect { official } = &item.request.action {
                 // A durable identity is authoritative before touching the network.
                 let _io = lock_unpoisoned(&self.io_gate);
-                let existing =
-                    PackStore::new(self.config_dir.clone(), None).listing_and_status(&operation_id);
+                let existing = self.store(None).listing_and_status(&operation_id);
                 let (listing, durable) = match existing {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -971,7 +994,7 @@ impl PackService {
         verified: Option<ManagedPack>,
     ) -> Result<(), String> {
         let operation_id = &item.request.operation_id;
-        let store = PackStore::new(self.config_dir.clone(), Some(self.builtin_assets.clone()));
+        let store = self.store(Some(self.builtin_assets.clone()));
         let existing = match store.listing_and_status(operation_id) {
             Ok(pair) => pair,
             Err(error) => {
@@ -2502,7 +2525,7 @@ mod tests {
                 "--exact",
                 "character_service::tests::registry_flock_child_fixture",
             ])
-            .env("HERDR_TEST_REGISTRY_FLOCK", lock)
+            .env("DESKTOP_PET_TEST_REGISTRY_FLOCK", lock)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -2531,8 +2554,8 @@ mod tests {
     fn registry_flock_child_fixture() {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
-        let path = std::env::var("HERDR_TEST_REGISTRY_FLOCK")
-            .expect("registry flock child requires HERDR_TEST_REGISTRY_FLOCK");
+        let path = std::env::var("DESKTOP_PET_TEST_REGISTRY_FLOCK")
+            .expect("registry flock child requires DESKTOP_PET_TEST_REGISTRY_FLOCK");
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

@@ -1,56 +1,132 @@
 use crate::automation::{new_automation, PresentationTarget};
 use crate::character_service::PackService;
 use crate::control::ControlServer;
-use crate::herdr::Watchers;
 use crate::lifecycle::{self, Paths};
 use crate::preferences::Preferences;
-use crate::remote::RemoteWatchers;
-use crate::socket;
 use crate::state::AppState;
 use crate::ui;
-use herdr_update_coordinator::protocol::{register_active, start_allowed, unregister_active};
-use herdr_update_coordinator::{
-    detect_origin, executable_identity, InstallOrigin, ObservationMode, UpdateContext,
-    OBSERVATION_MODE_ENV,
+use crate::Composition;
+use desktop_pet_contracts::{
+    DomainAccess, ObservationSelection, ProfileStore, RuntimePort, OBSERVATION_SELECTION_ENV,
+};
+use desktop_pet_update_coordinator::protocol::{register_active, start_allowed, unregister_active};
+use desktop_pet_update_coordinator::{
+    detect_origin, executable_identity, InstallOrigin, UpdateContext,
 };
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::Instant;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DaemonConfig {
     pub paths: Paths,
     pub assets: PathBuf,
     pub assets_override: bool,
-    pub herdr_socket: PathBuf,
     pub startup_token: Option<String>,
     pub automatic_start: bool,
-    pub host_plugin_config_dir: Option<PathBuf>,
-    pub observation_mode: ObservationMode,
+    pub observation_mode: ObservationSelection,
+    pub composition: Arc<Composition>,
 }
 
-impl DaemonConfig {
-    pub fn new(
-        paths: Paths,
-        assets: PathBuf,
-        herdr_socket: PathBuf,
-        startup_token: Option<String>,
-        assets_override: bool,
-        automatic_start: bool,
-        host_plugin_config_dir: Option<PathBuf>,
-        observation_mode: ObservationMode,
-    ) -> Self {
-        Self {
-            paths,
-            assets,
-            assets_override,
-            herdr_socket,
-            startup_token,
-            automatic_start,
-            host_plugin_config_dir,
-            observation_mode,
+pub(crate) struct StateRuntime {
+    pub shared: Arc<Mutex<AppState>>,
+}
+
+impl RuntimePort for StateRuntime {
+    fn with_domain(&self, operation: &mut dyn FnMut(&mut dyn DomainAccess)) -> Result<(), String> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| "desktop-pet domain lock is poisoned".to_owned())?;
+        operation(&mut *state);
+        Ok(())
+    }
+    fn wake_ui(&self) {
+        ui::wake();
+    }
+}
+
+struct IntegrationWorkers {
+    runtime: Arc<StateRuntime>,
+    integrations: Vec<Arc<dyn desktop_pet_contracts::Integration>>,
+    stopping: Arc<AtomicBool>,
+    tick: Option<JoinHandle<()>>,
+}
+
+impl IntegrationWorkers {
+    fn start(runtime: Arc<StateRuntime>, composition: &Composition) -> Result<Self, String> {
+        let mut workers = Self {
+            runtime,
+            integrations: Vec::new(),
+            stopping: Arc::new(AtomicBool::new(false)),
+            tick: None,
+        };
+        for integration in &composition.integrations {
+            workers.integrations.push(integration.clone());
+            integration.start(workers.runtime.clone())?;
+        }
+        let integrations = workers.integrations.clone();
+        let lifecycle_extensions = composition.extensions.lifecycle.clone();
+        let stopping = workers.stopping.clone();
+        let runtime = workers.runtime.clone();
+        if !integrations.is_empty() {
+            workers.tick = Some(
+                thread::Builder::new()
+                    .name("desktop-pet-integrations".into())
+                    .spawn(move || {
+                        while !stopping.load(Ordering::Acquire) {
+                            let now = Instant::now();
+                            // This is the sole integration clock; ticks can enter RuntimePort
+                            // and must run outside the domain lock, independently of IPC traffic.
+                            for integration in &integrations {
+                                integration.tick(now);
+                            }
+                            let exit = if lifecycle_extensions.is_empty() {
+                                false
+                            } else {
+                                let selection = runtime
+                                    .shared
+                                    .lock()
+                                    .ok()
+                                    .map(|state| state.observation_mode());
+                                selection.is_some_and(|selection| {
+                                    lifecycle_extensions
+                                        .iter()
+                                        .any(|extension| extension.should_exit(&selection, now))
+                                })
+                            };
+                            if exit {
+                                if let Ok(mut state) = runtime.shared.lock() {
+                                    state.request_shutdown();
+                                }
+                                runtime.wake_ui();
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                    })
+                    .map_err(|e| format!("cannot start integration clock: {e}"))?,
+            );
+        }
+        Ok(workers)
+    }
+}
+
+impl Drop for IntegrationWorkers {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Ok(mut state) = self.runtime.shared.lock() {
+            state.retire_integrations();
+        }
+        if let Some(tick) = self.tick.take() {
+            let _ = tick.join();
+        }
+        for integration in &self.integrations {
+            integration.shutdown();
         }
     }
 }
@@ -82,32 +158,32 @@ impl Drop for ActiveUpdateGuard {
     }
 }
 
-fn update_environment(
-    observation_mode: ObservationMode,
+pub(crate) fn captured_environment(
+    observation_mode: ObservationSelection,
     mut lookup: impl FnMut(&str) -> Option<String>,
-) -> BTreeMap<String, String> {
-    let mut environment = [
-        "HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_STATE_HOME",
-        "HERDR_BIN_PATH",
-        "HERDR_PLUGIN_ID",
-        "HERDR_ENV",
-        "HERDR_PLUGIN_CONFIG_DIR",
-        "HERDR_PLUGIN_STATE_DIR",
-        "HERDR_SOCKET_PATH",
-    ]
-    .into_iter()
-    .filter_map(|key| lookup(key).map(|value| (key.to_owned(), value)))
-    .collect::<BTreeMap<_, _>>();
-    // Absence is the legacy-compatible Herdr encoding, not an inherited selection.
-    if observation_mode != ObservationMode::Herdr {
+) -> Result<BTreeMap<String, String>, String> {
+    #[cfg(desktop_pet_legacy)]
+    {
+        desktop_pet_update_coordinator::legacy_entry::capture_environment(&observation_mode, lookup)
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        let mut environment = [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "DESKTOP_PET_CONFIG_DIR",
+            "DESKTOP_PET_STATE_DIR",
+        ]
+        .into_iter()
+        .filter_map(|key| lookup(key).map(|value| (key.to_owned(), value)))
+        .collect::<BTreeMap<_, _>>();
         environment.insert(
-            OBSERVATION_MODE_ENV.to_owned(),
+            OBSERVATION_SELECTION_ENV.to_owned(),
             observation_mode.as_str().to_owned(),
         );
+        Ok(environment)
     }
-    environment
 }
 
 fn update_context(
@@ -116,26 +192,25 @@ fn update_context(
     executable: PathBuf,
     prefs: &Preferences,
 ) -> Result<UpdateContext, String> {
-    let environment = update_environment(prefs.observation_host(), |key| env::var(key).ok());
+    let environment = captured_environment(prefs.observation_host(), |key| env::var(key).ok())?;
     let locale = ui::current_ui_locale(prefs.language()).tag();
-    let mut context = UpdateContext {
+    let context = UpdateContext {
         running: executable_identity(&executable)?,
         executable,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: desktop_pet_update_coordinator::identity::VERSION.to_owned(),
         instance_id,
         config_dir: config.paths.config_dir.clone(),
-        host_plugin_config_dir: config.host_plugin_config_dir.clone(),
+        #[cfg(desktop_pet_legacy)]
+        host_plugin_config_dir:
+            desktop_pet_update_coordinator::legacy_entry::host_plugin_config_dir(true),
         state_dir: config.paths.state_dir.clone(),
-        herdr_socket: config.herdr_socket.clone(),
+        #[cfg(desktop_pet_legacy)]
+        herdr_socket: desktop_pet_update_coordinator::legacy_entry::herdr_socket(),
         running_origin: None,
         assets_override: config.assets_override.then(|| config.assets.clone()),
         environment,
         locale: locale.to_owned(),
     };
-    context.running_origin =
-        Some(Box::new(detect_origin(&context).unwrap_or_else(|error| {
-            InstallOrigin::Unknown { reason: error }
-        })));
     Ok(context)
 }
 
@@ -145,9 +220,13 @@ fn update_context(
 /// clients never mutate AppState while doing disk I/O, and all worker shutdown
 /// joins happen after AppKit has returned.
 pub fn run(config: DaemonConfig) -> Result<(), String> {
-    let _lock = crate::cli::acquire_lock_until(&config.paths, Instant::now() + crate::cli::STARTUP_TIMEOUT)?;
+    let lock = Arc::new(crate::cli::acquire_lock_until(
+        &config.paths,
+        Instant::now() + crate::cli::STARTUP_TIMEOUT,
+    )?);
+    let profile = ProfileStore::with_lock(&config.paths.config_dir, lock.clone())?;
     let settings = lifecycle::read_settings(&config.paths.config_dir)?;
-    let updater_generation = env::var("HERDR_DESKTOP_PET_UPDATER_GENERATION")
+    let updater_generation = env::var("DESKTOP_PET_UPDATER_GENERATION")
         .ok()
         .map(|value| {
             value
@@ -155,21 +234,81 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
                 .map_err(|_| "invalid updater generation".to_owned())
         })
         .transpose()?;
-    let updater_token = env::var("HERDR_DESKTOP_PET_UPDATER_TOKEN").ok();
+    let updater_token = env::var("DESKTOP_PET_UPDATER_TOKEN").ok();
     if updater_token.is_some() != updater_generation.is_some() {
         return Err("updater startup requires both token and generation".into());
     }
-    if let Some(token) = config.startup_token.as_deref() {
-        lifecycle::claim_startup(&config.paths.config_dir, token)?;
-    }
     if config.automatic_start && !settings.auto_start {
         if let Some(token) = config.startup_token.as_deref() {
-            let _ = lifecycle::abandon_startup(&config.paths.config_dir, token);
+            let _ = profile
+                .with_writer_lock(|| lifecycle::abandon_startup(&config.paths.config_dir, token));
         }
         return Err("desktop-pet automatic start is disabled".to_owned());
     }
-    lifecycle::write_settings(&config.paths.config_dir, settings)?;
 
+    let mut initial_state = AppState::new();
+    initial_state.set_lifecycle_settings(settings);
+    initial_state.set_integrations(
+        config.composition.integrations.clone(),
+        config.composition.provider_labels.clone(),
+    );
+    initial_state.set_lifecycle_extensions(
+        config.composition.extensions.lifecycle.clone(),
+        profile.clone(),
+    );
+    let migration_input = migration_environment()?;
+    let mut prefs = if migration_input.is_some() {
+        Preferences::load(&config.paths.config_dir)?
+    } else {
+        Preferences::load_for_daemon(&config.paths.config_dir)?
+    };
+    prefs.set_integration_extensions(
+        profile.clone(),
+        config.composition.extensions.lifecycle.clone(),
+    );
+    prefs.set_observation_host(config.observation_mode.clone());
+    initial_state.set_observation_selection(config.observation_mode.clone())?;
+    initial_state.set_preferences(&prefs);
+    let automation =
+        new_automation(PresentationTarget::from_scene(&initial_state.scene()), None)
+            .map_err(|error| format!("cannot initialize presentation automation: {error}"))?;
+    let instance_id = crate::automation::lock_automation(&automation)
+        .instance()
+        .to_owned();
+    let executable = crate::bundle::executable()
+        .map_err(|error| format!("cannot resolve desktop-pet executable path: {error}"))?;
+    let mut context = update_context(&config, instance_id.clone(), executable, &prefs)?;
+    let migration = migration_input
+        .as_ref()
+        .map(|(path, operation, token)| {
+            desktop_pet_update_coordinator::migration::startup_authorization(
+                path, operation, token, &context,
+            )
+        })
+        .transpose()?;
+    context.running_origin = Some(Box::new(
+        detect_origin(&context).unwrap_or_else(|reason| InstallOrigin::Unknown { reason }),
+    ));
+    let origin = context
+        .running_origin
+        .as_deref()
+        .expect("origin captured")
+        .clone();
+    start_allowed(
+        &origin,
+        &config.paths.state_dir,
+        updater_generation,
+        updater_token.as_deref(),
+    )?;
+    config.composition.configure_profile(profile.clone())?;
+    prefs.refresh_owner_snapshot(&config.paths.config_dir)?;
+    if migration.is_none() {
+        if let Some(token) = config.startup_token.as_deref() {
+            profile
+                .with_writer_lock(|| lifecycle::claim_startup(&config.paths.config_dir, token))?;
+        }
+        lifecycle::write_settings(&profile, &config.composition.extensions.lifecycle, settings)?;
+    }
     let builtin_assets = if config.assets_override {
         crate::cli::resolve_assets(None).unwrap_or_else(|_| config.assets.clone())
     } else {
@@ -183,38 +322,23 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
     );
     // Every early return joins the worker before releasing the lifecycle lock.
     let _pack_worker = PackWorkerGuard(Arc::clone(&packs));
-    packs.start()?;
-
-    let mut initial_state = AppState::new();
-    initial_state.set_lifecycle_settings(settings);
-    let mut prefs = Preferences::load_for_daemon(&config.paths.config_dir)?;
-    prefs.set_observation_host(config.observation_mode);
-    initial_state.apply_observation_preferences(prefs.observation().clone());
-    initial_state.set_preferences(&prefs);
-    let automation =
-        new_automation(PresentationTarget::from_scene(&initial_state.scene()), None)
-            .map_err(|error| format!("cannot initialize presentation automation: {error}"))?;
-    let instance_id = crate::automation::lock_automation(&automation)
-        .instance()
-        .to_owned();
-    let executable = crate::bundle::executable()
-        .map_err(|error| format!("cannot resolve desktop-pet executable path: {error}"))?;
-    let context = update_context(&config, instance_id.clone(), executable, &prefs)?;
-    let origin = context
-        .running_origin
-        .as_deref()
-        .expect("origin captured")
-        .clone();
-    start_allowed(
-        &origin,
-        &config.paths.state_dir,
-        updater_generation,
-        updater_token.as_deref(),
-    )?;
+    if migration
+        .as_ref()
+        .is_some_and(|migration| !migration.source)
+    {
+        packs.start_read_only()?;
+    } else {
+        packs.start()?;
+    }
     // Token children already persisted the selected host under the launcher's
     // lifecycle lock. Direct daemon entry saves only after update admission.
-    if config.startup_token.is_none() {
-        crate::cli::persist_observation_mode(&config.paths.config_dir, config.observation_mode)?;
+    if config.startup_token.is_none() && migration.is_none() {
+        profile.with_writer_lock(|| {
+            crate::cli::persist_observation_mode(
+                &config.paths.config_dir,
+                config.observation_mode.clone(),
+            )
+        })?;
     }
     let _active = if matches!(origin, InstallOrigin::Unknown { .. }) {
         None
@@ -234,60 +358,42 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         })
     };
     let executable = context.running.path.clone();
-    initial_state.set_update_context(context);
+    initial_state.set_update_context(context)?;
     initial_state.set_automation(automation.clone());
+    if let Some(migration) = migration.as_ref().filter(|migration| !migration.source) {
+        let (path, _, _) = migration_input
+            .as_ref()
+            .ok_or("missing authenticated migration input")?;
+        initial_state.set_pending_migration_plan(
+            desktop_pet_update_coordinator::migration::read_plan(path)?,
+        )?;
+        initial_state
+            .set_migration_gate(migration.operation_id.clone(), migration.token.clone())?;
+    }
     let shared = Arc::new(Mutex::new(initial_state));
-    let watchers = Arc::new(Mutex::new(Watchers::new(Arc::clone(&shared))));
-    let mut remote_watchers = RemoteWatchers::new(Arc::clone(&shared));
-    // Remember the real configured endpoint even when Herdr starts dormant.
-    // Registration queues configuration only; the worker gates every request
-    // against the live observation host and epoch.
-    let launch_endpoint = socket::canonical_endpoint(&config.herdr_socket)?;
-    let mut endpoints = vec![launch_endpoint.clone()];
-    for endpoint in lifecycle::read_endpoints(&config.paths.config_dir)? {
-        if !endpoints.contains(&endpoint) {
-            endpoints.push(endpoint);
-        }
-    }
-    let mut accepted_endpoints = Vec::new();
-    for endpoint in endpoints {
-        let result = watchers
+    let runtime = Arc::new(StateRuntime {
+        shared: shared.clone(),
+    });
+    let workers = IntegrationWorkers::start(runtime, &config.composition)?;
+    {
+        let mut state = shared
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .register(endpoint.clone());
-        match result {
-            Ok(()) => accepted_endpoints.push(endpoint),
-            Err(error) => {
-                eprintln!(
-                    "desktop-pet: Herdr registration pending for {}: {error}",
-                    endpoint.display()
-                );
-            }
-        }
-    }
-
-    let mut control = match ControlServer::bind(
-        Arc::clone(&shared),
-        Arc::clone(&watchers),
-        config.paths.clone(),
-        Some(launch_endpoint),
-        executable,
-        Arc::clone(&packs),
-    ) {
-        Ok(control) => control,
-        Err(error) => {
-            packs.shutdown();
-            return Err(error);
-        }
-    };
-    for endpoint in accepted_endpoints {
-        if let Err(error) = control.record_registered_endpoint(endpoint.clone()) {
-            eprintln!(
-                "desktop-pet: cannot persist Herdr endpoint {}: {error}",
-                endpoint.display()
+            .map_err(|_| "desktop-pet domain lock is poisoned")?;
+        for integration in &config.composition.integrations {
+            integration.set_enabled(
+                config.observation_mode.includes_provider(integration.id()),
+                &mut *state,
             );
         }
     }
+    let mut control = ControlServer::bind(
+        Arc::clone(&shared),
+        config.paths.clone(),
+        executable,
+        Arc::clone(&packs),
+        config.composition.extensions.control.clone(),
+        config.composition.status_fields.clone(),
+    )?;
     start_allowed(
         &origin,
         &config.paths.state_dir,
@@ -299,7 +405,9 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         return Err(error);
     }
     if let Some(token) = config.startup_token.as_deref() {
-        if let Err(error) = lifecycle::finish_startup(&config.paths.config_dir, token) {
+        if let Err(error) =
+            profile.with_writer_lock(|| lifecycle::finish_startup(&config.paths.config_dir, token))
+        {
             control.shutdown();
             packs.shutdown();
             return Err(error);
@@ -335,47 +443,77 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         ui::wake();
     }
 
-    // AppKit has stopped before watcher/control threads are joined.  This
-    // ordering prevents a watcher event from touching a destroyed UI.
-    {
-        let mut watcher = watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        watcher.shutdown();
-    }
-    remote_watchers.shutdown();
+    // AppKit has stopped before joining integration/control workers.
+    drop(workers);
     control.shutdown();
     packs.shutdown();
 
     ui_result
 }
 
+fn migration_environment() -> Result<Option<(PathBuf, String, String)>, String> {
+    use desktop_pet_update_coordinator::migration::{OPERATION_ENV, PLAN_ENV, TOKEN_ENV};
+    let read_token = |key: &str| match env::var(key) {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => Err(format!("{key} is empty")),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{key} is not UTF-8")),
+    };
+    match (
+        env::var_os(PLAN_ENV),
+        read_token(OPERATION_ENV)?,
+        read_token(TOKEN_ENV)?,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(path), Some(operation), Some(token))
+            if !path.is_empty() && !operation.is_empty() && !token.is_empty() =>
+        {
+            Ok(Some((PathBuf::from(path), operation, token)))
+        }
+        _ => Err("migration startup requires exact plan, operation and token".into()),
+    }
+}
+
+pub(crate) fn validate_migration_startup_context(context: &UpdateContext) -> Result<(), String> {
+    if let Some((path, operation, token)) = migration_environment()? {
+        desktop_pet_update_coordinator::migration::startup_authorization(
+            &path, &operation, &token, context,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn daemon_capture_omits_default_mode_even_with_inherited_selection() {
-        for inherited in [None, Some("herdr"), Some("tern"), Some("both")] {
-            for mode in [
-                ObservationMode::Herdr,
-                ObservationMode::Tern,
-                ObservationMode::Both,
-            ] {
-                let captured = update_environment(mode, |key| match key {
-                    OBSERVATION_MODE_ENV => inherited.map(str::to_owned),
-                    "HERDR_SOCKET_PATH" => Some("/missing/host.sock".into()),
-                    _ => None,
-                });
-                assert_eq!(
-                    captured.get("HERDR_SOCKET_PATH").map(String::as_str),
-                    Some("/missing/host.sock")
-                );
-                assert_eq!(
-                    captured.get(OBSERVATION_MODE_ENV).map(String::as_str),
-                    (mode != ObservationMode::Herdr).then_some(mode.as_str())
-                );
-            }
-        }
+    #[cfg(not(desktop_pet_legacy))]
+    fn neutral_environment_has_no_host_defaults() {
+        let environment = captured_environment(ObservationSelection::Auto, |_| None)
+            .expect("neutral environment");
+        assert_eq!(
+            environment
+                .get(OBSERVATION_SELECTION_ENV)
+                .map(String::as_str),
+            Some("auto")
+        );
+        assert!(!environment.keys().any(|key| key.starts_with("HERDR")));
+    }
+    #[test]
+    fn domain_callback_is_once_and_poison_never_invokes_it() {
+        let runtime = Arc::new(StateRuntime {
+            shared: Arc::new(Mutex::new(AppState::new())),
+        });
+        let mut calls = 0;
+        runtime.with_domain(&mut |_| calls += 1).expect("good lock");
+        assert_eq!(calls, 1);
+        let shared = runtime.shared.clone();
+        let _ = thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            panic!("poison fixture");
+        })
+        .join();
+        assert!(runtime.with_domain(&mut |_| calls += 1).is_err());
+        assert_eq!(calls, 1);
     }
 }

@@ -4,13 +4,13 @@ use crate::i18n::{
     text, Message, SessionFilterLabel, SessionStatusLabel, UiLocale,
 };
 use crate::preferences::{BubbleAppearance, BubbleColor, BubblePalette, SessionListPreferences};
-use crate::session::AgentStatus;
 use crate::session_view::{
-    display_value, Availability, CardDisplay, DisplayStatus, SessionFilter, SessionKey,
-    SessionListOptions, SessionSnapshot, SessionSort, SessionStatusSummary, SessionView,
+    display_value, Availability, CardDisplay, DisplayStatus, SessionFilter, SessionListOptions,
+    SessionSnapshot, SessionSort, SessionStatusSummary, SessionView,
 };
 use crate::state::AppState;
 use crate::status_indicator::{semantic_color, StatusIcon, STATUS_ICON_GAP, STATUS_ICON_SIZE};
+use desktop_pet_contracts::{AgentStatus, SessionKey};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message as _;
@@ -2503,8 +2503,8 @@ fn localized_status(locale: UiLocale, status: AgentStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SessionMetadata;
     use crate::session_view::card_displays;
+    use desktop_pet_contracts::SessionMetadata;
 
     #[test]
     fn resize_freeze_retains_selection_filter_and_real_composition_intents() {
@@ -2696,6 +2696,9 @@ mod tests {
             },
             source_label: "Local".into(),
             is_local: true,
+            provider_label: String::new(),
+            prompt_supported: true,
+            remove_worktree_supported: true,
             pane_id: format!("pane-{terminal}"),
             status: AgentStatus::Working,
             outcome: None,

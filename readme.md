@@ -1,135 +1,101 @@
-# Herdr Desktop Pet
+# Desktop Pet
 
-A native macOS companion for [Herdr](https://herdr.dev). Rubelia reacts to touch, shows observed agent sessions on your desktop, and lets you reply to a selected local session.
+An independent native macOS desktop companion. Rubelia reacts to touch, displays sessions from registered providers such as Herdr and Tern, and lets you reply when that source grants prompt capability. The app also runs without a host.
 
-**English** · [한국어](readme.ko.md) · [简体中文](readme.zh-Hans.md) · [日本語](readme.ja.md) · [Version documentation](docs/releases/README.md) · [Releases](https://github.com/hanbong5938/herdr-desktop-pet/releases)
+**English** · [한국어](readme.ko.md) · [简体中文](readme.zh-Hans.md) · [日本語](readme.ja.md) · [Release history](docs/releases/README.md) · [Core releases](https://github.com/hanbong5938/desktop-pet/releases)
 
 <img src="assets/rubelia-thumbnail.png" alt="Rubelia, the default desktop companion" width="220">
 
 [Browse the optional character and outfit gallery](https://hanbong5938.github.io/herdr-characters/) (opens in English; choose KO for Korean) · [Character pack source and licenses](https://github.com/hanbong5938/herdr-characters). **Only Rubelia (`default@0`) is bundled.**
 
-[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is the published latest stable release, with verified public arm64 assets/checksums and the updated stable Homebrew formula. The matched app/helper pair reports `protocol: 3` and `observation_mode: 1`. Historical v0.3.5 and beta assets remain unchanged.
+**Publication boundary:** legacy [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is shipped with protocol 3 / observation capability 1. Independent Desktop Pet v0.4.0 (protocol 4 / observation capability 2 / integration API 1), bridge v0.3.7, the neutral formula and integration tags are **not yet published**. Actual candidate packaging/VM checks are separate from public availability; final acceptance matrices remain pending. Commands describe the neutral cutover, not a verified public installation. Historical notes, tags and assets remain immutable.
 
 ## Features
 
 - A movable, resizable desktop character with touch and petting reactions, an independent status bubble, and menu-bar controls.
-- Observed Herdr session cards with search, filters, ordering, and distinct local/remote source labels; remote observation is optional and read-only.
+- Observed provider session cards with search, filters, ordering, and distinct local/remote source labels; remote observation is optional and read-only.
 - One-line replies to selected **local** agent sessions, with IME-aware input and native status feedback.
 - Customizable character, bubble, dialogue, and visibility settings; optional verified character packs and an official catalog browser.
-- Herdr lifecycle actions, guarded linked-worktree removal, and explicit installation-aware app updates.
+- Integration-owned lifecycle actions, capability-guarded linked-worktree removal, and explicit installation-aware app updates.
+- **Current candidate:** a unified Connection setting selects Auto or an opaque registered provider, shows actual provider status, and saves live changes in one shared profile. Published legacy v0.3.6 does not include this capability-2 UI.
 
 ## Requirements
 
 - **Apple Silicon Mac with macOS 13 or later.** Intel Macs, Windows, and Linux are not supported native targets.
-- For local observation, use an existing local Herdr server (0.9.0 or later for snapshots); no plugin or host patch is needed. Replies separately require that server's `agent.prompt`. **Only optional client-attach auto-start** requires official Herdr 0.9.3 source built with the supplied [`client.attached` patch](integrations/herdr/client-attached.patch), or a future actual host release advertising that hook. Stock Herdr 0.9.0 and 0.9.3 lack it; the manifest version floor does not supply the hook. Follow the [host integration guide](integrations/herdr/README.md) and reject unknown-hook warnings in that managed setup.
-- Source builds require Rust/Cargo, Bun, Node.js/npm, and Xcode Command Line Tools; a prebuilt needs no source toolchain. This app is **ad-hoc signed, not Developer ID signed or notarized**; macOS Gatekeeper may require explicit local approval. Signature checks do not imply notarization.
+- Herdr observation needs an existing compatible local server (0.9.0+ for snapshots); replies separately require `agent.prompt`. Manual native observation does not require a plugin or patched host. Optional client-attach auto-start needs official Herdr 0.9.3 with the [integration-owned patch and host build instructions](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md), or an actual hook-supporting host. Stock Herdr 0.9.0/0.9.3 lack that hook; plugin installation does not patch the host.
+- Source builds require Rust/Cargo, Bun, Node.js/npm, and Xcode Command Line Tools; prebuilt installation does not. The app is **ad-hoc signed, not Developer ID signed or notarized**. Gatekeeper may require explicit local approval; signature validation does not imply notarization.
 
-## Install with Homebrew: first connection
+## Installation and optional integrations
 
-Install the published prebuilt with the stable formula below; Rust/Cargo, Bun, Node.js and a source checkout are not required. Existing Brew users should use the upgrade commands below. Existing profiles and preferences are preserved.
-
-```sh
-brew install hanbong5938/tap/herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-The native `start` is manual: it does not require `herdr plugin install`, `plugin link` or a patched host. Expand the bubble to see local session cards from that server (Herdr 0.9.0+ for snapshots); a live agent session is needed for a live card. Sending a reply additionally requires that server's `agent.prompt`; submission ACK is not completion. If cards do not appear, check the actual running Herdr CLI/server and `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`. If its backend socket differs from the pet's environment/default, use the **actual socket path printed by that server**, not a guessed path:
+**After the neutral release and formula are actually published**, the public Homebrew commands will be:
 
 ```sh
-herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
-herdr-desktop-pet status
+brew install hanbong5938/tap/desktop-pet
+desktop-pet --version
+desktop-pet start
+desktop-pet status
 ```
 
-Replace `/actual/path/to/herdr-api.sock` with the verified Herdr **backend** socket; `--socket` is not the pet's private control socket. `start` reuses an already-running daemon, so stop it before changing the selected backend; check `status` for the actual daemon version/executable, not just `--version`. See [connection troubleshooting](docs/usage.md#configuration-and-troubleshooting).
+The formula owns the app under Homebrew's prefix, not `/Applications`, and puts the CLI on `PATH`. It installs neither host plugin nor patched host. Do not substitute the old Herdr formula as the neutral default.
 
-Before upgrading an existing installation, **stop the old daemon**: `start` reuses a running one.
+For prebuilt or source installation use the **core** checkout, not a Herdr integration checkout:
 
 ```sh
-herdr-desktop-pet stop
-brew update && brew upgrade herdr-desktop-pet
-herdr-desktop-pet --version
-herdr-desktop-pet start
-herdr-desktop-pet status
+git clone https://github.com/hanbong5938/desktop-pet.git
+cd desktop-pet
+# Requires the pinned neutral public assets; unavailable until publication:
+bash scripts/install.sh --prebuilt
+# Explicit source alternative for the current core checkout:
+bash scripts/install.sh --source
 ```
 
-Verify the CLI reports `0.3.6` and, after restart, `status` shows `app_version: 0.3.6` **and the expected running executable**. The formula puts the app under Homebrew's prefix, **not** `/Applications`, and the CLI on `PATH`; it installs neither Herdr plugin nor patched host. Stop older daemons first; `start` otherwise reuses one. See [0.3 upgrade guidance](docs/releases/0.3.md#upgrade-from-v021-or-beta) for profile isolation and older cask migration.
+Default installation is **prebuilt-only**: unavailable downloads or validation failure never silently compile source. A non-Brew prebuilt belongs at the OS account home's `Applications/DesktopPet.app`; explicit source installation uses the core checkout's `dist/DesktopPet.app`. Installation admission may reuse a verified healthy installation rather than take over another owner. Read the reported executable/shared locator instead of assuming the source path is the selected installation. Reservations or live profiles prevent unsafe replacement. See [installation discovery](docs/development.md#profiles-and-installation-discovery).
 
-### Pet without Herdr
-
-For a continuously visible independent pet without a healthy local Herdr server, turn off the new profile's default 30-second disconnect exit **before** starting:
-
-```sh
-herdr-desktop-pet settings set exit_with_herdr off
-herdr-desktop-pet settings get
-herdr-desktop-pet start
-herdr-desktop-pet status
-```
-
-No Herdr installation, plugin or patch is needed. After starting, `herdr-desktop-pet hide_bubble` optionally hides the empty bubble while retaining the character. If the pet disappears after about 30 seconds, inspect `settings get` and `status`: with `exit_with_herdr` on and no healthy server, it exits after the grace period. Set it off before restarting (using the same actual config/state profile). This switch does **not** override confirmed disable/unlink of all registered local plugin endpoints. [Lifecycle details](docs/usage.md#lifecycle-and-plugin-actions).
-
-### Optional advanced: managed Herdr plugin and attach auto-start
-
-On the intended compatible Herdr host, install the [plugin repository](https://github.com/hanbong5938/herdr-desktop-pet) and explicitly start the pet:
+Install only the separate integrations you want:
 
 ```sh
 herdr plugin install hanbong5938/herdr-desktop-pet
-herdr plugin action invoke start --plugin desktop-pet
-```
-
-Managed installation runs `bash scripts/install.sh`: it tries the manifest-pinned v0.3.6 `.app`-only archive, validating checksums, archive entries, arm64 signature and bundled character. The **published v0.3.6 Release includes the complete archive/checksums and matching installer**; the separately uploaded provenance sidecar does not enter the installer archive. If prebuilt assets are unavailable or invalid, the default installer reports this and builds the checkout from source. Explicit `--prebuilt` fails instead of falling back; `--source` builds the checkout. Plugin installation does not patch or build Herdr. For attach auto-start, prepare the patched host described [here](integrations/herdr/README.md#build-in-separate-checkouts); native manual observation above needs neither.
-
-## Install this checkout from source for managed integration
-
-**For the optional managed attach workflow**, from this repository root first follow the [host build procedure](integrations/herdr/README.md#build-in-separate-checkouts) to patch/build official Herdr 0.9.3 in a separate checkout, run its isolated server, and set `PATCHED_HERDR` to that **built host executable** (for example, `PATCHED_HERDR="$HERDR_SOURCE/target/release/herdr"`). Keep the same intended host/profile/socket for the commands below; an unpatched binary on `PATH` is not a substitute for attach auto-start. Building the pet from source alone does not require a patched host.
-
-```sh
-bash scripts/install.sh --source
-"$PATCHED_HERDR" plugin link "$PWD" --enabled
-"$PATCHED_HERDR" plugin action invoke start --plugin desktop-pet
-```
-
-`plugin link` does **not** run the manifest build; build the pet first. Linking/enabling on an already-running host does not itself launch the pet: invoke `start` once, or await a later eligible shell/terminal client attach with `auto_start` enabled. Inspect link warnings: an unknown `client.attached` hook means the host lacks the required patch. Herdr actions require a running enabled host; server startup also runs automatic `ensure`.
-Manifest lifecycle and action commands use `scripts/run-native.sh`, selecting `HerdrDesktopPet.app` for a stable manifest version or `HerdrDesktopPetBeta.app` for `-beta.N`; a missing matching bundle fails rather than running the other channel. For direct source automation use `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`; stop an old daemon or isolate **both** config and state paths, then inspect `status` for the actual executable/version. See [source development](docs/development.md#source-development).
-
-## Tern installation and separate profile
-
-Install the native app first, then explicitly install the separate public plugin. The plugin never downloads, builds or starts the app.
-
-```sh
-brew install hanbong5938/tap/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
-PET="$(command -v herdr-desktop-pet)"
-PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
-PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
-"$PET" --version
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
-"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 ```
 
-The default host remains Herdr. `--host tern` needs no Herdr server, socket or plugin. In the actual Tern window, use **Configure desktop pet connection** with the absolute executable `PET` and the exact config AND state paths above, then **Connect to desktop pet**. Enter actual path values, not variable names. Check the window connection and matching native `status`; plugin discovery alone is not connection proof. Stop the same profile before changing binary or mode. Source development remains optional: build this checkout with `bash scripts/install.sh --source` and set `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`; no special branch is required. The matched app/helper pair uses protocol 3, with additive JSON capabilities `protocol: 3` and `observation_mode: 1`. English, Korean, Simplified Chinese and Japanese remain available. **Receive beta updates** is off by default and requires opt-in; checking never installs or restarts.
+These commands describe the integration cutover; integration tags are not yet published. Plugin updates/removal affect only integrations, never the shared app, profile or characters. Herdr is a thin consumer; Tern never downloads, builds, installs or auto-starts the native app. Native app updates do not reinstall host plugins. Source/link instructions belong to each integration repository; do not link the core as a Herdr plugin.
 
-Explicit `--host tern` observes Tern alone and needs **no Herdr server, plugin or socket**; `--host both` also observes Herdr. The default remains `herdr`; an explicit flag takes precedence over the strictly parsed `HERDR_PET_OBSERVATION_MODE` environment variable. Start, status, stop and plugin connection must use the same actual config **and** state profile, and stop an old daemon before changing modes: a running daemon in the wrong mode is not silently reused. `--socket` still names only a Herdr backend. In Tern-only mode, a missing Tern window leaves the source Offline without causing the Herdr disconnect exit timer to stop the pet; this does not imply Tern auto-start.
+## Profiles, connection and migration
 
-Connection settings are saved as one validated profile; cancel or failure retains the previous connection. Legacy settings migrate once, only if the new profile is absent. Reconnects recover the window binding without repeating `agents:ask`. Tern sources become Offline after five seconds without a fresh snapshot; the shared 64-source Herdr/Tern limit never evicts a live source or Herdr source. `status.herdr_socket` is the configured Herdr path, not a Tern-only dependency or proof of a listening server. Linking alone is not window verification: check the actual Tern window's connection status. If old code or an invalid/default connection path previously exceeded Tern's callback budget, configure the built executable and matching config/state profile, then explicitly reload the plugin in that window: a disabled hook can remain disabled until reload. See the [usage guide](docs/usage.md#tern-installation-and-separate-profile) for connection recovery.
+New profiles default to **Auto** and keep running without any adapter/server. `--host auto|PROVIDER` selects Auto or an opaque registered provider, not a different app or a fixed provider enumeration. Connection displays actual connections, not installation detection. Auto allows simultaneous observation, not provider fallback or deduplication by session name/path.
 
-Continuous polling now splits inventory work across four cooperative, zero-delay callbacks to limit work within Tern's callback budget. After a one-shot `agents:ask` succeeds or fails, the plugin immediately starts a fresh inventory exchange to report that outcome rather than waiting for the next periodic poll; it never retries the ask. A single slow SDK call or OS scheduling/preemption can still exceed the budget or delay delivery, so this does not guarantee latency or indefinite stability. An accepted receipt still is not agent completion. Budget and receipt details are in the [development guide](docs/development.md) and [CLI contract](docs/cli.md).
+Profile precedence is **explicit `--config-dir` / `--state-dir` → `DESKTOP_PET_CONFIG_DIR` / `DESKTOP_PET_STATE_DIR` → default-profile record → neutral XDG defaults** (`~/.config/desktop-pet`, `~/.local/state/desktop-pet` when XDG variables are absent). Core does not implicitly inherit host profile environment. The Herdr wrapper alone converts host-owned injected paths into explicit native arguments. Back up and select **both** actual directories for start, commands, status and stop.
 
-The plugin observes only agents in its **local Tern window VM**, not remote hosts, via local inventory and bounded native exchanges. Replies use Tern's semantic `agents:ask` for the revalidated selected pane, not PTY injection; acceptance **may be queued** and is not agent completion. No observed outcome means no success claim; stale/missing windows become Offline. This integration does **not** delete Tern worktrees. Earlier, an ordinary installed Tern 0.6.1 signed-out window and the packaged source binary connected with a healthy **empty** source; closing the window made it Offline while the pet kept running. In a subsequent live check using the user's existing Tern window, an isolated pet profile and an agent in a disposable OMP tab, the plugin observed a populated local agent; a real semantic prompt returned `prompt_accepted` with delivery `accepted_may_be_queued`. Tern's transcript separately showed the requested `TERN_PET_SMOKE_OK` assistant response. The observed `idle` state is not an authoritative completion or success signal. Normal beta use still requires signing in; a separate newly launched CLI window's Keychain access error does not establish that the user's running Tern window is signed out or broken. No remote-host or public-release support is implied.
+```sh
+desktop-pet profile show --json
+desktop-pet start
+desktop-pet status
+```
 
-## First use
+For a registered Herdr adapter, select the verified **backend** socket when necessary:
 
-### In-app updates (published protocol 3)
+```sh
+desktop-pet --herdr-socket /actual/path/to/herdr-api.sock start
+desktop-pet preferences set --observation-host auto
+```
 
-**Settings → App updates** offers independent **Automatic checking** (on by default) and **Receive beta updates** (off by default), **Check now**, the running version/origin, policy-specific last successful check, and an explicit action. Stable-only checks select official stable releases; opting in selects the highest eligible stable or beta by semantic version (a final release outranks its same-base beta). Opting out never downgrades an installed beta. Automatic checks run at most daily while the app is open, with separate stable-only and beta-inclusive timestamps. Switching beta policy invalidates the old candidate and checks under the new policy only when automatic checking is on; otherwise use **Check now**. Checks are read-only: neither toggle nor a check installs, restarts, refreshes Brew metadata or changes Git. Moving between release/channel/source and target requires separate native consent for the exact proposal.
+`--herdr-socket` is adapter-owned and is never the private `<state-dir>/control.sock`. Core without the Herdr adapter does not normalize or register a Herdr socket. Check the actual running executable/version/profile in `status`, not just `--version`; stop the selected daemon before changing its backend. Live provider selection uses Connection or `preferences set --observation-host auto|PROVIDER` (choose one value).
 
-The card distinguishes current check or handoff activity from the retained **Previous operation** result; **Show diagnostics** expands selectable paths, hashes, IDs and raw errors. Its short status and helper guidance follow the chosen UI language. A candidate installed on disk is not necessarily applied or running; a source-current or pinned result does not assert the latest public release. Herdr-managed migration pins the official release tag to an immutable commit on the same compatible live host without resetting a checkout. Homebrew keeps the captured manager/prefix and explicitly names the target formula/version; the confirmed operation revalidates metadata and reserves both installation roots without silently uninstalling the original formula. A local checkout rebuilds its on-disk files without Git pull/reset. Only a verified compatible already-installed package may offer **Apply installed update** without rerunning an installer; unknown origins cannot become managed installs implicitly.
+For Tern, copy the actual executable/config/state triple from native status or Connection into **Configure desktop pet connection**, save, then **Connect to desktop pet**. Discovery is not connection proof. Existing isolated Tern, beta and custom profiles remain in place, never automatically merged or deleted. Tern observes its local window/host inventory with adapter-authorized locality; remote sources remain read-only. Replies use a revalidated one-shot `agents:ask`, never PTY injection or Herdr fallback. Accepted may mean queued, not model delivery/completion; uncertain asks are never replayed.
 
-Native consent and Prepare recheck pending edits, IME composition and interactions before freezing mutating controls; the original keeps running through the handoff. An ownership ACK is not installation or permission to Stop: only the matching final visible/prepared ACK after accepted Prepare transfers consent, and only a fully delivered accepted reserved Stop commits updater shutdown. Staging runs on a worker so the helper window stays responsive; crossing the native 30-second handoff deadline means **waiting, not cancellation**. The helper checks replacement readiness and records installed and applied separately. Candidate startup uses the exact verified **image and installed origin** pair in the journal/reservation, never an origin inferred from current disk or the original source token. Uncertain or old-protocol reservations remain blocked with evidence intact; recovery does not replay an installer, silently delete a journal, or restart an original automatically. A user Stop prevents revival, but a proven safely stopped transaction can finish reconciliation and release its own reservation. See [update behavior and recovery](docs/usage.md#in-app-updates) and [CLI status and recovery](docs/cli.md#app-update-status-and-recovery) before retrying an uncertain operation.
+Core owns common lifecycle persistence and `auto_start` (`on|off`); Herdr owns `exit_with_herdr` and endpoints. When `lifecycle.json` is absent, the registered Herdr owner initializes `exit_with_herdr:true` atomically with the first lifecycle write; an existing file missing that key reads false. Legacy `enabled`, including false, migrates to `auto_start`. Auto/no-adapter runs remain alive; Herdr-only disconnect/disable rules are detailed in [lifecycle guidance](docs/usage.md#lifecycle-and-plugin-actions).
 
-Historical stable `v0.3.3` and paired `0.3.3-beta.1` archives remain immutable matched-protocol-2 app/helper packages; a check alone does not upgrade them. Adopt the published [v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) matched protocol-3/observation-mode-1 pair through the stable Brew install/upgrade or the pinned prebuilt installer; no source build is required. Never mix app/helper protocols. Legacy protocol-1/2 records remain preserved and blocked; inspect and explicitly recover them only with their retained signed matching helper, not the new updater.
+Legacy v0.3.6 is not converted by a rename, alias or formula swap. Follow the explicit [bridge A → neutral B migration](docs/migrations/desktop-pet.md), preserving the same profile and matching signed historical helper for old evidence.
+
+## In-app updates
+
+**Settings → App updates** separates automatic checking (default on), beta opt-in (default off), **Check now**, running version/origin, policy-specific check times and explicit installation-aware actions. Checks are read-only: they never install, restart, refresh Brew metadata or alter Git. Stable-only checks select official stable releases; beta opt-in selects the highest eligible stable/beta SemVer, with a final release ahead of its same-base beta and no downgrade on opt-out.
+
+Standalone, Homebrew and core-source owners remain distinct; normal native updates do not use a Herdr plugin manager. Source rebuilds use current disk contents without Git pull/reset/ref change. A verified installed candidate can be applied without reinstalling, but **installed is not applied or running**, and source-current/pinned results are not proof of a public release.
+
+Consent and Prepare recheck drafts, IME and pending interactions while the exact original instance still runs. An ownership ACK is not installation or permission to Stop: only matching final visible/prepared ACK after accepted Prepare and a fully delivered accepted reserved Stop authorize replacement. Slow staging stays responsive; the 30-second handoff deadline means waiting, not cancellation. Candidate readiness requires the exact durable image/origin/profile. User Stop forbids restart/rollback start. Unknown manager execution must never be blindly replayed.
+
+The UI retains Previous operation separately from a current check and exposes copyable diagnostics. Use the matching verified helper's status and explicit recovery before retrying. Protocol-4 `updates-v4/` evidence coexists with immutable old journals; never reserialize old protocol-1/2/3 evidence or recover it with the v4 helper. See [update behavior and recovery](docs/usage.md#in-app-updates) and the [CLI contract](docs/cli.md#app-update-status-and-recovery).
 
 ## Controls
 
@@ -149,22 +115,22 @@ The [character gallery](https://hanbong5938.github.io/herdr-characters/) preview
 
 ## Safety and limitations
 
-- Replies use only the selected **local** Herdr source's `agent.prompt`, not SSH, a shell or raw pane input; remote cards cannot send. Herdr's ACK means submission, **not agent completion**. Handle approval/questions in the actual terminal; check uncertain delivery before any manual resend. Session/pane replacement around submission has a current-occupant race, not an atomic session guarantee. [Delivery details](docs/usage.md#inline-replies-and-message-delivery).
+- Replies require the selected source's **local prompt capability**. Herdr uses `agent.prompt`; Tern uses one-shot `agents:ask`, never SSH, a shell or raw pane input. Remote cards cannot send. Acceptance is **not agent completion**. Handle approval/questions in the actual terminal and inspect uncertain delivery before any manual resend. Herdr's submission API has a current-occupant race, not an atomic session guarantee. [Delivery details](docs/usage.md#inline-replies-and-message-delivery).
 - **Remove Worktree…** is irreversible: confirm the **exact checkout path** and the **entire workspace's** tabs/panes before proceeding. It terminates their processes/agents and removes the linked checkout **including ignored files**; no Trash/undo. It does not delete the main repository or branch. [Removal safeguards](docs/usage.md#worktree-removal).
 - Remote observation requires selected saved-machine profiles and a compatible remote Herdr server, **not** a remote pet installation. The local app polls remote state and cannot recover missed brief transitions or send remote prompts. [Observation guide](docs/usage.md#observation-sources).
 - Automatic app-update checks are read-only; installing or applying an update requires explicit consent. An updater ownership ACK is **not completion**. For an unknown result, check [in-app update recovery](docs/usage.md#in-app-updates) and [CLI update status and recovery](docs/cli.md#app-update-status-and-recovery) before retrying.
 
 ## Configuration and troubleshooting
 
-`HERDR_PLUGIN_CONFIG_DIR` holds `preferences.json`, `lifecycle.json`, managed `characters/` and `menu-bar-icons/`; `HERDR_PLUGIN_STATE_DIR` holds the lock, control socket and `desktop-pet.log`. Without injection, Herdr's XDG plugin locations apply; native `--config-dir` / `--state-dir` can isolate profiles, but injected environment paths take precedence. Back up **both** actual directories before upgrading or switching channels. `lifecycle.json` controls `auto_start` and `exit_with_herdr`, separately from other preferences.
+The selected config directory holds `preferences.json`, `lifecycle.json`, managed `characters/` and `menu-bar-icons/`; state holds the process lock, private control socket, daemon `desktop-pet.log` and updater evidence. Use the exact precedence above and back up both actual directories before upgrades or migration.
 
-If the pet disappears about 30 seconds after a no-server start, use `settings get` to check `exit_with_herdr` and set it off **before** restarting for standalone use; confirmed disable/unlink of all registered local endpoints still ends this run. If hidden, use the menu-bar recovery above rather than reinstalling. If absent on a managed host, check its `client.attached` warnings, manual `start`/`status`, actual executable/version and daemon log; disabled auto-start can intentionally skip launch. For connection errors inspect `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH` and the server actually owning the backend socket; for remote errors inspect the saved profile and local CLI. Run the pet on the **Mac whose desktop should display it**. Provider integrations belong to upstream Herdr; reload existing provider sessions after installing their hooks. See [troubleshooting](docs/usage.md#configuration-and-troubleshooting) and [lifecycle](docs/usage.md#lifecycle-and-plugin-actions).
+Hidden windows are not an exited daemon: use menu-bar recovery instead of reinstalling. Auto/no-adapter keep running without a host; only Herdr-only mode applies its adapter-owned disconnect policy. For managed auto-start inspect actual `client.attached` support, `auto_start`, daemon executable/profile and logs. Verify the actual Herdr backend and adapter-owned `--herdr-socket`; remote errors require saved-machine/forwarding diagnostics. Launch on the **Mac whose desktop should display the pet**. Download failure never falls back to source; use explicit `--source` only for source development. [Troubleshooting](docs/usage.md#configuration-and-troubleshooting).
 
 ## Documentation and websites
 
-- [Usage and recovery](docs/usage.md) · [development and installation](docs/development.md) · [native automation CLI contract](docs/cli.md#english) · [patched host integration](integrations/herdr/README.md).
+- [Usage and recovery](docs/usage.md) · [development and installation](docs/development.md) · [native automation CLI contract](docs/cli.md#english) · [Herdr-owned host integration](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) · [Tern integration](https://github.com/hanbong5938/tern-desktop-pet).
 - [Release history](docs/releases/README.md) · [v0.3.6 changes](docs/releases/v0.3.6.md) · [v0.3 upgrade guidance](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [historical beta/preview guidance](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 migration](docs/migrations/v0.1.11-to-v0.2.0.md).
-- The promotional [English](https://hanbong5938.github.io/herdr-desktop-pet/en/), [Korean](https://hanbong5938.github.io/herdr-desktop-pet/), [Simplified Chinese](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/), and [Japanese](https://hanbong5938.github.io/herdr-desktop-pet/ja/) websites describe this **native** app; it does not run in a browser. Website development and deployment: [GitHub Pages guide](docs/development.md#website-github-pages). The separate [character gallery](https://hanbong5938.github.io/herdr-characters/) previews optional packs in English and Korean.
+- Planned promotional [English](https://hanbong5938.github.io/desktop-pet/en/), [Korean](https://hanbong5938.github.io/desktop-pet/), [Simplified Chinese](https://hanbong5938.github.io/desktop-pet/zh-Hans/), and [Japanese](https://hanbong5938.github.io/desktop-pet/ja/) Pages describe this **native** app, not a browser runtime; deployment is not established here. [GitHub Pages guide](docs/development.md#website-github-pages). The separate [character gallery](https://hanbong5938.github.io/herdr-characters/) previews optional packs in English and Korean.
 
 ## Artwork and licensing
 

@@ -1,0 +1,154 @@
+name: Build authorized legacy 0.3.7 envelope
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_revision:
+        description: "Exact published v0.4.0 core commit (40 lowercase hex characters)"
+        required: true
+        type: string
+      herdr_migration_revision:
+        description: "Exact published integration-only Herdr v0.4.0 commit for approved managed retirement (40 lowercase hex)"
+        required: true
+        type: string
+      authorize_legacy_0_3_7:
+        description: "Authorize only the planned genuine legacy 0.3.7 distribution envelope"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-pet-legacy-0.3.7
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    if: github.repository == 'hanbong5938/desktop-pet' && inputs.authorize_legacy_0_3_7
+    environment: legacy-bridge-build
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+      DESKTOP_PET_DISTRIBUTION: legacy-0.3.7
+      DESKTOP_PET_CARGO_TARGET: aarch64-apple-darwin
+      REQUESTED_CORE_REVISION: ${{ inputs.core_revision }}
+      DESKTOP_PET_HERDR_MIGRATION_REV: ${{ inputs.herdr_migration_revision }}
+    steps:
+      - name: Check out exact common core source, not a host app fork
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.core_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify same published core revision and bounded envelope authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(git rev-parse 'refs/tags/v0.4.0^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(plutil -extract name raw -o - package.json)" == desktop-pet ]]
+          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.0 ]]
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: web/rig/package-lock.json
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.2"
+
+      - name: Authenticate published immutable integration-only retirement target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref="$DESKTOP_PET_HERDR_MIGRATION_REV"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.0 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.0" and (.assets as $assets | ["DesktopPet-v0.4.0-macos-arm64.tar.gz","DesktopPet-v0.4.0-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.0-rig-native.json","desktop-pet-install-v0.4.0.sh","desktop-pet-install-v0.4.0.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
+          repository=hanbong5938/herdr-desktop-pet
+          gh api "repos/$repository/releases/tags/v0.4.0" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.0"' >/dev/null
+          [[ "$(gh api "repos/$repository/commits/$ref" --jq '.sha')" == "$ref" ]]
+          object="$(gh api "repos/$repository/git/ref/tags/v0.4.0" --jq '.object')"
+          for depth in 1 2 3 4 5 6 7 8; do
+            type="$(printf '%s' "$object" | jq -r '.type')"
+            sha="$(printf '%s' "$object" | jq -r '.sha')"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            if [[ "$type" == commit ]]; then break; fi
+            [[ "$type" == tag ]]
+            object="$(gh api "repos/$repository/git/tags/$sha" --jq '.object')"
+          done
+          [[ "$type" == commit && "$sha" == "$ref" ]]
+          gh api "repos/$repository/git/trees/$ref?recursive=1" | jq -e '.truncated == false and (.tree | type == "array") and all(.tree[]; (.path | test("^(native|assets|dist|web/rig)(/|$)|^scripts/(package-native\\.ts|build-rig-native\\.mjs)$")) | not)' >/dev/null
+          gh api "repos/$repository/contents/herdr-plugin.toml?ref=$ref" > "$RUNNER_TEMP/herdr-retirement-manifest.json"
+          bun -e 'const r=await Bun.file(process.env.RUNNER_TEMP+"/herdr-retirement-manifest.json").json(); if(r.encoding!=="base64"||typeof r.content!=="string")throw Error("invalid immutable manifest response"); const m=Bun.TOML.parse(Buffer.from(r.content,"base64").toString("utf8")); if(m.version!=="0.4.0")throw Error("retirement target is not the published integration0.4.0 manifest");'
+
+      - name: Install pinned JavaScript dependencies
+        run: bun install --frozen-lockfile && npm ci --prefix web/rig
+
+      - name: Install stable Rust and arm64 target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustup target add aarch64-apple-darwin
+
+      - name: Gate and build same source in its separate legacy target directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run check
+          cargo fmt --check --all --manifest-path native/Cargo.toml
+          cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/legacy-0.3.7 --manifest-path native/Cargo.toml
+          bun run build:native
+          bun run package:native
+
+      - name: Verify real legacy app/helper identity and package migration evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=dist/HerdrDesktopPet.app
+          binary="$app/Contents/MacOS/herdr-desktop-pet"
+          helper="$app/Contents/MacOS/herdr-update-coordinator"
+          [[ "$("$binary" --version)" == 'herdr-desktop-pet 0.3.7' ]]
+          for executable in "$binary" "$helper"; do
+            [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]]
+            [[ "$(lipo -archs "$executable")" == arm64 ]]
+            codesign --verify --strict "$executable"
+            "$executable" update-capabilities | node -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8"));if(c.protocol!==3||c.observation_mode!==1||c.integration_api!==1)process.exit(1);'
+          done
+          codesign --verify --deep --strict "$app"
+          mkdir bridge-assets
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf bridge-assets/HerdrDesktopPet-v0.3.7-macos-arm64.tar.gz -C dist HerdrDesktopPet.app
+          cp dist/HerdrDesktopPet.app.rig-native.json bridge-assets/HerdrDesktopPet-v0.3.7-rig-native.json
+          node --input-type=module <<'NODE'
+          import {readFile,writeFile} from 'node:fs/promises';
+          import {createHash} from 'node:crypto';
+          const provenance=JSON.parse(await readFile('dist/HerdrDesktopPet.app.rig-native.json','utf8'));
+          const identity=provenance.distribution_identity;
+          if(provenance.core_revision!==process.env.REQUESTED_CORE_REVISION||identity?.core_revision!==provenance.core_revision||identity.distribution!=='legacy-0.3.7'||identity.app_version!=='0.3.7'||identity.protocol!==3||identity.observation_mode!==1||identity.app_name!=='HerdrDesktopPet.app'||identity.executable!=='herdr-desktop-pet'||identity.helper!=='herdr-update-coordinator'||identity.bundle_id!=='dev.herdr.desktop-pet')throw Error('compiled bridge identity/revision mismatch');
+          if(identity.herdr_migration_revision!==process.env.DESKTOP_PET_HERDR_MIGRATION_REV||!/^[a-f0-9]{40}$/.test(identity.herdr_migration_revision))throw Error('compiled managed-retirement ref differs from authenticated published integration');
+          const archive='HerdrDesktopPet-v0.3.7-macos-arm64.tar.gz';
+          const archive_sha256=createHash('sha256').update(await readFile(`bridge-assets/${archive}`)).digest('hex');
+          const record={version:1,source_core_revision:provenance.core_revision,herdr_migration_revision:identity.herdr_migration_revision,distribution:identity.distribution,app_version:identity.app_version,protocol:identity.protocol,observation_mode:identity.observation_mode,integration_api:identity.integration_api,archive,archive_sha256,provenance:'HerdrDesktopPet-v0.3.7-rig-native.json'};
+          await writeFile('bridge-assets/release.json',JSON.stringify(record,null,2)+'\n');
+          NODE
+          (cd bridge-assets && shasum -a 256 HerdrDesktopPet-v0.3.7-macos-arm64.tar.gz > HerdrDesktopPet-v0.3.7-macos-arm64.tar.gz.sha256 && shasum -a 256 HerdrDesktopPet-v0.3.7-macos-arm64.tar.gz HerdrDesktopPet-v0.3.7-rig-native.json release.json > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+
+      - name: Save bridge bytes for separately authorized metadata-only ingress publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-pet-legacy-0.3.7-${{ inputs.core_revision }}
+          path: bridge-assets/
+          if-no-files-found: error
+          retention-days: 30
+          # This workflow has no old-repository write token. It never changes
+          # v0.3.6, beta, or any previously published legacy release or formula.

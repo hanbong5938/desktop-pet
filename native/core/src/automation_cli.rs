@@ -17,7 +17,7 @@ use crate::preferences::{
     BubbleAppearance, BubbleColor, BubbleTheme, MenuBarMode, PreferencePatch,
 };
 use crate::session_view::{SessionFilter, SessionPageCursor, SessionPageRequest};
-use herdr_update_coordinator::ObservationMode;
+use desktop_pet_contracts::ObservationSelection;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
@@ -609,13 +609,68 @@ pub(crate) fn parse_wait(value: &str) -> Result<Duration, String> {
 }
 
 pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<DomainCommand, String> {
+    parse_domain_with_extensions(preferences, tokens, &[])
+}
+
+fn parse_domain_with_extensions(
+    preferences: bool,
+    tokens: &[String],
+    extensions: &[std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+) -> Result<DomainCommand, String> {
     let operation = tokens.first().ok_or("operation is required")?.as_str();
     let mut fields = std::collections::HashMap::<&str, Vec<String>>::new();
     let mut index = 1;
+    let mut owner_arguments: Vec<Vec<desktop_pet_contracts::PreferencePatchArgument>> =
+        (0..extensions.len()).map(|_| Vec::new()).collect();
     while index < tokens.len() {
         let (name, inline) = tokens[index]
             .split_once('=')
             .map_or((tokens[index].as_str(), None), |(a, b)| (a, Some(b)));
+        let registered = if preferences {
+            let mut matched = None;
+            for (owner, extension) in extensions.iter().enumerate() {
+                if let Some(option) = extension
+                    .preference_options()
+                    .iter()
+                    .find(|option| option.name == name)
+                {
+                    if matched.is_some() {
+                        return Err(format!("duplicate registered preference option: {name}"));
+                    }
+                    matched = Some((owner, option));
+                }
+            }
+            matched
+        } else {
+            None
+        };
+        if let Some((owner, option)) = registered {
+            if operation != "set" {
+                return Err(format!("{name} is only valid for preferences set"));
+            }
+            if !option.repeatable
+                && owner_arguments[owner]
+                    .iter()
+                    .any(|argument| argument.name == name)
+            {
+                return Err(format!("duplicate {name}"));
+            }
+            let value = if option.takes_value {
+                Some(std::ffi::OsString::from(option_value(
+                    tokens, &mut index, inline, name,
+                )?))
+            } else if inline.is_some() {
+                return Err(format!("{name} does not take a value"));
+            } else {
+                None
+            };
+            owner_arguments[owner].push(desktop_pet_contracts::PreferencePatchArgument {
+                name: name.to_owned(),
+                value,
+            });
+            index += 1;
+            continue;
+        }
         let known = if preferences {
             matches!(
                 name,
@@ -629,10 +684,6 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                     | "--status-indicators"
                     | "--menu-bar"
                     | "--observation-host"
-                    | "--observation-local"
-                    | "--observation-remote"
-                    | "--machine"
-                    | "--clear-machines"
                     | "--expected-revision"
                     | "--operation-id"
                     | "--instance"
@@ -666,7 +717,7 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                 index += 1;
                 tokens.get(index).ok_or("--text requires a value")?.clone()
             }
-        } else if matches!(name, "--stdin" | "--no-wait" | "--clear-machines") {
+        } else if matches!(name, "--stdin" | "--no-wait") {
             if inline.is_some() {
                 return Err(format!("{name} does not take a value"));
             }
@@ -674,7 +725,7 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
         } else {
             option_value(tokens, &mut index, inline, name)?.to_owned()
         };
-        if name != "--machine" && fields.contains_key(name) {
+        if fields.contains_key(name) {
             return Err(format!("duplicate {name}"));
         }
         fields.entry(name).or_default().push(value);
@@ -783,36 +834,30 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                     })
                     .transpose()?;
                 patch.observation_host = take("--observation-host")
-                    .map(|value| match value {
-                        "auto" => Ok(ObservationMode::Both),
-                        "herdr" => Ok(ObservationMode::Herdr),
-                        "tern" => Ok(ObservationMode::Tern),
-                        _ => Err("--observation-host requires auto|herdr|tern"),
-                    })
+                    .map(str::parse::<ObservationSelection>)
                     .transpose()?;
-                patch.observation_local = take("--observation-local")
-                    .map(|v| on_off(v, "--observation-local"))
-                    .transpose()?;
-                patch.observation_remote = take("--observation-remote")
-                    .map(|v| on_off(v, "--observation-remote"))
-                    .transpose()?;
-                if take("--clear-machines").is_some() && fields.contains_key("--machine") {
-                    return Err("--clear-machines conflicts with --machine".into());
-                }
-                if take("--clear-machines").is_some() {
-                    patch.observation_machines = Some(Vec::new());
-                }
-                if let Some(machines) = fields.get("--machine") {
-                    patch.observation_machines = Some(machines.clone());
+                for (owner, arguments) in owner_arguments.iter().enumerate() {
+                    if arguments.is_empty() {
+                        continue;
+                    }
+                    for (key, value) in extensions[owner].parse_preference_options(arguments)? {
+                        if !extensions[owner]
+                            .preference_patch_keys()
+                            .contains(&key.as_str())
+                        {
+                            return Err(format!("unregistered preference field: {key}"));
+                        }
+                        if patch.owner.insert(key.clone(), value).is_some() {
+                            return Err(format!("duplicate preference field: {key}"));
+                        }
+                    }
                 }
                 if !appearance
                     && patch.language.is_none()
                     && patch.show_status_indicators.is_none()
                     && patch.menu_bar_mode.is_none()
                     && patch.observation_host.is_none()
-                    && patch.observation_local.is_none()
-                    && patch.observation_remote.is_none()
-                    && patch.observation_machines.is_none()
+                    && patch.owner.is_empty()
                 {
                     return Err("preferences set requires a setting".into());
                 }
@@ -913,9 +958,13 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
     }
 }
 
-pub(crate) fn parse_family(family: &str, tokens: &[String]) -> Result<DomainCommand, String> {
+pub(crate) fn parse_family_with_extensions(
+    family: &str,
+    tokens: &[String],
+    extensions: &[std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+) -> Result<DomainCommand, String> {
     match family {
-        "preferences" => return parse_domain(true, tokens),
+        "preferences" => return parse_domain_with_extensions(true, tokens, extensions),
         "sessions" => return parse_domain(false, tokens),
         "dialogue" | "worktree" => {}
         _ => return Err("unknown automation command".into()),
@@ -1938,27 +1987,7 @@ mod domain_tests {
         )
         .is_err());
         assert!(parse(true, &["get", "--language", "en"]).is_err());
-        assert!(parse(
-            true,
-            &[
-                "set",
-                "--observation-local",
-                "on",
-                "--observation-remote",
-                "off",
-                "--machine",
-                "node_a",
-                "--machine",
-                "node_b",
-                "--expected-revision",
-                "4"
-            ]
-        )
-        .is_ok());
-        assert!(
-            matches!(parse(true,&["set","--clear-machines"]).unwrap(),DomainCommand::PreferencesSet { patch:PreferencePatch { observation_machines:Some(machines),.. },.. } if machines.is_empty())
-        );
-        assert!(parse(true, &["set", "--clear-machines", "--machine", "node_a"]).is_err());
+        assert!(parse(true, &["set", "--unregistered-option", "on"]).is_err());
     }
 
     #[test]
@@ -1997,9 +2026,13 @@ mod domain_tests {
     #[test]
     fn preference_host_tokens_are_strict_and_preserve_other_patch_options() {
         for (token, expected) in [
-            ("auto", ObservationMode::Both),
-            ("herdr", ObservationMode::Herdr),
-            ("tern", ObservationMode::Tern),
+            ("auto", ObservationSelection::Auto),
+            ("herdr", ObservationSelection::Provider("herdr".into())),
+            ("tern", ObservationSelection::Provider("tern".into())),
+            (
+                "provider-y",
+                ObservationSelection::Provider("provider-y".into()),
+            ),
         ] {
             for args in [
                 vec![
@@ -2018,9 +2051,7 @@ mod domain_tests {
                 ));
             }
         }
-        for token in [
-            "both", "AUTO", "Herdr", "TERN", "", " auto", "tern ", "herdr\n",
-        ] {
+        for token in ["both", ""] {
             for args in [
                 vec![
                     "set".to_owned(),
@@ -2041,8 +2072,6 @@ mod domain_tests {
                     "ko",
                     "--observation-host",
                     "tern",
-                    "--observation-local",
-                    "off",
                     "--expected-revision",
                     "7",
                     "--no-wait",
@@ -2051,15 +2080,14 @@ mod domain_tests {
             .unwrap(),
             DomainCommand::PreferencesSet {
                 patch: PreferencePatch {
-                    observation_host: Some(ObservationMode::Tern),
+                    observation_host: Some(mode),
                     language: Some(LanguagePreference::Ko),
-                    observation_local: Some(false),
                     ..
                 },
                 revision: Some(7),
                 wait: None,
                 ..
-            }
+            } if mode == ObservationSelection::Provider("tern".into())
         ));
         assert!(parse(
             true,
@@ -2312,7 +2340,7 @@ mod domain_tests {
                 ["get", "--target", target, "--locale", "ko", "--slot", slot].map(str::to_owned);
             assert!(
                 matches!(
-                    parse_family("dialogue", &args),
+                    parse_family_with_extensions("dialogue", &args, &[]),
                     Ok(DomainCommand::DialogueRead(_))
                 ),
                 "{slot}"
@@ -2333,11 +2361,13 @@ mod domain_tests {
             "--no-wait",
         ]
         .map(str::to_owned);
-        assert!(matches!(parse_family("dialogue", &args),
+        assert!(
+            matches!(parse_family_with_extensions("dialogue", &args, &[]),
             Ok(DomainCommand::DialogueSet {
                 text:PromptText::Literal(value), baseline:Some(DialogueBaseline { override_entry:Some(entry),.. }),
                 wait:None,..
-            }) if value==" \n안녕\r\n " && entry==" before "));
+            }) if value==" \n안녕\r\n " && entry==" before ")
+        );
         let reset = [
             "reset-character",
             "--target",
@@ -2347,7 +2377,7 @@ mod domain_tests {
         ]
         .map(str::to_owned);
         assert!(matches!(
-            parse_family("dialogue", &reset),
+            parse_family_with_extensions("dialogue", &reset, &[]),
             Ok(DomainCommand::DialogueResetCharacter {
                 baseline: Some(_),
                 ..
@@ -2391,9 +2421,10 @@ mod domain_tests {
             ],
             vec!["reset-character", "--target", target, "--slot", "idle"],
         ] {
-            assert!(parse_family(
+            assert!(parse_family_with_extensions(
                 "dialogue",
-                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                &[]
             )
             .is_err());
         }
@@ -2423,12 +2454,13 @@ mod domain_tests {
                     if operation == "set" {
                         args.extend(["--text".to_owned(), "hello".to_owned()]);
                     }
-                    let selection = match parse_family("dialogue", &args).unwrap() {
-                        DomainCommand::DialogueRead(selection) => selection,
-                        DomainCommand::DialogueSet { selection, .. } => selection,
-                        DomainCommand::DialogueResetEntry { selection, .. } => selection,
-                        _ => panic!("unexpected dialogue command"),
-                    };
+                    let selection =
+                        match parse_family_with_extensions("dialogue", &args, &[]).unwrap() {
+                            DomainCommand::DialogueRead(selection) => selection,
+                            DomainCommand::DialogueSet { selection, .. } => selection,
+                            DomainCommand::DialogueResetEntry { selection, .. } => selection,
+                            _ => panic!("unexpected dialogue command"),
+                        };
                     assert_eq!(selection.locale, expected);
                     assert_eq!(serde_json::to_value(&selection).unwrap()["locale"], token);
                 }
@@ -2450,7 +2482,10 @@ mod domain_tests {
                 if operation == "set" {
                     args.extend(["--text".to_owned(), "hello".to_owned()]);
                 }
-                assert!(parse_family("dialogue", &args).is_err(), "{args:?}");
+                assert!(
+                    parse_family_with_extensions("dialogue", &args, &[]).is_err(),
+                    "{args:?}"
+                );
             }
         }
     }
@@ -2501,7 +2536,7 @@ mod domain_tests {
         ]
         .map(str::to_owned);
         assert!(matches!(
-            parse_family("worktree", &inspect),
+            parse_family_with_extensions("worktree", &inspect, &[]),
             Ok(DomainCommand::WorktreeInspect(SessionIdentity {
                 source_id: 12,
                 generation: 3,
@@ -2510,7 +2545,7 @@ mod domain_tests {
         ));
         let remove = ["remove", "--token", "opaque_one_use_token", "--no-wait"].map(str::to_owned);
         assert!(matches!(
-            parse_family("worktree", &remove),
+            parse_family_with_extensions("worktree", &remove, &[]),
             Ok(DomainCommand::WorktreeRemove { wait: None, .. })
         ));
         for args in [
@@ -2528,16 +2563,18 @@ mod domain_tests {
             vec!["remove", "--token", "opaque", "--path", "/tmp/repo"],
             vec!["remove", "--token", "opaque", "--wait", "0"],
         ] {
-            assert!(parse_family(
+            assert!(parse_family_with_extensions(
                 "worktree",
-                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                &[]
             )
             .is_err());
         }
         assert!(matches!(
-            parse_family(
+            parse_family_with_extensions(
                 "sessions",
-                &["status", "--instance", "daemon_1", "--operation-id", "op_1"].map(str::to_owned)
+                &["status", "--instance", "daemon_1", "--operation-id", "op_1"].map(str::to_owned),
+                &[]
             ),
             Ok(DomainCommand::Status {
                 family: DomainFamily::Sessions,
@@ -2551,7 +2588,7 @@ mod domain_tests {
         ] {
             let status =
                 ["status", "--instance", "daemon_1", "--operation-id", "op_1"].map(str::to_owned);
-            assert!(matches!(parse_family(family, &status),
+            assert!(matches!(parse_family_with_extensions(family, &status, &[]),
                 Ok(DomainCommand::Status { family, .. }) if family == expected));
         }
         assert!(!DomainFamily::Preferences.contains("session_prompt"));

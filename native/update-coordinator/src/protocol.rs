@@ -68,7 +68,8 @@ pub struct UpdateControlReply {
     pub accepted: bool,
     pub detail: String,
 }
-pub const UPDATER_PROTOCOL: u32 = 3;
+pub const UPDATER_PROTOCOL: u32 = crate::identity::PROTOCOL;
+const UPDATES_DIR: &str = crate::identity::UPDATES_DIRECTORY;
 
 pub fn validate_operation_id(id: &str) -> Result<(), String> {
     if id.len() != 32
@@ -111,6 +112,9 @@ pub struct OperationLease {
 
 pub fn lock_operation(state_dir: &Path, op: &str) -> Result<OperationLease, String> {
     validate_operation_id(op)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    reject_old_evidence(&global, None, None, Some(state_dir), false)?;
     let file = lock_with_mode(
         &private_updates(state_dir)?.join(format!("{op}.operation.lock")),
         libc::LOCK_EX | libc::LOCK_NB,
@@ -119,7 +123,7 @@ pub fn lock_operation(state_dir: &Path, op: &str) -> Result<OperationLease, Stri
 }
 pub fn private_updates(state_dir: &Path) -> Result<PathBuf, String> {
     check_dir(state_dir, false)?;
-    let updates = state_dir.join("updates");
+    let updates = state_dir.join(UPDATES_DIR);
     check_dir(&updates, true)?;
     Ok(updates)
 }
@@ -256,7 +260,7 @@ pub fn read_operation(
 ) -> Result<Option<OperationRecord>, String> {
     validate_operation_id(operation_id)?;
     check_dir(state_dir, false)?;
-    let updates = state_dir.join("updates");
+    let updates = state_dir.join(UPDATES_DIR);
     if missing_file(&updates) {
         return Ok(None);
     }
@@ -281,7 +285,9 @@ pub fn read_operation(
 /// Read only: an untouched profile does not gain an update directory.
 pub fn latest_operation(state_dir: &Path) -> Result<Option<OperationRecord>, String> {
     check_dir(state_dir, false)?;
-    let updates = state_dir.join("updates");
+    #[cfg(not(desktop_pet_legacy))]
+    reject_profile_reservations(state_dir, true)?;
+    let updates = state_dir.join(UPDATES_DIR);
     if missing_file(&updates) {
         return Ok(None);
     }
@@ -312,11 +318,13 @@ pub fn latest_operation(state_dir: &Path) -> Result<Option<OperationRecord>, Str
 pub fn installation_key(origin: &InstallOrigin) -> Result<String, String> {
     let root = crate::physical_install_root(origin)?;
     let material = match origin {
-        InstallOrigin::Herdr { .. } | InstallOrigin::Local { .. } => {
-            format!("checkout\0{}", root.display())
-        }
+        #[cfg(desktop_pet_legacy)]
+        InstallOrigin::Herdr { .. } => format!("checkout\0{}", root.display()),
+        InstallOrigin::Source { .. } => format!("checkout\0{}", root.display()),
         InstallOrigin::Homebrew { formula, .. } => format!("brew\0{}\0{formula}", root.display()),
-        InstallOrigin::Manual { .. } => format!("manual\0{}", root.display()),
+        InstallOrigin::Standalone { .. } | InstallOrigin::Manual { .. } => {
+            format!("manual\0{}", root.display())
+        }
         InstallOrigin::Unknown { .. } => {
             return Err("installation has no safely reservable owner".into())
         }
@@ -356,23 +364,38 @@ fn lock_scope(
     target: Option<&InstallOrigin>,
     keys: &[String],
 ) -> Result<Vec<File>, String> {
-    let mut lock_keys = keys.to_vec();
-    for origin in std::iter::once(source).chain(target) {
+    let mut origins = std::iter::once(source)
+        .chain(target)
+        .map(|origin| crate::physical_install_root(origin).map(|root| (root, origin)))
+        .collect::<Result<Vec<_>, _>>()?;
+    origins.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut lock_keys = Vec::new();
+    for (_, origin) in origins {
+        let key = installation_key(origin)?;
+        if keys.contains(&key) && !lock_keys.contains(&key) {
+            lock_keys.push(key);
+        }
         if let Some(old) = legacy_key(origin) {
-            lock_keys.push(old);
+            if !lock_keys.contains(&old) {
+                lock_keys.push(old);
+            }
         }
     }
-    lock_keys.sort_unstable();
-    lock_keys.dedup();
-    lock_keys
-        .iter()
-        .map(|key| {
-            lock_with_mode(
-                &global.join(format!("{key}.lock")),
+    let old = old_global(global)?;
+    let mut files = Vec::new();
+    for key in &lock_keys {
+        if let Some(old) = &old {
+            files.push(lock_with_mode(
+                &old.join(format!("{key}.lock")),
                 libc::LOCK_EX | libc::LOCK_NB,
-            )
-        })
-        .collect()
+            )?);
+        }
+        files.push(lock_with_mode(
+            &global.join(format!("{key}.lock")),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?);
+    }
+    Ok(files)
 }
 /// UID-wide durable private root outside replaceable app/checkout, shared by profiles.
 pub fn global_updates() -> Result<PathBuf, String> {
@@ -398,10 +421,1600 @@ pub fn global_updates() -> Result<PathBuf, String> {
         unsafe { CStr::from_ptr(user.pw_dir) }.to_bytes(),
     ));
     ensure_absolute(home)?;
-    let path = home.join(".herdr-updates");
+    let path = home.join(crate::identity::GLOBAL_UPDATES_DIRECTORY);
     check_dir(&path, true)?;
     Ok(path)
 }
+
+fn old_global(global: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(desktop_pet_legacy)]
+    {
+        let _ = global;
+        Ok(None)
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        let path = global
+            .parent()
+            .ok_or("global update root has no parent")?
+            .join(".herdr-updates");
+        check_dir(&path, true)?;
+        Ok(Some(path))
+    }
+}
+
+fn compatibility_global(global: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(desktop_pet_legacy)]
+    {
+        migration_global(global).map(Some)
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        old_global(global)
+    }
+}
+
+/// All namespace users acquire these gates in this order, never from HOME.
+fn lock_gates(global: &Path) -> Result<Vec<File>, String> {
+    check_dir(global, false)?;
+    let mut locks = Vec::new();
+    if let Some(old) = old_global(global)? {
+        locks.push(lock(&old.join("gate.lock"))?);
+    }
+    locks.push(lock(&global.join("gate.lock"))?);
+    #[cfg(desktop_pet_legacy)]
+    {
+        let new = migration_global(global)?;
+        locks.push(lock(&new.join("gate.lock"))?);
+    }
+    Ok(locks)
+}
+
+fn registry_files(global: &Path, suffix: &str) -> Result<Vec<PathBuf>, String> {
+    check_dir(global, false)?;
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(global).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(suffix))
+        {
+            paths.push(entry.path());
+            if paths.len() > 1024 {
+                return Err("updater registry exceeds bound".into());
+            }
+        }
+    }
+    paths.sort_unstable();
+    Ok(paths)
+}
+
+fn evidence_root(value: &serde_json::Value) -> Result<Option<PathBuf>, String> {
+    let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) else {
+        return Err("unsupported installation evidence; preserve original bytes".into());
+    };
+    let field = match kind {
+        "herdr" => "checkout_root",
+        "local" | "source" => "root",
+        "homebrew" => "cellar_formula_root",
+        "standalone" => "bundle",
+        "manual" => "locator",
+        "unknown" => return Ok(None),
+        _ => return Err("unsupported installation owner; preserve original bytes".into()),
+    };
+    let path = PathBuf::from(
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or("installation evidence has no physical root")?,
+    );
+    ensure_absolute(&path)?;
+    if kind == "manual" {
+        Ok(Some(
+            path.parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .ok_or("invalid manual image evidence")?
+                .to_path_buf(),
+        ))
+    } else {
+        Ok(Some(path))
+    }
+}
+
+fn evidence_matches(
+    value: &serde_json::Value,
+    roots: &[PathBuf],
+    state: Option<&Path>,
+) -> Result<bool, String> {
+    let object = value
+        .as_object()
+        .ok_or("unsupported reservation evidence")?;
+    if !matches!(
+        object.get("version").and_then(serde_json::Value::as_u64),
+        Some(1..=4)
+    ) {
+        return Err("unsupported reservation version; preserve original bytes".into());
+    }
+    let stored_state = PathBuf::from(
+        object
+            .get("state_dir")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("reservation evidence has no profile")?,
+    );
+    ensure_absolute(&stored_state)?;
+    let source = object
+        .get("source")
+        .ok_or("reservation evidence has no source")?;
+    let mut matching = state.is_some_and(|state| state == stored_state);
+    for origin in std::iter::once(source).chain(object.get("target").filter(|v| !v.is_null())) {
+        if let Some(root) = evidence_root(origin)? {
+            matching |= roots.iter().any(|candidate| candidate == &root);
+        }
+    }
+    Ok(matching)
+}
+
+fn reject_reservation_evidence(
+    global: &Path,
+    roots: &[PathBuf],
+    state: Option<&Path>,
+) -> Result<(), String> {
+    reject_migration_scopes(global, roots, state, None)?;
+    reject_normal_reservation_evidence(global, roots, state)
+}
+fn reject_normal_reservation_evidence(
+    global: &Path,
+    roots: &[PathBuf],
+    state: Option<&Path>,
+) -> Result<(), String> {
+    let index = scopes_path(global);
+    if !missing_file(&index) {
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_slice(&owned_private_file(&index, 1024 * 1024)?)
+                .map_err(|_| "unsupported scope registry; preserve original bytes")?;
+        if entries.len() > 256 {
+            return Err("installation scope registry exceeds bound".into());
+        }
+        for entry in entries {
+            if evidence_matches(&entry, roots, state)? {
+                return Err(
+                    "an existing update owns this profile or installation; use its matching helper"
+                        .into(),
+                );
+            }
+        }
+    }
+    for path in registry_files(global, ".reservation.json")? {
+        let entry: serde_json::Value =
+            serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                .map_err(|_| "unsupported reservation; preserve original bytes")?;
+        if evidence_matches(&entry, roots, state)? {
+            return Err(
+                "existing installation reservation must be reconciled by its matching helper"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn root_registry_keys(roots: &[PathBuf]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for root in roots {
+        for material in [
+            format!("checkout\0{}", root.display()),
+            format!("manual\0{}", root.display()),
+        ] {
+            keys.push(format!("{:x}", Sha256::digest(material.as_bytes())));
+        }
+        for formula in [
+            "desktop-pet",
+            "desktop-pet-beta",
+            "herdr-desktop-pet",
+            "herdr-desktop-pet-beta",
+        ] {
+            keys.push(format!(
+                "{:x}",
+                Sha256::digest(format!("brew\0{}\0{formula}", root.display()).as_bytes())
+            ));
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+fn reject_active_evidence(
+    global: &Path,
+    roots: &[PathBuf],
+    state: Option<&Path>,
+    all_root_profiles: bool,
+) -> Result<(), String> {
+    let keys = root_registry_keys(roots);
+    for path in registry_files(global, ".active.json")? {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("invalid active registry name")?;
+        let root_matches = keys
+            .iter()
+            .any(|key| name.strip_suffix(".active.json") == Some(key.as_str()));
+        let entries: Vec<ActiveProfile> =
+            serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                .map_err(|_| "unsupported active registry; preserve original bytes")?;
+        if entries.len() > 64 {
+            return Err("active profile registry exceeds bound".into());
+        }
+        for entry in entries {
+            ensure_absolute(&entry.state_dir)?;
+            if live(entry.pid)
+                && (state.is_some_and(|state| state == entry.state_dir)
+                    || root_matches
+                        && (all_root_profiles
+                            || state.is_none_or(|state| state != entry.state_dir)))
+            {
+                return Err("a live daemon still owns the profile or installation".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_profile_reservations(state: &Path, old_only: bool) -> Result<(), String> {
+    let directories: &[&str] = if old_only {
+        &["updates"]
+    } else {
+        &["updates", "updates-v4"]
+    };
+    for directory in directories {
+        let updates = state.join(directory);
+        if missing_file(&updates) {
+            continue;
+        }
+        check_dir(&updates, false)?;
+        let marker = updates.join("profile.reservation.json");
+        if !missing_file(&marker) {
+            owned_private_file(&marker, 16384)?;
+            return Err(
+                "profile still has an updater reservation; preserve matching protocol evidence"
+                    .into(),
+            );
+        }
+        // An older coordinator may have crashed before writing its reservation.
+        if *directory == "updates" && (old_only || UPDATER_PROTOCOL == 4) {
+            let latest = updates.join("latest-operation.json");
+            if !missing_file(&latest) {
+                let id: String = serde_json::from_slice(&owned_private_file(&latest, 128)?)
+                    .map_err(|_| "unsupported legacy journal locator; preserve original bytes")?;
+                validate_operation_id(&id)?;
+                let record: serde_json::Value = serde_json::from_slice(&owned_private_file(
+                    &updates.join(format!("{id}.result.json")),
+                    16384,
+                )?)
+                .map_err(|_| "unsupported legacy journal; preserve original bytes")?;
+                if !matches!(
+                    record.get("version").and_then(serde_json::Value::as_u64),
+                    Some(1..=3)
+                ) || !matches!(
+                    record.get("phase").and_then(serde_json::Value::as_str),
+                    Some("completed" | "failed" | "user_stopped")
+                ) {
+                    return Err(
+                        "legacy operation is unresolved; retain its matching helper and evidence"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_old_evidence(
+    global: &Path,
+    source: Option<&InstallOrigin>,
+    target: Option<&InstallOrigin>,
+    state: Option<&Path>,
+    starting: bool,
+) -> Result<(), String> {
+    let Some(old) = compatibility_global(global)? else {
+        return Ok(());
+    };
+    let mut roots = Vec::new();
+    for origin in source.into_iter().chain(target) {
+        if !matches!(origin, InstallOrigin::Unknown { .. }) {
+            roots.push(crate::physical_install_root(origin)?.to_path_buf());
+            reject_legacy_marker(&old, origin)?;
+        }
+    }
+    reject_reservation_evidence(&old, &roots, state)?;
+    if let Some(state) = state {
+        #[cfg(not(desktop_pet_legacy))]
+        reject_profile_reservations(state, true)?;
+        #[cfg(desktop_pet_legacy)]
+        {
+            let updates = state.join("updates-v4");
+            if !missing_file(&updates) {
+                check_dir(&updates, false)?;
+                let marker = updates.join("profile.reservation.json");
+                if !missing_file(&marker) {
+                    owned_private_file(&marker, 16384)?;
+                    return Err("neutral updater still owns this legacy profile".into());
+                }
+            }
+        }
+    }
+    reject_active_evidence(&old, &roots, state, starting)
+}
+
+/// Retain this guard through staging, replacement and locator writes.
+pub struct InstallationAdmission {
+    _roots: Vec<File>,
+    _gates: Vec<File>,
+    roots: Vec<PathBuf>,
+    global: PathBuf,
+}
+pub struct ProfileAdmission {
+    _lifecycle: Vec<desktop_pet_contracts::LifecycleLock>,
+    _admission: InstallationAdmission,
+}
+pub struct InstallationLocks {
+    _admission: InstallationAdmission,
+}
+
+fn lock_roots(global: &Path, roots: &[PathBuf]) -> Result<Vec<File>, String> {
+    let old = old_global(global)?;
+    let mut locks = Vec::new();
+    for root in roots {
+        for key in root_registry_keys(std::slice::from_ref(root)) {
+            if let Some(old) = &old {
+                locks.push(lock_with_mode(
+                    &old.join(format!("{key}.lock")),
+                    libc::LOCK_EX | libc::LOCK_NB,
+                )?);
+            }
+            locks.push(lock_with_mode(
+                &global.join(format!("{key}.lock")),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )?);
+        }
+    }
+    Ok(locks)
+}
+
+fn installation_roots(mut roots: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    if roots.is_empty() {
+        return Err("installation admission requires a physical root".into());
+    }
+    for root in &roots {
+        ensure_absolute(root)?;
+        let mut ancestor = root.as_path();
+        while missing_file(ancestor) {
+            ancestor = ancestor
+                .parent()
+                .ok_or("installation root has no existing ancestor")?;
+        }
+        let physical = fs::canonicalize(ancestor).map_err(|e| e.to_string())?;
+        if physical != ancestor || !fs::metadata(ancestor).map_err(|e| e.to_string())?.is_dir() {
+            return Err("installation root must have a physical directory ancestor".into());
+        }
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn installation_admission_at(
+    global: PathBuf,
+    select_roots: impl FnOnce() -> Result<Vec<PathBuf>, String>,
+    require_inactive: bool,
+) -> Result<InstallationAdmission, String> {
+    let gates = lock_gates(&global)?;
+    // A waiting installer must select the winner's roots, not a pre-gate snapshot.
+    let roots = installation_roots(select_roots()?)?;
+    let locks = lock_roots(&global, &roots)?;
+    let admission = InstallationAdmission {
+        _roots: locks,
+        _gates: gates,
+        roots,
+        global,
+    };
+    if require_inactive {
+        admission.installation_inactive()?;
+    } else {
+        admission.installation_reservations_clear()?;
+    }
+    Ok(admission)
+}
+
+pub fn admit_installation(roots: &[PathBuf]) -> Result<InstallationAdmission, String> {
+    installation_admission_at(global_updates()?, || Ok(roots.to_vec()), true)
+}
+/// Select under both global gates, then fence roots before deciding whether to reuse.
+/// Replacement additionally requires `installation_inactive` under the retained guard.
+#[cfg(not(desktop_pet_legacy))]
+pub(crate) fn admit_installation_reuse(
+    select_roots: impl FnOnce() -> Result<Vec<PathBuf>, String>,
+) -> Result<InstallationAdmission, String> {
+    installation_admission_at(global_updates()?, select_roots, false)
+}
+
+pub fn installer_admission(
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+) -> Result<InstallationAdmission, String> {
+    let roots = std::iter::once(source)
+        .chain(target)
+        .map(|origin| crate::physical_install_root(origin).map(Path::to_path_buf))
+        .collect::<Result<Vec<_>, _>>()?;
+    admit_installation(&roots)
+}
+
+pub fn installation_locks(
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+) -> Result<InstallationLocks, String> {
+    installer_admission(source, target).map(|admission| InstallationLocks {
+        _admission: admission,
+    })
+}
+
+impl InstallationAdmission {
+    fn installation_reservations_clear(&self) -> Result<(), String> {
+        let compatibility = compatibility_global(&self.global)?;
+        for global in std::iter::once(self.global.as_path()).chain(compatibility.as_deref()) {
+            reject_reservation_evidence(global, &self.roots, None)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    pub(crate) fn holds_root(&self, root: &Path) -> bool {
+        self.roots.iter().any(|held| held == root)
+    }
+
+    /// Caller must release its install lock before rebuilding the sorted root lockset.
+    /// Both global gates stay held; every newly fenced root gets the same reservation checks.
+    #[cfg(not(desktop_pet_legacy))]
+    pub(crate) fn fence_additional_root(&mut self, root: &Path) -> Result<(), String> {
+        let mut roots = self.roots.clone();
+        roots.push(root.to_path_buf());
+        let roots = installation_roots(roots)?;
+        self._roots.clear();
+        self._roots = lock_roots(&self.global, &roots)?;
+        self.roots = roots;
+        self.installation_reservations_clear()
+    }
+
+    pub fn installation_inactive(&self) -> Result<(), String> {
+        for global in
+            std::iter::once(self.global.clone()).chain(compatibility_global(&self.global)?)
+        {
+            reject_reservation_evidence(&global, &self.roots, None)?;
+            reject_active_evidence(&global, &self.roots, None, true)?;
+        }
+        crate::origin::installation_roots_inactive(&self.roots)
+    }
+    pub fn profile_adoption_allowed(&self, config: &Path, state: &Path) -> Result<(), String> {
+        check_dir(config, false)?;
+        check_dir(state, false)?;
+        reject_profile_reservations(state, false)?;
+        for global in
+            std::iter::once(self.global.clone()).chain(compatibility_global(&self.global)?)
+        {
+            reject_reservation_evidence(&global, &self.roots, Some(state))?;
+            reject_active_evidence(&global, &self.roots, Some(state), true)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn admit_profile_adoption(config: &Path, state: &Path) -> Result<ProfileAdmission, String> {
+    admit_profile_adoption_profiles(&[(config.to_path_buf(), state.to_path_buf())])
+}
+
+/// One transaction covers both the requested profile and the previous locator.
+pub fn admit_profile_adoption_profiles(
+    profiles: &[(PathBuf, PathBuf)],
+) -> Result<ProfileAdmission, String> {
+    if profiles.is_empty() {
+        return Err("profile adoption requires a profile".into());
+    }
+    for (config, state) in profiles {
+        check_dir(config, false)?;
+        check_dir(state, false)?;
+        reject_profile_reservations(state, false)?;
+    }
+    let global = global_updates()?;
+    let gates = lock_gates(&global)?;
+    let mut key_locks = Vec::new();
+    let mut registry_keys = Vec::new();
+    for namespace in std::iter::once(global.clone()).chain(compatibility_global(&global)?) {
+        for (_, state) in profiles {
+            reject_reservation_evidence(&namespace, &[], Some(state))?;
+            reject_active_evidence(&namespace, &[], Some(state), true)?;
+        }
+        for path in registry_files(&namespace, ".active.json")? {
+            let entries: Vec<ActiveProfile> =
+                serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                    .map_err(|_| "unsupported active profile registry")?;
+            if entries
+                .iter()
+                .any(|entry| profiles.iter().any(|(_, state)| *state == entry.state_dir))
+            {
+                let key = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_suffix(".active.json"))
+                    .ok_or("invalid active profile registry")?
+                    .to_owned();
+                registry_keys.push(key);
+            }
+        }
+    }
+    registry_keys.sort_unstable();
+    registry_keys.dedup();
+    let old = old_global(&global)?;
+    for key in registry_keys {
+        if let Some(old) = &old {
+            key_locks.push(lock_with_mode(
+                &old.join(format!("{key}.lock")),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )?);
+        }
+        key_locks.push(lock_with_mode(
+            &global.join(format!("{key}.lock")),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?);
+    }
+    let admission = InstallationAdmission {
+        _roots: key_locks,
+        _gates: gates,
+        roots: Vec::new(),
+        global,
+    };
+    let mut states = profiles.iter().map(|(_, state)| state).collect::<Vec<_>>();
+    states.sort_unstable();
+    states.dedup();
+    let mut lifecycle = Vec::new();
+    for state in states {
+        lifecycle.push(
+            desktop_pet_contracts::LifecycleLock::try_acquire(state)?
+                .ok_or("profile is owned by a live daemon")?,
+        );
+    }
+    for (config, state) in profiles {
+        admission.profile_adoption_allowed(config, state)?;
+    }
+    Ok(ProfileAdmission {
+        _lifecycle: lifecycle,
+        _admission: admission,
+    })
+}
+
+/// Read-only admission snapshot. Mutation must retain `admit_profile_adoption`.
+pub fn profile_adoption_allowed(config: &Path, state: &Path) -> Result<(), String> {
+    admit_profile_adoption(config, state).map(|_| ())
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationProfile {
+    pub pid: u32,
+    pub instance_id: String,
+    pub state_dir: PathBuf,
+    pub config_dir: PathBuf,
+    pub image: crate::ExecutableIdentity,
+    pub stop_generation: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationStartup {
+    root: PathBuf,
+    image: crate::ExecutableIdentity,
+    state_dir: PathBuf,
+    stop_generation: u64,
+    token: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationScope {
+    version: u32,
+    operation_id: String,
+    roots: Vec<PathBuf>,
+    profiles: Vec<MigrationProfile>,
+    readonly_target_profiles: Vec<MigrationProfile>,
+    owner_token: String,
+    startups: Vec<MigrationStartup>,
+}
+pub struct LegacyMigrationAdmission {
+    _locks: Vec<File>,
+    _gates: Vec<File>,
+    global: PathBuf,
+    scope: MigrationScope,
+}
+pub struct MigrationReservation {
+    global: PathBuf,
+    operation_id: String,
+    owner_token: String,
+}
+fn migration_global(global: &Path) -> Result<PathBuf, String> {
+    let path = global
+        .parent()
+        .ok_or("missing global parent")?
+        .join(".desktop-pet-updates");
+    check_dir(&path, true)?;
+    Ok(path)
+}
+fn migration_path(global: &Path, operation: &str) -> PathBuf {
+    global.join(format!("{operation}.migration.json"))
+}
+fn valid_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+fn migration_scopes(global: &Path) -> Result<Vec<MigrationScope>, String> {
+    let namespace = migration_global(global)?;
+    let mut entries = Vec::new();
+    for path in registry_files(&namespace, ".migration.json")? {
+        let scope: MigrationScope = serde_json::from_slice(&owned_private_file(&path, 128 * 1024)?)
+            .map_err(|_| "unsupported migration scope; preserve original bytes")?;
+        validate_operation_id(&scope.operation_id)?;
+        if scope.version != 4
+            || scope.roots.is_empty()
+            || scope.roots.len() > 16
+            || scope.profiles.is_empty()
+            || scope.profiles.len() > 64
+            || scope.readonly_target_profiles.len() > 64
+            || scope.startups.len() > scope.profiles.len()
+            || !valid_token(&scope.owner_token)
+            || migration_path(&namespace, &scope.operation_id) != path
+        {
+            return Err("unsupported migration ownership evidence".into());
+        }
+        if scope.roots.windows(2).any(|roots| roots[0] >= roots[1]) {
+            return Err("migration roots must be sorted and unique".into());
+        }
+        for root in &scope.roots {
+            ensure_absolute(root)?;
+        }
+        for (index, profile) in scope.profiles.iter().enumerate() {
+            if scope.profiles[..index]
+                .iter()
+                .any(|other| other.state_dir == profile.state_dir || other.pid == profile.pid)
+            {
+                return Err("migration source profiles must be unique".into());
+            }
+            ensure_absolute(&profile.state_dir)?;
+            ensure_absolute(&profile.config_dir)?;
+            ensure_absolute(&profile.image.path)?;
+            if profile.pid == 0
+                || profile.instance_id.is_empty()
+                || profile.instance_id.len() > 128
+                || !scope
+                    .roots
+                    .iter()
+                    .any(|root| profile.image.path.starts_with(root))
+            {
+                return Err("invalid migration source identity".into());
+            }
+        }
+        validate_readonly_target_profiles(&scope)?;
+        for (index, startup) in scope.startups.iter().enumerate() {
+            if scope.startups[..index]
+                .iter()
+                .any(|other| other.state_dir == startup.state_dir)
+            {
+                return Err("migration startup profiles must be unique".into());
+            }
+            ensure_absolute(&startup.image.path)?;
+            if !scope.roots.contains(&startup.root)
+                || !startup.image.path.starts_with(&startup.root)
+                || !valid_token(&startup.token)
+                || !scope.profiles.iter().any(|profile| {
+                    profile.state_dir == startup.state_dir
+                        && profile.stop_generation == startup.stop_generation
+                })
+            {
+                return Err("invalid migration startup authority".into());
+            }
+        }
+        entries.push(scope);
+        if entries.len() > 256 {
+            return Err("migration scope registry exceeds bound".into());
+        }
+    }
+    Ok(entries)
+}
+fn reject_migration_scopes(
+    global: &Path,
+    roots: &[PathBuf],
+    state: Option<&Path>,
+    owned: Option<&str>,
+) -> Result<(), String> {
+    for scope in migration_scopes(global)? {
+        if owned == Some(scope.operation_id.as_str()) {
+            continue;
+        }
+        if scope.roots.iter().any(|root| roots.contains(root))
+            || state.is_some_and(|state| {
+                scope
+                    .profiles
+                    .iter()
+                    .chain(&scope.readonly_target_profiles)
+                    .any(|profile| profile.state_dir == state)
+            })
+        {
+            return Err("profile or installation is reserved by a legacy migration".into());
+        }
+    }
+    Ok(())
+}
+fn combined_generation(state: &Path) -> Result<u64, String> {
+    check_dir(state, false)?;
+    read_generation(&state.join("updates/stop-generation.json"))?
+        .checked_add(read_generation(
+            &state.join("updates-v4/stop-generation.json"),
+        )?)
+        .ok_or_else(|| "stop generation overflow".into())
+}
+fn migration_profile_checks(scope: &MigrationScope) -> Result<(), String> {
+    for profile in &scope.profiles {
+        check_dir(&profile.config_dir, false)?;
+        check_dir(&profile.state_dir, false)?;
+        reject_profile_reservations(&profile.state_dir, false)?;
+        if combined_generation(&profile.state_dir)? != profile.stop_generation {
+            return Err("user stop superseded migration".into());
+        }
+        if crate::executable_identity(&profile.image.path)? != profile.image {
+            return Err("authenticated bridge image changed".into());
+        }
+    }
+    Ok(())
+}
+
+fn migration_source_roots(scope: &MigrationScope) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for profile in &scope.profiles {
+        let root = scope
+            .roots
+            .iter()
+            .filter(|root| profile.image.path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .ok_or("source image is outside migration roots")?;
+        roots.push(root.clone());
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn validate_readonly_target_profiles(scope: &MigrationScope) -> Result<(), String> {
+    if scope.readonly_target_profiles.is_empty() {
+        return Ok(());
+    }
+    let source_roots = migration_source_roots(scope)?;
+    for (index, profile) in scope.readonly_target_profiles.iter().enumerate() {
+        ensure_absolute(&profile.config_dir)?;
+        ensure_absolute(&profile.state_dir)?;
+        ensure_absolute(&profile.image.path)?;
+        if profile.pid == 0
+            || profile.instance_id.is_empty()
+            || profile.instance_id.len() > 128
+            || !scope
+                .roots
+                .iter()
+                .any(|root| profile.image.path.starts_with(root))
+            || source_roots
+                .iter()
+                .any(|root| profile.image.path.starts_with(root))
+            || scope
+                .profiles
+                .iter()
+                .chain(&scope.readonly_target_profiles[..index])
+                .any(|other| other.state_dir == profile.state_dir || other.pid == profile.pid)
+        {
+            return Err(
+                "read-only target profile must be unique and outside every source root".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn readonly_target_profile_checks(scope: &MigrationScope) -> Result<(), String> {
+    validate_readonly_target_profiles(scope)?;
+    for profile in &scope.readonly_target_profiles {
+        if live(profile.pid) {
+            verify_process_identity(profile.pid, &profile.image)?;
+            check_dir(&profile.config_dir, false)?;
+            check_dir(&profile.state_dir, false)?;
+            reject_profile_reservations(&profile.state_dir, false)?;
+        }
+        if crate::executable_identity(&profile.image.path)? != profile.image {
+            return Err("verified read-only target image changed".into());
+        }
+    }
+    Ok(())
+}
+pub fn active_profiles_for_roots(roots: &[PathBuf]) -> Result<Vec<ActiveProfile>, String> {
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let keys = root_registry_keys(roots);
+    let mut result = Vec::new();
+    for namespace in std::iter::once(global.clone()).chain(compatibility_global(&global)?) {
+        for key in &keys {
+            result.extend(
+                active(&namespace, key)?
+                    .into_iter()
+                    .filter(|profile| live(profile.pid)),
+            );
+        }
+    }
+    result.sort_unstable_by(|a, b| a.state_dir.cmp(&b.state_dir).then(a.pid.cmp(&b.pid)));
+    result.dedup_by(|a, b| {
+        a.state_dir == b.state_dir && a.pid == b.pid && a.instance_id == b.instance_id
+    });
+    Ok(result)
+}
+pub fn admit_legacy_migration(
+    roots: &[PathBuf],
+    profiles: &[MigrationProfile],
+    readonly_target_profiles: &[MigrationProfile],
+    operation_id: &str,
+) -> Result<LegacyMigrationAdmission, String> {
+    validate_operation_id(operation_id)?;
+    if profiles.is_empty()
+        || profiles.len() > 64
+        || readonly_target_profiles.len() > 64
+        || roots.is_empty()
+        || roots.len() > 16
+    {
+        return Err("migration requires bounded authenticated profiles and roots".into());
+    }
+    let global = global_updates()?;
+    let gates = lock_gates(&global)?;
+    let mut roots = roots.to_vec();
+    for root in &roots {
+        ensure_absolute(root)?;
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    reject_migration_scopes(&global, &roots, None, None)?;
+    for (index, profile) in profiles.iter().enumerate() {
+        if profiles[..index]
+            .iter()
+            .any(|other| other.state_dir == profile.state_dir || other.pid == profile.pid)
+        {
+            return Err("migration source profiles must be unique".into());
+        }
+        if profile.pid == 0
+            || profile.instance_id.is_empty()
+            || profile.instance_id.len() > 128
+            || !roots
+                .iter()
+                .any(|root| profile.image.path.starts_with(root))
+        {
+            return Err(
+                "migration profile has no exact source identity in the reserved roots".into(),
+            );
+        }
+        reject_migration_scopes(&global, &roots, Some(&profile.state_dir), None)?;
+    }
+    let locks = lock_roots(&global, &roots)?;
+    let scope = MigrationScope {
+        version: 4,
+        operation_id: operation_id.into(),
+        roots,
+        profiles: profiles.to_vec(),
+        readonly_target_profiles: readonly_target_profiles.to_vec(),
+        owner_token: String::new(),
+        startups: Vec::new(),
+    };
+    let admission = LegacyMigrationAdmission {
+        _locks: locks,
+        _gates: gates,
+        global,
+        scope,
+    };
+    admission.recheck_profiles()?;
+    Ok(admission)
+}
+fn migration_recheck(global: &Path, scope: &MigrationScope) -> Result<(), String> {
+    migration_profile_checks(scope)?;
+    readonly_target_profile_checks(scope)?;
+    let keys = root_registry_keys(&scope.roots);
+    let mut registered = vec![false; scope.profiles.len() + scope.readonly_target_profiles.len()];
+    for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
+        reject_migration_scopes(&namespace, &scope.roots, None, Some(&scope.operation_id))?;
+        let index = scopes_path(&namespace);
+        if !missing_file(&index) {
+            let entries: Vec<serde_json::Value> =
+                serde_json::from_slice(&owned_private_file(&index, 1024 * 1024)?)
+                    .map_err(|_| "unsupported scope registry")?;
+            if entries.len() > 256 {
+                return Err("scope registry exceeds bound".into());
+            }
+            for entry in entries {
+                for profile in scope.profiles.iter().chain(&scope.readonly_target_profiles) {
+                    if evidence_matches(&entry, &scope.roots, Some(&profile.state_dir))? {
+                        return Err("normal updater operation must finish before migration".into());
+                    }
+                }
+            }
+        }
+        for path in registry_files(&namespace, ".reservation.json")? {
+            let entry: serde_json::Value =
+                serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                    .map_err(|_| "unsupported reservation")?;
+            for profile in scope.profiles.iter().chain(&scope.readonly_target_profiles) {
+                if evidence_matches(&entry, &scope.roots, Some(&profile.state_dir))? {
+                    return Err("normal updater reservation must finish before migration".into());
+                }
+            }
+        }
+        for path in registry_files(&namespace, ".active.json")? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("invalid active registry")?;
+            let entries: Vec<ActiveProfile> =
+                serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                    .map_err(|_| "unsupported active registry")?;
+            if entries.len() > 64 {
+                return Err("active registry exceeds bound".into());
+            }
+            for entry in entries.into_iter().filter(|entry| live(entry.pid)) {
+                let relevant = keys
+                    .iter()
+                    .any(|key| name.strip_suffix(".active.json") == Some(key.as_str()))
+                    || scope
+                        .profiles
+                        .iter()
+                        .chain(&scope.readonly_target_profiles)
+                        .any(|profile| profile.state_dir == entry.state_dir);
+                if relevant
+                    && !scope
+                        .profiles
+                        .iter()
+                        .chain(&scope.readonly_target_profiles)
+                        .any(|profile| {
+                            profile.pid == entry.pid
+                                && profile.instance_id == entry.instance_id
+                                && profile.state_dir == entry.state_dir
+                        })
+                {
+                    return Err("unapproved live profile shares migration installations".into());
+                }
+                for (index, profile) in scope
+                    .profiles
+                    .iter()
+                    .chain(&scope.readonly_target_profiles)
+                    .enumerate()
+                {
+                    if profile.pid == entry.pid
+                        && profile.instance_id == entry.instance_id
+                        && profile.state_dir == entry.state_dir
+                    {
+                        registered[index] = true;
+                    }
+                }
+            }
+        }
+    }
+    if scope
+        .profiles
+        .iter()
+        .chain(&scope.readonly_target_profiles)
+        .enumerate()
+        .any(|(index, profile)| live(profile.pid) && !registered[index])
+    {
+        return Err("authenticated source is missing its exact active registration".into());
+    }
+    let authorized = scope
+        .profiles
+        .iter()
+        .chain(&scope.readonly_target_profiles)
+        .filter(|profile| live(profile.pid))
+        .map(|profile| (profile.pid, profile.image.clone()))
+        .collect::<Vec<_>>();
+    crate::origin::installation_roots_admitted(&scope.roots, &authorized)
+}
+impl LegacyMigrationAdmission {
+    pub fn recheck_profiles(&self) -> Result<(), String> {
+        migration_recheck(&self.global, &self.scope)
+    }
+    pub fn profiles_stopped(&self) -> Result<(), String> {
+        self.recheck_profiles()?;
+        if self.scope.profiles.iter().any(|profile| live(profile.pid)) {
+            return Err("authenticated bridge profiles have not all stopped".into());
+        }
+        crate::origin::installation_roots_inactive(&migration_source_roots(&self.scope)?)
+    }
+    pub fn stop_requested(&self) -> Result<bool, String> {
+        for profile in &self.scope.profiles {
+            if combined_generation(&profile.state_dir)? != profile.stop_generation {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub fn reserve(mut self, token: &str) -> Result<MigrationReservation, String> {
+        if !valid_token(token) {
+            return Err("migration plan token must be 256-bit lowercase hex".into());
+        }
+        self.recheck_profiles()?;
+        self.scope.owner_token = token.into();
+        write_private_new(
+            &migration_path(&migration_global(&self.global)?, &self.scope.operation_id),
+            &serde_json::to_vec(&self.scope).map_err(|e| e.to_string())?,
+            0o600,
+        )?;
+        Ok(MigrationReservation {
+            global: self.global.clone(),
+            operation_id: self.scope.operation_id.clone(),
+            owner_token: token.into(),
+        })
+    }
+}
+/// Only the authenticated bridge instance may accept bounded migration Prepare/Stop.
+pub fn verify_legacy_migration_control(
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation: &str,
+    token: &str,
+) -> Result<(), String> {
+    validate_operation_id(operation)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let scope = migration_scopes(&global)?
+        .into_iter()
+        .find(|scope| scope.operation_id == operation && scope.owner_token == token)
+        .ok_or("migration request has no owned durable scope")?;
+    if !scope.profiles.iter().any(|profile| {
+        profile.state_dir == state
+            && profile.pid == pid
+            && profile.instance_id == instance
+            && live(pid)
+    }) {
+        return Err("migration request does not authorize this bridge instance".into());
+    }
+    migration_recheck(&global, &scope)
+}
+
+/// Commit authorization is bound to the actual registered target, not a locator.
+pub fn verify_migration_target(
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation: &str,
+    token: &str,
+) -> Result<(), String> {
+    validate_operation_id(operation)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    verify_migration_target_locked(&global, state, pid, instance, operation, token).map(|_| ())
+}
+
+fn verify_migration_target_locked(
+    global: &Path,
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation: &str,
+    token: &str,
+) -> Result<MigrationScope, String> {
+    let scope = migration_scopes(global)?
+        .into_iter()
+        .find(|scope| scope.operation_id == operation && scope.owner_token == token)
+        .ok_or("migration request has no owned durable scope")?;
+    let startup = scope
+        .startups
+        .iter()
+        .find(|startup| startup.state_dir == state)
+        .ok_or("migration has not authorized this target profile")?;
+    if combined_generation(state)? != startup.stop_generation {
+        return Err("user stop superseded migration commit".into());
+    }
+    let mut registered = false;
+    for key in root_registry_keys(std::slice::from_ref(&startup.root)) {
+        registered |= active(global, &key)?.iter().any(|entry| {
+            entry.state_dir == state
+                && entry.pid == pid
+                && entry.instance_id == instance
+                && live(pid)
+        });
+    }
+    if !registered {
+        return Err("target instance has no exact active registration".into());
+    }
+    migration_start_registry_checks(global, &scope, Some((pid, startup.image.clone())))?;
+    Ok(scope)
+}
+
+/// Atomically fence preference persistence and target mutation-gate release
+/// against user Stop and ordinary profile/installation admission.
+/// The caller holds its lifecycle writer; the callback may acquire the shared
+/// profile writer and then the domain lock, but must not reenter updater gates.
+pub fn with_migration_target_commit<T>(
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation_id: &str,
+    token: &str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    validate_operation_id(operation_id)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let scope = verify_migration_target_locked(&global, state, pid, instance, operation_id, token)?;
+    let _roots = lock_roots(&global, &scope.roots)?;
+    operation()
+}
+
+#[cfg(target_os = "macos")]
+fn verify_process_identity(pid: u32, image: &crate::ExecutableIdentity) -> Result<(), String> {
+    if !live(pid) {
+        return Err("migration instance is no longer live".into());
+    }
+    unsafe extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+    }
+    let mut buffer = [0u8; 4096];
+    let length =
+        unsafe { proc_pidpath(pid as i32, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return Err("cannot authenticate migration process image".into());
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("unterminated migration process image")?;
+    let path = Path::new(std::ffi::OsStr::from_bytes(&buffer[..end]));
+    if path != image.path || crate::executable_identity(path)? != *image {
+        return Err("migration process image does not match its authenticated identity".into());
+    }
+    Ok(())
+}
+#[cfg(not(target_os = "macos"))]
+fn verify_process_identity(_: u32, _: &crate::ExecutableIdentity) -> Result<(), String> {
+    Err("migration process proof requires macOS".into())
+}
+
+fn cleanup_instance_registered(
+    global: &Path,
+    state: &Path,
+    pid: u32,
+    instance: &str,
+) -> Result<bool, String> {
+    for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
+        for path in registry_files(&namespace, ".active.json")? {
+            let entries: Vec<ActiveProfile> =
+                serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                    .map_err(|_| "unsupported active profile registry")?;
+            if entries.len() > 64 {
+                return Err("active profile registry exceeds bound".into());
+            }
+            if entries.iter().any(|entry| {
+                entry.state_dir == state && entry.pid == pid && entry.instance_id == instance
+            }) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Cleanup only: a user Stop cannot strand an authenticated prepared bridge.
+/// This grants neither startup nor installation/migration commit permission.
+pub fn verify_legacy_migration_abort(
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation: &str,
+    token: &str,
+) -> Result<(), String> {
+    validate_operation_id(operation)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let scope = migration_scopes(&global)?
+        .into_iter()
+        .find(|scope| scope.operation_id == operation && scope.owner_token == token)
+        .ok_or("migration abort has no owned durable scope")?;
+    let profile = scope
+        .profiles
+        .iter()
+        .find(|profile| {
+            profile.state_dir == state && profile.pid == pid && profile.instance_id == instance
+        })
+        .ok_or("migration abort does not authorize this bridge instance")?;
+    if !cleanup_instance_registered(&global, state, pid, instance)? {
+        return Err("migration abort instance has no exact active registration".into());
+    }
+    verify_process_identity(pid, &profile.image)
+}
+
+/// Shutdown only: honor user Stop without reopening launch or commit authority.
+pub fn verify_migration_target_stop(
+    state: &Path,
+    pid: u32,
+    instance: &str,
+    operation: &str,
+    token: &str,
+) -> Result<(), String> {
+    validate_operation_id(operation)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let scope = migration_scopes(&global)?
+        .into_iter()
+        .find(|scope| scope.operation_id == operation && scope.owner_token == token)
+        .ok_or("migration stop has no owned durable scope")?;
+    let startup = scope
+        .startups
+        .iter()
+        .find(|startup| startup.state_dir == state)
+        .ok_or("migration has not issued target startup authority for this profile")?;
+    if !cleanup_instance_registered(&global, state, pid, instance)? {
+        return Err("migration stop target has no exact active registration".into());
+    }
+    verify_process_identity(pid, &startup.image)
+}
+
+pub fn lock_migration_operation(
+    state: &Path,
+    operation: &str,
+    token: &str,
+) -> Result<OperationLease, String> {
+    validate_operation_id(operation)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let scope = migration_scopes(&global)?
+        .into_iter()
+        .find(|scope| {
+            scope.operation_id == operation
+                && scope.owner_token == token
+                && scope
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.state_dir == state)
+        })
+        .ok_or("migration operation lease has no owned profile scope")?;
+    reject_migration_scopes(&global, &scope.roots, Some(state), Some(operation))?;
+    let file = lock_with_mode(
+        &private_updates(state)?.join(format!("{operation}.operation.lock")),
+        libc::LOCK_EX | libc::LOCK_NB,
+    )?;
+    Ok(OperationLease { _file: file })
+}
+
+pub fn load_migration_reservation(
+    operation_id: &str,
+    token: &str,
+) -> Result<MigrationReservation, String> {
+    validate_operation_id(operation_id)?;
+    if !valid_token(token) {
+        return Err("invalid migration ownership token".into());
+    }
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    let reservation = MigrationReservation {
+        global: global.clone(),
+        operation_id: operation_id.into(),
+        owner_token: token.into(),
+    };
+    reservation.scope()?;
+    Ok(reservation)
+}
+impl MigrationReservation {
+    /// Serialize pointer CAS/adoption/rollback with ordinary profile adoption.
+    /// The callback must not reenter protocol gates or perform lifecycle/control I/O.
+    pub fn with_pointer_mutation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gates = lock_gates(&self.global)?;
+        let scope = self.scope()?;
+        let _roots = lock_roots(&self.global, &scope.roots)?;
+        readonly_target_profile_checks(&scope)?;
+        for namespace in
+            std::iter::once(self.global.clone()).chain(compatibility_global(&self.global)?)
+        {
+            for profile in &scope.profiles {
+                reject_migration_scopes(
+                    &namespace,
+                    &scope.roots,
+                    Some(&profile.state_dir),
+                    Some(&self.operation_id),
+                )?;
+                reject_normal_reservation_evidence(
+                    &namespace,
+                    &scope.roots,
+                    Some(&profile.state_dir),
+                )?;
+            }
+        }
+        operation()
+    }
+
+    fn scope(&self) -> Result<MigrationScope, String> {
+        migration_scopes(&self.global)?
+            .into_iter()
+            .find(|scope| {
+                scope.operation_id == self.operation_id && scope.owner_token == self.owner_token
+            })
+            .ok_or_else(|| "migration ownership changed".into())
+    }
+    pub fn recheck_profiles(&self) -> Result<(), String> {
+        let _gates = lock_gates(&self.global)?;
+        migration_recheck(&self.global, &self.scope()?)
+    }
+    pub fn profiles_stopped(&self) -> Result<(), String> {
+        let _gates = lock_gates(&self.global)?;
+        let scope = self.scope()?;
+        migration_recheck(&self.global, &scope)?;
+        if scope.profiles.iter().any(|profile| live(profile.pid)) {
+            return Err("bridge still running".into());
+        }
+        crate::origin::installation_roots_inactive(&migration_source_roots(&scope)?)
+    }
+    pub fn recheck_inactive_source(&self) -> Result<(), String> {
+        let _gates = lock_gates(&self.global)?;
+        let scope = self.scope()?;
+        if scope.profiles.iter().any(|profile| live(profile.pid)) {
+            return Err("legacy source daemon still running".into());
+        }
+        let roots = migration_source_roots(&scope)?;
+        crate::origin::installation_roots_inactive(&roots)
+    }
+    /// Any captured read-only target user forbids target image replacement.
+    pub fn target_reuse_present(&self) -> Result<bool, String> {
+        let _gates = lock_gates(&self.global)?;
+        Ok(!self.scope()?.readonly_target_profiles.is_empty())
+    }
+
+    pub fn stop_requested(&self) -> Result<bool, String> {
+        let _gates = lock_gates(&self.global)?;
+        for profile in self.scope()?.profiles {
+            if combined_generation(&profile.state_dir)? != profile.stop_generation {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub fn authorize_start(
+        &self,
+        origin: &InstallOrigin,
+        image: &crate::ExecutableIdentity,
+        state: &Path,
+    ) -> Result<(u64, String), String> {
+        let _gates = lock_gates(&self.global)?;
+        let mut scope = self.scope()?;
+        migration_profile_checks(&scope)?;
+        readonly_target_profile_checks(&scope)?;
+        let root = crate::physical_install_root(origin)?.to_path_buf();
+        if !scope.roots.contains(&root)
+            || !image.path.starts_with(&root)
+            || crate::executable_identity(&image.path)? != *image
+            || scope.profiles.iter().any(|profile| live(profile.pid))
+        {
+            return Err("migration start requires exact verified image and stopped sources".into());
+        }
+        if let Some(target) = scope
+            .readonly_target_profiles
+            .iter()
+            .find(|profile| profile.image.path.starts_with(&root))
+        {
+            if target.image != *image {
+                return Err("migration may only reuse the pinned live target image".into());
+            }
+        }
+        migration_start_registry_checks(&self.global, &scope, None)?;
+        let expected = scope
+            .profiles
+            .iter()
+            .find(|profile| profile.state_dir == state)
+            .ok_or("startup profile is outside migration")?
+            .stop_generation;
+        if let Some(existing) = scope.startups.iter().find(|startup| {
+            startup.state_dir == state && startup.image == *image && startup.root == root
+        }) {
+            return Ok((expected, existing.token.clone()));
+        }
+        // Changing target to rollback is legal only after the previous image stops.
+        let lifecycle = desktop_pet_contracts::LifecycleLock::try_acquire(state)?
+            .ok_or("startup profile is still owned by a live daemon")?;
+        let token = new_token()?;
+        scope.startups.retain(|startup| startup.state_dir != state);
+        scope.startups.push(MigrationStartup {
+            root,
+            image: image.clone(),
+            state_dir: state.into(),
+            stop_generation: expected,
+            token: token.clone(),
+        });
+        write_private_bytes(
+            &migration_path(&migration_global(&self.global)?, &self.operation_id),
+            &serde_json::to_vec(&scope).map_err(|e| e.to_string())?,
+            0o600,
+        )?;
+        drop(lifecycle);
+        Ok((expected, token))
+    }
+    pub fn release(&self) -> Result<(), String> {
+        let _gates = lock_gates(&self.global)?;
+        self.scope()?;
+        let path = migration_path(&migration_global(&self.global)?, &self.operation_id);
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
+        sync_parent(&path)
+    }
+}
+/// This permits fast reuse of an already authenticated target daemon only.
+/// It cannot authorize a spawn or refresh the captured instance registration.
+fn migration_readonly_reuse_for(
+    global: &Path,
+    origin: &InstallOrigin,
+    state: &Path,
+    expected: Option<u64>,
+    token: Option<&str>,
+) -> Result<Option<MigrationProfile>, String> {
+    if expected.is_some() || token.is_some() {
+        return Ok(None);
+    }
+    let root = match origin {
+        InstallOrigin::Unknown { .. } => return Ok(None),
+        _ => crate::physical_install_root(origin)?,
+    };
+    let mut admitted = None;
+    for scope in migration_scopes(global)? {
+        let Some(profile) = scope
+            .readonly_target_profiles
+            .iter()
+            .find(|profile| profile.state_dir == state && profile.image.path.starts_with(root))
+        else {
+            continue;
+        };
+        if admitted.is_some() {
+            return Err("overlapping read-only target migration scopes".into());
+        }
+        readonly_target_profile_checks(&scope)?;
+        if !cleanup_instance_registered(global, state, profile.pid, &profile.instance_id)? {
+            return Err("read-only target reuse has lost its captured active instance".into());
+        }
+        verify_process_identity(profile.pid, &profile.image)?;
+        admitted = Some(profile.clone());
+    }
+    Ok(admitted)
+}
+
+fn migration_start_for(
+    global: &Path,
+    origin: &InstallOrigin,
+    state: &Path,
+    expected: Option<u64>,
+    token: Option<&str>,
+) -> Result<Option<(MigrationScope, MigrationStartup)>, String> {
+    let root = match origin {
+        InstallOrigin::Unknown { .. } => None,
+        _ => Some(crate::physical_install_root(origin)?),
+    };
+    let mut admitted = None;
+    for scope in migration_scopes(global)? {
+        if !scope
+            .profiles
+            .iter()
+            .any(|profile| profile.state_dir == state)
+            && root.is_none_or(|root| !scope.roots.iter().any(|stored| stored == root))
+        {
+            continue;
+        }
+        if admitted.is_some() {
+            return Err("overlapping migration scopes".into());
+        }
+        let startup = scope
+            .startups
+            .iter()
+            .find(|startup| {
+                startup.state_dir == state
+                    && root == Some(startup.root.as_path())
+                    && expected == Some(startup.stop_generation)
+                    && token == Some(startup.token.as_str())
+            })
+            .cloned()
+            .ok_or("installation is reserved by migration; startup is not authorized")?;
+        if combined_generation(state)? != startup.stop_generation
+            || crate::executable_identity(&startup.image.path)? != startup.image
+        {
+            return Err("migration startup image or stop generation changed".into());
+        }
+        admitted = Some((scope, startup));
+    }
+    Ok(admitted)
+}
+
+fn reject_migration_for_origins(
+    global: &Path,
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+    state: &Path,
+) -> Result<(), String> {
+    let roots = std::iter::once(source)
+        .chain(target)
+        .map(|origin| crate::physical_install_root(origin).map(Path::to_path_buf))
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_migration_scopes(global, &roots, Some(state), None)
+}
+
+fn migration_start_registry_checks(
+    global: &Path,
+    scope: &MigrationScope,
+    registering: Option<(u32, crate::ExecutableIdentity)>,
+) -> Result<(), String> {
+    let mut authorized = Vec::new();
+    if let Some(registering) = registering {
+        authorized.push(registering);
+    }
+    readonly_target_profile_checks(scope)?;
+    for profile in &scope.profiles {
+        reject_profile_reservations(&profile.state_dir, false)?;
+        if combined_generation(&profile.state_dir)? != profile.stop_generation {
+            return Err("user stop superseded migration startup".into());
+        }
+    }
+    let keys = root_registry_keys(&scope.roots);
+    for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
+        for profile in scope.profiles.iter().chain(&scope.readonly_target_profiles) {
+            reject_normal_reservation_evidence(&namespace, &scope.roots, Some(&profile.state_dir))?;
+        }
+        for path in registry_files(&namespace, ".active.json")? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("invalid registry path")?;
+            let entries: Vec<ActiveProfile> =
+                serde_json::from_slice(&owned_private_file(&path, 16384)?)
+                    .map_err(|_| "unsupported active registry")?;
+            if entries.len() > 64 {
+                return Err("active profile registry exceeds bound".into());
+            }
+            for entry in entries.into_iter().filter(|entry| live(entry.pid)) {
+                if !keys
+                    .iter()
+                    .any(|key| name.strip_suffix(".active.json") == Some(key.as_str()))
+                    && !scope
+                        .profiles
+                        .iter()
+                        .chain(&scope.readonly_target_profiles)
+                        .any(|profile| profile.state_dir == entry.state_dir)
+                {
+                    continue;
+                }
+                if let Some(profile) = scope.readonly_target_profiles.iter().find(|profile| {
+                    profile.state_dir == entry.state_dir
+                        && profile.pid == entry.pid
+                        && profile.instance_id == entry.instance_id
+                }) {
+                    authorized.push((entry.pid, profile.image.clone()));
+                } else {
+                    let startup = scope
+                        .startups
+                        .iter()
+                        .find(|startup| startup.state_dir == entry.state_dir)
+                        .ok_or(
+                            "unapproved live source or new target user during migration startup",
+                        )?;
+                    authorized.push((entry.pid, startup.image.clone()));
+                }
+            }
+        }
+    }
+    crate::origin::installation_roots_admitted(&scope.roots, &authorized)
+}
+
 fn lock(path: &Path) -> Result<File, String> {
     lock_with_mode(path, libc::LOCK_EX)
 }
@@ -458,6 +2071,7 @@ fn selectable_origin(
         return false;
     }
     match (source, origin) {
+        #[cfg(desktop_pet_legacy)]
         (
             InstallOrigin::Herdr {
                 host,
@@ -601,12 +2215,30 @@ fn missing_file(path: &Path) -> bool {
 fn generation_file(state_dir: &Path) -> Result<PathBuf, String> {
     Ok(private_updates(state_dir)?.join("stop-generation.json"))
 }
+fn read_generation(path: &Path) -> Result<u64, String> {
+    if let Some(parent) = path.parent() {
+        if !missing_file(parent) {
+            check_dir(parent, false)?;
+        }
+    }
+    if missing_file(path) {
+        return Ok(0);
+    }
+    serde_json::from_slice(&owned_private_file(path, 32)?).map_err(|e| e.to_string())
+}
 fn generation(state_dir: &Path) -> Result<u64, String> {
-    let path = generation_file(state_dir)?;
-    match owned_private_file(&path, 32) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-        Err(_) if missing_file(&path) => Ok(0),
-        Err(e) => Err(e),
+    check_dir(state_dir, false)?;
+    let current = read_generation(&state_dir.join(UPDATES_DIR).join("stop-generation.json"))?;
+    #[cfg(desktop_pet_legacy)]
+    {
+        Ok(current)
+    }
+    #[cfg(not(desktop_pet_legacy))]
+    {
+        let old = read_generation(&state_dir.join("updates/stop-generation.json"))?;
+        current
+            .checked_add(old)
+            .ok_or_else(|| "stop generation overflow".into())
     }
 }
 fn profile_marker(state_dir: &Path) -> Result<PathBuf, String> {
@@ -635,7 +2267,7 @@ fn start_allowed_at(
     expected_generation: Option<u64>,
     updater_token: Option<&str>,
 ) -> Result<(), String> {
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(global)?;
     start_allowed_locked(
         global,
         origin,
@@ -651,6 +2283,34 @@ fn start_allowed_locked(
     expected_generation: Option<u64>,
     updater_token: Option<&str>,
 ) -> Result<(), String> {
+    if migration_readonly_reuse_for(
+        global,
+        origin,
+        state_dir,
+        expected_generation,
+        updater_token,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    if let Some((scope, startup)) = migration_start_for(
+        global,
+        origin,
+        state_dir,
+        expected_generation,
+        updater_token,
+    )? {
+        let current = std::env::current_exe().map_err(|e| e.to_string())?;
+        let registering = if crate::executable_identity(&current)? == startup.image {
+            Some((std::process::id(), startup.image))
+        } else {
+            None
+        };
+        migration_start_registry_checks(global, &scope, registering)?;
+        return Ok(());
+    }
+    reject_old_evidence(global, Some(origin), None, Some(state_dir), true)?;
     let current = generation(state_dir)?;
     if expected_generation.is_some_and(|g| g != current) {
         return Err("user requested stop after updater prepared startup".into());
@@ -724,6 +2384,12 @@ fn active_for_origin(global: &Path, origin: &InstallOrigin) -> Result<Vec<Active
     if let Some(old) = legacy_key(origin).filter(|old| old != &key) {
         entries.extend(active(global, &old)?);
     }
+    if let Some(old_global) = compatibility_global(global)? {
+        entries.extend(active(&old_global, &key)?);
+        if let Some(old) = legacy_key(origin).filter(|old| old != &key) {
+            entries.extend(active(&old_global, &old)?);
+        }
+    }
     Ok(entries)
 }
 fn live(pid: u32) -> bool {
@@ -764,7 +2430,7 @@ fn register_active_at(
     if pid == 0 || instance_id.is_empty() || instance_id.len() > 128 {
         return Err("invalid active daemon identity".into());
     }
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(global)?;
     start_allowed_locked(
         global,
         origin,
@@ -772,6 +2438,30 @@ fn register_active_at(
         expected_generation,
         updater_token,
     )?;
+    if let Some(profile) = migration_readonly_reuse_for(
+        global,
+        origin,
+        state_dir,
+        expected_generation,
+        updater_token,
+    )? {
+        if profile.pid != pid || profile.instance_id != instance_id {
+            return Err(
+                "migration permits only the captured read-only target instance, not a new daemon"
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+    if let Some((scope, startup)) = migration_start_for(
+        global,
+        origin,
+        state_dir,
+        expected_generation,
+        updater_token,
+    )? {
+        migration_start_registry_checks(global, &scope, Some((pid, startup.image)))?;
+    }
     let key = installation_key(origin)?;
     let mut entries = active(global, &key)?;
     entries.retain(|e| live(e.pid));
@@ -808,7 +2498,7 @@ pub fn unregister_active(
     instance_id: &str,
 ) -> Result<(), String> {
     let global = global_updates()?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(&global)?;
     let key = installation_key(origin)?;
     let mut entries = active(&global, &key)?;
     entries.retain(|e| !(e.state_dir == state_dir && e.pid == pid && e.instance_id == instance_id));
@@ -823,7 +2513,7 @@ pub fn conflicting_active_profiles(
     state_dir: &Path,
 ) -> Result<Vec<ActiveProfile>, String> {
     let global = global_updates()?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(&global)?;
     Ok(active_for_origin(&global, origin)?
         .into_iter()
         .filter(|e| e.state_dir != state_dir && live(e.pid))
@@ -856,7 +2546,9 @@ fn verify_control_at(
     token: &str,
 ) -> Result<(), String> {
     validate_operation_id(operation_id)?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(global)?;
+    reject_migration_for_origins(global, source, target, state_dir)?;
+    reject_old_evidence(global, Some(source), target, Some(state_dir), false)?;
     let entries = scopes(global)?;
     let data = scope_for(&entries, operation_id, state_dir)?;
     if &data.source != source
@@ -871,15 +2563,15 @@ fn verify_control_at(
     Ok(())
 }
 pub fn stop_generation(state_dir: &Path) -> Result<u64, String> {
-    let _gate = lock(&global_updates()?.join("gate.lock"))?;
+    let _gate = lock_gates(&global_updates()?)?;
     generation(state_dir)
 }
 pub fn record_user_stop(state_dir: &Path) -> Result<u64, String> {
     record_user_stop_at(&global_updates()?, state_dir)
 }
 fn record_user_stop_at(global: &Path, state_dir: &Path) -> Result<u64, String> {
-    let _gate = lock(&global.join("gate.lock"))?;
-    let next = generation(state_dir)?
+    let _gate = lock_gates(global)?;
+    let next = read_generation(&generation_file(state_dir)?)?
         .checked_add(1)
         .ok_or("stop generation overflow")?;
     write_private_bytes(
@@ -887,7 +2579,7 @@ fn record_user_stop_at(global: &Path, state_dir: &Path) -> Result<u64, String> {
         &serde_json::to_vec(&next).map_err(|e| e.to_string())?,
         0o600,
     )?;
-    Ok(next)
+    generation(state_dir)
 }
 /// Durable atomic scope index gates both roots even across partial marker writes.
 /// Dropping the locks never clears the scope; release follows reconciliation.
@@ -928,12 +2620,13 @@ fn reservation_snapshot_at(
 ) -> Result<Option<ReservationSnapshot>, String> {
     validate_operation_id(operation_id)?;
     check_dir(state_dir, false)?;
-    let updates = state_dir.join("updates");
+    let updates = state_dir.join(UPDATES_DIR);
     if !missing_file(&updates) {
         check_dir(&updates, false)?;
     }
     let keys = installation_keys(source, target)?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    let _gate = lock_gates(global)?;
+    reject_old_evidence(global, Some(source), target, Some(state_dir), false)?;
     for origin in std::iter::once(source).chain(target) {
         reject_legacy_marker(global, origin)?;
     }
@@ -1022,12 +2715,15 @@ fn reserve_install_at(
     validate_operation_id(operation_id)?;
     check_dir(global, false)?;
     let keys = installation_keys(source, target)?;
+    let _gate = lock_gates(global)?;
+    reject_migration_for_origins(global, source, target, state_dir)?;
+    reject_old_evidence(global, Some(source), target, Some(state_dir), false)?;
+    let locks = lock_scope(global, source, target, &keys)?;
     let profile_lock = lock_with_mode(
         &private_updates(state_dir)?.join("profile.lock"),
         libc::LOCK_EX | libc::LOCK_NB,
     )?;
-    let locks = lock_scope(global, source, target, &keys)?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    // The gates were acquired before the sorted installation locks.
     let mut entries = scopes(global)?;
     for origin in std::iter::once(source).chain(target) {
         reject_legacy_marker(global, origin)?;
@@ -1131,12 +2827,15 @@ fn recover_reservation_at(
 ) -> Result<InstallationReservation, String> {
     validate_operation_id(operation_id)?;
     let keys = installation_keys(source, target)?;
+    let _gate = lock_gates(global)?;
+    reject_migration_for_origins(global, source, target, state_dir)?;
+    reject_old_evidence(global, Some(source), target, Some(state_dir), false)?;
+    let locks = lock_scope(global, source, target, &keys)?;
     let profile_lock = lock_with_mode(
         &private_updates(state_dir)?.join("profile.lock"),
         libc::LOCK_EX | libc::LOCK_NB,
     )?;
-    let locks = lock_scope(global, source, target, &keys)?;
-    let _gate = lock(&global.join("gate.lock"))?;
+    // Never attach a protocol-4 helper to legacy evidence.
     for origin in std::iter::once(source).chain(target) {
         reject_legacy_marker(global, origin)?;
     }
@@ -1190,12 +2889,19 @@ impl InstallationReservation {
         &self.control_token
     }
     pub fn user_stop_requested(&self) -> Result<bool, String> {
-        let _gate = lock(&self.global_dir.join("gate.lock"))?;
+        let _gate = lock_gates(&self.global_dir)?;
         Ok(generation(&self.state_dir)? != self.stop_generation)
     }
     pub fn issued_start_token_for(&self, origin: &InstallOrigin) -> Result<Option<String>, String> {
         self.selected(origin)?;
-        let _gate = lock(&self.global_dir.join("gate.lock"))?;
+        let _gate = lock_gates(&self.global_dir)?;
+        reject_old_evidence(
+            &self.global_dir,
+            Some(&self.source),
+            self.target.as_ref(),
+            Some(&self.state_dir),
+            false,
+        )?;
         if generation(&self.state_dir)? != self.stop_generation {
             return Err("user stop superseded updater start".into());
         }
@@ -1216,7 +2922,14 @@ impl InstallationReservation {
     /// The selected candidate or verified original is the only admissible start.
     pub fn authorize_start_for(&self, origin: &InstallOrigin) -> Result<String, String> {
         self.selected(origin)?;
-        let _gate = lock(&self.global_dir.join("gate.lock"))?;
+        let _gate = lock_gates(&self.global_dir)?;
+        reject_old_evidence(
+            &self.global_dir,
+            Some(&self.source),
+            self.target.as_ref(),
+            Some(&self.state_dir),
+            false,
+        )?;
         if generation(&self.state_dir)? != self.stop_generation {
             return Err("user stop superseded updater start".into());
         }
@@ -1244,7 +2957,7 @@ impl InstallationReservation {
     }
     /// Release only after durable final result and reconciled installation state.
     pub fn release(self) -> Result<(), String> {
-        let _gate = lock(&self.global_dir.join("gate.lock"))?;
+        let _gate = lock_gates(&self.global_dir)?;
         let mut entries = scopes(&self.global_dir)?;
         let data = self.checked_scope(&entries)?;
         let paths = std::iter::once(profile_marker(&self.state_dir)?)
@@ -1281,18 +2994,167 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, InstallOrigin) {
         let dir = tempfile::tempdir().unwrap();
-        let global = dir.path().join("global");
+        let global = dir.path().join(crate::identity::GLOBAL_UPDATES_DIRECTORY);
         let state = dir.path().join("profile");
         fs::create_dir(&global).unwrap();
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let origin = InstallOrigin::Local {
+        let origin = InstallOrigin::Source {
             root: dir.path().join("checkout"),
         };
         (dir, global, state, origin)
     }
 
+    #[cfg(not(desktop_pet_legacy))]
+    fn installation_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let (dir, global, state, _) = fixture();
+        let global = fs::canonicalize(global).unwrap();
+        let state = fs::canonicalize(state).unwrap();
+        let desired = global.parent().unwrap().join("Applications/DesktopPet.app");
+        (dir, global, state, desired)
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn waiting_installer_selects_and_fences_the_winner_under_both_gates() {
+        use std::sync::mpsc;
+
+        let (_dir, global, _state, desired) = installation_fixture();
+        let winner = global.parent().unwrap().join("selected-checkout");
+        let (publish, worker_selection) = mpsc::channel::<PathBuf>();
+        let first =
+            installation_admission_at(global.clone(), || Ok(vec![desired.clone()]), false).unwrap();
+        let worker_global = global.clone();
+        let worker_desired = desired.clone();
+        let (ready, waiting) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            let mut selected_root = None;
+            let admission = installation_admission_at(
+                worker_global.clone(),
+                || {
+                    for namespace in std::iter::once(worker_global.clone())
+                        .chain(old_global(&worker_global).unwrap())
+                    {
+                        assert!(lock_with_mode(
+                            &namespace.join("gate.lock"),
+                            libc::LOCK_EX | libc::LOCK_NB,
+                        )
+                        .is_err());
+                    }
+                    let root = worker_selection.recv().unwrap();
+                    selected_root = Some(root.clone());
+                    Ok(vec![worker_desired, root])
+                },
+                false,
+            )
+            .unwrap();
+            (admission, selected_root.unwrap())
+        });
+        waiting.recv().unwrap();
+        publish.send(winner.clone()).unwrap();
+        drop(first);
+
+        let (admission, selection) = worker.join().unwrap();
+        assert_eq!(selection, winner);
+        for root in [&desired, &winner] {
+            assert!(admission.holds_root(root));
+            for namespace in std::iter::once(global.clone()).chain(old_global(&global).unwrap()) {
+                for key in root_registry_keys(std::slice::from_ref(root)) {
+                    assert!(lock_with_mode(
+                        &namespace.join(format!("{key}.lock")),
+                        libc::LOCK_EX | libc::LOCK_NB,
+                    )
+                    .is_err());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn root_refresh_retains_both_gates_and_all_sorted_root_fences() {
+        let (_dir, global, _state, desired) = installation_fixture();
+        let winner = global.parent().unwrap().join("0-selected-checkout");
+        let mut admission =
+            installation_admission_at(global.clone(), || Ok(vec![desired.clone()]), false).unwrap();
+        assert!(!admission.holds_root(&winner));
+        admission.fence_additional_root(&winner).unwrap();
+        assert_eq!(admission.roots, vec![winner.clone(), desired.clone()]);
+        for namespace in std::iter::once(global.clone()).chain(old_global(&global).unwrap()) {
+            assert!(
+                lock_with_mode(&namespace.join("gate.lock"), libc::LOCK_EX | libc::LOCK_NB,)
+                    .is_err()
+            );
+            for root in [&desired, &winner] {
+                for key in root_registry_keys(std::slice::from_ref(root)) {
+                    assert!(lock_with_mode(
+                        &namespace.join(format!("{key}.lock")),
+                        libc::LOCK_EX | libc::LOCK_NB,
+                    )
+                    .is_err());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn newly_selected_root_reservations_in_either_namespace_block_refresh() {
+        for legacy in [false, true] {
+            let (_dir, global, state, desired) = installation_fixture();
+            let winner = global.parent().unwrap().join("selected-checkout");
+            let namespace = if legacy {
+                old_global(&global).unwrap().unwrap()
+            } else {
+                global.clone()
+            };
+            let marker = namespace.join("selected.reservation.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "version": if legacy { 3 } else { UPDATER_PROTOCOL },
+                "source": {"kind": "source", "root": winner},
+                "target": null,
+                "state_dir": state,
+            }))
+            .unwrap();
+            write_private_new(&marker, &bytes, 0o600).unwrap();
+            let mut admission =
+                installation_admission_at(global, || Ok(vec![desired]), false).unwrap();
+            assert!(admission.fence_additional_root(&winner).is_err());
+            assert_eq!(fs::read(marker).unwrap(), bytes);
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn live_selected_installation_can_be_reused_but_not_replaced() {
+        let (_dir, global, state, desired) = installation_fixture();
+        let origin = InstallOrigin::Standalone {
+            bundle: desired.clone(),
+        };
+        let entry = ActiveProfile {
+            state_dir: state,
+            pid: std::process::id(),
+            instance_id: "selected-winner".into(),
+        };
+        for namespace in std::iter::once(global.clone()).chain(old_global(&global).unwrap()) {
+            write_private_new(
+                &active_path(&namespace, &installation_key(&origin).unwrap()),
+                &serde_json::to_vec(&vec![entry.clone()]).unwrap(),
+                0o600,
+            )
+            .unwrap();
+        }
+        let admission = installation_admission_at(global, || Ok(vec![desired]), false).unwrap();
+        assert!(admission.installation_reservations_clear().is_ok());
+        assert!(admission
+            .installation_inactive()
+            .unwrap_err()
+            .contains("a live daemon"));
+    }
+
+    #[cfg(desktop_pet_legacy)]
     fn herdr_source(state: &Path) -> InstallOrigin {
         let root = state.parent().unwrap();
         InstallOrigin::Herdr {
@@ -1307,6 +3169,7 @@ mod tests {
         }
     }
 
+    #[cfg(desktop_pet_legacy)]
     fn herdr_commit(source: &InstallOrigin, commit: &str) -> InstallOrigin {
         let mut next = source.clone();
         if let InstallOrigin::Herdr {
@@ -1318,6 +3181,7 @@ mod tests {
         next
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn targetless_herdr_selects_exact_actual_commit_and_admits_only_its_token() {
         let (_dir, global, state, _) = fixture();
@@ -1362,6 +3226,7 @@ mod tests {
         lease.release().unwrap();
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn targetless_herdr_rejects_scope_drift_invalid_commit_and_explicit_target_delta() {
         let (_dir, global, state, _) = fixture();
@@ -1423,6 +3288,7 @@ mod tests {
         lease.release().unwrap();
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn snapshot_observes_index_before_markers_without_repair_then_reuses_token() {
         let (_dir, global, state, _) = fixture();
@@ -1433,7 +3299,7 @@ mod tests {
             reservation_snapshot_at(&global, &source, None, &state, op).unwrap(),
             None
         );
-        assert!(!state.join("updates").exists());
+        assert!(!state.join(UPDATES_DIR).exists());
         let lease = reserve_install_at(&global, &source, None, &state, op).unwrap();
         assert_eq!(
             reservation_snapshot_at(&global, &source, None, &state, op).unwrap(),
@@ -1488,6 +3354,7 @@ mod tests {
         recovered.release().unwrap();
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn snapshot_rejects_conflicting_or_malformed_markers_and_stop_preserves_selection() {
         let (_dir, global, state, _) = fixture();
@@ -1528,6 +3395,7 @@ mod tests {
         recovered.release().unwrap();
     }
 
+    #[cfg(desktop_pet_legacy)]
     #[test]
     fn user_stop_allows_explicit_partial_marker_recovery_and_safe_release() {
         let (_dir, global, state, _) = fixture();
@@ -1614,7 +3482,7 @@ mod tests {
         start_allowed_at(&global, &unknown, &state, None, None).unwrap();
         let id = "0123456789abcdef0123456789abcdef";
         let reservation = reserve_install_at(&global, &origin, None, &state, id).unwrap();
-        let different_install = InstallOrigin::Local {
+        let different_install = InstallOrigin::Source {
             root: state.parent().unwrap().join("other-checkout"),
         };
         assert!(start_allowed_at(&global, &different_install, &state, None, None).is_err());
@@ -1707,7 +3575,7 @@ mod tests {
             installation_key(&origin).unwrap()
         )))
         .unwrap();
-        let different_install = InstallOrigin::Local {
+        let different_install = InstallOrigin::Source {
             root: state.parent().unwrap().join("other-checkout"),
         };
         assert!(recover_reservation_at(&global, &different_install, None, &state, id).is_err());
@@ -1753,7 +3621,7 @@ mod tests {
     fn reconnect_never_reports_old_success_over_reserved_work() {
         let (_dir, global, state, origin) = fixture();
         assert!(latest_operation(&state).unwrap().is_none());
-        assert!(!state.join("updates").exists());
+        assert!(!state.join(UPDATES_DIR).exists());
         let completed = OperationRecord {
             version: UPDATER_PROTOCOL,
             operation_id: "0123456789abcdef0123456789abcdef".into(),
@@ -1810,13 +3678,13 @@ mod tests {
         };
         let outside = state.parent().unwrap().join("outside");
         fs::write(&outside, b"keep").unwrap();
-        symlink(&outside, state.join("updates")).unwrap();
+        symlink(&outside, state.join(UPDATES_DIR)).unwrap();
         assert!(write_operation(&state, &record).is_err());
-        fs::remove_file(state.join("updates")).unwrap();
+        fs::remove_file(state.join(UPDATES_DIR)).unwrap();
         private_updates(&state).unwrap();
         symlink(
             &outside,
-            state.join("updates").join(format!("{id}.result.json")),
+            state.join(UPDATES_DIR).join(format!("{id}.result.json")),
         )
         .unwrap();
         assert!(read_operation(&state, id).is_err());
@@ -1907,7 +3775,7 @@ mod tests {
     #[test]
     fn dual_scope_blocks_both_roots_and_only_selected_origin_can_start() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("beta-checkout"),
         };
         let other = state.parent().unwrap().join("other-profile");
@@ -1950,7 +3818,7 @@ mod tests {
     #[test]
     fn dual_scope_restore_selects_original_without_unblocking_target() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("beta-target"),
         };
         let id = "0123456789abcdef0123456789abcdef";
@@ -1966,7 +3834,7 @@ mod tests {
     #[test]
     fn live_profile_on_proposed_target_prevents_replacement() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("beta-checkout"),
         };
         let other = state.parent().unwrap().join("other-profile");
@@ -2015,7 +3883,7 @@ mod tests {
     #[test]
     fn partial_dual_markers_keep_both_roots_gated_and_recover_from_index() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("target"),
         };
         let id = "0123456789abcdef0123456789abcdef";
@@ -2044,7 +3912,7 @@ mod tests {
     #[test]
     fn partial_dual_authorization_never_admits_until_recovered() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("target"),
         };
         let id = "0123456789abcdef0123456789abcdef";
@@ -2130,7 +3998,7 @@ mod tests {
     #[test]
     fn protocol_two_evidence_stays_blocked_and_byte_preserved() {
         let (_dir, global, state, source) = fixture();
-        let target = InstallOrigin::Local {
+        let target = InstallOrigin::Source {
             root: state.parent().unwrap().join("beta-target"),
         };
         let id = "0123456789abcdef0123456789abcdef";
@@ -2161,6 +4029,216 @@ mod tests {
         assert!(read_operation(&state, id).is_err());
         assert!(write_operation(&state, &record).is_err());
         assert_eq!(fs::read(&journal).unwrap(), old_journal);
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn old_scope_blocks_neutral_and_remains_byte_identical() {
+        let (_dir, global, state, origin) = fixture();
+        let old = old_global(&global).unwrap().unwrap();
+        let evidence = serde_json::json!([{
+            "version": 3,
+            "operation_id": "0123456789abcdef0123456789abcdef",
+            "source": {"kind":"local", "root": crate::physical_install_root(&origin).unwrap()},
+            "target": null,
+            "state_dir": state,
+            "keys": [installation_key(&origin).unwrap()]
+        }]);
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        write_private_bytes(&scopes_path(&old), &bytes, 0o600).unwrap();
+        let id = "abcdef0123456789abcdef0123456789";
+        assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
+        assert!(reserve_install_at(&global, &origin, None, &state, id).is_err());
+        assert!(recover_reservation_at(&global, &origin, None, &state, id).is_err());
+        assert!(verify_control_at(&global, &origin, None, &state, id, "token").is_err());
+        assert_eq!(fs::read(scopes_path(&old)).unwrap(), bytes);
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn old_registration_and_each_namespace_stop_generation_gate_neutral() {
+        let (_dir, global, state, origin) = fixture();
+        let old = old_global(&global).unwrap().unwrap();
+        let old_updates = state.join("updates");
+        check_dir(&old_updates, true).unwrap();
+        write_private_bytes(&old_updates.join("stop-generation.json"), b"7", 0o600).unwrap();
+        assert_eq!(generation(&state).unwrap(), 7);
+        assert_eq!(record_user_stop_at(&global, &state).unwrap(), 8);
+        assert_eq!(
+            fs::read(old_updates.join("stop-generation.json")).unwrap(),
+            b"7"
+        );
+        write_private_bytes(&old_updates.join("stop-generation.json"), b"8", 0o600).unwrap();
+        assert!(start_allowed_at(&global, &origin, &state, Some(8), None).is_err());
+        let profiles = vec![ActiveProfile {
+            state_dir: state.clone(),
+            pid: std::process::id(),
+            instance_id: "legacy".into(),
+        }];
+        write_private_bytes(
+            &active_path(&old, &installation_key(&origin).unwrap()),
+            &serde_json::to_vec(&profiles).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
+        assert!(register_active_at(
+            &global,
+            &origin,
+            &state,
+            std::process::id(),
+            "neutral",
+            None,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn durable_migration_scope_blocks_normal_paths_and_honors_stop_without_reencoding() {
+        let (_dir, global, state, origin) = fixture();
+        let operation = "0123456789abcdef0123456789abcdef";
+        let token = "a".repeat(64);
+        let root = crate::physical_install_root(&origin).unwrap().to_path_buf();
+        let scope = MigrationScope {
+            version: 4,
+            operation_id: operation.into(),
+            roots: vec![root.clone()],
+            profiles: vec![MigrationProfile {
+                pid: std::process::id(),
+                instance_id: "authenticated-bridge".into(),
+                state_dir: state.clone(),
+                config_dir: state.clone(),
+                image: crate::ExecutableIdentity {
+                    path: root.join("HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+                    sha256: "b".repeat(64),
+                },
+                stop_generation: 0,
+            }],
+            readonly_target_profiles: Vec::new(),
+            owner_token: token.clone(),
+            startups: Vec::new(),
+        };
+        let namespace = migration_global(&global).unwrap();
+        let path = migration_path(&namespace, operation);
+        let bytes = serde_json::to_vec(&scope).unwrap();
+        write_private_new(&path, &bytes, 0o600).unwrap();
+        assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
+        assert!(reserve_install_at(&global, &origin, None, &state, operation).is_err());
+        assert!(recover_reservation_at(&global, &origin, None, &state, operation).is_err());
+        assert!(reject_reservation_evidence(&global, &[root], Some(&state)).is_err());
+        let reservation = MigrationReservation {
+            global: global.clone(),
+            operation_id: operation.into(),
+            owner_token: token,
+        };
+        assert!(!reservation.stop_requested().unwrap());
+        record_user_stop_at(&global, &state).unwrap();
+        assert!(reservation.stop_requested().unwrap());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        reservation.release().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn readonly_target_reuse_keeps_its_live_instance_and_only_source_stop_fences_migration() {
+        let (_dir, global, state, source) = fixture();
+        let readonly_state = state.parent().unwrap().join("existing-neutral-profile");
+        check_dir(&readonly_state, true).unwrap();
+        let image = crate::executable_identity(&std::env::current_exe().unwrap()).unwrap();
+        let target_root = image.path.parent().unwrap().to_path_buf();
+        let source_root = crate::physical_install_root(&source).unwrap().to_path_buf();
+        let target_origin = InstallOrigin::Source {
+            root: target_root.clone(),
+        };
+        let operation = "0123456789abcdef0123456789abcdef";
+        let token = "d".repeat(64);
+        let mut roots = vec![source_root.clone(), target_root];
+        roots.sort_unstable();
+        let readonly = MigrationProfile {
+            pid: std::process::id(),
+            instance_id: "existing-neutral".into(),
+            state_dir: readonly_state.clone(),
+            config_dir: readonly_state.clone(),
+            image,
+            stop_generation: 0,
+        };
+        let scope = MigrationScope {
+            version: 4,
+            operation_id: operation.into(),
+            roots,
+            profiles: vec![MigrationProfile {
+                pid: 1,
+                instance_id: "bridge".into(),
+                state_dir: state.clone(),
+                config_dir: state.clone(),
+                image: crate::ExecutableIdentity {
+                    path: source_root.join("HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+                    sha256: "b".repeat(64),
+                },
+                stop_generation: 0,
+            }],
+            readonly_target_profiles: vec![readonly.clone()],
+            owner_token: token.clone(),
+            startups: Vec::new(),
+        };
+        assert_eq!(migration_source_roots(&scope).unwrap(), vec![source_root]);
+        readonly_target_profile_checks(&scope).unwrap();
+        let namespace = migration_global(&global).unwrap();
+        write_private_new(
+            &migration_path(&namespace, operation),
+            &serde_json::to_vec(&scope).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        write_private_bytes(
+            &active_path(&global, &installation_key(&target_origin).unwrap()),
+            &serde_json::to_vec(&vec![ActiveProfile {
+                state_dir: readonly_state.clone(),
+                pid: readonly.pid,
+                instance_id: readonly.instance_id.clone(),
+            }])
+            .unwrap(),
+            0o600,
+        )
+        .unwrap();
+        start_allowed_at(&global, &target_origin, &readonly_state, None, None).unwrap();
+        assert!(register_active_at(
+            &global,
+            &target_origin,
+            &readonly_state,
+            readonly.pid + 1,
+            "replacement-instance",
+            None,
+            None
+        )
+        .is_err());
+        record_user_stop_at(&global, &readonly_state).unwrap();
+        let reservation = MigrationReservation {
+            global: global.clone(),
+            operation_id: operation.into(),
+            owner_token: token,
+        };
+        assert!(!reservation.stop_requested().unwrap());
+        readonly_target_profile_checks(&scope).unwrap();
+        record_user_stop_at(&global, &state).unwrap();
+        assert!(reservation.stop_requested().unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_requires_the_exact_live_process_image_without_global_census() {
+        let image = crate::executable_identity(&std::env::current_exe().unwrap()).unwrap();
+        verify_process_identity(std::process::id(), &image).unwrap();
+        let mut drifted = image.clone();
+        drifted.sha256 = if image.sha256 == "a".repeat(64) {
+            "b".repeat(64)
+        } else {
+            "a".repeat(64)
+        };
+        assert!(verify_process_identity(std::process::id(), &drifted).is_err());
+        assert!(verify_process_identity(0, &image).is_err());
     }
 
     #[test]

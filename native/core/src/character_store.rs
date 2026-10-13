@@ -211,6 +211,7 @@ pub struct PackStore {
     config_dir: PathBuf,
     builtin_assets: Option<PathBuf>,
     root: PathBuf,
+    read_only: bool,
 }
 
 /// A transaction owns the per-config store flock through `finish`, until Drop.
@@ -245,12 +246,21 @@ impl PackStore {
             config_dir,
             builtin_assets,
             root,
+            read_only: false,
         }
     }
 
+    pub fn new_read_only(config_dir: PathBuf, builtin_assets: Option<PathBuf>) -> Self {
+        let mut store = Self::new(config_dir, builtin_assets);
+        store.read_only = true;
+        store
+    }
+
     pub fn list(&self) -> Result<PackListing, String> {
-        let (layout, _lock) = self.open_locked()?;
-        Ok(listing_from_loaded(load_registry(&layout.root_file)?))
+        let (_layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
+        Ok(listing_from_loaded(loaded))
     }
 
     /// Read an operation and its registry listing under a single flock and load.
@@ -259,8 +269,10 @@ impl PackStore {
         operation_id: &str,
     ) -> Result<(PackListing, Option<PackOperation>), String> {
         validate_operation_id(operation_id)?;
-        let (layout, _lock) = self.open_locked()?;
-        listing_and_status_from_loaded(load_registry(&layout.root_file)?, operation_id)
+        let (_layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
+        listing_and_status_from_loaded(loaded, operation_id)
     }
 
     pub fn startup_candidates(&self) -> Result<Vec<(CharacterRef, PathBuf)>, String> {
@@ -268,8 +280,9 @@ impl PackStore {
             .builtin_assets
             .clone()
             .ok_or_else(|| "builtin character assets are not configured".to_string())?;
-        let (layout, _lock) = self.open_locked()?;
-        let loaded = load_registry(&layout.root_file)?;
+        let (_layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
 
         let mut result = Vec::new();
         let selected = loaded.index.selected.clone();
@@ -335,6 +348,9 @@ impl PackStore {
         active: Option<&CharacterRef>,
         verified: Option<ManagedPack>,
     ) -> Result<PackTransaction, String> {
+        if self.read_only {
+            return Err("character store mutations are gated until migration commits".into());
+        }
         if matches!(request.action, PackAction::ImportAndSelect { .. })
             && (verified.is_none() || request.expected_generation.is_none())
         {
@@ -347,7 +363,7 @@ impl PackStore {
             return Err("builtin character assets are not configured".to_string());
         }
         let (layout, lock) = self.open_locked()?;
-        let loaded = load_registry(&layout.root_file)?;
+        let loaded = load_registry(&layout.root_file, false)?;
         if loaded.readonly {
             return Err(loaded.warning.unwrap_or_else(|| {
                 "character store metadata is corrupt; store is read-only".to_string()
@@ -676,8 +692,9 @@ impl PackStore {
         generation: u64,
     ) -> Result<(String, Option<CharacterMetadata>), String> {
         validate_character_ref(reference)?;
-        let (layout, _lock) = self.open_locked()?;
-        let loaded = load_registry(&layout.root_file)?;
+        let (layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
         if loaded.index.generation != generation {
             return Err(format!(
                 "character store generation mismatch (expected {generation}, current {})",
@@ -708,6 +725,7 @@ impl PackStore {
                 reference.id, reference.revision
             ));
         }
+        let layout = layout.ok_or("character store has no managed revisions")?;
         let packs = open_directory_at(
             &layout.root_file,
             std::ffi::OsStr::new(PACKS_DIR),
@@ -718,13 +736,13 @@ impl PackStore {
             std::ffi::OsStr::new(&reference.id),
             "managed character directory",
         )?;
-        verify_private_directory(&pack_directory, Path::new("<managed character directory>"))?;
+        self.verify_read_directory(&pack_directory, Path::new("<managed character directory>"))?;
         let revision_directory = open_directory_at(
             &pack_directory,
             std::ffi::OsStr::new(&reference.revision.to_string()),
             "managed character revision",
         )?;
-        verify_private_directory(
+        self.verify_read_directory(
             &revision_directory,
             Path::new("<managed character revision>"),
         )?;
@@ -738,12 +756,11 @@ impl PackStore {
         expected_generation: u64,
     ) -> Result<Option<ValidatedCharacter>, String> {
         validate_character_ref(reference)?;
-        let (layout, _lock) = match self.open_locked_result() {
+        let (layout, _lock, loaded) = match self.read_registry() {
             Ok(locked) => locked,
             Err(StoreOpenError::Contended) => return Ok(None),
             Err(StoreOpenError::Diagnostic(error)) => return Err(error),
         };
-        let loaded = load_registry(&layout.root_file)?;
         if loaded.index.generation != expected_generation {
             return Err(format!(
                 "character store generation mismatch (expected {expected_generation}, current {})",
@@ -776,6 +793,7 @@ impl PackStore {
                 reference.id, reference.revision
             ));
         }
+        let layout = layout.ok_or("character store has no managed revisions")?;
         let packs = open_directory_at(
             &layout.root_file,
             std::ffi::OsStr::new(PACKS_DIR),
@@ -786,13 +804,13 @@ impl PackStore {
             std::ffi::OsStr::new(&reference.id),
             "managed character directory",
         )?;
-        verify_private_directory(&pack, Path::new("<managed character directory>"))?;
+        self.verify_read_directory(&pack, Path::new("<managed character directory>"))?;
         let revision = open_directory_at(
             &pack,
             std::ffi::OsStr::new(&reference.revision.to_string()),
             "managed character revision",
         )?;
-        verify_private_directory(&revision, Path::new("<managed character revision>"))?;
+        self.verify_read_directory(&revision, Path::new("<managed character revision>"))?;
         let managed = ManagedPack::load_from_directory(&revision)?;
         if managed.id != reference.id {
             return Err(format!(
@@ -805,7 +823,9 @@ impl PackStore {
 
     pub fn load_revision(&self, reference: &CharacterRef) -> Result<ValidatedCharacter, String> {
         validate_character_ref(reference)?;
-        let (layout, _lock) = self.open_locked()?;
+        let (layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
         if reference.id == CharacterRef::builtin().id {
             let path = self
                 .builtin_assets
@@ -814,7 +834,6 @@ impl PackStore {
             return ValidatedCharacter::load_builtin(path);
         }
 
-        let loaded = load_registry(&layout.root_file)?;
         if loaded.readonly {
             return Err(loaded.warning.unwrap_or_else(|| {
                 "character store metadata is corrupt; store is read-only".to_string()
@@ -832,6 +851,7 @@ impl PackStore {
                 reference.id, reference.revision
             ));
         }
+        let layout = layout.ok_or("character store has no managed revisions")?;
         let packs = open_directory_at(
             &layout.root_file,
             std::ffi::OsStr::new(PACKS_DIR),
@@ -842,13 +862,13 @@ impl PackStore {
             std::ffi::OsStr::new(&reference.id),
             "managed character directory",
         )?;
-        verify_private_directory(&pack_directory, Path::new("<managed character directory>"))?;
+        self.verify_read_directory(&pack_directory, Path::new("<managed character directory>"))?;
         let revision_directory = open_directory_at(
             &pack_directory,
             std::ffi::OsStr::new(&reference.revision.to_string()),
             "managed character revision",
         )?;
-        verify_private_directory(
+        self.verify_read_directory(
             &revision_directory,
             Path::new("<managed character revision>"),
         )?;
@@ -873,7 +893,7 @@ impl PackStore {
                 .ok_or_else(|| "builtin character assets are not configured".to_string())?;
             ManagedPack::load_internal(path, true)?
         } else {
-            let loaded = load_registry(&layout.root_file)?;
+            let loaded = load_registry(&layout.root_file, false)?;
             if loaded.readonly {
                 return Err(loaded.warning.unwrap_or_else(|| {
                     "character store metadata is corrupt; store is read-only".to_string()
@@ -918,8 +938,9 @@ impl PackStore {
 
     pub fn operation_status(&self, operation_id: &str) -> Result<Option<PackOperation>, String> {
         validate_operation_id(operation_id)?;
-        let (layout, _lock) = self.open_locked()?;
-        let loaded = load_registry(&layout.root_file)?;
+        let (_layout, _lock, loaded) = self
+            .read_registry()
+            .map_err(|error| error.diagnostic(&self.root))?;
         if loaded.readonly {
             return Err(loaded.warning.unwrap_or_else(|| {
                 "character store metadata is corrupt; store is read-only".to_string()
@@ -932,12 +953,72 @@ impl PackStore {
             .find(|operation| operation.operation_id == operation_id))
     }
 
+    fn verify_read_directory(&self, file: &File, path: &Path) -> Result<(), String> {
+        if self.read_only {
+            verify_read_only_directory(file, path)
+        } else {
+            verify_private_directory(file, path)
+        }
+    }
+
+    fn read_registry(
+        &self,
+    ) -> Result<(Option<StoreLayout>, Option<StoreLock>, LoadedRegistry), StoreOpenError> {
+        if !self.read_only {
+            let (layout, lock) = self.open_locked_result()?;
+            let loaded =
+                load_registry(&layout.root_file, false).map_err(StoreOpenError::Diagnostic)?;
+            return Ok((Some(layout), Some(lock), loaded));
+        }
+        let config = open_directory_fd(&self.config_dir).map_err(StoreOpenError::Diagnostic)?;
+        verify_read_only_directory(&config, &self.config_dir)
+            .map_err(StoreOpenError::Diagnostic)?;
+        let root_name =
+            child_name(&self.root, "character store").map_err(StoreOpenError::Diagnostic)?;
+        if stat_at(&config, root_name, "character store")
+            .map_err(StoreOpenError::Diagnostic)?
+            .is_none()
+        {
+            return Ok((
+                None,
+                None,
+                LoadedRegistry {
+                    index: RegistryDisk::empty(),
+                    bytes: None,
+                    backup_bytes: None,
+                    current_valid: false,
+                    backup_valid: false,
+                    readonly: false,
+                    preserve_orphans: false,
+                    warning: None,
+                },
+            ));
+        }
+        let root_file = open_directory_at(&config, root_name, "character store")
+            .map_err(StoreOpenError::Diagnostic)?;
+        verify_read_only_directory(&root_file, &self.root).map_err(StoreOpenError::Diagnostic)?;
+        let layout = StoreLayout {
+            root: self.root.clone(),
+            root_file,
+            lock_path: self.root.join(LOCK_FILE),
+        };
+        let lock =
+            acquire_read_only_store_lock(&layout.root_file, &layout.root, &layout.lock_path)?;
+        let loaded = load_registry(&layout.root_file, true).map_err(StoreOpenError::Diagnostic)?;
+        Ok((Some(layout), lock, loaded))
+    }
+
     fn open_locked(&self) -> Result<(StoreLayout, StoreLock), String> {
         self.open_locked_result()
             .map_err(|error| error.diagnostic(&self.root))
     }
 
     fn open_locked_result(&self) -> Result<(StoreLayout, StoreLock), StoreOpenError> {
+        if self.read_only {
+            return Err(StoreOpenError::Diagnostic(
+                "character store mutations are gated until migration commits".into(),
+            ));
+        }
         let layout =
             ensure_layout(&self.config_dir, &self.root).map_err(StoreOpenError::Diagnostic)?;
         let lock = acquire_store_lock(&layout.root_file, &layout.root, &layout.lock_path)?;
@@ -966,7 +1047,10 @@ impl PackTransaction {
     pub(crate) fn listing_and_status(
         &self,
     ) -> Result<(PackListing, Option<PackOperation>), String> {
-        listing_and_status_from_loaded(load_registry(&self.root_directory)?, &self.operation_id)
+        listing_and_status_from_loaded(
+            load_registry(&self.root_directory, false)?,
+            &self.operation_id,
+        )
     }
 
     /// Publish the staged revision (if any) and replace `registry.json`.
@@ -1544,6 +1628,65 @@ fn ensure_real_directory(path: &Path) -> Result<(), String> {
     };
     verify_private_directory(&directory, path)
 }
+fn verify_read_only_directory(file: &File, path: &Path) -> Result<(), String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect directory {}: {error}", path.display()))?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(format!(
+            "directory {} is not an owned private directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn acquire_read_only_store_lock(
+    root_directory: &File,
+    root: &Path,
+    path: &Path,
+) -> Result<Option<StoreLock>, StoreOpenError> {
+    let name = child_name(path, "store lock").map_err(StoreOpenError::Diagnostic)?;
+    if stat_at(root_directory, name, "store lock")
+        .map_err(StoreOpenError::Diagnostic)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let file = open_child_file(root_directory, name, libc::O_RDONLY, 0, "store lock")
+        .map_err(StoreOpenError::Diagnostic)?;
+    let metadata = file.metadata().map_err(|error| {
+        StoreOpenError::Diagnostic(format!("cannot inspect store lock: {error}"))
+    })?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(StoreOpenError::Diagnostic(format!(
+            "store lock {} is not a private regular file",
+            path.display()
+        )));
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)
+        ) {
+            return Err(StoreOpenError::Contended);
+        }
+        return Err(StoreOpenError::Diagnostic(format!(
+            "cannot read-lock character store {}: {error}",
+            root.display()
+        )));
+    }
+    Ok(Some(StoreLock { file }))
+}
+
 fn acquire_store_lock(
     root_directory: &File,
     root: &Path,
@@ -1597,7 +1740,7 @@ fn acquire_store_lock(
     Ok(StoreLock { file })
 }
 
-fn load_registry(root_file: &File) -> Result<LoadedRegistry, String> {
+fn load_registry(root_file: &File, read_only: bool) -> Result<LoadedRegistry, String> {
     let current = read_registry_slot(root_file, REGISTRY_FILE);
     let previous = read_registry_slot(root_file, PREVIOUS_REGISTRY_FILE);
     let (current_index, current_bytes, current_error) = match current {
@@ -1623,7 +1766,7 @@ fn load_registry(root_file: &File) -> Result<LoadedRegistry, String> {
             )),
         };
         let preserve_orphans =
-            warning.is_some() || scan_max_revision(root_file).unwrap_or_default() > 0;
+            warning.is_some() || scan_max_revision(root_file, read_only).unwrap_or_default() > 0;
         return Ok(LoadedRegistry {
             index: RegistryDisk::empty(),
             bytes: None,
@@ -2252,7 +2395,7 @@ fn revision_path(root: &Path, id: &str, revision: u64) -> PathBuf {
 }
 
 fn preview_next_revision(root_file: &File, index: &RegistryDisk) -> Result<u64, String> {
-    let max_existing = scan_max_revision(root_file)?;
+    let max_existing = scan_max_revision(root_file, false)?;
     let candidate = index.next_revision.max(max_existing.saturating_add(1));
     if candidate == 0 || candidate == u64::MAX {
         return Err("global character revision allocator is exhausted".to_string());
@@ -2260,7 +2403,7 @@ fn preview_next_revision(root_file: &File, index: &RegistryDisk) -> Result<u64, 
     Ok(candidate)
 }
 
-fn scan_max_revision(root_file: &File) -> Result<u64, String> {
+fn scan_max_revision(root_file: &File, read_only: bool) -> Result<u64, String> {
     let mut max_revision = 0u64;
     let mut budget = ScanBudget::default();
     let packs = open_directory_at(
@@ -2281,7 +2424,11 @@ fn scan_max_revision(root_file: &File) -> Result<u64, String> {
             continue;
         }
         let id_directory = open_directory_at(&packs, &id_name, "character pack")?;
-        verify_private_directory(&id_directory, Path::new("<character pack>"))?;
+        if read_only {
+            verify_read_only_directory(&id_directory, Path::new("<character pack>"))?;
+        } else {
+            verify_private_directory(&id_directory, Path::new("<character pack>"))?;
+        }
         for revision_name in read_dir_bounded(&id_directory, "character revision directory")? {
             budget.visit()?;
             let Some(metadata) = stat_at(&id_directory, &revision_name, "character revision")?
@@ -2812,6 +2959,77 @@ fn unique_nonce() -> u128 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn read_only_startup_loads_builtin_without_creating_a_store() {
+        let config = tempfile::tempdir().unwrap();
+        fs::set_permissions(config.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/rubelia-default")
+            .canonicalize()
+            .unwrap();
+        let store = PackStore::new_read_only(config.path().to_owned(), Some(assets.clone()));
+        let listing = store.list().unwrap();
+        assert_eq!(listing.generation, 0);
+        assert_eq!(listing.selected, CharacterRef::builtin());
+        assert!(listing.packs.is_empty());
+        assert_eq!(
+            store.startup_candidates().unwrap(),
+            vec![(CharacterRef::builtin(), assets)]
+        );
+        store.load_revision(&CharacterRef::builtin()).unwrap();
+        assert!(!config.path().join(STORE_DIR).exists());
+        assert_eq!(fs::read_dir(config.path()).unwrap().count(), 0);
+        assert_eq!(
+            fs::metadata(config.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn read_only_startup_rejects_nonprivate_config_without_changing_it() {
+        let config = tempfile::tempdir().unwrap();
+        fs::set_permissions(config.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let store = PackStore::new_read_only(config.path().to_owned(), None);
+        assert!(store
+            .list()
+            .unwrap_err()
+            .contains("not an owned private directory"));
+        assert_eq!(fs::read_dir(config.path()).unwrap().count(), 0);
+        assert_eq!(
+            fs::metadata(config.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn read_only_registry_preserves_existing_bytes_and_does_not_initialize_missing_lock() {
+        let config = tempfile::tempdir().unwrap();
+        let ordinary = PackStore::new(config.path().to_owned(), None);
+        ordinary.list().unwrap();
+        let root = config.path().join(STORE_DIR);
+        let mut index = RegistryDisk::empty();
+        index.generation = 7;
+        let bytes = serde_json::to_vec(&index).unwrap();
+        write_fixture_file(&root.join(REGISTRY_FILE), &bytes);
+        fs::remove_file(root.join(LOCK_FILE)).unwrap();
+        let readonly = PackStore::new_read_only(config.path().to_owned(), None);
+        let listing = readonly.list().unwrap();
+        assert_eq!(listing.generation, 7);
+        assert_eq!(fs::read(root.join(REGISTRY_FILE)).unwrap(), bytes);
+        assert!(!root.join(LOCK_FILE).exists());
+        assert!(!root.join(PREVIOUS_REGISTRY_FILE).exists());
+        let request = PackRequest {
+            operation_id: "gated-select".into(),
+            expected_generation: Some(7),
+            action: PackAction::Select {
+                id: CharacterRef::builtin().id,
+            },
+        };
+        assert!(readonly.begin(&request, None).is_err());
+        assert_eq!(fs::read(root.join(REGISTRY_FILE)).unwrap(), bytes);
+        assert!(!root.join(LOCK_FILE).exists());
+    }
+
     fn test_png_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();
         {
@@ -3051,7 +3269,7 @@ mod tests {
         let marker = store_root.join(PACKS_DIR).join("unknown");
         fs::create_dir_all(&marker).unwrap();
         fs::write(marker.join("keep"), b"data").unwrap();
-        let loaded = load_registry(&layout.root_file).unwrap();
+        let loaded = load_registry(&layout.root_file, false).unwrap();
         assert!(loaded.readonly);
         recover_owned(&layout.root_file, &store_root, &loaded, None).unwrap();
         let _ = fs::remove_dir_all(root);
@@ -3210,7 +3428,7 @@ mod tests {
         fs::create_dir_all(&orphan).unwrap();
         fs::write(orphan.join("unknown"), b"preserve").unwrap();
 
-        let loaded = load_registry(&layout.root_file).unwrap();
+        let loaded = load_registry(&layout.root_file, false).unwrap();
         assert!(loaded.preserve_orphans);
         recover_owned(&layout.root_file, &store_root, &loaded, None).unwrap();
 
@@ -3224,7 +3442,7 @@ mod tests {
             &next,
         )
         .unwrap();
-        let after = load_registry(&layout.root_file).unwrap();
+        let after = load_registry(&layout.root_file, false).unwrap();
         assert!(after.index.preserve_orphans);
         recover_owned(&layout.root_file, &store_root, &after, None).unwrap();
         let _ = fs::remove_dir_all(root);
@@ -3366,7 +3584,7 @@ mod tests {
         assert!(error.contains("generation overflow"), "{error}");
         drop(transaction);
 
-        let loaded = load_registry(&layout.root_file).unwrap();
+        let loaded = load_registry(&layout.root_file, false).unwrap();
         assert_eq!(loaded.index.generation, u64::MAX);
         assert!(loaded.index.packs.is_empty());
         assert!(store.operation_status("overflow-import").unwrap().is_none());
@@ -3444,7 +3662,7 @@ mod tests {
         fs::create_dir(&store_root).unwrap();
         fs::write(store_root.join(REGISTRY_FILE), b"attacker-controlled").unwrap();
 
-        let loaded = load_registry(&layout.root_file).unwrap();
+        let loaded = load_registry(&layout.root_file, false).unwrap();
         assert!(!loaded.readonly);
         assert_eq!(loaded.index.generation, 0);
         let _ = fs::remove_dir_all(root);
@@ -3462,7 +3680,7 @@ mod tests {
         fs::create_dir_all(outside.join(PACKS_DIR)).unwrap();
         std::os::unix::fs::symlink(outside.join(PACKS_DIR), store_root.join(PACKS_DIR)).unwrap();
 
-        assert!(scan_max_revision(&layout.root_file).is_err());
+        assert!(scan_max_revision(&layout.root_file, false).is_err());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }

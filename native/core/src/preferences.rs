@@ -4,7 +4,7 @@ use crate::i18n::LanguagePreference;
 use crate::session_view::SessionSort;
 use crate::sources::ObservationPreferences;
 use crate::state::{normalize_scale, DEFAULT_SCALE};
-use herdr_update_coordinator::ObservationMode;
+use desktop_pet_contracts::ObservationSelection;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -137,10 +137,8 @@ impl BubbleAppearance {
     }
 }
 
-/// A partial settings mutation. Absent fields leave the saved value unchanged;
-/// an empty machine list explicitly clears the selected catalog machines.
+/// A partial common mutation with opaque, registered adapter-owned fields.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PreferencePatch {
     #[serde(default, deserialize_with = "deserialize_patch_language")]
     pub(crate) language: Option<LanguagePreference>,
@@ -149,27 +147,29 @@ pub(crate) struct PreferencePatch {
     pub(crate) show_status_indicators: Option<bool>,
     pub(crate) menu_bar_mode: Option<MenuBarMode>,
     #[serde(default, deserialize_with = "deserialize_patch_host")]
-    pub(crate) observation_host: Option<ObservationMode>,
-    pub(crate) observation_local: Option<bool>,
-    pub(crate) observation_remote: Option<bool>,
-    pub(crate) observation_machines: Option<Vec<String>>,
+    pub(crate) observation_host: Option<ObservationSelection>,
+    #[serde(flatten)]
+    pub(crate) owner: Map<String, Value>,
 }
 
-fn deserialize_patch_host<'de, D>(deserializer: D) -> Result<Option<ObservationMode>, D::Error>
+pub(crate) fn is_common_patch_key(key: &str) -> bool {
+    matches!(
+        key,
+        "language"
+            | "bubble_appearance"
+            | "show_status_indicators"
+            | "menu_bar_mode"
+            | "observation_host"
+    )
+}
+
+fn deserialize_patch_host<'de, D>(deserializer: D) -> Result<Option<ObservationSelection>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let token = Option::<String>::deserialize(deserializer)?;
     token
-        .map(|token| match token.as_str() {
-            "auto" => Ok(ObservationMode::Both),
-            "herdr" => Ok(ObservationMode::Herdr),
-            "tern" => Ok(ObservationMode::Tern),
-            _ => Err(serde::de::Error::unknown_variant(
-                &token,
-                &["auto", "herdr", "tern"],
-            )),
-        })
+        .map(|token| token.parse().map_err(serde::de::Error::custom))
         .transpose()
 }
 
@@ -239,10 +239,9 @@ pub(crate) struct PreferenceSnapshot {
     pub(crate) bubble_appearance: BubbleAppearance,
     pub(crate) show_status_indicators: bool,
     pub(crate) menu_bar_mode: MenuBarMode,
-    pub(crate) observation_host: ObservationMode,
-    pub(crate) observation_local: bool,
-    pub(crate) observation_remote: bool,
-    pub(crate) observation_machines: Vec<String>,
+    pub(crate) observation_host: ObservationSelection,
+    #[serde(flatten)]
+    pub(crate) owner: Map<String, Value>,
 }
 
 /// Position coordinates persisted relative to the panel's display bounds.
@@ -480,7 +479,7 @@ impl SessionListPreferences {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Preferences {
     visible: bool,
     passthrough: bool,
@@ -508,6 +507,25 @@ pub struct Preferences {
     session_list_extra: Map<String, Value>,
     /// Top-level keys from a newer build, written back unchanged on save.
     extra: Map<String, Value>,
+    profile_store: Option<desktop_pet_contracts::ProfileStore>,
+    extensions: Vec<std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>>,
+    owner_snapshot: Map<String, Value>,
+    postcommit_error: Option<String>,
+}
+
+impl std::fmt::Debug for Preferences {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Preferences")
+            .field("visible", &self.visible)
+            .field("passthrough", &self.passthrough)
+            .field("scale", &self.scale)
+            .field("language", &self.language)
+            .field("observation", &self.observation)
+            .field("owner_snapshot", &self.owner_snapshot)
+            .field("extra", &self.extra)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -522,8 +540,8 @@ impl Default for DiskObservationPreferences {
     fn default() -> Self {
         Self {
             selection: ObservationPreferences {
-                host: ObservationMode::Herdr,
-                ..ObservationPreferences::default()
+                host: ObservationSelection::migrate_legacy_input(None)
+                    .expect("known prior profile default"),
             },
             extra: Map::new(),
         }
@@ -616,16 +634,50 @@ impl Default for Preferences {
             session_list: SessionListPreferences::default(),
             session_list_extra: Map::new(),
             extra: Map::new(),
+            profile_store: None,
+            extensions: Vec::new(),
+            owner_snapshot: Map::new(),
+            postcommit_error: None,
         }
     }
 }
 impl Preferences {
+    pub(crate) fn set_integration_extensions(
+        &mut self,
+        store: desktop_pet_contracts::ProfileStore,
+        extensions: Vec<std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>>,
+    ) {
+        self.profile_store = Some(store);
+        self.extensions = extensions;
+    }
+
+    pub(crate) fn refresh_owner_snapshot(&mut self, directory: &Path) -> Result<(), String> {
+        let read = || read_preference_object(&directory.join(PREFERENCES_FILE));
+        let saved = if let Some(store) = &self.profile_store {
+            store.with_writer_lock(read)?
+        } else {
+            read()?
+        };
+        self.owner_snapshot.clear();
+        for extension in &self.extensions {
+            for (key, value) in extension.preference_snapshot(&saved)? {
+                if self.owner_snapshot.insert(key.clone(), value).is_some() {
+                    return Err(format!("duplicate preference owner: {key}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn postcommit_error(&self) -> Option<&str> {
+        self.postcommit_error.as_deref()
+    }
     /// Strict load for read-only consumers: an unusable file is reported as an
     /// error and left untouched.
     pub fn load(directory: &Path) -> Result<Self, String> {
         Self::load_for_profile(
             directory,
-            &crate::lifecycle::plugin_config_dir(),
+            &crate::lifecycle::Paths::resolve_readonly(None, None)?.config_dir,
             legacy_preferences_path().as_deref(),
             false,
         )
@@ -638,7 +690,7 @@ impl Preferences {
     pub(crate) fn load_for_daemon(directory: &Path) -> Result<Self, String> {
         Self::load_for_profile(
             directory,
-            &crate::lifecycle::plugin_config_dir(),
+            &crate::lifecycle::Paths::resolve_readonly(None, None)?.config_dir,
             legacy_preferences_path().as_deref(),
             true,
         )
@@ -744,6 +796,10 @@ impl Preferences {
             session_list,
             session_list_extra,
             extra: disk.extra,
+            profile_store: None,
+            extensions: Vec::new(),
+            owner_snapshot: Map::new(),
+            postcommit_error: None,
         };
         preferences.sanitize();
         Ok(Some(preferences))
@@ -762,7 +818,7 @@ impl Preferences {
     }
 
     /// Save the complete candidate once, then replace the owner's state only
-    /// after the atomic writer succeeds. No live preferences are read from disk.
+    /// after the atomic writer succeeds. Owner fields are merged under the shared writer.
     pub(crate) fn save_candidate(
         &mut self,
         candidate: Self,
@@ -787,16 +843,13 @@ impl Preferences {
             bubble_appearance: self.bubble_appearance,
             show_status_indicators: self.show_status_indicators,
             menu_bar_mode: self.menu_bar_mode,
-            observation_host: self.observation.host,
-            observation_local: self.observation.local,
-            observation_remote: self.observation.remote,
-            observation_machines: self.observation.machines.clone(),
+            observation_host: self.observation.host.clone(),
+            owner: self.owner_snapshot.clone(),
         }
     }
 
-    /// Validate the entire patch before writing a single candidate. Unlike
-    /// legacy GUI observation saves, automation rejects malformed selections
-    /// rather than silently pruning them.
+    /// Validate the entire patch before writing a single candidate. Adapter
+    /// fields are admitted by their registered owner, not by deserialization.
     pub(crate) fn apply_patch(
         &mut self,
         patch: PreferencePatch,
@@ -816,18 +869,14 @@ impl Preferences {
             show_status_indicators,
             menu_bar_mode,
             observation_host,
-            observation_local,
-            observation_remote,
-            observation_machines,
+            owner,
         } = patch;
         if language.is_none()
             && bubble_appearance.is_none()
             && show_status_indicators.is_none()
             && menu_bar_mode.is_none()
             && observation_host.is_none()
-            && observation_local.is_none()
-            && observation_remote.is_none()
-            && observation_machines.is_none()
+            && owner.is_empty()
         {
             return Err("preference patch must contain at least one setting".to_owned());
         }
@@ -847,28 +896,46 @@ impl Preferences {
         if let Some(host) = observation_host {
             candidate.set_observation_host(host);
         }
-        if let Some(local) = observation_local {
-            candidate.observation.local = local;
-        }
-        if let Some(remote) = observation_remote {
-            candidate.observation.remote = remote;
-        }
-        if let Some(machines) = observation_machines {
-            let mut checked = ObservationPreferences {
-                machines,
-                ..candidate.observation.clone()
-            };
-            let original = checked.machines.clone();
-            checked.sanitize();
-            if checked.machines != original {
-                return Err(
-                    "observation machines contain duplicate or invalid IDs, or exceed the selection limit"
-                        .to_owned(),
-                );
+        let mut prepared = Vec::new();
+        let mut remaining = owner.clone();
+        for extension in &self.extensions {
+            let fields: Map<String, Value> = extension
+                .preference_patch_keys()
+                .iter()
+                .filter_map(|key| {
+                    owner
+                        .get(*key)
+                        .cloned()
+                        .map(|value| ((*key).to_owned(), value))
+                })
+                .collect();
+            if fields.is_empty() {
+                continue;
             }
-            candidate.observation = checked;
+            for key in fields.keys() {
+                if remaining.remove(key).is_none() {
+                    return Err(format!("duplicate preference owner: {key}"));
+                }
+            }
+            prepared.push(extension.prepare_preference_patch(&fields)?);
         }
-        self.save_candidate_in_directory(candidate, directory)?;
+        if let Some(key) = remaining.keys().next() {
+            return Err(format!("unknown preference setting: {key}"));
+        }
+        let (_, saved) = candidate.write_atomically_prepared(directory, false, &prepared)?;
+        *self = candidate;
+        let mut errors = Vec::new();
+        for mutation in &prepared {
+            if let Err(error) = mutation.committed(&saved) {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = self.refresh_owner_snapshot(directory) {
+            errors.push(error);
+        }
+        if !prepared.is_empty() {
+            self.postcommit_error = (!errors.is_empty()).then(|| errors.join("\n"));
+        }
         Ok(self.snapshot())
     }
 
@@ -931,12 +998,12 @@ impl Preferences {
     pub(crate) fn observation(&self) -> &ObservationPreferences {
         &self.observation
     }
-    pub fn observation_host(&self) -> ObservationMode {
-        self.observation.host
+    pub fn observation_host(&self) -> ObservationSelection {
+        self.observation.host.clone()
     }
 
     /// Stage a host selection on a candidate; commit it with `save_candidate`.
-    pub fn set_observation_host(&mut self, host: ObservationMode) {
+    pub fn set_observation_host(&mut self, host: ObservationSelection) {
         self.observation.host = host;
     }
 
@@ -996,10 +1063,51 @@ impl Preferences {
     }
 
     fn write_atomically(&self, directory: &Path, no_clobber: bool) -> Result<bool, String> {
+        self.write_atomically_prepared(directory, no_clobber, &[])
+            .map(|(written, _)| written)
+    }
+
+    fn write_atomically_prepared(
+        &self,
+        directory: &Path,
+        no_clobber: bool,
+        prepared: &[Box<dyn desktop_pet_contracts::PreparedPreferencePatch>],
+    ) -> Result<(bool, Map<String, Value>), String> {
+        let operation = || self.write_atomically_locked(directory, no_clobber, prepared);
+        if let Some(store) = &self.profile_store {
+            store.with_writer_lock(operation)
+        } else {
+            operation()
+        }
+    }
+
+    fn write_atomically_locked(
+        &self,
+        directory: &Path,
+        no_clobber: bool,
+        prepared: &[Box<dyn desktop_pet_contracts::PreparedPreferencePatch>],
+    ) -> Result<(bool, Map<String, Value>), String> {
         fs::create_dir_all(directory)
             .map_err(|error| format!("preferences directory cannot be created: {error}"))?;
         set_private_directory(directory)?;
         let path = directory.join(PREFERENCES_FILE);
+        let mut latest = read_preference_object(&path)?;
+        let exists = path
+            .try_exists()
+            .map_err(|error| format!("preferences presence cannot be checked: {error}"))?;
+        // Existing owner fields, including deletions, are authoritative. Use
+        // loaded extras only when importing into a profile with no saved object.
+        let mut observation_extra = match latest.remove("observation") {
+            Some(Value::Object(fields)) => fields,
+            _ if !exists => self.observation_extra.clone(),
+            _ => Map::new(),
+        };
+        observation_extra.remove("host");
+        let session_list_extra = match latest.remove("session_list") {
+            Some(Value::Object(fields)) => fields,
+            _ if !exists => self.session_list_extra.clone(),
+            _ => Map::new(),
+        };
 
         let disk = DiskPreferences {
             visible: self.visible,
@@ -1023,13 +1131,41 @@ impl Preferences {
             bubble_appearance: self.bubble_appearance,
             observation: DiskObservationPreferences {
                 selection: self.observation.clone(),
-                extra: self.observation_extra.clone(),
+                extra: observation_extra,
             },
             dialogue_overrides: self.dialogue_overrides.clone(),
-            session_list: self.session_list.to_disk(self.session_list_extra.clone()),
-            extra: self.extra.clone(),
+            session_list: self.session_list.to_disk(session_list_extra),
+            extra: if exists {
+                Map::new()
+            } else {
+                self.extra.clone()
+            },
         };
-        let bytes = serde_json::to_vec_pretty(&disk)
+        let Value::Object(mut candidate) = serde_json::to_value(&disk)
+            .map_err(|error| format!("preferences cannot be encoded: {error}"))?
+        else {
+            unreachable!("preferences object");
+        };
+        for (key, value) in latest {
+            // These optional core fields remain owned when serialization omits
+            // them. Their absence is a clear, not an unknown owner's value to retain.
+            if matches!(
+                key.as_str(),
+                "last_update_check"
+                    | "last_beta_update_check"
+                    | "menu_bar_icon"
+                    | "standalone_bubble_position"
+            ) {
+                continue;
+            }
+            if !candidate.contains_key(&key) {
+                candidate.insert(key, value);
+            }
+        }
+        for mutation in prepared {
+            mutation.apply(&mut candidate)?;
+        }
+        let bytes = serde_json::to_vec_pretty(&candidate)
             .map_err(|error| format!("preferences cannot be encoded: {error}"))?;
 
         let temporary = temporary_path(directory);
@@ -1059,7 +1195,7 @@ impl Preferences {
             if result {
                 sync_directory(directory);
             }
-            return Ok(result);
+            return Ok((result, candidate));
         }
 
         if let Err(error) = fs::rename(&temporary, &path) {
@@ -1067,7 +1203,7 @@ impl Preferences {
             return Err(format!("preferences cannot be committed: {error}"));
         }
         sync_directory(directory);
-        Ok(true)
+        Ok((true, candidate))
     }
 
     pub fn visible(&self) -> bool {
@@ -1216,8 +1352,32 @@ impl Preferences {
             .standalone_bubble_position
             .filter(|(x, y)| x.is_finite() && y.is_finite());
         self.bubble_sizes.sanitize();
-        self.observation.sanitize();
     }
+}
+
+fn read_preference_object(path: &Path) -> Result<Map<String, Value>, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) => return Err(format!("preferences cannot be opened: {error}")),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("preferences metadata unavailable: {error}"))?;
+    if !metadata.is_file()
+        || metadata.uid() != desktop_pet_contracts::profile_store::effective_uid()
+    {
+        return Err("preferences must be an owned regular file".into());
+    }
+    let value: Value = serde_json::from_reader(file)
+        .map_err(|error| format!("preferences cannot be decoded: {error}"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "preferences must be an object".into())
 }
 
 fn legacy_preferences_path() -> Option<PathBuf> {
@@ -1289,6 +1449,163 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Default)]
+    struct SelectionCommitState {
+        targets: Option<Vec<String>>,
+        commits: u64,
+    }
+
+    struct SelectionOwner {
+        store: desktop_pet_contracts::ProfileStore,
+        state: std::sync::Arc<parking_lot::Mutex<SelectionCommitState>>,
+    }
+
+    fn validate_owner_targets(value: Value) -> Result<Option<Vec<String>>, String> {
+        let targets: Option<Vec<String>> =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if let Some(targets) = &targets {
+            if targets.len() > 64 {
+                return Err("too many selected targets".into());
+            }
+            let mut unique = std::collections::BTreeSet::new();
+            for target in targets {
+                if target.is_empty()
+                    || target.len() > 4096
+                    || target.chars().any(char::is_control)
+                    || !unique.insert(target)
+                {
+                    return Err("invalid selected target".into());
+                }
+            }
+        }
+        Ok(targets)
+    }
+
+    fn saved_owner_targets(saved: &Map<String, Value>) -> Result<Option<Vec<String>>, String> {
+        let Some(observation) = saved.get("observation") else {
+            return Ok(None);
+        };
+        let observation = observation
+            .as_object()
+            .ok_or("observation must be an object")?;
+        let Some(selection) = observation.get("remote_selection") else {
+            return Ok(None);
+        };
+        let selection = selection
+            .as_object()
+            .ok_or("remote selection must be an object")?;
+        validate_owner_targets(selection.get("targets").cloned().unwrap_or(Value::Null))
+    }
+
+    struct PreparedSelectionPatch {
+        targets: Option<Vec<String>>,
+        store: desktop_pet_contracts::ProfileStore,
+        state: std::sync::Arc<parking_lot::Mutex<SelectionCommitState>>,
+    }
+
+    impl desktop_pet_contracts::PreparedPreferencePatch for PreparedSelectionPatch {
+        fn apply(&self, candidate: &mut Map<String, Value>) -> Result<(), String> {
+            let observation = candidate
+                .get_mut("observation")
+                .and_then(Value::as_object_mut)
+                .ok_or("observation must be an object")?;
+            if let Some(targets) = &self.targets {
+                let selection = observation
+                    .entry("remote_selection")
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .ok_or("remote selection must be an object")?;
+                selection.insert(
+                    "targets".into(),
+                    serde_json::to_value(targets).map_err(|error| error.to_string())?,
+                );
+            } else if let Some(selection) = observation.get_mut("remote_selection") {
+                let selection = selection
+                    .as_object_mut()
+                    .ok_or("remote selection must be an object")?;
+                selection.remove("targets");
+                if selection.is_empty() {
+                    observation.remove("remote_selection");
+                }
+            }
+            Ok(())
+        }
+
+        fn committed(&self, saved: &Map<String, Value>) -> Result<(), String> {
+            let targets = saved_owner_targets(saved)?;
+            // A lifecycle write here also exercises release of the shared writer
+            // before the owner's real postcommit state transition.
+            self.store.update(|lifecycle, _| {
+                lifecycle.insert(
+                    "selected_target_count".into(),
+                    serde_json::json!(targets.as_ref().map_or(0, Vec::len)),
+                );
+                Ok(())
+            })?;
+            let mut state = self.state.lock();
+            state.targets = targets;
+            state.commits += 1;
+            Ok(())
+        }
+    }
+
+    impl desktop_pet_contracts::LifecycleExtension for SelectionOwner {
+        fn provider(&self) -> &'static str {
+            "selection-owner"
+        }
+
+        fn settings(
+            &self,
+            _store: &desktop_pet_contracts::ProfileStore,
+            _selection: &ObservationSelection,
+            _locale: &str,
+        ) -> Result<Vec<desktop_pet_contracts::LifecycleSettingView>, String> {
+            Ok(Vec::new())
+        }
+
+        fn apply_setting(
+            &self,
+            _store: &desktop_pet_contracts::ProfileStore,
+            _key: &str,
+            _value: bool,
+        ) -> Result<(), String> {
+            Err("selection owner has no boolean lifecycle setting".into())
+        }
+
+        fn preference_patch_keys(&self) -> &'static [&'static str] {
+            &["selected_targets"]
+        }
+
+        fn preference_snapshot(
+            &self,
+            saved: &Map<String, Value>,
+        ) -> Result<Map<String, Value>, String> {
+            Ok(Map::from_iter([(
+                "selected_targets".into(),
+                serde_json::to_value(saved_owner_targets(saved)?)
+                    .map_err(|error| error.to_string())?,
+            )]))
+        }
+
+        fn prepare_preference_patch(
+            &self,
+            patch: &Map<String, Value>,
+        ) -> Result<Box<dyn desktop_pet_contracts::PreparedPreferencePatch>, String> {
+            let value = patch
+                .get("selected_targets")
+                .ok_or("missing selected targets")?;
+            Ok(Box::new(PreparedSelectionPatch {
+                targets: validate_owner_targets(value.clone())?,
+                store: self.store.clone(),
+                state: self.state.clone(),
+            }))
+        }
+
+        fn should_exit(&self, _selection: &ObservationSelection, _now: std::time::Instant) -> bool {
+            false
+        }
+    }
 
     #[test]
     fn explicit_profile_load_writes_and_failed_candidate_preserve_other_profile() {
@@ -1479,6 +1796,17 @@ mod tests {
         let saved = Preferences::load_path(&path).unwrap();
         assert_eq!(saved.update_check_time(true), None);
         assert_eq!(saved.update_check_time(false), Some(100));
+        let raw = read_preference_object(&path).unwrap();
+        assert!(!raw.contains_key("last_beta_update_check"));
+        let mut candidate = preferences.candidate();
+        candidate.set_update_check_time(false, None);
+        preferences.save_candidate(candidate, &directory).unwrap();
+        let saved = Preferences::load_path(&path).unwrap();
+        assert_eq!(saved.update_check_time(false), None);
+        assert_eq!(saved.update_check_time(true), None);
+        let raw = read_preference_object(&path).unwrap();
+        assert!(!raw.contains_key("last_update_check"));
+        assert!(!raw.contains_key("last_beta_update_check"));
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -1931,6 +2259,7 @@ mod tests {
             session_list: SessionListPreferences::default(),
             session_list_extra: Map::new(),
             extra: Map::new(),
+            ..Preferences::default()
         };
         preferences.sanitize();
         assert_eq!(preferences.scale(), DEFAULT_SCALE);
@@ -2106,11 +2435,25 @@ mod tests {
     }
 
     #[test]
-    fn patch_rejects_invalid_language_and_nested_appearance_without_affecting_disk_compatibility() {
-        assert!(serde_json::from_value::<PreferencePatch>(
-            serde_json::json!({"language": "en", "unknown_setting": true})
+    fn patch_rejects_unowned_fields_invalid_language_and_nested_appearance_without_affecting_disk_compatibility(
+    ) {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        let mut preferences = Preferences::default();
+        preferences.save_in_directory(&directory).unwrap();
+        let before = fs::read(&path).unwrap();
+        let original = preferences.snapshot();
+        let patch = serde_json::from_value::<PreferencePatch>(
+            serde_json::json!({"language": "en", "unknown_setting": true}),
         )
-        .is_err());
+        .expect("opaque owner fields are decoded before owner admission");
+        assert_eq!(patch.owner["unknown_setting"], true);
+        let error = preferences
+            .apply_patch_in_directory(patch, &directory)
+            .unwrap_err();
+        assert_eq!(error, "unknown preference setting: unknown_setting");
+        assert_eq!(preferences.snapshot(), original);
+        assert_eq!(fs::read(&path).unwrap(), before);
         for language in [
             serde_json::json!("future"),
             serde_json::json!("zh-Hant"),
@@ -2177,6 +2520,9 @@ mod tests {
             serde_json::from_str::<LanguagePreference>("\"future\"").unwrap(),
             LanguagePreference::System
         );
+        assert_eq!(preferences.snapshot(), original);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -2188,41 +2534,135 @@ mod tests {
             "future_setting".to_owned(),
             serde_json::json!({"preserve": [1, 2]}),
         );
+        preferences.observation_extra.insert(
+            "remote_selection".into(),
+            serde_json::json!({
+                "targets": ["old"], "future_owner_setting": {"keep": true}
+            }),
+        );
+        preferences
+            .observation_extra
+            .insert("untouched_owner".into(), serde_json::json!({"revision": 3}));
         preferences.save_in_directory(&directory).unwrap();
+        let store = desktop_pet_contracts::ProfileStore::acquire(
+            &directory,
+            &directory.join("runtime-state"),
+        )
+        .unwrap();
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(SelectionCommitState::default()));
+        let extension = std::sync::Arc::new(SelectionOwner {
+            store: store.clone(),
+            state: state.clone(),
+        });
+        preferences.set_integration_extensions(store.clone(), vec![extension.clone()]);
+        preferences.refresh_owner_snapshot(&directory).unwrap();
+        store
+            .update(|lifecycle, _| {
+                lifecycle.insert("auto_start".into(), Value::Bool(false));
+                lifecycle.insert(
+                    "future_lifecycle".into(),
+                    serde_json::json!({"revision": 4}),
+                );
+                Ok(())
+            })
+            .unwrap();
         let mut appearance = preferences.bubble_appearance();
         appearance.theme = BubbleTheme::Custom;
         appearance.custom.accent = BubbleColor::parse_hex("#aBcDeF").unwrap();
+        let patch: PreferencePatch = serde_json::from_value(serde_json::json!({
+            "language": "ko",
+            "bubble_appearance": appearance,
+            "show_status_indicators": false,
+            "menu_bar_mode": "recovery_only",
+            "observation_host": "tern",
+            "selected_targets": ["studio", "laptop"]
+        }))
+        .unwrap();
         let snapshot = preferences
-            .apply_patch_in_directory(
-                PreferencePatch {
-                    language: Some(LanguagePreference::Ko),
-                    bubble_appearance: Some(appearance),
-                    show_status_indicators: Some(false),
-                    menu_bar_mode: Some(MenuBarMode::RecoveryOnly),
-                    observation_host: Some(ObservationMode::Tern),
-                    observation_local: Some(false),
-                    observation_remote: Some(true),
-                    observation_machines: Some(vec![" machine:/🌲 ".to_owned()]),
-                },
-                &directory,
-            )
+            .apply_patch_in_directory(patch, &directory)
             .unwrap();
         assert_eq!(snapshot.language, LanguagePreference::Ko);
         assert_eq!(snapshot.bubble_appearance, appearance);
         assert!(!snapshot.show_status_indicators);
         assert_eq!(snapshot.menu_bar_mode, MenuBarMode::RecoveryOnly);
-        assert_eq!(snapshot.observation_host, ObservationMode::Tern);
-        assert!(!snapshot.observation_local);
-        assert!(snapshot.observation_remote);
-        assert_eq!(snapshot.observation_machines, vec![" machine:/🌲 "]);
+        assert_eq!(
+            snapshot.observation_host,
+            ObservationSelection::Provider("tern".into())
+        );
         assert_eq!(snapshot, preferences.snapshot());
-        let saved = Preferences::load_path(&path).unwrap();
+        assert_eq!(
+            snapshot.owner["selected_targets"],
+            serde_json::json!(["studio", "laptop"])
+        );
+        assert!(preferences.postcommit_error().is_none());
+        assert_eq!(
+            state.lock().targets,
+            Some(vec!["studio".to_owned(), "laptop".to_owned()])
+        );
+        assert_eq!(state.lock().commits, 1);
+        let disk = read_preference_object(&path).unwrap();
+        assert!(!disk.contains_key("selected_targets"));
+        assert_eq!(
+            disk["observation"]["remote_selection"]["targets"],
+            serde_json::json!(["studio", "laptop"])
+        );
+        assert_eq!(
+            disk["observation"]["remote_selection"]["future_owner_setting"],
+            serde_json::json!({"keep": true})
+        );
+        assert_eq!(
+            disk["observation"]["untouched_owner"],
+            serde_json::json!({"revision": 3})
+        );
+        let (lifecycle, _) = store.read_object_with_presence().unwrap();
+        assert_eq!(lifecycle["auto_start"], false);
+        assert_eq!(
+            lifecycle["future_lifecycle"],
+            serde_json::json!({"revision": 4})
+        );
+        assert_eq!(lifecycle["selected_target_count"], 2);
+        let mut saved = Preferences::load_path(&path).unwrap();
+        saved.set_integration_extensions(store.clone(), vec![extension]);
+        saved.refresh_owner_snapshot(&directory).unwrap();
         assert_eq!(saved.snapshot(), snapshot);
         assert_eq!(saved.extra, preferences.extra);
         assert_eq!(
             saved.extra["future_setting"],
             serde_json::json!({"preserve": [1, 2]})
         );
+        let clear: PreferencePatch = serde_json::from_value(serde_json::json!({
+            "selected_targets": null
+        }))
+        .unwrap();
+        let snapshot = preferences
+            .apply_patch_in_directory(clear, &directory)
+            .unwrap();
+        assert_eq!(snapshot.owner["selected_targets"], Value::Null);
+        assert_eq!(state.lock().targets, None);
+        assert_eq!(state.lock().commits, 2);
+        let mut candidate = preferences.candidate();
+        candidate.set_visible(false);
+        preferences.save_candidate(candidate, &directory).unwrap();
+        let disk = read_preference_object(&path).unwrap();
+        assert!(disk["observation"]["remote_selection"]
+            .get("targets")
+            .is_none());
+        assert_eq!(
+            disk["observation"]["remote_selection"]["future_owner_setting"],
+            serde_json::json!({"keep": true})
+        );
+        assert_eq!(
+            disk["observation"]["untouched_owner"],
+            serde_json::json!({"revision": 3})
+        );
+        assert_eq!(state.lock().commits, 2);
+        let (lifecycle, _) = store.read_object_with_presence().unwrap();
+        assert_eq!(lifecycle["auto_start"], false);
+        assert_eq!(
+            lifecycle["future_lifecycle"],
+            serde_json::json!({"revision": 4})
+        );
+        assert_eq!(lifecycle["selected_target_count"], 0);
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -2243,9 +2683,7 @@ mod tests {
             .apply_patch_in_directory(
                 PreferencePatch {
                     language: Some(LanguagePreference::En),
-                    observation_host: Some(ObservationMode::Tern),
-                    observation_remote: Some(true),
-                    observation_machines: Some(vec!["opaque-machine".to_owned()]),
+                    observation_host: Some(ObservationSelection::Provider("tern".into())),
                     ..PreferencePatch::default()
                 },
                 &directory,
@@ -2310,34 +2748,79 @@ mod tests {
         let path = directory.join(PREFERENCES_FILE);
         let mut preferences = Preferences::default();
         preferences.save_in_directory(&directory).unwrap();
+        let store = desktop_pet_contracts::ProfileStore::acquire(
+            &directory,
+            &directory.join("runtime-state"),
+        )
+        .unwrap();
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(SelectionCommitState::default()));
+        let extension = std::sync::Arc::new(SelectionOwner {
+            store: store.clone(),
+            state: state.clone(),
+        });
+        preferences.set_integration_extensions(store.clone(), vec![extension.clone()]);
+        preferences.refresh_owner_snapshot(&directory).unwrap();
         let before = fs::read(&path).unwrap();
         let original = preferences.snapshot();
-        for machines in [
-            vec!["duplicate".to_owned(), "duplicate".to_owned()],
-            vec!["invalid\0id".to_owned()],
-            vec!["id".repeat(4097)],
-            (0..65).map(|index| index.to_string()).collect(),
+        for targets in [
+            serde_json::json!(["duplicate", "duplicate"]),
+            serde_json::json!(["invalid\0id"]),
+            serde_json::json!(["id".repeat(4097)]),
+            serde_json::json!((0..65).map(|index| index.to_string()).collect::<Vec<_>>()),
+            serde_json::json!(true),
         ] {
+            let patch: PreferencePatch = serde_json::from_value(serde_json::json!({
+                "language": "en", "observation_host": "tern", "selected_targets": targets
+            }))
+            .expect("owner admission validates opaque payloads");
+            preferences
+                .apply_patch_in_directory(patch, &directory)
+                .expect_err("invalid owner selection must reject the entire patch");
+            assert_eq!(preferences.snapshot(), original);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(state.lock().commits, 0);
+        }
+        let patch: PreferencePatch = serde_json::from_value(serde_json::json!({
+            "language": "en", "selected_targets": ["studio"], "unregistered": true
+        }))
+        .unwrap();
+        assert_eq!(
+            preferences
+                .apply_patch_in_directory(patch, &directory)
+                .unwrap_err(),
+            "unknown preference setting: unregistered"
+        );
+        assert_eq!(preferences.snapshot(), original);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(state.lock().commits, 0);
+        for reserved in ["", "auto", "both"] {
             preferences
                 .apply_patch_in_directory(
                     PreferencePatch {
                         language: Some(LanguagePreference::En),
-                        observation_host: Some(ObservationMode::Tern),
-                        observation_machines: Some(machines),
+                        observation_host: Some(ObservationSelection::Provider(reserved.into())),
+                        owner: Map::from_iter([(
+                            "selected_targets".into(),
+                            serde_json::json!(["studio"]),
+                        )]),
                         ..PreferencePatch::default()
                     },
                     &directory,
                 )
-                .expect_err("invalid selection must reject the entire patch");
+                .expect_err("a malformed programmatic selection cannot reach disk");
             assert_eq!(preferences.snapshot(), original);
             assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(state.lock().commits, 0);
         }
         preferences
             .apply_patch_in_directory(PreferencePatch::default(), &directory)
             .expect_err("an empty patch is not a mutation");
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(preferences.snapshot(), original);
-        assert_eq!(Preferences::load_path(&path).unwrap().snapshot(), original);
+        let mut saved = Preferences::load_path(&path).unwrap();
+        saved.set_integration_extensions(store, vec![extension]);
+        saved.refresh_owner_snapshot(&directory).unwrap();
+        assert_eq!(saved.snapshot(), original);
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -2450,7 +2933,7 @@ mod tests {
         assert_eq!(
             loaded.observation(),
             &ObservationPreferences {
-                host: ObservationMode::Herdr,
+                host: ObservationSelection::Provider("herdr".into()),
                 ..ObservationPreferences::default()
             }
         );
@@ -3110,7 +3593,7 @@ mod tests {
         for daemon in [false, true] {
             let new_profile =
                 Preferences::load_for_profile(&explicit, &default, Some(&legacy), daemon).unwrap();
-            assert_eq!(new_profile.observation_host(), ObservationMode::Both);
+            assert_eq!(new_profile.observation_host(), ObservationSelection::Auto);
             assert!(new_profile.visible());
             assert!(new_profile.extra.is_empty());
             assert!(!explicit.join(PREFERENCES_FILE).exists());
@@ -3118,7 +3601,10 @@ mod tests {
 
         let migrated =
             Preferences::load_for_profile(&default, &default, Some(&legacy), false).unwrap();
-        assert_eq!(migrated.observation_host(), ObservationMode::Herdr);
+        assert_eq!(
+            migrated.observation_host(),
+            ObservationSelection::Provider("herdr".into())
+        );
         assert!(!migrated.visible());
         assert!(migrated.passthrough());
         assert_eq!(migrated.scale(), 0.875);
@@ -3139,7 +3625,10 @@ mod tests {
         for daemon in [false, true] {
             let existing =
                 Preferences::load_for_profile(&explicit, &default, Some(&legacy), daemon).unwrap();
-            assert_eq!(existing.observation_host(), ObservationMode::Herdr);
+            assert_eq!(
+                existing.observation_host(),
+                ObservationSelection::Provider("herdr".into())
+            );
             assert_eq!(existing.scale(), 0.5);
             assert_eq!(
                 fs::read(explicit.join(PREFERENCES_FILE)).unwrap(),
@@ -3159,7 +3648,7 @@ mod tests {
         let directory = isolated_preferences_directory();
         let path = directory.join(PREFERENCES_FILE);
         let new_profile = Preferences::load_in_directory(&directory, None, false).unwrap();
-        assert_eq!(new_profile.observation_host(), ObservationMode::Both);
+        assert_eq!(new_profile.observation_host(), ObservationSelection::Auto);
         new_profile.save_in_directory(&directory).unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["observation"]["host"], "auto");
@@ -3183,7 +3672,10 @@ mod tests {
             }
             fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
             let mut legacy = Preferences::load_path(&path).unwrap();
-            assert_eq!(legacy.observation_host(), ObservationMode::Herdr);
+            assert_eq!(
+                legacy.observation_host(),
+                ObservationSelection::Provider("herdr".into())
+            );
             legacy
                 .apply_patch_in_directory(
                     PreferencePatch {
@@ -3213,10 +3705,18 @@ mod tests {
         let directory = isolated_preferences_directory();
         let path = directory.join(PREFERENCES_FILE);
         for (token, mode, canonical) in [
-            ("herdr", ObservationMode::Herdr, "herdr"),
-            ("tern", ObservationMode::Tern, "tern"),
-            ("auto", ObservationMode::Both, "auto"),
-            ("both", ObservationMode::Both, "auto"),
+            (
+                "herdr",
+                ObservationSelection::Provider("herdr".into()),
+                "herdr",
+            ),
+            (
+                "tern",
+                ObservationSelection::Provider("tern".into()),
+                "tern",
+            ),
+            ("auto", ObservationSelection::Auto, "auto"),
+            ("both", ObservationSelection::Auto, "auto"),
         ] {
             let disk = serde_json::json!({
                 "visible": false, "passthrough": true, "scale": 0.875, "position": null,
@@ -3258,7 +3758,7 @@ mod tests {
         let directory = isolated_preferences_directory();
         let path = directory.join(PREFERENCES_FILE);
         let mut owner = Preferences::default();
-        owner.set_observation_host(ObservationMode::Tern);
+        owner.set_observation_host(ObservationSelection::Provider("tern".into()));
         owner.save_in_directory(&directory).unwrap();
         let before = fs::read(&path).unwrap();
         let valid: Value = serde_json::from_slice(&before).unwrap();
@@ -3269,8 +3769,6 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::json!(""),
-            serde_json::json!("Auto"),
-            serde_json::json!("unknown"),
         ] {
             let mut disk = valid.clone();
             disk["observation"]["host"] = malformed;
@@ -3278,13 +3776,15 @@ mod tests {
             fs::write(&path, &bytes).unwrap();
             assert!(Preferences::load_path(&path).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
-            assert_eq!(owner.observation_host(), ObservationMode::Tern);
+            assert_eq!(
+                owner.observation_host(),
+                ObservationSelection::Provider("tern".into())
+            );
         }
         fs::write(&path, &before).unwrap();
         for malformed in [
             serde_json::json!("both"),
-            serde_json::json!("AUTO"),
-            serde_json::json!("unknown"),
+            serde_json::json!(""),
             serde_json::json!(1),
             serde_json::json!(true),
             serde_json::json!([]),
@@ -3296,8 +3796,44 @@ mod tests {
                 }))
                 .is_err()
             );
-            assert_eq!(owner.observation_host(), ObservationMode::Tern);
+            assert_eq!(
+                owner.observation_host(),
+                ObservationSelection::Provider("tern".into())
+            );
             assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        for (token, expected) in [
+            ("auto", ObservationSelection::Auto),
+            ("herdr", ObservationSelection::Provider("herdr".into())),
+            ("tern", ObservationSelection::Provider("tern".into())),
+            ("Auto", ObservationSelection::Provider("Auto".into())),
+            (
+                "other-provider",
+                ObservationSelection::Provider("other-provider".into()),
+            ),
+        ] {
+            let mut disk = valid.clone();
+            disk["observation"]["host"] = serde_json::json!(token);
+            let bytes = serde_json::to_vec(&disk).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let mut accepted = Preferences::load_path(&path).unwrap();
+            assert_eq!(accepted.observation_host(), expected);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let patch: PreferencePatch = serde_json::from_value(serde_json::json!({
+                "observation_host": token, "language": "ko"
+            }))
+            .unwrap();
+            assert_eq!(
+                accepted
+                    .apply_patch_in_directory(patch, &directory)
+                    .unwrap()
+                    .observation_host,
+                expected
+            );
+            assert_eq!(
+                Preferences::load_path(&path).unwrap().observation_host(),
+                expected
+            );
         }
         let _ = fs::remove_dir_all(directory);
     }
@@ -3308,14 +3844,17 @@ mod tests {
         let path = directory.join(PREFERENCES_FILE);
         let blocked = directory.join("not-a-directory");
         let mut owner = Preferences::default();
-        owner.set_observation_host(ObservationMode::Herdr);
+        owner.set_observation_host(ObservationSelection::Provider("herdr".into()));
         owner.save_in_directory(&directory).unwrap();
         let before = fs::read(&path).unwrap();
         fs::write(&blocked, b"sentinel").unwrap();
         let mut candidate = owner.candidate();
-        candidate.set_observation_host(ObservationMode::Both);
+        candidate.set_observation_host(ObservationSelection::Auto);
         assert!(owner.save_candidate(candidate, &blocked).is_err());
-        assert_eq!(owner.observation_host(), ObservationMode::Herdr);
+        assert_eq!(
+            owner.observation_host(),
+            ObservationSelection::Provider("herdr".into())
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read(&blocked).unwrap(), b"sentinel");
         owner
@@ -3329,7 +3868,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Preferences::load_path(&path).unwrap().observation_host(),
-            ObservationMode::Herdr
+            ObservationSelection::Provider("herdr".into())
         );
         let _ = fs::remove_dir_all(directory);
     }
@@ -3344,13 +3883,10 @@ mod tests {
         )
         .expect("old preferences should be written");
         let mut preferences = Preferences::load_path(&path).expect("old preferences should load");
-        let machine = "opaque machine:🍃/A".to_owned();
         preferences
             .apply_patch_in_directory(
                 PreferencePatch {
-                    observation_local: Some(false),
-                    observation_remote: Some(true),
-                    observation_machines: Some(vec![machine.clone()]),
+                    observation_host: Some(ObservationSelection::Provider("herdr".into())),
                     ..PreferencePatch::default()
                 },
                 &directory,
@@ -3358,53 +3894,16 @@ mod tests {
             .expect("observation should save");
         let loaded = Preferences::load_path(&path).expect("migrated preferences should reload");
         assert_eq!(loaded.observation(), preferences.observation());
-        assert_eq!(loaded.observation_host(), ObservationMode::Herdr);
-        assert_eq!(loaded.observation().machines, vec![machine]);
+        assert_eq!(
+            loaded.observation_host(),
+            ObservationSelection::Provider("herdr".into())
+        );
         assert!(!loaded.visible());
         assert!(loaded.passthrough());
         assert_eq!(loaded.scale(), 0.875);
         assert_eq!(loaded.position(), Some((123.25, 456.75)));
         assert!(loaded.position_is_legacy());
         assert_eq!(loaded.language(), LanguagePreference::Ko);
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn disabled_remote_selection_survives_patch_and_reload() {
-        let directory = isolated_preferences_directory();
-        let path = directory.join(PREFERENCES_FILE);
-        let mut preferences = Preferences::default();
-        let id = "opaque id:/🌲".to_owned();
-        preferences
-            .apply_patch_in_directory(
-                PreferencePatch {
-                    observation_local: Some(true),
-                    observation_remote: Some(false),
-                    observation_machines: Some(vec![id.clone()]),
-                    ..PreferencePatch::default()
-                },
-                &directory,
-            )
-            .expect("selection should save");
-        let loaded = Preferences::load_path(&path).expect("selection should reload");
-        assert_eq!(loaded.observation().machines, vec![id.clone()]);
-        assert!(!loaded.observation().remote);
-        assert!(!loaded
-            .observation()
-            .includes(&crate::sources::remote_source(&id)));
-        preferences
-            .apply_patch_in_directory(
-                PreferencePatch {
-                    observation_remote: Some(true),
-                    ..PreferencePatch::default()
-                },
-                &directory,
-            )
-            .expect("reenabling remote should save");
-        let reloaded = Preferences::load_path(&path).expect("enabled selection should reload");
-        assert!(reloaded
-            .observation()
-            .includes(&crate::sources::remote_source(&id)));
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -3578,6 +4077,123 @@ mod tests {
     }
 
     #[test]
+    fn common_save_preserves_newer_owner_data_and_owner_deletions() {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        let mut preferences = Preferences::default();
+        preferences
+            .extra
+            .insert("retired_owner".into(), serde_json::json!({"old": true}));
+        preferences
+            .observation_extra
+            .insert("retired_field".into(), serde_json::json!(true));
+        preferences
+            .observation_extra
+            .insert("owner_selection".into(), serde_json::json!(["old"]));
+        preferences
+            .session_list_extra
+            .insert("retired_field".into(), serde_json::json!(true));
+        preferences
+            .session_list_extra
+            .insert("future_sort".into(), serde_json::json!("old"));
+        preferences.set_update_check_time(false, Some(100));
+        preferences.set_update_check_time(true, Some(200));
+        preferences.set_standalone_bubble_position(Some((42.0, 64.0)));
+        preferences.save_in_directory(&directory).unwrap();
+        let store = desktop_pet_contracts::ProfileStore::acquire(
+            &directory,
+            &directory.join("runtime-state"),
+        )
+        .unwrap();
+        preferences.set_integration_extensions(store.clone(), Vec::new());
+        store
+            .update(|lifecycle, _| {
+                lifecycle.insert("auto_start".into(), Value::Bool(false));
+                lifecycle.insert("future_owner".into(), serde_json::json!({"revision": 5}));
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_writer_lock(|| {
+                let mut saved = read_preference_object(&path)?;
+                saved.remove("retired_owner");
+                saved.insert("new_owner".into(), serde_json::json!({"revision": 2}));
+                let observation = saved
+                    .get_mut("observation")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                observation.remove("retired_field");
+                observation.insert("owner_selection".into(), serde_json::json!(["new"]));
+                let session_list = saved
+                    .get_mut("session_list")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                session_list.remove("retired_field");
+                session_list.insert("future_sort".into(), serde_json::json!("new"));
+                desktop_pet_contracts::profile_store::atomic_write(
+                    &path,
+                    &serde_json::to_vec(&saved).unwrap(),
+                )
+            })
+            .unwrap();
+        let mut candidate = preferences.candidate();
+        candidate.set_visible(false);
+        candidate.set_update_check_time(false, None);
+        candidate.set_update_check_time(true, None);
+        candidate.set_standalone_bubble_position(None);
+        preferences
+            .save_candidate_in_directory(candidate, &directory)
+            .unwrap();
+        let saved = read_preference_object(&path).unwrap();
+        assert_eq!(saved["visible"], false);
+        assert_eq!(saved["new_owner"], serde_json::json!({"revision": 2}));
+        assert!(!saved.contains_key("retired_owner"));
+        let observation = saved["observation"].as_object().unwrap();
+        assert_eq!(observation["host"], "auto");
+        assert_eq!(observation["owner_selection"], serde_json::json!(["new"]));
+        assert!(!observation.contains_key("retired_field"));
+        let session_list = saved["session_list"].as_object().unwrap();
+        assert_eq!(session_list["future_sort"], "new");
+        assert!(!session_list.contains_key("retired_field"));
+        for cleared in [
+            "last_update_check",
+            "last_beta_update_check",
+            "standalone_bubble_position",
+        ] {
+            assert!(!saved.contains_key(cleared));
+        }
+        let (lifecycle, _) = store.read_object_with_presence().unwrap();
+        assert_eq!(lifecycle["auto_start"], false);
+        assert_eq!(
+            lifecycle["future_owner"],
+            serde_json::json!({"revision": 5})
+        );
+        store
+            .with_writer_lock(|| {
+                let mut saved = read_preference_object(&path)?;
+                saved.remove("observation");
+                saved.remove("session_list");
+                desktop_pet_contracts::profile_store::atomic_write(
+                    &path,
+                    &serde_json::to_vec(&saved).unwrap(),
+                )
+            })
+            .unwrap();
+        preferences.save_in_directory(&directory).unwrap();
+        let saved = read_preference_object(&path).unwrap();
+        assert_eq!(saved["observation"], serde_json::json!({"host": "auto"}));
+        assert_eq!(
+            saved["session_list"],
+            serde_json::json!({"sort": "stable", "running_first": false})
+        );
+        drop(store);
+        drop(preferences);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn unknown_top_level_field_survives_save() {
         let directory = isolated_preferences_directory();
         let path = directory.join(PREFERENCES_FILE);
@@ -3647,11 +4263,14 @@ mod tests {
         assert_eq!(
             loaded.observation(),
             &ObservationPreferences {
-                host: ObservationMode::Herdr,
-                local: false,
-                remote: true,
-                machines: vec!["studio".to_owned()],
+                host: ObservationSelection::Provider("herdr".into()),
             }
+        );
+        assert_eq!(loaded.observation_extra["local"], false);
+        assert_eq!(loaded.observation_extra["remote"], true);
+        assert_eq!(
+            loaded.observation_extra["machines"],
+            serde_json::json!(["studio"])
         );
         assert_eq!(loaded.scale(), 0.875);
         let _ = fs::remove_dir_all(directory);

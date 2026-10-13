@@ -6,22 +6,18 @@ use crate::automation::{
 use crate::bubble::BubblePlacement;
 use crate::character_service::PackService;
 use crate::character_types::{PackAction, PackListing, PackOperation, PackRequest};
-use crate::herdr::Watchers;
-use crate::lifecycle::{self, LifecycleLock, LifecycleSetting, LifecycleSettings, Paths};
+use crate::lifecycle::{self, LifecycleSetting, LifecycleSettings, Paths};
 use crate::preferences::Preferences;
 use crate::session_view::{SessionCursor, SessionFilter, SessionPageCursor, SessionPageRequest};
 use crate::socket;
 use crate::state::AppState;
-use crate::tern::{
-    serialize_response as tern_response_json, TernExchangeErrorCode, TernExchangeReply,
-    TernExchangeRequest, MAX_EXCHANGE_BYTES, MAX_RESPONSE_BYTES,
-};
 use crate::ui;
-use herdr_update_coordinator::protocol::{
+use desktop_pet_contracts::{ControlExtension, HostConnections, LifecycleLock};
+use desktop_pet_update_coordinator::protocol::{
     record_user_stop, start_allowed, stop_generation, verify_control_for, UpdateCommand,
     UpdateControlReply, UpdateControlRequest, UPDATER_PROTOCOL,
 };
-use herdr_update_coordinator::{
+use desktop_pet_update_coordinator::{
     read_plan, validate_plan_target, InstallOrigin, UpdateContext, UpdatePlan, UpdatePolicy,
 };
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -76,7 +72,7 @@ struct LifecycleRequest {
     kind: String,
     operation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    key: Option<LifecycleSetting>,
+    key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     value: Option<bool>,
 }
@@ -87,7 +83,7 @@ struct LifecycleReply {
     version: u64,
     kind: String,
     ok: bool,
-    settings: Option<LifecycleSettings>,
+    settings: Option<Map<String, Value>>,
     error: Option<String>,
 }
 
@@ -97,12 +93,20 @@ fn validate_lifecycle_request(request: &LifecycleRequest) -> Result<(), String> 
     }
     match request.operation.as_str() {
         "get" if request.key.is_none() && request.value.is_none() => Ok(()),
-        "set" if request.key.is_some() && request.value.is_some() => Ok(()),
+        "set"
+            if request
+                .key
+                .as_ref()
+                .is_some_and(|key| !key.is_empty() && key.len() <= 128)
+                && request.value.is_some() =>
+        {
+            Ok(())
+        }
         _ => Err("invalid lifecycle operation or key/value".to_owned()),
     }
 }
 
-fn lifecycle_reply(result: Result<LifecycleSettings, String>) -> LifecycleReply {
+fn lifecycle_reply(result: Result<Map<String, Value>, String>) -> LifecycleReply {
     match result {
         Ok(settings) => LifecycleReply {
             version: PROTOCOL_VERSION,
@@ -561,6 +565,17 @@ pub struct ControlResponse {
     pub r#type: String,
     pub version: u64,
     pub app_version: String,
+    pub updater_protocol: u32,
+    pub observation_capability: u32,
+    pub integration_api: u32,
+    pub update_ui_visible: bool,
+    pub update_operation_id: Option<String>,
+    pub migration_operation: Option<String>,
+    pub migration_gated: bool,
+    #[cfg(desktop_pet_legacy)]
+    pub migration_source_environment: Option<std::collections::BTreeMap<String, String>>,
+    #[cfg(desktop_pet_legacy)]
+    pub migration_source_host_plugin_config_dir: Option<PathBuf>,
     pub ok: bool,
     pub command: String,
     pub error: Option<String>,
@@ -570,7 +585,7 @@ pub struct ControlResponse {
     #[serde(default = "default_observation_mode")]
     pub observation_mode: String,
     #[serde(default)]
-    pub host_connections: crate::sources::HostConnections,
+    pub host_connections: HostConnections,
     pub ui_ready: bool,
     pub control_ready: bool,
     pub registration_accepted: bool,
@@ -593,10 +608,11 @@ pub struct ControlResponse {
     pub scale: f64,
     pub shutdown: bool,
     pub auto_start: bool,
-    pub exit_with_herdr: bool,
     pub pid: u32,
     #[serde(default)]
     pub instance_id: String,
+    #[serde(flatten)]
+    pub provider_fields: Map<String, Value>,
     #[serde(default)]
     pub running_sha256: String,
     #[serde(default)]
@@ -604,7 +620,6 @@ pub struct ControlResponse {
     pub executable_path: String,
     pub config_dir: String,
     pub state_dir: String,
-    pub herdr_socket: String,
 }
 
 fn default_bubble_visible() -> bool {
@@ -612,7 +627,7 @@ fn default_bubble_visible() -> bool {
 }
 
 fn default_observation_mode() -> String {
-    "herdr".to_owned()
+    "auto".to_owned()
 }
 
 impl ControlResponse {
@@ -629,22 +644,26 @@ impl ControlResponse {
         let assets_override = context
             .and_then(|value| value.assets_override.as_ref())
             .map(|value| value.display().to_string());
-        let herdr_socket = context
-            .map(|value| value.herdr_socket.display().to_string())
-            .unwrap_or_default();
         let ui_ready = state.is_ui_ready();
         let scene = state.scene();
         let settings = state.lifecycle_settings();
         let observation_mode = state.observation_mode().as_str().to_owned();
-        let host_connections = state.host_connections();
+        let host_connections = state.host_connections().clone();
+        let update_ui_visible = state.update_ui_visible();
+        let update_operation_id = state.update_ui_operation_id().map(str::to_owned);
+        let migration_operation = state.migration_operation().map(str::to_owned);
+        let migration_gated = state.migration_gated();
+        #[cfg(desktop_pet_legacy)]
+        let migration_source_environment = context.map(|context| {
+            desktop_pet_update_coordinator::legacy_entry::migration_source_environment(
+                &context.environment,
+            )
+        });
+        #[cfg(desktop_pet_legacy)]
+        let migration_source_host_plugin_config_dir =
+            context.and_then(|context| context.host_plugin_config_dir.clone());
         drop(state);
-        let endpoint = lock_unpoisoned(&inner.registered);
-        let registration_accepted = inner
-            .endpoint
-            .as_ref()
-            .map(|path| endpoint.contains(path))
-            .unwrap_or(true);
-        Self {
+        let mut response = Self {
             r#type: if command == "ready" {
                 "ready"
             } else {
@@ -652,7 +671,19 @@ impl ControlResponse {
             }
             .to_owned(),
             version: PROTOCOL_VERSION,
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version: desktop_pet_update_coordinator::identity::VERSION.to_owned(),
+            updater_protocol: desktop_pet_update_coordinator::identity::PROTOCOL,
+            observation_capability:
+                desktop_pet_update_coordinator::identity::OBSERVATION_CAPABILITY,
+            integration_api: desktop_pet_update_coordinator::identity::INTEGRATION_API,
+            update_ui_visible,
+            update_operation_id,
+            migration_operation,
+            migration_gated,
+            #[cfg(desktop_pet_legacy)]
+            migration_source_environment,
+            #[cfg(desktop_pet_legacy)]
+            migration_source_host_plugin_config_dir,
             ok: true,
             command,
             error: None,
@@ -660,11 +691,11 @@ impl ControlResponse {
             running: true,
             phase: scene.phase.as_str().to_owned(),
             observation_mode,
+            data_connected: host_connections.values().any(|count| *count > 0),
             host_connections,
             ui_ready,
             control_ready: true,
-            registration_accepted,
-            data_connected: host_connections.herdr > 0 || host_connections.tern > 0,
+            registration_accepted: true,
             connected_sources: scene.connected_sources,
             disconnected_sources: scene.disconnected_sources,
             sessions: scene.sessions,
@@ -680,7 +711,6 @@ impl ControlResponse {
             scale: scene.scale,
             shutdown: scene.shutdown,
             auto_start: settings.auto_start,
-            exit_with_herdr: settings.exit_with_herdr,
             instance_id,
             running_sha256,
             assets_override,
@@ -688,8 +718,30 @@ impl ControlResponse {
             executable_path: inner.executable_path.display().to_string(),
             config_dir: inner.paths.config_dir.display().to_string(),
             state_dir: inner.paths.state_dir.display().to_string(),
-            herdr_socket,
+            provider_fields: Map::new(),
+        };
+        for fields in &inner.status_fields {
+            match fields() {
+                Ok(fields) => {
+                    if fields.keys().any(|key| {
+                        common_status_key(key) || response.provider_fields.contains_key(key)
+                    }) {
+                        response.ok = false;
+                        response.error = Some(
+                            "integration status attempted to replace common status fields".into(),
+                        );
+                        break;
+                    }
+                    response.provider_fields.extend(fields);
+                }
+                Err(error) => {
+                    response.ok = false;
+                    response.error = Some(error);
+                    break;
+                }
+            }
         }
+        response
     }
 
     fn error(command: impl Into<String>, inner: &ControlInner, message: impl Into<String>) -> Self {
@@ -699,18 +751,16 @@ impl ControlResponse {
         response.error = Some(message.into());
         response
     }
-
-    fn endpoint_error(command: &str, inner: &ControlInner, message: impl Into<String>) -> Self {
-        let mut response = Self::error(command, inner, message);
-        response.registration_accepted = false;
-        response.ready = false;
-        response
-    }
 }
 
 /// Serialize a local-control response as one bounded newline-delimited frame.
 fn response_json(response: &ControlResponse) -> io::Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(response)
+    let value = serde_json::to_value(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    #[cfg(desktop_pet_legacy)]
+    let value = desktop_pet_update_coordinator::legacy_entry::encode_control_response(value)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut bytes = serde_json::to_vec(&value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if bytes.len() + 1 > MAX_FRAME_BYTES {
         return Err(io::Error::new(
@@ -725,11 +775,10 @@ fn response_json(response: &ControlResponse) -> io::Result<Vec<u8>> {
 struct ControlInner {
     stopping: AtomicBool,
     shared: Arc<Mutex<AppState>>,
-    watchers: Arc<Mutex<Watchers>>,
+    extensions: Vec<Arc<dyn ControlExtension>>,
+    status_fields: Vec<crate::StatusFields>,
     packs: Arc<PackService>,
     paths: Paths,
-    endpoint: Option<PathBuf>,
-    registered: Mutex<HashSet<PathBuf>>,
     lifecycle_writes: Mutex<()>,
     executable_path: PathBuf,
     pid: u32,
@@ -748,24 +797,21 @@ pub struct ControlServer {
 impl ControlServer {
     pub fn bind(
         shared: Arc<Mutex<AppState>>,
-        watchers: Arc<Mutex<Watchers>>,
         paths: Paths,
-        endpoint: Option<PathBuf>,
         executable_path: PathBuf,
         packs: Arc<PackService>,
+        extensions: Vec<Arc<dyn ControlExtension>>,
+        status_fields: Vec<crate::StatusFields>,
     ) -> Result<Self, String> {
-        lifecycle::validate_directory(&paths.state_dir, true)?;
+        desktop_pet_contracts::profile_store::validate_directory(&paths.state_dir, true)?;
         let listener = bind_private_socket(&paths.control_socket)?;
         let inner = Arc::new(ControlInner {
             stopping: AtomicBool::new(false),
             shared,
-            watchers,
+            extensions,
+            status_fields,
             packs,
             paths,
-            endpoint: endpoint
-                .map(|path| socket::canonical_endpoint(&path))
-                .transpose()?,
-            registered: Mutex::new(HashSet::new()),
             lifecycle_writes: Mutex::new(()),
             executable_path,
             pid: std::process::id(),
@@ -779,16 +825,6 @@ impl ControlServer {
             started: false,
             stopped: false,
         })
-    }
-
-    pub fn record_registered_endpoint(&self, endpoint: PathBuf) -> Result<(), String> {
-        let canonical = socket::canonical_endpoint(&endpoint)?;
-        {
-            let _write_guard = lock_unpoisoned(&self.inner.lifecycle_writes);
-            lifecycle::add_endpoint(&self.inner.paths.config_dir, &canonical)?;
-        }
-        lock_unpoisoned(&self.inner.registered).insert(canonical);
-        Ok(())
     }
 
     pub fn start(&mut self) -> Result<(), String> {
@@ -837,18 +873,9 @@ impl Drop for ControlServer {
 }
 
 fn accept_loop(listener: UnixListener, inner: Arc<ControlInner>) {
-    let mut next_expiry = Instant::now();
     loop {
         if inner.stopping.load(Ordering::Acquire) {
             return;
-        }
-        let now = Instant::now();
-        if now >= next_expiry {
-            next_expiry = now + Duration::from_millis(100);
-            let changed = lock_unpoisoned(&inner.shared).expire_tern(now);
-            if changed {
-                ui::wake();
-            }
         }
         reap_finished_clients(&inner);
         let (stream, _) = match listener.accept() {
@@ -982,11 +1009,11 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> io::
     Ok(())
 }
 
-fn read_client_frame(
+fn read_client_frame_with_size(
     stream: &mut UnixStream,
     deadline: Instant,
     limit: usize,
-) -> io::Result<Vec<u8>> {
+) -> io::Result<(Vec<u8>, usize)> {
     let mut frame = Vec::with_capacity(MAX_FRAME_BYTES);
     let mut chunk = [0u8; 1024];
     loop {
@@ -1007,19 +1034,356 @@ fn read_client_frame(
         }
         frame.extend_from_slice(&chunk[..count]);
         if newline.is_some() {
+            let wire_bytes = frame.len() + 1;
             if frame.last() == Some(&b'\r') {
                 frame.pop();
             }
-            return Ok(frame);
+            return Ok((frame, wire_bytes));
+        }
+    }
+}
+
+fn read_client_frame(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    read_client_frame_with_size(stream, deadline, limit).map(|(frame, _)| frame)
+}
+
+fn common_status_key(key: &str) -> bool {
+    matches!(
+        key,
+        "type"
+            | "version"
+            | "app_version"
+            | "updater_protocol"
+            | "observation_capability"
+            | "integration_api"
+            | "update_ui_visible"
+            | "update_operation_id"
+            | "migration_operation"
+            | "migration_gated"
+            | "migration_source_environment"
+            | "migration_source_host_plugin_config_dir"
+            | "ok"
+            | "command"
+            | "error"
+            | "ready"
+            | "running"
+            | "phase"
+            | "observation_mode"
+            | "host_connections"
+            | "ui_ready"
+            | "control_ready"
+            | "registration_accepted"
+            | "data_connected"
+            | "connected_sources"
+            | "disconnected_sources"
+            | "sessions"
+            | "working"
+            | "blocked"
+            | "done"
+            | "unknown"
+            | "visible"
+            | "passthrough"
+            | "alpha_passthrough"
+            | "bubble_visible"
+            | "bubble_placement"
+            | "scale"
+            | "shutdown"
+            | "auto_start"
+            | "pid"
+            | "instance_id"
+            | "running_sha256"
+            | "assets_override"
+            | "executable_path"
+            | "config_dir"
+            | "state_dir"
+    )
+}
+
+#[cfg(desktop_pet_legacy)]
+fn dispatch_legacy_registration(
+    inner: &ControlInner,
+    frame: &[u8],
+    command: &str,
+    authorized: bool,
+) -> ControlResponse {
+    let result: Result<bool, String> = (|| {
+        if !authorized {
+            return Err("unauthorized legacy registration".into());
+        }
+        let kind: FrameKind =
+            serde_json::from_slice(frame).map_err(|e| format!("invalid legacy frame: {e}"))?;
+        let extension = inner
+            .extensions
+            .iter()
+            .find(|extension| Some(extension.kind()) == kind.kind.as_deref())
+            .ok_or("legacy integration is not registered")?;
+        if frame.len() + 1 > extension.max_request_bytes() {
+            return Err("legacy registration exceeds frame limit".into());
+        }
+        let bytes = extension.handle_frame(frame)?;
+        if bytes.len() > extension.max_response_bytes() {
+            return Err("legacy registration response exceeds frame limit".into());
+        }
+        reject_duplicate_json_keys(&bytes)?;
+        let reply: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("invalid legacy registration reply: {e}"))?;
+        if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("legacy registration rejected".into());
+        }
+        reply
+            .get("registration_accepted")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "legacy registration omitted readiness proof".into())
+    })();
+    match result {
+        Ok(accepted) => {
+            let mut response = ControlResponse::status(command, inner);
+            response.registration_accepted = accepted;
+            response
+        }
+        Err(error) => {
+            let mut response = ControlResponse::error(command, inner, error);
+            response.registration_accepted = false;
+            response.ready = false;
+            response
+        }
+    }
+}
+
+fn verify_migration_control(
+    inner: &ControlInner,
+    request: &desktop_pet_update_coordinator::migration::MigrationControlRequest,
+) -> Result<UpdateContext, String> {
+    let context = lock_unpoisoned(&inner.shared)
+        .update_context()
+        .cloned()
+        .ok_or("migration context unavailable")?;
+    let bridge = desktop_pet_update_coordinator::identity::LEGACY;
+    desktop_pet_update_coordinator::migration::verify_live_control(
+        &request.plan_path,
+        request,
+        &context,
+        bridge,
+    )?;
+    use desktop_pet_update_coordinator::migration::MigrationCommand;
+    match (bridge, request.command) {
+        (true, MigrationCommand::Abort) => {
+            desktop_pet_update_coordinator::protocol::verify_legacy_migration_abort(
+                &context.state_dir,
+                inner.pid,
+                &context.instance_id,
+                &request.operation_id,
+                &request.token,
+            )?
+        }
+        (true, _) => desktop_pet_update_coordinator::protocol::verify_legacy_migration_control(
+            &context.state_dir,
+            inner.pid,
+            &context.instance_id,
+            &request.operation_id,
+            &request.token,
+        )?,
+        (false, MigrationCommand::Stop) => {
+            desktop_pet_update_coordinator::protocol::verify_migration_target_stop(
+                &context.state_dir,
+                inner.pid,
+                &context.instance_id,
+                &request.operation_id,
+                &request.token,
+            )?
+        }
+        (false, _) => desktop_pet_update_coordinator::protocol::verify_migration_target(
+            &context.state_dir,
+            inner.pid,
+            &context.instance_id,
+            &request.operation_id,
+            &request.token,
+        )?,
+    }
+    Ok(context)
+}
+
+fn dispatch_migration(
+    inner: &ControlInner,
+    request: &desktop_pet_update_coordinator::migration::MigrationControlRequest,
+    deadline: Instant,
+) -> Result<bool, String> {
+    use desktop_pet_update_coordinator::migration::{self, MigrationCommand};
+    let context = verify_migration_control(inner, request)?;
+    if inner.stopping.load(Ordering::Acquire) {
+        return Err("daemon is stopping".into());
+    }
+    match request.command {
+        MigrationCommand::Prepare => {
+            let plan = migration::read_plan(&request.plan_path)?;
+            let (sender, receiver) = mpsc::channel();
+            {
+                let _writer = lock_unpoisoned(&inner.lifecycle_writes);
+                let mut state = lock_unpoisoned(&inner.shared);
+                if !state.is_ui_ready() {
+                    return Err("migration source UI is not ready".into());
+                }
+                if state.migration_authorized(&request.operation_id, &request.token)
+                    && state.update_ui_visible()
+                    && state.update_ui_operation_id() == Some(request.operation_id.as_str())
+                {
+                    return Ok(false);
+                }
+                state.set_pending_migration_plan(plan)?;
+                if let Err(error) = state.queue_update_prepare(
+                    request.operation_id.clone(),
+                    request.token.clone(),
+                    sender,
+                ) {
+                    state.cancel_update_prepare(&request.operation_id, &request.token);
+                    return Err(error);
+                }
+            }
+            ui::wake();
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    lock_unpoisoned(&inner.shared)
+                        .cancel_update_prepare(&request.operation_id, &request.token);
+                    ui::wake();
+                    return Err(error);
+                }
+                Err(_) => {
+                    lock_unpoisoned(&inner.shared)
+                        .cancel_update_prepare(&request.operation_id, &request.token);
+                    ui::wake();
+                    return Err("migration main-thread preparation timed out".into());
+                }
+            }
+            let _writer = lock_unpoisoned(&inner.lifecycle_writes);
+            if let Err(error) = verify_migration_control(inner, request) {
+                lock_unpoisoned(&inner.shared)
+                    .cancel_update_prepare(&request.operation_id, &request.token);
+                ui::wake();
+                return Err(error);
+            }
+            lock_unpoisoned(&inner.shared)
+                .promote_prepared_migration(&request.operation_id, &request.token)?;
+            Ok(false)
+        }
+        MigrationCommand::ConsentAck => {
+            {
+                let state = lock_unpoisoned(&inner.shared);
+                if !desktop_pet_update_coordinator::identity::LEGACY
+                    || state.scene().shutdown
+                    || !state.migration_authorized(&request.operation_id, &request.token)
+                {
+                    return Err(
+                        "migration final consent is not authorized for this exact operation".into(),
+                    );
+                }
+            }
+            ui::confirm_migration_consent_visibility(&request.operation_id)?;
+            verify_migration_control(inner, request)?;
+            let state = lock_unpoisoned(&inner.shared);
+            if state.scene().shutdown
+                || !state.migration_authorized(&request.operation_id, &request.token)
+                || !state.update_ui_visible()
+                || state.update_ui_operation_id() != Some(request.operation_id.as_str())
+            {
+                return Err(
+                    "migration final consent is not visible for this exact operation".into(),
+                );
+            }
+            Ok(false)
+        }
+        MigrationCommand::Stop => {
+            if desktop_pet_update_coordinator::identity::LEGACY {
+                ui::confirm_migration_consent_visibility(&request.operation_id)?;
+                verify_migration_control(inner, request)?;
+            }
+            let state = lock_unpoisoned(&inner.shared);
+            if state.scene().shutdown
+                || (desktop_pet_update_coordinator::identity::LEGACY
+                    && (!state.migration_authorized(&request.operation_id, &request.token)
+                        || !state.update_ui_visible()
+                        || state.update_ui_operation_id() != Some(request.operation_id.as_str())))
+            {
+                return Err(
+                    "migration source is not visibly prepared for this authorization".into(),
+                );
+            }
+            Ok(true)
+        }
+        MigrationCommand::Abort | MigrationCommand::Commit => {
+            let _writer = lock_unpoisoned(&inner.lifecycle_writes);
+            if !lock_unpoisoned(&inner.shared)
+                .migration_authorized(&request.operation_id, &request.token)
+            {
+                return Err("migration gate is not owned by this authorization".into());
+            }
+            if request.command == MigrationCommand::Commit {
+                desktop_pet_update_coordinator::protocol::with_migration_target_commit(
+                    &context.state_dir,
+                    inner.pid,
+                    &context.instance_id,
+                    &request.operation_id,
+                    &request.token,
+                    || {
+                        lock_unpoisoned(&inner.shared)
+                            .release_migration_gate(&request.operation_id, &request.token)
+                    },
+                )?;
+                inner.packs.finish_read_only_startup()?;
+            } else {
+                verify_migration_control(inner, request)?;
+                lock_unpoisoned(&inner.shared)
+                    .release_migration_gate(&request.operation_id, &request.token)?;
+            }
+            ui::wake();
+            Ok(false)
         }
     }
 }
 
 fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
     let deadline = Instant::now() + CLIENT_TIMEOUT;
-    let frame = match read_client_frame(&mut stream, deadline, MAX_PROMPT_FRAME_BYTES + 1) {
+    let limit = inner
+        .extensions
+        .iter()
+        .map(|extension| extension.max_request_bytes())
+        .max()
+        .unwrap_or(0)
+        .max(MAX_PROMPT_FRAME_BYTES + 1);
+    let (frame, wire_bytes) = match read_client_frame_with_size(&mut stream, deadline, limit) {
         Ok(frame) => frame,
         Err(_) => return,
+    };
+    if reject_duplicate_json_keys(&frame).is_err() {
+        return;
+    }
+    #[cfg(desktop_pet_legacy)]
+    let frame = match desktop_pet_update_coordinator::legacy_entry::decode_control_request(&frame) {
+        Ok(desktop_pet_update_coordinator::legacy_entry::LegacyControlFrame::Common(frame)) => {
+            frame
+        }
+        Ok(desktop_pet_update_coordinator::legacy_entry::LegacyControlFrame::Register {
+            frame,
+            command,
+            ..
+        }) => {
+            let result =
+                dispatch_legacy_registration(&inner, &frame, &command, verify_peer_uid(&stream));
+            let _ = write_response(&mut stream, &result, deadline);
+            return;
+        }
+        Err(error) => {
+            let _ = write_response(
+                &mut stream,
+                &ControlResponse::error("unknown", &inner, error),
+                deadline,
+            );
+            return;
+        }
     };
     let frame_kind: FrameKind = match serde_json::from_slice(&frame) {
         Ok(frame_kind) => frame_kind,
@@ -1029,6 +1393,108 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
             return;
         }
     };
+    if reject_duplicate_json_keys(&frame).is_err() {
+        let response = ControlResponse::error("unknown", &inner, "invalid control request");
+        let _ = write_response(&mut stream, &response, deadline);
+        return;
+    }
+    if matches!(
+        frame_kind.kind.as_deref(),
+        Some("legacy-migration" | "update")
+    ) {
+        if frame.len() + 1 > MAX_FRAME_BYTES || !verify_peer_uid(&stream) {
+            return;
+        }
+        let request: desktop_pet_update_coordinator::migration::MigrationControlRequest =
+            match serde_json::from_slice(&frame) {
+                Ok(request) => request,
+                Err(_) => return,
+            };
+        let migration_deadline = Instant::now() + Duration::from_secs(15);
+        let result = dispatch_migration(&inner, &request, migration_deadline);
+        let stopping = result.as_ref().is_ok_and(|stop| *stop);
+        let reply = desktop_pet_update_coordinator::migration::MigrationControlReply {
+            version: request.version,
+            kind: request.kind.clone(),
+            command: request.command,
+            operation_id: request.operation_id.clone(),
+            instance_id: request.instance_id.clone(),
+            token: request.token.clone(),
+            plan_path: request.plan_path.clone(),
+            source_image: request.source_image.clone(),
+            config_dir: request.config_dir.clone(),
+            state_dir: request.state_dir.clone(),
+            stop_generation: request.stop_generation,
+            accepted: result.is_ok(),
+            error: result.err(),
+        };
+        let written = bounded_json(&reply, MAX_FRAME_BYTES)
+            .and_then(|bytes| write_frame(&mut stream, &bytes, migration_deadline))
+            .is_ok();
+        if written && stopping {
+            if desktop_pet_update_coordinator::identity::LEGACY
+                && ui::confirm_migration_consent_visibility(&request.operation_id).is_err()
+            {
+                return;
+            }
+            let _writer = lock_unpoisoned(&inner.lifecycle_writes);
+            if verify_migration_control(&inner, &request).is_ok() {
+                let mut state = lock_unpoisoned(&inner.shared);
+                if !desktop_pet_update_coordinator::identity::LEGACY
+                    || (state.migration_authorized(&request.operation_id, &request.token)
+                        && state.update_ui_visible()
+                        && state.update_ui_operation_id() == Some(request.operation_id.as_str()))
+                {
+                    state.request_shutdown();
+                    drop(state);
+                    ui::wake();
+                }
+            }
+        } else if !written
+            && request.command
+                == desktop_pet_update_coordinator::migration::MigrationCommand::Prepare
+        {
+            let mut state = lock_unpoisoned(&inner.shared);
+            state.cancel_update_prepare(&request.operation_id, &request.token);
+            if state.migration_authorized(&request.operation_id, &request.token) {
+                let _ = state.release_migration_gate(&request.operation_id, &request.token);
+            }
+            drop(state);
+            ui::wake();
+        }
+        return;
+    }
+    if let Some(extension) = inner
+        .extensions
+        .iter()
+        .find(|extension| Some(extension.kind()) == frame_kind.kind.as_deref())
+    {
+        if wire_bytes > extension.max_request_bytes() || !verify_peer_uid(&stream) {
+            return;
+        }
+        match extension.handle_frame(&frame) {
+            Ok(bytes)
+                if bytes.len() <= extension.max_response_bytes()
+                    && bytes.last() == Some(&b'\n')
+                    && !bytes[..bytes.len() - 1].contains(&b'\n') =>
+            {
+                let _ = write_frame(&mut stream, &bytes, deadline);
+            }
+            Ok(_) => {
+                let response = ControlResponse::error(
+                    extension.kind(),
+                    &inner,
+                    "extension response exceeds frame bounds",
+                );
+                let _ = write_response(&mut stream, &response, deadline);
+            }
+            Err(error) => {
+                let response = ControlResponse::error(extension.kind(), &inner, error);
+                let _ = write_response(&mut stream, &response, deadline);
+            }
+        }
+        return;
+    }
     if frame_kind.kind.as_deref() == Some("updater") {
         let updater_deadline = Instant::now() + Duration::from_secs(15);
         // Lock order: lifecycle_writes -> durable generation gate -> AppState.
@@ -1141,28 +1607,6 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
         let _ = write_sessions_response(&mut stream, &response, deadline);
         return;
     }
-    if frame_kind.kind.as_deref() == Some("tern") {
-        let response = decode_tern_exchange_request(&frame)
-            .map(|request| lock_unpoisoned(&inner.shared).tern_exchange(request))
-            .unwrap_or_else(|message| {
-                let state = lock_unpoisoned(&inner.shared);
-                let instance_id = state
-                    .update_context()
-                    .map(|context| context.instance_id.clone())
-                    .unwrap_or_default();
-                TernExchangeReply::error(instance_id, TernExchangeErrorCode::Rejected, message)
-            });
-        if response.ok {
-            ui::wake();
-        }
-        match tern_response_json(&response) {
-            Ok(bytes) => {
-                let _ = write_frame(&mut stream, &bytes, deadline);
-            }
-            Err(error) => eprintln!("cannot encode admitted Tern exchange response: {error}"),
-        }
-        return;
-    }
     if frame.len() > MAX_FRAME_BYTES {
         return;
     }
@@ -1202,25 +1646,31 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
             .map_err(|error| format!("invalid lifecycle request: {error}"))
             .and_then(|request| {
                 validate_lifecycle_request(&request)?;
-                if inner.stopping.load(Ordering::Acquire)
-                    || lock_unpoisoned(&inner.shared).scene().shutdown
-                {
-                    return Err("desktop pet is stopping".to_owned());
-                }
+                let (profile, extensions, selection) = {
+                    let state = lock_unpoisoned(&inner.shared);
+                    if inner.stopping.load(Ordering::Acquire) || state.scene().shutdown {
+                        return Err("desktop pet is stopping".into());
+                    }
+                    (
+                        state
+                            .profile_store()
+                            .cloned()
+                            .ok_or("daemon profile store unavailable")?,
+                        state.lifecycle_extensions().to_vec(),
+                        state.observation_mode(),
+                    )
+                };
                 if request.operation == "get" {
-                    return Ok(lock_unpoisoned(&inner.shared).lifecycle_settings());
+                    return lifecycle_values(&profile, &extensions, &selection);
                 }
                 let _guard = lock_unpoisoned(&inner.lifecycle_writes);
                 mutation_admission(&inner)?;
-                let key = request
-                    .key
-                    .ok_or_else(|| "missing lifecycle key".to_owned())?;
-                let value = request
-                    .value
-                    .ok_or_else(|| "missing lifecycle value".to_owned())?;
-                lock_unpoisoned(&inner.watchers).update_lifecycle_settings(|| {
-                    lifecycle::update_setting(&inner.paths.config_dir, key, value)
-                })
+                let key = request.key.as_deref().ok_or("missing lifecycle key")?;
+                let value = request.value.ok_or("missing lifecycle value")?;
+                apply_lifecycle_value(&profile, &extensions, &selection, key, value)?;
+                let settings = lifecycle::read_settings(profile.config_dir())?;
+                lock_unpoisoned(&inner.shared).set_lifecycle_settings(settings);
+                lifecycle_values(&profile, &extensions, &selection)
             });
         let mut bytes = match serde_json::to_vec(&lifecycle_reply(result)) {
             Ok(bytes) => bytes,
@@ -1977,70 +2427,27 @@ fn settings_admission(state: &AppState, stopping: bool) -> Result<(), String> {
 }
 
 fn dispatch(inner: &ControlInner, command: &str, endpoint: Option<PathBuf>) -> ControlResponse {
+    if endpoint.is_some() {
+        return ControlResponse::error(
+            command,
+            inner,
+            "endpoint routing belongs to a registered integration",
+        );
+    }
     if inner.stopping.load(Ordering::Acquire) && command != "status" {
         return ControlResponse::error(command, inner, "desktop pet is stopping");
     }
     if !matches!(
         command,
-        "status" | "ping" | "ready" | "stop" | "shutdown" | "register" | "ensure"
+        "status" | "ping" | "ready" | "stop" | "shutdown" | "ensure"
     ) {
         if let Err(error) = mutation_admission(inner) {
             return ControlResponse::error(command, inner, error);
         }
     }
     match command {
-        "register" => {
-            let Some(endpoint) = endpoint.or_else(|| inner.endpoint.clone()) else {
-                return ControlResponse::endpoint_error(
-                    command,
-                    inner,
-                    "Herdr socket path is unavailable",
-                );
-            };
-            match register_endpoint(inner, endpoint.clone()) {
-                Ok(()) => {
-                    let mut response = ControlResponse::status(command, inner);
-                    if let Ok(endpoint) = socket::canonical_endpoint(&endpoint) {
-                        response.registration_accepted =
-                            lock_unpoisoned(&inner.registered).contains(&endpoint);
-                    }
-                    response
-                }
-                Err(error) => ControlResponse::endpoint_error(command, inner, error),
-            }
-        }
-        "ensure" => {
-            let Some(target) = endpoint.or_else(|| inner.endpoint.clone()) else {
-                return ControlResponse::endpoint_error(
-                    command,
-                    inner,
-                    "Herdr socket path is unavailable",
-                );
-            };
-            if let Err(error) = register_endpoint(inner, target.clone()) {
-                return ControlResponse::endpoint_error(command, inner, error);
-            }
+        "ready" | "ensure" => {
             let mut response = ControlResponse::status(command, inner);
-            if let Ok(target) = socket::canonical_endpoint(&target) {
-                response.registration_accepted =
-                    lock_unpoisoned(&inner.registered).contains(&target);
-            }
-            if response.shutdown && !response.ui_ready {
-                response.ok = false;
-                response.error = Some("desktop pet stopped before UI became ready".to_owned());
-            }
-            response
-        }
-        "ready" => {
-            let mut response = ControlResponse::status(command, inner);
-            if let Some(target) = endpoint {
-                let target = match socket::canonical_endpoint(&target) {
-                    Ok(target) => target,
-                    Err(error) => return ControlResponse::endpoint_error(command, inner, error),
-                };
-                response.registration_accepted =
-                    lock_unpoisoned(&inner.registered).contains(&target);
-            }
             if response.shutdown && !response.ui_ready {
                 response.ok = false;
                 response.error = Some("desktop pet stopped before UI became ready".to_owned());
@@ -2135,7 +2542,8 @@ fn send_lifecycle_request(
         return Err("invalid lifecycle response protocol".to_owned());
     }
     match (reply.ok, reply.settings, reply.error) {
-        (true, Some(settings), None) => Ok(settings),
+        (true, Some(settings), None) => serde_json::from_value(Value::Object(settings))
+            .map_err(|e| format!("invalid lifecycle settings: {e}")),
         (false, None, Some(error)) => Err(error),
         _ => Err("invalid lifecycle response fields".to_owned()),
     }
@@ -2150,13 +2558,16 @@ fn lifecycle_request(
         version: PROTOCOL_VERSION,
         kind: "lifecycle".to_owned(),
         operation: operation.to_owned(),
-        key,
+        key: key.map(|key| match key {
+            LifecycleSetting::AutoStart => "auto_start".into(),
+        }),
         value,
     }
 }
 
 fn access_lifecycle_settings(
     paths: &Paths,
+    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
     change: Option<(LifecycleSetting, bool)>,
 ) -> Result<LifecycleSettings, String> {
     let deadline = Instant::now() + crate::cli::STARTUP_TIMEOUT;
@@ -2191,8 +2602,15 @@ fn access_lifecycle_settings(
                 if change.is_some() {
                     start_allowed(&offline_origin, &paths.state_dir, None, None)?;
                 }
+                let lock = Arc::new(lock);
                 let settings = match change {
-                    Some((key, value)) => lifecycle::update_setting(&paths.config_dir, key, value)?,
+                    Some((key, value)) => {
+                        let profile = desktop_pet_contracts::ProfileStore::with_lock(
+                            &paths.config_dir,
+                            lock.clone(),
+                        )?;
+                        lifecycle::update_setting(&profile, extensions, key, value)?
+                    }
                     None => lifecycle::read_settings(&paths.config_dir)?,
                 };
                 drop(lock);
@@ -2206,39 +2624,127 @@ fn access_lifecycle_settings(
     }
 }
 
-pub(crate) fn get_lifecycle_settings(paths: &Paths) -> Result<LifecycleSettings, String> {
-    access_lifecycle_settings(paths, None)
+fn lifecycle_values(
+    profile: &desktop_pet_contracts::ProfileStore,
+    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+    selection: &desktop_pet_contracts::ObservationSelection,
+) -> Result<Map<String, Value>, String> {
+    let settings = lifecycle::read_settings(profile.config_dir())?;
+    let mut values = Map::new();
+    values.insert("auto_start".into(), Value::Bool(settings.auto_start));
+    for extension in extensions {
+        for setting in extension.settings(profile, selection, "en")? {
+            if values
+                .insert(setting.key, Value::Bool(setting.value))
+                .is_some()
+            {
+                return Err("duplicate registered lifecycle setting".into());
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn apply_lifecycle_value(
+    profile: &desktop_pet_contracts::ProfileStore,
+    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+    selection: &desktop_pet_contracts::ObservationSelection,
+    key: &str,
+    value: bool,
+) -> Result<(), String> {
+    if key == "auto_start" {
+        return lifecycle::update_setting(profile, extensions, LifecycleSetting::AutoStart, value)
+            .map(|_| ());
+    }
+    let mut owner = None;
+    for extension in extensions {
+        if extension
+            .settings(profile, selection, "en")?
+            .iter()
+            .any(|setting| setting.key == key)
+        {
+            if owner.replace(extension).is_some() {
+                return Err("duplicate registered lifecycle setting".into());
+            }
+        }
+    }
+    owner
+        .ok_or_else(|| format!("unknown lifecycle setting: {key}"))?
+        .apply_setting(profile, key, value)
+}
+
+pub(crate) fn access_registered_lifecycle(
+    paths: &Paths,
+    change: Option<(&str, bool)>,
+    composition: &crate::Composition,
+) -> Result<Map<String, Value>, String> {
+    if control_socket_is_live(&paths.control_socket, CLIENT_TIMEOUT) {
+        let request = LifecycleRequest {
+            version: PROTOCOL_VERSION,
+            kind: "lifecycle".into(),
+            operation: if change.is_some() { "set" } else { "get" }.into(),
+            key: change.map(|(key, _)| key.into()),
+            value: change.map(|(_, value)| value),
+        };
+        let frame = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        let reply = send_raw_frame(
+            &paths.control_socket,
+            &frame,
+            CLIENT_TIMEOUT,
+            MAX_FRAME_BYTES,
+        )?;
+        let reply: LifecycleReply = serde_json::from_slice(&reply).map_err(|e| e.to_string())?;
+        return match (reply.ok, reply.settings, reply.error) {
+            (true, Some(settings), None)
+                if reply.version == PROTOCOL_VERSION && reply.kind == "lifecycle" =>
+            {
+                Ok(settings)
+            }
+            (false, None, Some(error)) => Err(error),
+            _ => Err("invalid registered lifecycle reply".into()),
+        };
+    }
+    let guard = Arc::new(crate::cli::acquire_lock_until(
+        paths,
+        Instant::now() + crate::cli::STARTUP_TIMEOUT,
+    )?);
+    if control_socket_is_live(&paths.control_socket, Duration::from_millis(150))
+        || lifecycle::startup_pending(&paths.config_dir)?
+    {
+        return Err("profile became active while accessing lifecycle settings".into());
+    }
+    let profile = desktop_pet_contracts::ProfileStore::with_lock(&paths.config_dir, guard)?;
+    if change.is_some() {
+        start_allowed(
+            &InstallOrigin::Unknown {
+                reason: "offline lifecycle settings".into(),
+            },
+            &paths.state_dir,
+            None,
+            None,
+        )?;
+    }
+    composition.configure_profile(profile.clone())?;
+    let selection = Preferences::load(&paths.config_dir)?.observation_host();
+    if let Some((key, value)) = change {
+        apply_lifecycle_value(
+            &profile,
+            &composition.extensions.lifecycle,
+            &selection,
+            key,
+            value,
+        )?;
+    }
+    lifecycle_values(&profile, &composition.extensions.lifecycle, &selection)
 }
 
 pub(crate) fn set_lifecycle_setting(
     paths: &Paths,
+    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
     key: LifecycleSetting,
     value: bool,
 ) -> Result<LifecycleSettings, String> {
-    access_lifecycle_settings(paths, Some((key, value)))
-}
-
-fn register_endpoint(inner: &ControlInner, endpoint: PathBuf) -> Result<(), String> {
-    if !lock_unpoisoned(&inner.shared)
-        .observation_mode()
-        .supports_herdr()
-    {
-        return Err("Herdr endpoint registration is unavailable in Tern mode".into());
-    }
-    let canonical_key = socket::canonical_endpoint(&endpoint)?;
-    let _write_guard = lock_unpoisoned(&inner.lifecycle_writes);
-    mutation_admission(inner)?;
-    let was_registered = lock_unpoisoned(&inner.registered).contains(&canonical_key);
-    // Even registered endpoints may have since been disabled by the host.
-    {
-        let watchers = lock_unpoisoned(&inner.watchers);
-        watchers.register(canonical_key.clone())?;
-    }
-    if !was_registered {
-        lifecycle::add_endpoint(&inner.paths.config_dir, &canonical_key)?;
-        lock_unpoisoned(&inner.registered).insert(canonical_key);
-    }
-    Ok(())
+    access_lifecycle_settings(paths, extensions, Some((key, value)))
 }
 
 struct BoundedJson {
@@ -2482,59 +2988,42 @@ pub fn send_command(
 
     let length = read_frame(&mut stream, &mut response, deadline)
         .map_err(|error| format!("cannot read control response: {error}"))?;
-    serde_json::from_slice(&response[..length])
-        .map_err(|error| format!("invalid control response: {error}"))
-}
-pub(crate) fn decode_tern_exchange_request(frame: &[u8]) -> Result<TernExchangeRequest, String> {
-    // Socket framing removes LF/CRLF; stdin may still include that terminator.
-    let frame = match frame.strip_suffix(b"\n") {
-        Some(frame) => frame.strip_suffix(b"\r").unwrap_or(frame),
-        None => frame,
+    reject_duplicate_json_keys(&response[..length])?;
+    let reply: ControlResponse = serde_json::from_slice(&response[..length])
+        .map_err(|error| format!("invalid control response: {error}"))?;
+    #[cfg(desktop_pet_legacy)]
+    let reply = {
+        let mut reply = reply;
+        reply.observation_mode = desktop_pet_contracts::ObservationSelection::migrate_legacy_input(
+            Some(&reply.observation_mode),
+        )?
+        .as_str()
+        .into();
+        reply
     };
-    if frame.len() > MAX_EXCHANGE_BYTES {
-        return Err("Tern exchange request JSON exceeds 256 KiB".into());
-    }
-    reject_duplicate_json_keys(frame).map_err(|error| format!("invalid Tern exchange: {error}"))?;
-    let request: TernExchangeRequest =
-        serde_json::from_slice(frame).map_err(|error| format!("invalid Tern exchange: {error}"))?;
-    Ok(request)
+    Ok(reply)
 }
-
-pub(crate) fn send_tern_exchange(
+pub(crate) fn send_raw_frame(
     socket_path: &Path,
-    request: &TernExchangeRequest,
+    frame: &[u8],
     timeout: Duration,
-) -> Result<TernExchangeReply, String> {
-    if socket_path.as_os_str().is_empty() {
-        return Err("control socket path is empty".into());
-    }
-    let mut bytes = serde_json::to_vec(request)
-        .map_err(|error| format!("cannot encode Tern exchange: {error}"))?;
-    if bytes.len() > MAX_EXCHANGE_BYTES {
-        return Err("Tern exchange request JSON exceeds 256 KiB".into());
-    }
-    bytes.push(b'\n');
+    response_limit: usize,
+) -> Result<Vec<u8>, String> {
+    reject_duplicate_json_keys(frame)?;
     let deadline = Instant::now() + timeout;
     let mut stream = connect_private_socket(socket_path, deadline)?;
+    let mut bytes = frame.to_owned();
+    if bytes.last() != Some(&b'\n') {
+        bytes.push(b'\n');
+    }
     write_frame(&mut stream, &bytes, deadline)
-        .map_err(|error| format!("cannot send Tern exchange: {error}"))?;
-    let frame = read_client_frame(&mut stream, deadline, MAX_RESPONSE_BYTES)
-        .map_err(|error| format!("cannot read Tern exchange: {error}"))?;
-    reject_duplicate_json_keys(&frame)
-        .map_err(|error| format!("invalid Tern exchange response: {error}"))?;
-    let reply: TernExchangeReply = serde_json::from_slice(&frame)
-        .map_err(|error| format!("invalid Tern exchange response: {error}"))?;
-    if reply.instance_id.is_empty()
-        || (reply.ok
-            && (reply.error.is_some() || reply.error_code.is_some() || reply.generation == 0))
-        || (!reply.ok
-            && (reply.error.as_deref().is_none_or(str::is_empty)
-                || reply.error.as_ref().is_some_and(|error| error.len() > 4096)
-                || reply.error_code.is_none()
-                || reply.generation != 0
-                || reply.command.is_some()))
-    {
-        return Err("invalid Tern exchange response fields".into());
+        .map_err(|e| format!("cannot send integration request: {e}"))?;
+    let mut reply = read_client_frame(&mut stream, deadline, response_limit)
+        .map_err(|e| format!("cannot read integration reply: {e}"))?;
+    reject_duplicate_json_keys(&reply)?;
+    reply.push(b'\n');
+    if reply.len() > response_limit {
+        return Err("integration reply exceeds frame bound".into());
     }
     Ok(reply)
 }
@@ -3017,40 +3506,49 @@ mod tests {
     use super::*;
     use crate::character_types::{CharacterRef, PackRecord};
     #[test]
-    fn tern_exchange_rejects_nested_duplicate_keys_before_dispatch() {
-        let duplicate = br#"{"version":1,"kind":"tern","window":"w","epoch":1,"sequence":1,"instance_id":null,"agents":[{"pane":"p","pane":"other","title":"a","cwd":"/tmp","session_id":null,"session_label":null,"tab_id":null,"tab_label":null,"state":"idle","delivery_error":null}],"results":[]}"#;
-        assert!(decode_tern_exchange_request(duplicate).is_err());
-        let oversized = vec![b' '; MAX_EXCHANGE_BYTES + 1];
-        assert!(decode_tern_exchange_request(&oversized).is_err());
+    fn frame_budget_counts_both_crlf_bytes_before_dispatch() {
+        let wire = b"{\"kind\":\"inventory\"}\r\n";
+        let (mut peer, mut server) = UnixStream::pair().expect("frame pair");
+        peer.write_all(wire).expect("frame write");
+        server
+            .set_nonblocking(true)
+            .expect("nonblocking frame read");
+        let (frame, count) =
+            read_client_frame_with_size(&mut server, Instant::now() + CLIENT_TIMEOUT, wire.len())
+                .expect("exact bound");
+        assert_eq!(count, wire.len());
+        assert_eq!(frame, b"{\"kind\":\"inventory\"}");
+        let (mut peer, mut server) = UnixStream::pair().expect("oversized frame pair");
+        peer.write_all(wire).expect("oversized frame write");
+        server
+            .set_nonblocking(true)
+            .expect("nonblocking oversized read");
+        assert!(read_client_frame_with_size(
+            &mut server,
+            Instant::now() + CLIENT_TIMEOUT,
+            wire.len() - 1
+        )
+        .is_err());
     }
 
     #[test]
-    fn ready_reports_requested_registered_endpoint_not_primary_display() {
-        let primary = socket::canonical_endpoint(Path::new("/tmp/herdr-primary.sock")).unwrap();
-        let secondary = socket::canonical_endpoint(Path::new("/tmp/herdr-secondary.sock")).unwrap();
+    fn integration_frames_reject_nested_duplicate_keys_before_dispatch() {
+        let duplicate = br#"{"kind":"inventory","hosts":[{"id":"a","id":"b"}]}"#;
+        assert!(reject_duplicate_json_keys(duplicate).is_err());
+        assert!(
+            reject_duplicate_json_keys(br#"{"kind":"inventory","hosts":[{"id":"a"}]}"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn zero_integration_readiness_has_no_host_authority() {
         let shared = Arc::new(Mutex::new(AppState::new()));
-        lock_unpoisoned(&shared).set_update_context(UpdateContext {
-            executable: PathBuf::from("/tmp/unused-executable"),
-            version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: "ready-fixture".into(),
-            config_dir: PathBuf::from("/tmp/unused-profile"),
-            host_plugin_config_dir: None,
-            state_dir: PathBuf::from("/tmp/unused-state"),
-            herdr_socket: primary.clone(),
-            running: herdr_update_coordinator::ExecutableIdentity {
-                path: PathBuf::from("/tmp/unused-executable"),
-                sha256: "a".repeat(64),
-            },
-            running_origin: None,
-            assets_override: None,
-            environment: Default::default(),
-            locale: "en".into(),
-        });
         lock_unpoisoned(&shared).set_ui_ready();
         let inner = ControlInner {
             stopping: AtomicBool::new(false),
-            watchers: Arc::new(Mutex::new(Watchers::new(Arc::clone(&shared)))),
             shared,
+            extensions: Vec::new(),
+            status_fields: Vec::new(),
             packs: PackService::new(
                 PathBuf::from("/tmp/unused-profile"),
                 PathBuf::from("/tmp/unused-assets"),
@@ -3062,65 +3560,30 @@ mod tests {
                 control_socket: PathBuf::from("/tmp/unused-control.sock"),
                 log_file: PathBuf::from("/tmp/unused-log"),
             },
-            endpoint: Some(primary.clone()),
-            registered: Mutex::new(HashSet::from([primary.clone(), secondary.clone()])),
             lifecycle_writes: Mutex::new(()),
             executable_path: PathBuf::from("/tmp/unused-executable"),
             pid: std::process::id(),
             clients: Mutex::new(Vec::new()),
             active_clients: Mutex::new(0),
         };
-        let secondary_alias = PathBuf::from("/tmp/../tmp/herdr-secondary.sock");
-        let accepted = dispatch(&inner, "ready", Some(secondary_alias));
-        assert!(accepted.ok && accepted.ready && accepted.registration_accepted);
-        assert_eq!(accepted.herdr_socket, primary.display().to_string());
-        assert_eq!(
-            accepted.host_connections,
-            crate::sources::HostConnections::default()
-        );
-        let missing = dispatch(
-            &inner,
-            "ready",
-            Some(PathBuf::from("/tmp/not-registered.sock")),
-        );
-        assert!(missing.ok && missing.ready && !missing.registration_accepted);
-        let invalid = dispatch(&inner, "ready", Some(PathBuf::from("relative.sock")));
-        assert!(!invalid.ok && !invalid.registration_accepted);
-        {
-            let mut state = lock_unpoisoned(&inner.shared);
-            let source = primary.to_string_lossy().into_owned();
-            assert!(state.begin_source(source.clone(), 1));
-            let empty: [crate::session::AgentRecord; 0] = [];
-            assert!(state.publish_source_snapshot(
-                &source,
-                1,
-                empty.iter(),
-                crate::state::SourceCounts::default(),
-                Arc::from([]),
-                &[],
-                Instant::now(),
-            ));
-        }
-        let connected = ControlResponse::status("status", &inner);
-        assert_eq!(connected.host_connections.herdr, 1);
-        lock_unpoisoned(&inner.shared)
-            .set_observation_mode(herdr_update_coordinator::ObservationMode::Tern);
-        let dormant = ControlResponse::status("status", &inner);
-        assert_eq!(dormant.observation_mode, "tern");
-        assert_eq!(dormant.host_connections.herdr, 0);
-        assert_eq!(dormant.herdr_socket, primary.display().to_string());
-        assert!(!dormant.shutdown);
+        let ready = dispatch(&inner, "ready", None);
+        assert!(ready.ok && ready.ready && ready.control_ready);
+        assert_eq!(ready.observation_mode, "auto");
+        assert!(ready.host_connections.is_empty());
+        assert!(!ready.data_connected && !ready.shutdown);
+        assert!(!dispatch(&inner, "register", None).ok);
+        assert!(!dispatch(&inner, "ready", Some(PathBuf::from("/tmp/host.sock"))).ok);
     }
 
     #[test]
     fn updater_plan_rejects_other_profile_image_assets_and_source() {
-        use herdr_update_coordinator::{ExecutableIdentity, UpdateAction};
+        use desktop_pet_update_coordinator::{ExecutableIdentity, UpdateAction};
         use std::collections::BTreeMap;
         let running = ExecutableIdentity {
-            path: PathBuf::from("/tmp/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+            path: PathBuf::from("/tmp/DesktopPet.app/Contents/MacOS/desktop-pet"),
             sha256: "a".repeat(64),
         };
-        let origin = InstallOrigin::Local {
+        let origin = InstallOrigin::Source {
             root: PathBuf::from("/tmp/local-checkout"),
         };
         let context = UpdateContext {
@@ -3128,9 +3591,11 @@ mod tests {
             version: "0.2.0".into(),
             instance_id: "daemon-1".into(),
             config_dir: PathBuf::from("/tmp/profile/config"),
+            #[cfg(desktop_pet_legacy)]
             host_plugin_config_dir: None,
-            state_dir: PathBuf::from("/tmp/profile/state"),
+            #[cfg(desktop_pet_legacy)]
             herdr_socket: PathBuf::from("/tmp/profile/herdr.sock"),
+            state_dir: PathBuf::from("/tmp/profile/state"),
             running: running.clone(),
             running_origin: Some(Box::new(origin.clone())),
             assets_override: Some(PathBuf::from("/tmp/profile/assets")),
@@ -3142,7 +3607,7 @@ mod tests {
             operation_id: "operation-1".into(),
             context: context.clone(),
             origin,
-            action: UpdateAction::LocalRebuild,
+            action: UpdateAction::SourceRebuild,
             running,
             candidate: None,
             target: None,
@@ -3155,7 +3620,7 @@ mod tests {
         tampered.context.assets_override = None;
         assert!(verify_running_plan(&tampered, &context).is_err());
         tampered = plan.clone();
-        tampered.origin = InstallOrigin::Local {
+        tampered.origin = InstallOrigin::Source {
             root: PathBuf::from("/tmp/other-checkout"),
         };
         assert!(verify_running_plan(&tampered, &context).is_err());
@@ -3560,7 +4025,7 @@ mod tests {
             r#"{"version":1,"kind":"lifecycle","operation":"set","key":"auto_start","value":false,"value":true}"#,
             r#"{"version":1,"kind":"lifecycle","operation":"set","key":"auto_start","value":false,"unexpected":0}"#,
             r#"{"version":1,"kind":"lifecycle","operation":"set","key":"auto_start","value":"off"}"#,
-            r#"{"version":1,"kind":"lifecycle","operation":"set","key":"enabled","value":false}"#,
+            r#"{"version":1,"kind":"lifecycle","operation":"set","key":"","value":false}"#,
             r#"{"version":1,"kind":"lifecycle","operation":"set","key":"auto_start"}"#,
             r#"{"version":1,"kind":"lifecycle","operation":"get","key":"auto_start"}"#,
             r#"{"version":2,"kind":"lifecycle","operation":"get"}"#,
@@ -3573,6 +4038,120 @@ mod tests {
                 .and_then(|request| validate_lifecycle_request(&request));
             assert!(parsed.is_err(), "{frame}");
         }
+    }
+
+    #[test]
+    fn lifecycle_dynamic_keys_require_one_admitted_owner_before_mutation() {
+        use desktop_pet_contracts::{
+            LifecycleExtension, LifecycleSettingView, ObservationSelection, ProfileStore,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct SettingOwner {
+            calls: AtomicUsize,
+        }
+        impl LifecycleExtension for SettingOwner {
+            fn provider(&self) -> &'static str {
+                "fixture"
+            }
+            fn should_exit(&self, _selection: &ObservationSelection, _now: Instant) -> bool {
+                false
+            }
+            fn settings(
+                &self,
+                store: &ProfileStore,
+                selection: &ObservationSelection,
+                _locale: &str,
+            ) -> Result<Vec<LifecycleSettingView>, String> {
+                if selection != &ObservationSelection::Provider(self.provider().into()) {
+                    return Ok(Vec::new());
+                }
+                let (saved, _) = store.read_object_with_presence()?;
+                let value = desktop_pet_contracts::profile_store::setting_bool(
+                    store.config_dir(),
+                    &saved,
+                    "fixture_policy",
+                )?
+                .unwrap_or(true);
+                Ok(vec![LifecycleSettingView {
+                    key: "enabled".into(),
+                    label: "Fixture policy".into(),
+                    help: String::new(),
+                    value,
+                    enabled: true,
+                }])
+            }
+            fn apply_setting(
+                &self,
+                store: &ProfileStore,
+                key: &str,
+                value: bool,
+            ) -> Result<(), String> {
+                assert_eq!(key, "enabled");
+                store.update(|saved, _| {
+                    saved.insert("fixture_policy".into(), Value::Bool(value));
+                    Ok(())
+                })?;
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let frame =
+            br#"{"version":1,"kind":"lifecycle","operation":"set","key":"enabled","value":false}"#;
+        reject_duplicate_json_keys(frame).unwrap();
+        let request: LifecycleRequest = serde_json::from_slice(frame).unwrap();
+        validate_lifecycle_request(&request).unwrap();
+        let key = request.key.as_deref().unwrap();
+        let value = request.value.unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let profile = ProfileStore::acquire(config.path(), state.path()).unwrap();
+        let selection = ObservationSelection::Provider("fixture".into());
+        let owner = Arc::new(SettingOwner {
+            calls: AtomicUsize::new(0),
+        });
+        let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner.clone()];
+        let before = profile.read_object_with_presence().unwrap();
+
+        assert!(apply_lifecycle_value(&profile, &[], &selection, key, value).is_err());
+        assert!(apply_lifecycle_value(
+            &profile,
+            &extensions,
+            &ObservationSelection::Provider("other".into()),
+            key,
+            value,
+        )
+        .is_err());
+        assert!(
+            apply_lifecycle_value(&profile, &extensions, &selection, "unknown_setting", value)
+                .is_err()
+        );
+        let duplicate = Arc::new(SettingOwner {
+            calls: AtomicUsize::new(0),
+        });
+        let duplicate_extensions: Vec<Arc<dyn LifecycleExtension>> =
+            vec![owner.clone(), duplicate.clone()];
+        assert!(lifecycle_values(&profile, &duplicate_extensions, &selection).is_err());
+        assert!(
+            apply_lifecycle_value(&profile, &duplicate_extensions, &selection, key, value).is_err()
+        );
+        assert_eq!(profile.read_object_with_presence().unwrap(), before);
+        assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(duplicate.calls.load(Ordering::SeqCst), 0);
+
+        apply_lifecycle_value(&profile, &extensions, &selection, key, value).unwrap();
+        assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lifecycle_values(&profile, &extensions, &selection)
+                .unwrap()
+                .get(key),
+            Some(&Value::Bool(false))
+        );
+        let (saved, present) = profile.read_object_with_presence().unwrap();
+        assert!(present);
+        assert_eq!(saved.get("fixture_policy"), Some(&Value::Bool(false)));
+        assert!(!saved.contains_key("enabled"));
     }
 
     fn list_reply(packs: Vec<PackRecord>) -> PackReplyEnvelope {

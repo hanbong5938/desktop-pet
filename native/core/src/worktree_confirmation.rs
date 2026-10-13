@@ -1,5 +1,5 @@
 use crate::automation::SessionIdentity;
-use crate::session_view::WorktreeRemoveTarget;
+use desktop_pet_contracts::WorktreeRemoveTarget;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -164,8 +164,8 @@ fn random_token() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::WorkspaceWorktreeInfo;
-    use crate::session_view::SessionKey;
+    use desktop_pet_contracts::SessionKey;
+    use desktop_pet_contracts::WorkspaceWorktreeInfo;
     use serde_json::json;
     use std::sync::Arc;
 

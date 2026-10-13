@@ -8,7 +8,15 @@ fn main() {
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let native_root = manifest_dir.parent().expect("core manifest parent");
     let project_root = native_root.parent().expect("native workspace parent");
-    println!("cargo:rerun-if-env-changed=HERDR_RIG_JS_RUNTIME");
+    println!("cargo:rerun-if-env-changed=DESKTOP_PET_RIG_JS_RUNTIME");
+    println!("cargo:rerun-if-env-changed=DESKTOP_PET_DISTRIBUTION");
+    println!("cargo:rustc-check-cfg=cfg(desktop_pet_legacy)");
+    let distribution = env::var("DESKTOP_PET_DISTRIBUTION").unwrap_or_else(|_| "neutral".into());
+    match distribution.as_str() {
+        "neutral" => {}
+        "legacy-0.3.7" => println!("cargo:rustc-cfg=desktop_pet_legacy"),
+        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.7"),
+    }
     for path in [
         "native/core/build.rs",
         "native/rig/RigBridge.h",
@@ -43,11 +51,12 @@ fn main() {
         return;
     }
     let profile = env::var("PROFILE").expect("PROFILE");
-    let runtime = env::var_os("HERDR_RIG_JS_RUNTIME").unwrap_or_else(|| OsString::from("bun"));
+    let runtime =
+        env::var_os("DESKTOP_PET_RIG_JS_RUNTIME").unwrap_or_else(|| OsString::from("bun"));
     let status = Command::new(&runtime)
         .arg(project_root.join("scripts/build-rig-native.mjs"))
         .current_dir(project_root)
-        .env("HERDR_RIG_BUILD_PROFILE", &profile)
+        .env("DESKTOP_PET_RIG_BUILD_PROFILE", &profile)
         .env_remove("RIG_PROBE_FAULTS")
         .stdin(Stdio::null())
         .status()
@@ -58,9 +67,13 @@ fn main() {
             )
         });
     assert!(status.success(), "native rig build failed with {status}");
-    let output = native_root.join("target/rig-native").join(profile);
+    let output = native_root
+        .join("target")
+        .join(distribution)
+        .join("rig-native")
+        .join(profile);
     println!(
-        "cargo:rustc-env=HERDR_RIG_LIMITS_RS={}",
+        "cargo:rustc-env=DESKTOP_PET_RIG_LIMITS_RS={}",
         output.join("Resources/rig/RigLimits.rs").display()
     );
     let dylib = output.join("libherdr_rig.dylib");
@@ -69,9 +82,12 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=herdr_rig");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", output.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
-    println!("cargo:rustc-env=HERDR_RIG_NATIVE_DYLIB={}", dylib.display());
     println!(
-        "cargo:rustc-env=HERDR_RIG_DECODE_WORKER={}",
+        "cargo:rustc-env=DESKTOP_PET_RIG_NATIVE_DYLIB={}",
+        dylib.display()
+    );
+    println!(
+        "cargo:rustc-env=DESKTOP_PET_RIG_DECODE_WORKER={}",
         worker.display()
     );
 }
