@@ -1,4 +1,5 @@
 use crate::{ObservationSelection, ProfileStore};
+use serde_json::{Map, Value};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,6 +71,55 @@ pub struct LifecycleSettingView {
     pub enabled: bool,
 }
 
+/// Adapter-owned action presentation. Copy text is data, not a shell command
+/// for core to execute. A disabled action must not be offered as actionable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleActionView {
+    pub key: String,
+    pub label: String,
+    pub help: String,
+    pub enabled: bool,
+    pub copy_text: Option<String>,
+}
+
+/// A registered option within the common `preferences set` command, distinct
+/// from launch options. Names include their leading `--`; composition rejects
+/// collisions with common options and other owners.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreferencePatchOption {
+    pub name: &'static str,
+    pub takes_value: bool,
+    pub repeatable: bool,
+    pub help: &'static str,
+}
+
+/// One parsed adapter preference option. Core validates arity/repetition from
+/// the registration and preserves order; the adapter owns meaning, conflicting
+/// options, values, and conversion to its opaque preference patch fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreferencePatchArgument {
+    pub name: String,
+    pub value: Option<OsString>,
+}
+
+/// Validated adapter patch with any required authority snapshot captured
+/// before the profile writer transaction. Core stages all owners into one
+/// candidate and retains its existing revision/CAS and operation semantics.
+pub trait PreparedPreferencePatch: Send + Sync {
+    /// Pure candidate transformation: only adapter-owned fields may change,
+    /// and unknown fields must survive. No ProfileStore reentry, lock acquisition,
+    /// host I/O, or live mutation. Err discards the entire candidate, including
+    /// common settings, without a write or a call to committed.
+    fn apply(&self, candidate: &mut Map<String, Value>) -> Result<(), String>;
+
+    /// Called only after the sole atomic preference save succeeds and after the
+    /// writer/domain locks are released. Apply live policy using the actual
+    /// saved object, obtaining RuntimePort access here if needed. A failure is
+    /// a postcommit error, not permission to roll back or report an unsaved
+    /// candidate; the caller retains the committed revision/result semantics.
+    fn committed(&self, saved: &Map<String, Value>) -> Result<(), String>;
+}
+
 /// Core owns auto_start only. Adapter-owned lifecycle fields and defaults are
 /// interpreted here and persisted through the SAME ProfileStore as core.
 /// should_exit implements host-specific exit policy without a concrete host
@@ -84,6 +134,71 @@ pub trait LifecycleExtension: Send + Sync {
         locale: &str,
     ) -> Result<Vec<LifecycleSettingView>, String>;
     fn apply_setting(&self, store: &ProfileStore, key: &str, value: bool) -> Result<(), String>;
+    /// Returns only real adapter actions. Core may copy copy_text, but must
+    /// never interpret it as executable host behavior.
+    fn actions(
+        &self,
+        _store: &ProfileStore,
+        _selection: &ObservationSelection,
+        _locale: &str,
+    ) -> Result<Vec<LifecycleActionView>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Opaque top-level preference patch keys owned by this adapter. Core
+    /// routes only registered keys and rejects unowned/duplicate ownership;
+    /// it never interprets adapter settings or reconstructs their disk object.
+    fn preference_patch_keys(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Pure projection from saved disk layout to registered opaque wire patch
+    /// fields. Core does not know the adapter's storage schema. No store/domain
+    /// reentry, lock acquisition, or host I/O; preserve validation errors rather
+    /// than inventing defaults for malformed settings.
+    fn preference_snapshot(
+        &self,
+        _saved: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, String> {
+        if self.preference_patch_keys().is_empty() {
+            Ok(Map::new())
+        } else {
+            Err(format!(
+                "{} does not support preference snapshots",
+                self.provider()
+            ))
+        }
+    }
+
+    fn preference_options(&self) -> &'static [PreferencePatchOption] {
+        &[]
+    }
+
+    /// Converts registered CLI options to the same opaque fields accepted by
+    /// the preference control request. Unsupported extensions reject, rather
+    /// than consuming options and reporting a successful no-op.
+    fn parse_preference_options(
+        &self,
+        _arguments: &[PreferencePatchArgument],
+    ) -> Result<Map<String, Value>, String> {
+        Err(format!(
+            "{} does not support preference options",
+            self.provider()
+        ))
+    }
+
+    /// Runs outside the writer/domain locks. Validate the complete owner patch
+    /// and capture authority here; apply then operates only on the caller's
+    /// loaded candidate. No persistence or live policy changes happen here.
+    fn prepare_preference_patch(
+        &self,
+        _patch: &Map<String, Value>,
+    ) -> Result<Box<dyn PreparedPreferencePatch>, String> {
+        Err(format!(
+            "{} does not support preference patches",
+            self.provider()
+        ))
+    }
     fn should_exit(&self, selection: &ObservationSelection, now: Instant) -> bool;
 }
 

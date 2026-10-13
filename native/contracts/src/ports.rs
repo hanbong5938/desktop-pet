@@ -31,7 +31,39 @@ pub trait DomainAccess {
     fn source_generation(&self, source: &str) -> Option<u64>;
     fn retired_source_generation(&self, source: &str) -> Option<u64>;
     fn source_descriptor(&self, source: &str) -> Option<&SourceDescriptor>;
+    /// Updates presentation data only when the source generation still matches.
+    /// Never changes source identity, provider, locality, capabilities, observed
+    /// session status/outcomes, or admission authority. Synchronizing session
+    /// presentation labels is permitted. False means unsupported/missing/stale,
+    /// with no mutation; a successful implementation preserves authority.
+    fn set_source_label(&mut self, _source: &str, _generation: u64, _label: &str) -> bool {
+        false
+    }
+    /// Changes observation visibility only when the source generation matches.
+    /// Hidden sources continue ingesting snapshots and retain the same session
+    /// keys. Core excludes them from observed presentation, aggregates, action
+    /// admission, and reactions without changing descriptor authority, source
+    /// generation, or live connection counts. Provider disable still retires;
+    /// hiding is not retirement. False means unsupported/missing/stale and
+    /// performs no mutation.
+    fn set_source_observed(&mut self, _source: &str, _generation: u64, _observed: bool) -> bool {
+        false
+    }
     fn source_admission(&self, source: &str, generation: u64) -> SourceAdmission;
+    /// Pressure-only admission check, BEFORE the requesting adapter takes its
+    /// registry guard. A shared-domain implementation may ask all registered
+    /// adapters to reclaim expired sources when admission is Capacity, then
+    /// recheck admission. No host I/O or RuntimePort reentry is permitted.
+    /// Adapters that already inspected a registry must release it first and
+    /// reacquire only after this call, in the same domain transaction.
+    fn ensure_source_capacity(
+        &mut self,
+        source: &str,
+        generation: u64,
+        _now: Instant,
+    ) -> SourceAdmission {
+        self.source_admission(source, generation)
+    }
     /// Rechecks both generation and offline state before removing. The caller
     /// holds its registry guard after the domain lock and has checked no pending
     /// work; false leaves a mismatched/live source untouched.
@@ -93,6 +125,15 @@ pub trait Integration: Send + Sync {
     fn id(&self) -> &'static str;
     fn start(&self, runtime: Arc<dyn RuntimePort>) -> Result<(), String>;
     fn tick(&self, now: Instant);
+    /// Already inside the domain transaction, with no requester registry held.
+    /// Called only under shared source-capacity pressure. Lock domain -> own
+    /// registry, reclaim only owned expired/offline/no-pending sources, and use
+    /// remove_offline_source to recheck their current generation/offline state.
+    /// Return actual removals; zero truthfully means no eligible sources.
+    /// No RuntimePort reentry, host I/O, or copied candidate collection.
+    fn reclaim_expired_sources(&self, _now: Instant, _domain: &mut dyn DomainAccess) -> usize {
+        0
+    }
     /// Already inside with_domain. Must not reenter RuntimePort.
     fn set_enabled(&self, enabled: bool, domain: &mut dyn DomainAccess);
     /// Already inside with_domain. Must not reenter RuntimePort.

@@ -194,10 +194,10 @@ impl Drop for LifecycleLock {
     }
 }
 
-/// A shared lifecycle object store, not a settings schema. Unknown keys survive
-/// every update because the callback mutates the object read under the guard.
-/// Core and adapters must clone this store or its lifecycle guard, never create
-/// independent in-process writer locks for the same profile.
+/// A shared profile writer and lifecycle object store, not a settings schema.
+/// Unknown keys survive lifecycle updates because the callback mutates the
+/// object read under the guard. Core and adapters must clone this store or its
+/// lifecycle guard, never create independent writer locks for the same profile.
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
     config_dir: PathBuf,
@@ -224,13 +224,34 @@ impl ProfileStore {
         &self.lock
     }
 
-    pub fn read_object_with_presence(&self) -> Result<(Map<String, Value>, bool), String> {
+    /// Serializes a complete owner-defined read/validate/atomic-write
+    /// transaction, including files other than lifecycle.json. This uses the
+    /// same mutex as lifecycle reads and updates, even across store wrappers
+    /// sharing the lifecycle guard.
+    ///
+    /// Poison returns Err without invoking the callback. The store performs no
+    /// implicit write or rollback: validate and stage all changes before the
+    /// callback's final atomic write so a rejected operation writes nothing.
+    /// A panic poisons the writer; it is never silently recovered.
+    ///
+    /// No reentry: do not call this method, read_object_with_presence, or update
+    /// on any store sharing the guard from the callback. Use low-level file
+    /// helpers instead. Do not acquire the domain lock or perform host I/O
+    /// while holding the writer; live application belongs after commit.
+    pub fn with_writer_lock<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
         let _guard = self
             .lock
             .writes
             .lock()
             .map_err(|_| "profile writer lock poisoned".to_owned())?;
-        read_object_with_presence(&self.config_dir)
+        operation()
+    }
+
+    pub fn read_object_with_presence(&self) -> Result<(Map<String, Value>, bool), String> {
+        self.with_writer_lock(|| read_object_with_presence(&self.config_dir))
     }
 
     /// The callback changes only its owner's keys. Err or panic never writes
@@ -240,15 +261,12 @@ impl ProfileStore {
         &self,
         operation: impl FnOnce(&mut Map<String, Value>, bool) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _guard = self
-            .lock
-            .writes
-            .lock()
-            .map_err(|_| "profile writer lock poisoned".to_owned())?;
-        let (mut object, exists) = read_object_with_presence(&self.config_dir)?;
-        let result = operation(&mut object, exists)?;
-        write_object(&self.config_dir, object)?;
-        Ok(result)
+        self.with_writer_lock(|| {
+            let (mut object, exists) = read_object_with_presence(&self.config_dir)?;
+            let result = operation(&mut object, exists)?;
+            write_object(&self.config_dir, object)?;
+            Ok(result)
+        })
     }
 }
 
