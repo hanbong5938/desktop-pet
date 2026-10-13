@@ -2496,6 +2496,8 @@ mod tern_control_boundary {
                         Err(error) => panic!("fake Herdr accept: {error}"),
                     }
                 };
+                // Accepted sockets can inherit the listener's nonblocking flag.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(REQUEST_TIMEOUT)).unwrap();
                 let mut line = String::new();
                 BufReader::new(&mut stream).read_line(&mut line).unwrap();
