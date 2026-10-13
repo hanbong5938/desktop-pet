@@ -22,13 +22,13 @@ The old updater must first receive a real legacy envelope from the **old Herdr r
 
 Check now alone changes nothing. Explicit Operation A consent authorizes only the exact bridge bytes. The old helper must observe the **actual bridge daemon's PID/image/version and same profile**, and complete A's terminal journal, lease and reservation release before B is enabled. A retains the old updater's rollback limitations; a successful A is not neutral migration.
 
-## Operation B: explicit bridge → neutral 0.4.0
+## Operation B: explicit bridge → neutral 0.4.1
 
 Only the separate **Migrate to Desktop Pet** consent authorizes B. It shows the authenticated source/target installation, both preserved profile paths, manager changes and exact legacy retirement. A verified already-installed neutral image may be reused rather than installing a second app.
 
 A staged, verified **protocol-4** helper executes `migrate-legacy --plan ABS`; it is not disguised as the bridge's paired protocol-3 helper. The version-1 `legacy_to_desktop_pet` plan records operation ID, authenticated source image/origin/profile/instance/stop-generation, neutral target release/image/origin and prior locator/default-profile record. Bridge-only bounded `legacy-migration` Prepare/Stop authorization does not change normal old protocol 3; neutral readiness uses normal protocol 4. Unresolved old operations, stale authorization, another live root-sharing profile or changed image/hash block before mutation.
 
-Stage and validate the neutral app **before** stopping the bridge. Quiesce every profile using the source root, stop the authorized bridge, atomically switch the locator and launch the exact neutral image with the same config/state. Verify actual PID/path/hash, `app_version:0.4.0`, protocol 4 / capability 2, preserved observation selection, same profile and real UI/control readiness. Before migration commit, target mutation remains gated: no new preference/schema/agent writes.
+Stage and validate the neutral app **before** stopping the bridge. Quiesce every profile using the source root, stop the authorized bridge, atomically switch the locator and launch the exact neutral image with the same config/state. The approved new bridge targets the separately published v0.4.1 source/release; until those assets and bridge are published, this route remains unavailable. Verify actual PID/path/hash, `app_version:0.4.1`, protocol 4 / capability 2, preserved observation selection, same profile and real UI/control readiness. Before migration commit, target mutation remains gated: no new preference/schema/agent writes. Earlier v0.4.0 runtime evidence remains historical rather than proof of this new public target.
 
 On readiness failure restore the exact bridge image and prior locator/default-profile record. Restart it only if no user Stop occurred and old authorization is still valid. **User Stop forbids target restart and rollback start.** If manager execution is Unknown, never rerun it automatically: preserve both images, signed evidence and journals for explicit reconciliation. Installed is not applied; native ready is not migration complete.
 
