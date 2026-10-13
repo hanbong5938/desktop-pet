@@ -195,7 +195,7 @@ fn state_root() -> PathBuf {
         .unwrap_or_else(|| env::temp_dir().join(format!("{CONFIG_ROOT_NAME}-state")))
 }
 
-fn plugin_config_dir() -> PathBuf {
+pub(crate) fn plugin_config_dir() -> PathBuf {
     config_root().join("plugins").join("config").join(PLUGIN_ID)
 }
 

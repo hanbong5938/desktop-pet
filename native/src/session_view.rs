@@ -128,6 +128,7 @@ pub(crate) struct SessionView {
     pub(crate) key: SessionKey,
     pub(crate) source_label: String,
     pub(crate) is_local: bool,
+    pub(crate) is_tern: bool,
     pub(crate) pane_id: String,
     pub(crate) status: AgentStatus,
     pub(crate) outcome: Option<AgentOutcome>,
@@ -244,6 +245,8 @@ struct SourceState {
     source_id: u64,
     generation: u64,
     label: String,
+    is_local: bool,
+    locality_initialized: bool,
     visible: bool,
     availability: Availability,
     records: BTreeMap<String, StoredRecord>,
@@ -356,6 +359,10 @@ impl SessionStore {
             let was_live = existing.availability == Availability::Live;
             existing.generation = generation;
             existing.availability = Availability::Offline;
+            if source.starts_with("tern:") {
+                existing.is_local = false;
+                existing.locality_initialized = false;
+            }
             for record in existing.records.values_mut() {
                 record.outcome = None;
                 record.accepted_report = None;
@@ -378,7 +385,10 @@ impl SessionStore {
             source: source.to_owned(),
             source_id,
             generation,
-            label: "Local".to_owned(),
+            label: tern_host_id(source).unwrap_or_else(|| "Local".to_owned()),
+            is_local: !source.starts_with("tern:")
+                && crate::sources::remote_machine_id(source).is_none(),
+            locality_initialized: !source.starts_with("tern:"),
             visible: true,
             availability: Availability::Offline,
             records: BTreeMap::new(),
@@ -672,7 +682,7 @@ impl SessionStore {
             .records
             .get(&key.terminal_id)
             .ok_or(PromptTargetError::Stale)?;
-        if crate::sources::remote_machine_id(&source.source).is_some() {
+        if !source.is_local {
             return Err(PromptTargetError::ReadOnly);
         }
         if source.availability != Availability::Live {
@@ -778,7 +788,29 @@ impl SessionStore {
         }
     }
 
+    /// Locality is fixed for one observation generation. New Tern generations
+    /// begin read-only until their validated metadata establishes permission.
+    pub(crate) fn set_locality(&mut self, source: &str, is_local: bool) -> bool {
+        let Some(index) = self.source_index(source) else {
+            return false;
+        };
+        let entry = &mut self.sources[index];
+        if entry.locality_initialized {
+            return entry.is_local == is_local;
+        }
+        entry.locality_initialized = true;
+        if entry.is_local != is_local {
+            entry.is_local = is_local;
+            self.bump_revision();
+        }
+        true
+    }
+
     pub(crate) fn set_label(&mut self, source: &str, label: &str) {
+        let fallback = (source.starts_with("tern:") && display_value(Some(label)).is_none())
+            .then(|| tern_host_id(source))
+            .flatten();
+        let label = fallback.as_deref().unwrap_or(label);
         if let Some(entry) = self.sources.iter_mut().find(|entry| entry.source == source) {
             if entry.label != label {
                 entry.label.clear();
@@ -851,7 +883,6 @@ impl SessionStore {
             .iter()
             .filter(|source| source.visible)
             .flat_map(|source| {
-                let is_local = crate::sources::remote_machine_id(&source.source).is_none();
                 source
                     .records
                     .iter()
@@ -861,7 +892,8 @@ impl SessionStore {
                             terminal_id,
                         },
                         source_label: &source.label,
-                        is_local,
+                        is_local: source.is_local,
+                        is_tern: source.source.starts_with("tern:"),
                         metadata: &record.metadata,
                     })
             })
@@ -1107,7 +1139,8 @@ impl SessionStore {
                 terminal_id: terminal_id.to_owned(),
             },
             source_label: source.label.clone(),
-            is_local: crate::sources::remote_machine_id(&source.source).is_none(),
+            is_local: source.is_local,
+            is_tern: source.source.starts_with("tern:"),
             pane_id: record.pane_id.clone(),
             status: record.status,
             outcome: record.outcome,
@@ -1168,6 +1201,7 @@ struct PresentationRow<'a> {
     key: PresentationKey<'a>,
     source_label: &'a str,
     is_local: bool,
+    is_tern: bool,
     metadata: &'a SessionMetadata,
 }
 
@@ -1236,9 +1270,12 @@ fn search_matches(
                 .all(|character| character.is_ascii_digit())
                 && contains(&format!("{} {}", text(locale, Message::Tab), tab.trim()))
         }))
-        || (crate::sources::remote_machine_id(&source.source).is_none()
+        || (source.source.starts_with("tern:") && contains(&display.context))
+        || (!source.source.starts_with("tern:")
+            && source.is_local
             && contains(session_local_source(locale)))
-        || (crate::sources::remote_machine_id(&source.source).is_some()
+        || (!source.source.starts_with("tern:")
+            && !source.is_local
             && display_value(Some(&source.label)).is_some_and(|label| contains(&label)))
 }
 
@@ -1296,7 +1333,32 @@ fn tab_location(locale: UiLocale, view: &PresentationRow<'_>) -> String {
     }
 }
 
+fn tern_host_id(source: &str) -> Option<String> {
+    let (_, encoded) = source.strip_prefix("tern:")?.split_once(':')?;
+    let mut host = String::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let digit = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        host.push(char::from(digit));
+    }
+    (!host.is_empty() && encoded.len() % 2 == 0).then_some(host)
+}
+
 fn card_source_label<'a>(locale: UiLocale, view: &'a PresentationRow<'_>) -> Cow<'a, str> {
+    if view.is_tern {
+        let label = display_value(Some(view.source_label)).unwrap_or_default();
+        let locality = text(
+            locale,
+            if view.is_local {
+                Message::TernHostLocal
+            } else {
+                Message::TernHostRemote
+            },
+        );
+        return Cow::Owned(format!("Tern · {label} · {locality}"));
+    }
     if view.is_local {
         Cow::Borrowed(session_local_source(locale))
     } else {
@@ -1317,6 +1379,7 @@ pub(crate) fn card_displays(locale: UiLocale, rows: &[SessionView]) -> Vec<CardD
             },
             source_label: &view.source_label,
             is_local: view.is_local,
+            is_tern: view.is_tern,
             metadata: &view.metadata,
         })
         .collect();
@@ -1560,6 +1623,277 @@ mod tests {
         row.metadata.cwd = Some(cwd.into());
         row.metadata.tab_label = Some("2".into());
         row
+    }
+
+    #[test]
+    fn tern_grace_removal_invalidates_selection_detail_cursor_and_filter_totals() {
+        use crate::automation::{PresentationTarget, SessionIdentity};
+        use crate::state::tests::{set_tern_test_last_seen, tern_test_request, tern_test_state};
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        use herdr_update_coordinator::ObservationMode;
+        use std::time::{Duration, Instant};
+
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let automation =
+            crate::automation::test_automation(PresentationTarget::from_scene(&state.scene()));
+        state.set_automation(automation);
+        for window in ["selected-offline", "surviving-live"] {
+            let mut inventory = tern_test_request(window);
+            inventory.hosts[0].agents[0].state = crate::tern::TernAgentState::Idle;
+            assert!(state.tern_exchange(inventory).ok);
+        }
+        let base = Instant::now();
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        set_tern_test_last_seen(&mut state, "selected-offline", None, base);
+        set_tern_test_last_seen(&mut state, "surviving-live", None, deadline);
+        let selected = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .into_iter()
+            .find(|row| row.metadata.title.as_deref() == Some("selected-offline"))
+            .unwrap()
+            .key;
+        let identity = SessionIdentity {
+            instance_id: "test".into(),
+            source_id: selected.source_id,
+            generation: selected.generation,
+            terminal_id: selected.terminal_id.clone(),
+        };
+        assert!(state.maintain_tern(base + FRESHNESS));
+        let options = SessionListOptions::with_filter(SessionFilter::Offline);
+        let retained = state.session_snapshot(&options, Some(&selected));
+        assert_eq!(retained.selected.as_ref(), Some(&selected));
+        assert_eq!(
+            (retained.total, retained.matched, retained.rows.len()),
+            (2, 1, 1)
+        );
+        assert_eq!(retained.status_summary.status, DisplayStatus::Offline);
+        assert_eq!(
+            state.automation_session_detail(&identity).unwrap()["availability"],
+            "offline"
+        );
+        let mut request = SessionPageRequest {
+            instance_id: "test".into(),
+            filter: SessionFilter::All,
+            cursor: None,
+            limit: 1,
+        };
+        let page = state.automation_session_page(&request).unwrap();
+        request.cursor = Some(serde_json::from_value(page["next_cursor"].clone()).unwrap());
+        assert!(!state.maintain_tern(deadline - Duration::from_nanos(1)));
+        assert!(state.automation_session_detail(&identity).is_ok());
+        assert!(state.automation_session_page(&request).is_ok());
+        assert!(state.maintain_tern(deadline));
+        let removed = state.session_snapshot(&options, Some(&selected));
+        assert!(removed.selected.is_none());
+        assert!(removed.rows.is_empty());
+        assert_eq!((removed.total, removed.matched, removed.omitted), (1, 0, 0));
+        assert_eq!(
+            removed.status_summary,
+            SessionStatusSummary {
+                status: DisplayStatus::Idle,
+                count: 1,
+                total: 1
+            },
+        );
+        assert!(state.session_view_for_key(&selected).is_none());
+        assert!(state
+            .session_display_for_key(UiLocale::En, &selected)
+            .is_none());
+        assert_eq!(
+            state.prompt_available(&selected),
+            Err(crate::herdr::PromptError::StaleTarget)
+        );
+        assert_eq!(
+            state.automation_session_detail(&identity).unwrap_err(),
+            "stale session key"
+        );
+        assert_eq!(
+            state.automation_session_page(&request).unwrap_err(),
+            "session revision changed"
+        );
+        request.cursor = None;
+        let fresh = state.automation_session_page(&request).unwrap();
+        assert_eq!(fresh["total"], 1);
+        assert_eq!(fresh["matched"], 1);
+        assert!(fresh["next_cursor"].is_null());
+        request.filter = SessionFilter::Offline;
+        let offline = state.automation_session_page(&request).unwrap();
+        assert_eq!(offline["total"], 1);
+        assert_eq!(offline["matched"], 0);
+        assert!(offline["rows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tern_available_empty_source_stays_live_but_offline_empty_source_is_removed() {
+        use crate::state::tests::{set_tern_test_last_seen, tern_test_request, tern_test_state};
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        use herdr_update_coordinator::ObservationMode;
+        use std::time::Instant;
+
+        let mut state = tern_test_state(ObservationMode::Tern);
+        for window in ["empty-offline", "empty-live"] {
+            let mut inventory = tern_test_request(window);
+            inventory.hosts[0].agents.clear();
+            assert!(state.tern_exchange(inventory).ok);
+        }
+        let base = Instant::now();
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        set_tern_test_last_seen(&mut state, "empty-offline", None, base);
+        set_tern_test_last_seen(&mut state, "empty-live", None, deadline);
+        let live = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(live.rows.is_empty());
+        assert_eq!(live.status_summary.status, DisplayStatus::Idle);
+        assert_eq!(state.host_connections().tern, 2);
+        assert!(state.maintain_tern(base + FRESHNESS));
+        let offline = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(offline.rows.is_empty());
+        assert_eq!(offline.status_summary.status, DisplayStatus::Offline);
+        assert_eq!(state.host_connections().tern, 1);
+        assert!(state.maintain_tern(deadline));
+        let pruned = state.session_snapshot(&SessionListOptions::default(), None);
+        assert!(pruned.rows.is_empty());
+        assert_eq!(
+            pruned.status_summary,
+            SessionStatusSummary {
+                status: DisplayStatus::Idle,
+                count: 0,
+                total: 0
+            },
+        );
+        assert_eq!(state.host_connections().tern, 1);
+        assert!(!state.maintain_tern(deadline));
+    }
+
+    #[test]
+    fn tern_host_display_search_sort_and_rename_preserve_selection() {
+        let mut store = SessionStore::new();
+        let local = crate::tern::source_id("window", "0");
+        let remote = crate::tern::source_id("window", "42");
+        let mut row = record("same-pane", "same-pane", AgentStatus::Working);
+        row.metadata.title = Some("Build".into());
+        for (source, label, is_local) in [(&local, "Zulu", true), (&remote, "Alpha", false)] {
+            assert!(store.begin_source(source, 1));
+            assert!(store.set_locality(source, is_local));
+            store.set_label(source, label);
+            assert!(store.replace_source(source, 1, [&row]));
+        }
+        let options = SessionListOptions {
+            sort: SessionSort::SourceAsc,
+            ..SessionListOptions::default()
+        };
+        let snapshot = store.snapshot(&options, None);
+        let remote_key = snapshot.rows[0].key.clone();
+        let local_key = snapshot.rows[1].key.clone();
+        assert_ne!(local_key.source_id, remote_key.source_id);
+        assert!(snapshot.rows.iter().all(|row| row.is_tern));
+        assert!(!snapshot.rows[0].is_local);
+        assert!(snapshot.rows[1].is_local);
+        assert!(snapshot.displays[0]
+            .context
+            .contains("Tern · Alpha · Remote"));
+        assert!(snapshot.displays[1].context.contains("Tern · Zulu · Local"));
+        assert_eq!(
+            store.prompt_target(&remote_key),
+            Err(PromptTargetError::ReadOnly)
+        );
+        assert_eq!(store.prompt_target(&local_key).unwrap().source, local);
+        for (locale, local_label, remote_label) in [
+            (UiLocale::En, "Local", "Remote"),
+            (UiLocale::Ko, "로컬", "원격"),
+            (UiLocale::Ja, "ローカル", "リモート"),
+            (UiLocale::ZhHans, "本地", "远程"),
+        ] {
+            for (label, key) in [(local_label, &local_key), (remote_label, &remote_key)] {
+                let filtered = store.snapshot(
+                    &SessionListOptions {
+                        query: label,
+                        locale,
+                        ..SessionListOptions::default()
+                    },
+                    Some(key),
+                );
+                assert_eq!(filtered.matched, 1);
+                assert_eq!(&filtered.rows[0].key, key);
+                assert!(filtered.displays[0].context.contains(label));
+            }
+        }
+        store.set_label(&local, " \u{202e}Aardvark\n Mac ");
+        let renamed = store.snapshot(&options, Some(&local_key));
+        assert_eq!(renamed.selected, Some(local_key.clone()));
+        assert_eq!(renamed.rows[0].key, local_key);
+        assert!(renamed.displays[0]
+            .context
+            .contains("Tern · Aardvark Mac · Local"));
+        let filtered = store.snapshot(
+            &SessionListOptions {
+                query: "aardvark mac",
+                ..SessionListOptions::default()
+            },
+            Some(&local_key),
+        );
+        assert_eq!(filtered.rows[0].key, local_key);
+        assert_eq!(
+            store
+                .snapshot(
+                    &SessionListOptions {
+                        query: "Zulu",
+                        ..SessionListOptions::default()
+                    },
+                    None
+                )
+                .matched,
+            0
+        );
+        store.set_label(&remote, "\u{202e}\n ");
+        let fallback = store.view_for_key(&remote_key).unwrap();
+        assert_eq!(fallback.source_label, "42");
+        assert!(store
+            .display_for_key(UiLocale::En, &remote_key)
+            .unwrap()
+            .context
+            .contains("Tern · 42 · Remote"));
+    }
+
+    #[test]
+    fn tern_locality_permissions_are_fixed_until_a_new_generation() {
+        let mut store = SessionStore::new();
+        let source = crate::tern::source_id("window", "0");
+        let row = record("pane", "pane", AgentStatus::Working);
+        assert!(store.begin_source(&source, 1));
+        assert!(store.replace_source(&source, 1, [&row]));
+        let key = store.snapshot(&SessionListOptions::default(), None).rows[0]
+            .key
+            .clone();
+        assert_eq!(store.prompt_target(&key), Err(PromptTargetError::ReadOnly));
+        assert!(store.set_locality(&source, true));
+        assert!(store.prompt_target(&key).is_ok());
+        assert!(!store.set_locality(&source, false));
+        assert!(store.begin_source(&source, 1));
+        assert!(!store.set_locality(&source, false));
+        assert!(store.prompt_target(&key).is_ok());
+        assert!(store.begin_source(&source, 2));
+        assert_eq!(store.prompt_target(&key), Err(PromptTargetError::Stale));
+        assert!(store.set_locality(&source, false));
+        assert!(!store.set_locality(&source, true));
+        assert!(store.replace_source(&source, 2, [&row]));
+        let next = store.snapshot(&SessionListOptions::default(), Some(&key));
+        assert_eq!(next.selected, None);
+        assert_eq!(
+            store.prompt_target(&next.rows[0].key),
+            Err(PromptTargetError::ReadOnly)
+        );
+        assert!(!next.rows[0].is_local);
+        assert!(store.begin_source(&source, 3));
+        let unbound = store.snapshot(&SessionListOptions::default(), None);
+        assert_eq!(
+            store.prompt_target(&unbound.rows[0].key),
+            Err(PromptTargetError::ReadOnly)
+        );
+        assert!(store.set_locality(&source, true));
+        assert!(store.replace_source(&source, 3, [&row]));
+        let restored = store.snapshot(&SessionListOptions::default(), None);
+        assert!(store.prompt_target(&restored.rows[0].key).is_ok());
     }
 
     #[test]
@@ -2523,6 +2857,44 @@ mod tests {
         assert_eq!(
             store.snapshot(&SessionListOptions::default(), None).total,
             0
+        );
+    }
+
+    #[test]
+    fn retired_provider_identity_never_aliases_same_metadata_or_recreated_source() {
+        let mut store = SessionStore::new();
+        let local = "/private/herdr.sock";
+        let tern = crate::tern::source_id("window-a", "0");
+        let mut row = record("shared-terminal", "shared-pane", AgentStatus::Working);
+        row.metadata.title = Some("Shared project".into());
+        row.metadata.cwd = Some("/same/project".into());
+        assert!(store.begin_source(local, 1));
+        assert!(store.begin_source(&tern, 1));
+        assert!(store.replace_source(local, 1, [&row]));
+        assert!(store.replace_source(&tern, 1, [&row]));
+        let snapshot = store.snapshot(&SessionListOptions::default(), None);
+        assert_eq!(snapshot.total, 2);
+        let local_key = snapshot.rows[0].key.clone();
+        let old_tern_key = snapshot.rows[1].key.clone();
+        assert_ne!(local_key.source_id, old_tern_key.source_id);
+        assert!(store.remove_source(&tern, 1));
+        assert_eq!(store.view_for_key(&old_tern_key), None);
+        assert!(store.begin_source(&tern, 2));
+        assert!(store.set_locality(&tern, true));
+        assert!(store.replace_source(&tern, 2, [&row]));
+        let current = store.snapshot(&SessionListOptions::default(), Some(&old_tern_key));
+        assert_eq!(current.total, 2);
+        assert_eq!(current.selected, None);
+        assert_eq!(current.rows[0].key, local_key);
+        assert_ne!(current.rows[1].key.source_id, old_tern_key.source_id);
+        assert_eq!(
+            store.prompt_target(&old_tern_key),
+            Err(PromptTargetError::Stale)
+        );
+        assert_eq!(store.prompt_target(&local_key).unwrap().source, local);
+        assert_eq!(
+            store.prompt_target(&current.rows[1].key).unwrap().source,
+            tern
         );
     }
 

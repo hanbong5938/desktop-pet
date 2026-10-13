@@ -4,6 +4,7 @@ use crate::i18n::LanguagePreference;
 use crate::session_view::SessionSort;
 use crate::sources::ObservationPreferences;
 use crate::state::{normalize_scale, DEFAULT_SCALE};
+use herdr_update_coordinator::ObservationMode;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -147,9 +148,29 @@ pub(crate) struct PreferencePatch {
     pub(crate) bubble_appearance: Option<BubbleAppearance>,
     pub(crate) show_status_indicators: Option<bool>,
     pub(crate) menu_bar_mode: Option<MenuBarMode>,
+    #[serde(default, deserialize_with = "deserialize_patch_host")]
+    pub(crate) observation_host: Option<ObservationMode>,
     pub(crate) observation_local: Option<bool>,
     pub(crate) observation_remote: Option<bool>,
     pub(crate) observation_machines: Option<Vec<String>>,
+}
+
+fn deserialize_patch_host<'de, D>(deserializer: D) -> Result<Option<ObservationMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let token = Option::<String>::deserialize(deserializer)?;
+    token
+        .map(|token| match token.as_str() {
+            "auto" => Ok(ObservationMode::Both),
+            "herdr" => Ok(ObservationMode::Herdr),
+            "tern" => Ok(ObservationMode::Tern),
+            _ => Err(serde::de::Error::unknown_variant(
+                &token,
+                &["auto", "herdr", "tern"],
+            )),
+        })
+        .transpose()
 }
 
 fn deserialize_patch_language<'de, D>(
@@ -218,6 +239,7 @@ pub(crate) struct PreferenceSnapshot {
     pub(crate) bubble_appearance: BubbleAppearance,
     pub(crate) show_status_indicators: bool,
     pub(crate) menu_bar_mode: MenuBarMode,
+    pub(crate) observation_host: ObservationMode,
     pub(crate) observation_local: bool,
     pub(crate) observation_remote: bool,
     pub(crate) observation_machines: Vec<String>,
@@ -480,11 +502,32 @@ pub struct Preferences {
     language: LanguagePreference,
     bubble_appearance: BubbleAppearance,
     observation: ObservationPreferences,
+    observation_extra: Map<String, Value>,
     dialogue_overrides: DialogueOverrides,
     session_list: SessionListPreferences,
     session_list_extra: Map<String, Value>,
     /// Top-level keys from a newer build, written back unchanged on save.
     extra: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DiskObservationPreferences {
+    #[serde(flatten)]
+    selection: ObservationPreferences,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+impl Default for DiskObservationPreferences {
+    fn default() -> Self {
+        Self {
+            selection: ObservationPreferences {
+                host: ObservationMode::Herdr,
+                ..ObservationPreferences::default()
+            },
+            extra: Map::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -524,7 +567,7 @@ struct DiskPreferences {
     #[serde(default)]
     bubble_appearance: BubbleAppearance,
     #[serde(default)]
-    observation: ObservationPreferences,
+    observation: DiskObservationPreferences,
     #[serde(default)]
     dialogue_overrides: DialogueOverrides,
     #[serde(default)]
@@ -568,6 +611,7 @@ impl Default for Preferences {
             language: LanguagePreference::default(),
             bubble_appearance: BubbleAppearance::default(),
             observation: ObservationPreferences::default(),
+            observation_extra: Map::new(),
             dialogue_overrides: DialogueOverrides::default(),
             session_list: SessionListPreferences::default(),
             session_list_extra: Map::new(),
@@ -579,7 +623,12 @@ impl Preferences {
     /// Strict load for read-only consumers: an unusable file is reported as an
     /// error and left untouched.
     pub fn load(directory: &Path) -> Result<Self, String> {
-        Self::load_in_directory(directory, legacy_preferences_path().as_deref(), false)
+        Self::load_for_profile(
+            directory,
+            &crate::lifecycle::plugin_config_dir(),
+            legacy_preferences_path().as_deref(),
+            false,
+        )
     }
 
     /// Daemon startup load: an unusable file is moved aside to
@@ -587,7 +636,26 @@ impl Preferences {
     /// daemon neither refuses to start nor later overwrites the original bytes.
     /// Fails only when the file cannot be moved aside.
     pub(crate) fn load_for_daemon(directory: &Path) -> Result<Self, String> {
-        Self::load_in_directory(directory, legacy_preferences_path().as_deref(), true)
+        Self::load_for_profile(
+            directory,
+            &crate::lifecycle::plugin_config_dir(),
+            legacy_preferences_path().as_deref(),
+            true,
+        )
+    }
+
+    /// Only the canonical native profile may adopt the global pre-profile settings.
+    fn load_for_profile(
+        directory: &Path,
+        default_directory: &Path,
+        legacy: Option<&Path>,
+        quarantine_invalid: bool,
+    ) -> Result<Self, String> {
+        Self::load_in_directory(
+            directory,
+            legacy.filter(|_| directory == default_directory),
+            quarantine_invalid,
+        )
     }
 
     fn load_in_directory(
@@ -670,7 +738,8 @@ impl Preferences {
             position_space: disk.position_space,
             language: disk.language,
             bubble_appearance: disk.bubble_appearance,
-            observation: disk.observation,
+            observation: disk.observation.selection,
+            observation_extra: disk.observation.extra,
             dialogue_overrides: disk.dialogue_overrides,
             session_list,
             session_list_extra,
@@ -718,6 +787,7 @@ impl Preferences {
             bubble_appearance: self.bubble_appearance,
             show_status_indicators: self.show_status_indicators,
             menu_bar_mode: self.menu_bar_mode,
+            observation_host: self.observation.host,
             observation_local: self.observation.local,
             observation_remote: self.observation.remote,
             observation_machines: self.observation.machines.clone(),
@@ -745,6 +815,7 @@ impl Preferences {
             bubble_appearance,
             show_status_indicators,
             menu_bar_mode,
+            observation_host,
             observation_local,
             observation_remote,
             observation_machines,
@@ -753,6 +824,7 @@ impl Preferences {
             && bubble_appearance.is_none()
             && show_status_indicators.is_none()
             && menu_bar_mode.is_none()
+            && observation_host.is_none()
             && observation_local.is_none()
             && observation_remote.is_none()
             && observation_machines.is_none()
@@ -771,6 +843,9 @@ impl Preferences {
         }
         if let Some(mode) = menu_bar_mode {
             candidate.menu_bar_mode = mode;
+        }
+        if let Some(host) = observation_host {
+            candidate.set_observation_host(host);
         }
         if let Some(local) = observation_local {
             candidate.observation.local = local;
@@ -856,6 +931,14 @@ impl Preferences {
     pub(crate) fn observation(&self) -> &ObservationPreferences {
         &self.observation
     }
+    pub fn observation_host(&self) -> ObservationMode {
+        self.observation.host
+    }
+
+    /// Stage a host selection on a candidate; commit it with `save_candidate`.
+    pub fn set_observation_host(&mut self, host: ObservationMode) {
+        self.observation.host = host;
+    }
 
     pub(crate) fn session_list(&self) -> SessionListPreferences {
         self.session_list
@@ -938,7 +1021,10 @@ impl Preferences {
             position_space: self.position_space,
             language: self.language,
             bubble_appearance: self.bubble_appearance,
-            observation: self.observation.clone(),
+            observation: DiskObservationPreferences {
+                selection: self.observation.clone(),
+                extra: self.observation_extra.clone(),
+            },
             dialogue_overrides: self.dialogue_overrides.clone(),
             session_list: self.session_list.to_disk(self.session_list_extra.clone()),
             extra: self.extra.clone(),
@@ -1840,6 +1926,7 @@ mod tests {
             language: LanguagePreference::default(),
             bubble_appearance: BubbleAppearance::default(),
             observation: ObservationPreferences::default(),
+            observation_extra: Map::new(),
             dialogue_overrides: DialogueOverrides::default(),
             session_list: SessionListPreferences::default(),
             session_list_extra: Map::new(),
@@ -2112,6 +2199,7 @@ mod tests {
                     bubble_appearance: Some(appearance),
                     show_status_indicators: Some(false),
                     menu_bar_mode: Some(MenuBarMode::RecoveryOnly),
+                    observation_host: Some(ObservationMode::Tern),
                     observation_local: Some(false),
                     observation_remote: Some(true),
                     observation_machines: Some(vec![" machine:/🌲 ".to_owned()]),
@@ -2123,6 +2211,7 @@ mod tests {
         assert_eq!(snapshot.bubble_appearance, appearance);
         assert!(!snapshot.show_status_indicators);
         assert_eq!(snapshot.menu_bar_mode, MenuBarMode::RecoveryOnly);
+        assert_eq!(snapshot.observation_host, ObservationMode::Tern);
         assert!(!snapshot.observation_local);
         assert!(snapshot.observation_remote);
         assert_eq!(snapshot.observation_machines, vec![" machine:/🌲 "]);
@@ -2154,6 +2243,7 @@ mod tests {
             .apply_patch_in_directory(
                 PreferencePatch {
                     language: Some(LanguagePreference::En),
+                    observation_host: Some(ObservationMode::Tern),
                     observation_remote: Some(true),
                     observation_machines: Some(vec!["opaque-machine".to_owned()]),
                     ..PreferencePatch::default()
@@ -2232,6 +2322,7 @@ mod tests {
                 .apply_patch_in_directory(
                     PreferencePatch {
                         language: Some(LanguagePreference::En),
+                        observation_host: Some(ObservationMode::Tern),
                         observation_machines: Some(machines),
                         ..PreferencePatch::default()
                     },
@@ -2356,7 +2447,13 @@ mod tests {
 
         assert_eq!(loaded.language(), LanguagePreference::System);
         assert_eq!(loaded.bubble_appearance(), BubbleAppearance::default());
-        assert_eq!(loaded.observation(), &ObservationPreferences::default());
+        assert_eq!(
+            loaded.observation(),
+            &ObservationPreferences {
+                host: ObservationMode::Herdr,
+                ..ObservationPreferences::default()
+            }
+        );
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2965,7 +3062,10 @@ mod tests {
             language: valid.language,
             position_space: valid.position_space,
             bubble_appearance: valid.bubble_appearance,
-            observation: valid.observation.clone(),
+            observation: DiskObservationPreferences {
+                selection: valid.observation.clone(),
+                extra: Map::new(),
+            },
             dialogue_overrides: DialogueOverrides::default(),
             session_list: valid.session_list.to_disk(Map::new()),
             extra: Map::new(),
@@ -2987,6 +3087,250 @@ mod tests {
         disk["bubble_appearance"]["custom"]["surface"] = serde_json::json!(1e300);
         fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
         assert!(Preferences::load_path(&path).is_err());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn global_legacy_preferences_migrate_only_into_the_default_profile() {
+        let home = isolated_preferences_directory();
+        let default = home.join("default-native-profile");
+        let explicit = home.join("explicit-profile");
+        let legacy = home
+            .join("Library")
+            .join("Application Support")
+            .join("OMPet")
+            .join(PREFERENCES_FILE);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let legacy_bytes = br#"{
+            "visible":false,"passthrough":true,"scale":0.875,"position":null,
+            "future_setting":{"preserve":[1,2]}
+        }"#;
+        fs::write(&legacy, legacy_bytes).unwrap();
+
+        for daemon in [false, true] {
+            let new_profile =
+                Preferences::load_for_profile(&explicit, &default, Some(&legacy), daemon).unwrap();
+            assert_eq!(new_profile.observation_host(), ObservationMode::Both);
+            assert!(new_profile.visible());
+            assert!(new_profile.extra.is_empty());
+            assert!(!explicit.join(PREFERENCES_FILE).exists());
+        }
+
+        let migrated =
+            Preferences::load_for_profile(&default, &default, Some(&legacy), false).unwrap();
+        assert_eq!(migrated.observation_host(), ObservationMode::Herdr);
+        assert!(!migrated.visible());
+        assert!(migrated.passthrough());
+        assert_eq!(migrated.scale(), 0.875);
+        assert_eq!(
+            migrated.extra["future_setting"]["preserve"],
+            serde_json::json!([1, 2])
+        );
+        let default_bytes = fs::read(default.join(PREFERENCES_FILE)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&default_bytes).unwrap()["observation"]["host"],
+            "herdr"
+        );
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+
+        fs::create_dir_all(&explicit).unwrap();
+        let explicit_bytes = br#"{"visible":true,"passthrough":false,"scale":0.5,"position":null}"#;
+        fs::write(explicit.join(PREFERENCES_FILE), explicit_bytes).unwrap();
+        for daemon in [false, true] {
+            let existing =
+                Preferences::load_for_profile(&explicit, &default, Some(&legacy), daemon).unwrap();
+            assert_eq!(existing.observation_host(), ObservationMode::Herdr);
+            assert_eq!(existing.scale(), 0.5);
+            assert_eq!(
+                fs::read(explicit.join(PREFERENCES_FILE)).unwrap(),
+                explicit_bytes
+            );
+        }
+        assert_eq!(
+            fs::read(default.join(PREFERENCES_FILE)).unwrap(),
+            default_bytes
+        );
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn new_profiles_save_auto_but_legacy_profiles_without_host_stay_herdr() {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        let new_profile = Preferences::load_in_directory(&directory, None, false).unwrap();
+        assert_eq!(new_profile.observation_host(), ObservationMode::Both);
+        new_profile.save_in_directory(&directory).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["observation"]["host"], "auto");
+
+        for observation in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({
+                "local": false,
+                "remote": true,
+                "machines": ["studio"],
+                "future_scope": {"enabled": true}
+            })),
+        ] {
+            let mut disk = serde_json::json!({
+                "visible": false, "passthrough": true, "scale": 0.875, "position": null,
+                "future_setting": {"preserve": [1, 2]}
+            });
+            if let Some(observation) = &observation {
+                disk["observation"] = observation.clone();
+            }
+            fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            let mut legacy = Preferences::load_path(&path).unwrap();
+            assert_eq!(legacy.observation_host(), ObservationMode::Herdr);
+            legacy
+                .apply_patch_in_directory(
+                    PreferencePatch {
+                        language: Some(LanguagePreference::Ko),
+                        ..PreferencePatch::default()
+                    },
+                    &directory,
+                )
+                .unwrap();
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["observation"]["host"], "herdr");
+            assert_eq!(saved["future_setting"], disk["future_setting"]);
+            if let Some(observation) = observation {
+                for (field, value) in observation.as_object().unwrap() {
+                    assert_eq!(&saved["observation"][field], value);
+                }
+            }
+            assert!(!legacy.visible());
+            assert!(legacy.passthrough());
+            assert_eq!(legacy.scale(), 0.875);
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn saved_host_migrates_both_and_host_only_patches_preserve_scope_and_extras() {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        for (token, mode, canonical) in [
+            ("herdr", ObservationMode::Herdr, "herdr"),
+            ("tern", ObservationMode::Tern, "tern"),
+            ("auto", ObservationMode::Both, "auto"),
+            ("both", ObservationMode::Both, "auto"),
+        ] {
+            let disk = serde_json::json!({
+                "visible": false, "passthrough": true, "scale": 0.875, "position": null,
+                "future_setting": {"preserve": [1, 2]},
+                "observation": {
+                    "host": token, "local": false, "remote": true, "machines": ["studio"],
+                    "future_scope": {"enabled": true}
+                }
+            });
+            fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            let mut owner = Preferences::load_path(&path).unwrap();
+            assert_eq!(owner.observation_host(), mode);
+            let patch: PreferencePatch = serde_json::from_value(serde_json::json!({
+                "observation_host": canonical
+            }))
+            .unwrap();
+            let snapshot = owner.apply_patch_in_directory(patch, &directory).unwrap();
+            assert_eq!(snapshot.observation_host, mode);
+            assert_eq!(
+                serde_json::to_value(snapshot).unwrap()["observation_host"],
+                canonical
+            );
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["observation"]["host"], canonical);
+            for field in ["local", "remote", "machines", "future_scope"] {
+                assert_eq!(saved["observation"][field], disk["observation"][field]);
+            }
+            assert_eq!(saved["future_setting"], disk["future_setting"]);
+            assert_eq!(
+                Preferences::load_path(&path).unwrap().observation_host(),
+                mode
+            );
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn malformed_host_is_rejected_without_changing_saved_selection() {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        let mut owner = Preferences::default();
+        owner.set_observation_host(ObservationMode::Tern);
+        owner.save_in_directory(&directory).unwrap();
+        let before = fs::read(&path).unwrap();
+        let valid: Value = serde_json::from_slice(&before).unwrap();
+        for malformed in [
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!("Auto"),
+            serde_json::json!("unknown"),
+        ] {
+            let mut disk = valid.clone();
+            disk["observation"]["host"] = malformed;
+            let bytes = serde_json::to_vec(&disk).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(Preferences::load_path(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(owner.observation_host(), ObservationMode::Tern);
+        }
+        fs::write(&path, &before).unwrap();
+        for malformed in [
+            serde_json::json!("both"),
+            serde_json::json!("AUTO"),
+            serde_json::json!("unknown"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<PreferencePatch>(serde_json::json!({
+                    "observation_host": malformed, "language": "ko"
+                }))
+                .is_err()
+            );
+            assert_eq!(owner.observation_host(), ObservationMode::Tern);
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn failed_host_candidate_does_not_leak_into_a_later_save() {
+        let directory = isolated_preferences_directory();
+        let path = directory.join(PREFERENCES_FILE);
+        let blocked = directory.join("not-a-directory");
+        let mut owner = Preferences::default();
+        owner.set_observation_host(ObservationMode::Herdr);
+        owner.save_in_directory(&directory).unwrap();
+        let before = fs::read(&path).unwrap();
+        fs::write(&blocked, b"sentinel").unwrap();
+        let mut candidate = owner.candidate();
+        candidate.set_observation_host(ObservationMode::Both);
+        assert!(owner.save_candidate(candidate, &blocked).is_err());
+        assert_eq!(owner.observation_host(), ObservationMode::Herdr);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&blocked).unwrap(), b"sentinel");
+        owner
+            .apply_patch_in_directory(
+                PreferencePatch {
+                    language: Some(LanguagePreference::Ko),
+                    ..PreferencePatch::default()
+                },
+                &directory,
+            )
+            .unwrap();
+        assert_eq!(
+            Preferences::load_path(&path).unwrap().observation_host(),
+            ObservationMode::Herdr
+        );
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -3014,6 +3358,7 @@ mod tests {
             .expect("observation should save");
         let loaded = Preferences::load_path(&path).expect("migrated preferences should reload");
         assert_eq!(loaded.observation(), preferences.observation());
+        assert_eq!(loaded.observation_host(), ObservationMode::Herdr);
         assert_eq!(loaded.observation().machines, vec![machine]);
         assert!(!loaded.visible());
         assert!(loaded.passthrough());
@@ -3302,6 +3647,7 @@ mod tests {
         assert_eq!(
             loaded.observation(),
             &ObservationPreferences {
+                host: ObservationMode::Herdr,
                 local: false,
                 remote: true,
                 machines: vec!["studio".to_owned()],

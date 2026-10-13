@@ -43,6 +43,9 @@ fn preference_target_state(
             .menu_bar_mode
             .is_some_and(|_| target.menu_bar_mode != desired.menu_bar_mode)
         || patch
+            .observation_host
+            .is_some_and(|_| target.observation_host != desired.observation_host)
+        || patch
             .observation_local
             .is_some_and(|_| target.observation_local != desired.observation_local)
         || patch
@@ -66,6 +69,7 @@ fn patch_changes(patch: &PreferencePatch, snapshot: &PreferenceSnapshot) -> Resu
         && patch.bubble_appearance.is_none()
         && patch.show_status_indicators.is_none()
         && patch.menu_bar_mode.is_none()
+        && patch.observation_host.is_none()
         && patch.observation_local.is_none()
         && patch.observation_remote.is_none()
         && patch.observation_machines.is_none()
@@ -84,6 +88,9 @@ fn patch_changes(patch: &PreferencePatch, snapshot: &PreferenceSnapshot) -> Resu
         || patch
             .menu_bar_mode
             .is_some_and(|value| value != snapshot.menu_bar_mode)
+        || patch
+            .observation_host
+            .is_some_and(|value| value != snapshot.observation_host)
         || patch
             .observation_local
             .is_some_and(|value| value != snapshot.observation_local)
@@ -202,6 +209,7 @@ impl Ui {
         effective.language = self.effective_language;
         effective.bubble_appearance = self.native_bubble_appearance;
         if let Ok(state) = self.shared.lock() {
+            effective.observation_host = state.observation_mode();
             effective.observation_local = state.observation_preferences().local;
             effective.observation_remote = state.observation_preferences().remote;
             effective.observation_machines = state.observation_preferences().machines.clone();
@@ -368,12 +376,17 @@ impl Ui {
             self.menu_panel.set_menu_bar_mode(target.menu_bar_mode);
         }
         self.sync_committed_menu_bar_mode();
-        if target.observation_local != previous.observation_local
+        if target.observation_host != previous.observation_host
+            || target.observation_local != previous.observation_local
             || target.observation_remote != previous.observation_remote
             || target.observation_machines != previous.observation_machines
         {
             if let Ok(mut state) = self.shared.lock() {
                 state.apply_observation_preferences(self.prefs.observation().clone());
+                if target.observation_host != previous.observation_host {
+                    self.app_update
+                        .reconcile_context(state.update_context().cloned());
+                }
             }
             self.sync_observation_panel();
         }
@@ -427,7 +440,8 @@ impl Ui {
         target: &PreferenceSnapshot,
         patch: &PreferencePatch,
     ) -> bool {
-        let observation_needed = patch.observation_local.is_some()
+        let observation_needed = patch.observation_host.is_some()
+            || patch.observation_local.is_some()
             || patch.observation_remote.is_some()
             || patch.observation_machines.is_some();
         patch.language.is_none_or(|_| {
@@ -447,8 +461,11 @@ impl Ui {
                 || self.shared.lock().is_ok_and(|state| {
                     let observation = state.observation_preferences();
                     patch
-                        .observation_local
-                        .is_none_or(|_| target.observation_local == observation.local)
+                        .observation_host
+                        .is_none_or(|_| target.observation_host == state.observation_mode())
+                        && patch
+                            .observation_local
+                            .is_none_or(|_| target.observation_local == observation.local)
                         && patch
                             .observation_remote
                             .is_none_or(|_| target.observation_remote == observation.remote)
@@ -473,7 +490,8 @@ impl Ui {
         }
         self.shared.lock().map_or(true, |state| {
             let actual = state.observation_preferences();
-            desired.observation_local != actual.local
+            desired.observation_host != state.observation_mode()
+                || desired.observation_local != actual.local
                 || desired.observation_remote != actual.remote
                 || desired.observation_machines != actual.machines
         })
@@ -692,6 +710,135 @@ mod tests {
             preference_target_state(&target, &replacement, &patch, true),
             DomainOperationState::Superseded
         );
+    }
+
+    #[test]
+    fn host_operations_track_host_without_superseding_unrelated_settings() {
+        use herdr_update_coordinator::ObservationMode;
+        let mut target = Preferences::default().snapshot();
+        target.observation_host = ObservationMode::Tern;
+        let patch = PreferencePatch {
+            observation_host: Some(ObservationMode::Tern),
+            ..Default::default()
+        };
+        assert!(!patch_changes(&patch, &target).unwrap());
+        assert_eq!(
+            preference_target_state(&target, &target, &patch, false),
+            DomainOperationState::Pending
+        );
+        let mut unrelated = target.clone();
+        unrelated.observation_remote = !target.observation_remote;
+        assert_eq!(
+            preference_target_state(&target, &unrelated, &patch, true),
+            DomainOperationState::Applied
+        );
+        let mut replacement = target.clone();
+        replacement.observation_host = ObservationMode::Both;
+        assert!(patch_changes(&patch, &replacement).unwrap());
+        for native_applied in [false, true] {
+            assert_eq!(
+                preference_target_state(&target, &replacement, &patch, native_applied),
+                DomainOperationState::Superseded
+            );
+        }
+        let scope_patch = PreferencePatch {
+            observation_local: Some(target.observation_local),
+            ..Default::default()
+        };
+        assert_eq!(
+            preference_target_state(&target, &replacement, &scope_patch, true),
+            DomainOperationState::Applied
+        );
+    }
+
+    #[test]
+    fn host_save_first_keeps_live_mode_and_scope_when_persistence_fails() {
+        use herdr_update_coordinator::ObservationMode;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-host-save-first-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("preferences.json");
+        let mut prefs = Preferences::default();
+        let mut state = crate::state::tests::tern_test_state(ObservationMode::Herdr);
+        let mut updater = AppUpdateService::new(
+            None,
+            false,
+            herdr_update_coordinator::UpdatePolicy::StableOnly,
+            None,
+        );
+        updater.reconcile_context(state.update_context().cloned());
+        prefs
+            .apply_patch_in_directory(
+                PreferencePatch {
+                    observation_host: Some(ObservationMode::Tern),
+                    observation_local: Some(false),
+                    observation_remote: Some(true),
+                    observation_machines: Some(vec!["saved-machine".into()]),
+                    ..Default::default()
+                },
+                &directory,
+            )
+            .unwrap();
+        state.apply_observation_preferences(prefs.observation().clone());
+        updater.reconcile_context(state.update_context().cloned());
+        let saved_context = state.update_context().cloned();
+        let saved_consent = updater.consent_generation();
+        let saved_update_revision = updater.revision();
+        let saved = prefs.snapshot();
+        let saved_bytes = std::fs::read(&path).unwrap();
+        let backup = directory.join("saved.json");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let result = prefs
+            .apply_patch_in_directory(
+                PreferencePatch {
+                    observation_host: Some(ObservationMode::Herdr),
+                    ..Default::default()
+                },
+                &directory,
+            )
+            .map(|_| {
+                state.apply_observation_preferences(prefs.observation().clone());
+                updater.reconcile_context(state.update_context().cloned());
+            });
+        assert!(result.is_err());
+        assert_eq!(prefs.snapshot(), saved);
+        assert_eq!(state.observation_mode(), ObservationMode::Tern);
+        assert_eq!(state.observation_preferences(), prefs.observation());
+        assert_eq!(state.update_context().cloned(), saved_context);
+        assert_eq!(updater.consent_generation(), saved_consent);
+        assert_eq!(updater.revision(), saved_update_revision);
+        assert_eq!(std::fs::read(&backup).unwrap(), saved_bytes);
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        let target = prefs
+            .apply_patch_in_directory(
+                PreferencePatch {
+                    observation_host: Some(ObservationMode::Both),
+                    ..Default::default()
+                },
+                &directory,
+            )
+            .unwrap();
+        state.apply_observation_preferences(prefs.observation().clone());
+        updater.reconcile_context(state.update_context().cloned());
+        assert_ne!(updater.consent_generation(), saved_consent);
+        assert_eq!(
+            state.update_context().unwrap().observation_mode().unwrap(),
+            ObservationMode::Both
+        );
+        assert_eq!(state.observation_mode(), ObservationMode::Both);
+        assert_eq!(state.observation_preferences(), prefs.observation());
+        assert_eq!(target.observation_local, saved.observation_local);
+        assert_eq!(target.observation_remote, saved.observation_remote);
+        assert_eq!(target.observation_machines, saved.observation_machines);
+        assert_eq!(Preferences::load_path(&path).unwrap().snapshot(), target);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

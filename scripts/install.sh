@@ -227,13 +227,13 @@ validate_app() {
     if plutil -type observation_mode - <<< "$main_capabilities" >/dev/null 2>&1; then
       main_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$main_capabilities" 2>/dev/null)" ||
         fail "packaged app does not advertise numeric observation-mode support"
-      [[ "$main_observation" == 1 ]] ||
+      [[ "$main_observation" == 1 || "$main_observation" == 2 ]] ||
         fail "packaged app advertises unsupported observation-mode support"
     fi
     if plutil -type observation_mode - <<< "$helper_capabilities" >/dev/null 2>&1; then
       helper_observation="$(plutil -extract observation_mode raw -expect integer -o - - <<< "$helper_capabilities" 2>/dev/null)" ||
         fail "packaged update coordinator does not advertise numeric observation-mode support"
-      [[ "$helper_observation" == 1 ]] ||
+      [[ "$helper_observation" == 1 || "$helper_observation" == 2 ]] ||
         fail "packaged update coordinator advertises unsupported observation-mode support"
     fi
     [[ "$helper_observation" == "$main_observation" ]] ||

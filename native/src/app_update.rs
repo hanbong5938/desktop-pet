@@ -175,6 +175,25 @@ impl AppUpdateService {
                 .is_none_or(|record| terminal_phase(record.phase))
     }
 
+    pub(super) fn reconcile_context(&mut self, context: Option<UpdateContext>) {
+        if self.context == context {
+            return;
+        }
+        self.context = context;
+        // Retire discovery and consent, not the immutable plan or journal owned
+        // by an already launched helper. Native state gates host changes while
+        // an actual preparation is active.
+        self.pending_request = None;
+        self.check_busy = false;
+        self.snapshot = None;
+        self.candidate_generation = self.candidate_generation.wrapping_add(1);
+        self.problem = None;
+        self.next_auto_due = None;
+        self.scheduled_due_before = None;
+        self.auto_failure_paused = false;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub(super) fn change_policy(&mut self, policy: UpdatePolicy, checked_at: Option<u64>) {
         if !self.settings_admitted() || self.policy == policy {
             return;
@@ -321,7 +340,7 @@ impl AppUpdateService {
         }
     }
 
-    pub(super) fn check_now(&mut self) {
+    fn begin_check(&mut self) -> Option<(u64, u64, UpdateContext)> {
         if self.check_busy
             || self.launching.is_some()
             || (self.launch_plan.is_some()
@@ -346,7 +365,7 @@ impl AppUpdateService {
                     .is_some_and(|record| terminal_phase(record.phase)))
             || self.journal_error.is_some()
         {
-            return;
+            return None;
         }
         let Some(context) = self.context.clone() else {
             let problem = "Running app update context is unavailable";
@@ -354,17 +373,24 @@ impl AppUpdateService {
                 self.problem = Some(problem.into());
                 self.revision = self.revision.wrapping_add(1);
             }
-            return;
+            return None;
         };
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
         let policy_generation = self.policy_generation;
-        let policy = self.policy;
         self.pending_request = Some(request_id);
         self.auto_failure_paused = false;
         self.check_busy = true;
         self.problem = None;
         self.revision = self.revision.wrapping_add(1);
+        Some((request_id, policy_generation, context))
+    }
+
+    pub(super) fn check_now(&mut self) {
+        let Some((request_id, policy_generation, context)) = self.begin_check() else {
+            return;
+        };
+        let policy = self.policy;
         let sender = self.sender.clone();
         let observed_operation_id = self.observed_operation_id.clone();
         std::thread::spawn(move || {
@@ -1432,6 +1458,136 @@ mod tests {
             }),
             checked_at: Some(42),
         }
+    }
+
+    fn local_check_for_context(context: UpdateContext) -> CheckSnapshot {
+        let mut snapshot = local_check();
+        let plan = snapshot.plan.as_mut().unwrap();
+        plan.running = context.running.clone();
+        plan.context = context;
+        snapshot
+    }
+
+    #[test]
+    fn host_commits_retire_old_checks_and_consent_and_capture_each_live_mode() {
+        use herdr_update_coordinator::ObservationMode;
+        let mut state = crate::state::tests::tern_test_state(ObservationMode::Herdr);
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        service.reconcile_context(state.update_context().cloned());
+        let history = failed_record('a');
+        service.previous_outcome = Some(history.clone());
+        let (request, policy, context) = service.begin_check().unwrap();
+        let mut snapshot = local_check_for_context(context);
+        assert_eq!(
+            service.checked_event(request, policy, Ok(snapshot.clone()), None),
+            Some(42)
+        );
+        for mode in [
+            ObservationMode::Tern,
+            ObservationMode::Both,
+            ObservationMode::Herdr,
+        ] {
+            let old_plan = service.plan().unwrap().clone();
+            let old_consent = service.consent_generation();
+            let (old_request, old_policy, _) = service.begin_check().unwrap();
+            let mut observation = state.observation_preferences().clone();
+            observation.host = mode;
+            state.apply_observation_preferences(observation);
+            service.reconcile_context(state.update_context().cloned());
+            assert!(!service.check_busy);
+            assert!(service.plan().is_none());
+            assert!(!service.consent_matches(&old_plan, old_consent));
+            assert!(service.launch(old_plan, old_consent).is_err());
+            assert_eq!(
+                service.checked_at_for_save(old_request, old_policy, &Ok(snapshot.clone())),
+                None
+            );
+            let (request, policy, context) = service.begin_check().unwrap();
+            assert_eq!(context.observation_mode().unwrap(), mode);
+            assert_eq!(
+                service.checked_event(
+                    old_request,
+                    old_policy,
+                    Ok(snapshot),
+                    Some(SettledOperationProof(history.clone())),
+                ),
+                None
+            );
+            assert_eq!(service.pending_request, Some(request));
+            assert!(service.check_busy);
+            assert_eq!(service.previous_outcome.as_ref(), Some(&history));
+            snapshot = local_check_for_context(context.clone());
+            assert_eq!(
+                service.checked_event(request, policy, Ok(snapshot.clone()), None),
+                Some(42)
+            );
+            let plan = service.plan().unwrap().clone();
+            assert_eq!(plan.context, context);
+            assert_eq!(plan.context.observation_mode().unwrap(), mode);
+            let consent = service.consent_generation();
+            assert!(service.consent_matches(&plan, consent));
+            let revision = service.revision();
+            service.reconcile_context(state.update_context().cloned());
+            assert_eq!(service.revision(), revision);
+            assert!(service.consent_matches(&plan, consent));
+        }
+    }
+
+    #[test]
+    fn prepared_admission_protects_host_context_and_original_helper_ownership() {
+        use herdr_update_coordinator::ObservationMode;
+        let (mut service, plan) = pending_local_launch();
+        assert!(service.launch_result(&plan.operation_id, Ok(())));
+        let mut active = failed_record('e');
+        active.phase = OperationPhase::Installing;
+        service.journal(&plan.operation_id, Ok(Some(active.clone())), None);
+        service.journal_in_flight = Some(plan.operation_id.clone());
+        let history = failed_record('a');
+        service.previous_outcome = Some(history.clone());
+        let mut state = crate::state::tests::tern_test_state(ObservationMode::Herdr);
+        state.set_update_context(plan.context.clone());
+        state.set_ui_ready();
+        let (sender, receiver) = mpsc::channel();
+        state
+            .queue_update_prepare(plan.operation_id.clone(), "secret".into(), sender)
+            .unwrap();
+        state.take_update_prepare().unwrap();
+        assert!(state.finish_update_prepare(&plan.operation_id, "secret", Ok(())));
+        receiver.recv().unwrap().unwrap();
+        assert!(state.update_mutation_allowed().is_err());
+        let mut observation = state.observation_preferences().clone();
+        observation.host = ObservationMode::Tern;
+        state.apply_observation_preferences(observation);
+        assert_eq!(state.observation_mode(), ObservationMode::Herdr);
+        assert_eq!(state.update_context(), Some(&plan.context));
+        service.reconcile_context(state.update_context().cloned());
+        assert_eq!(service.context.as_ref(), Some(&plan.context));
+        assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
+        assert_eq!(service.operation.as_ref(), Some(&active));
+        assert_eq!(service.previous_outcome.as_ref(), Some(&history));
+        assert_eq!(
+            service.journal_in_flight.as_deref(),
+            Some(plan.operation_id.as_str())
+        );
+        assert!(service.observing(&plan.operation_id));
+        assert!(!service.settings_admitted());
+        assert!(service.begin_check().is_none());
+        assert!(service.plan().is_none());
+        let recovered = failed_record('e');
+        assert_eq!(
+            service.journal(
+                &plan.operation_id,
+                Ok(Some(recovered.clone())),
+                Some(PreparedRecoveryProof {
+                    record: recovered,
+                    plan: plan.clone(),
+                }),
+            ),
+            Some(plan.context.clone())
+        );
+        assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
+        service.recovery_reconciled(&plan.operation_id);
+        assert!(service.prepared_plan.is_none());
     }
 
     fn failed_record(id: char) -> OperationRecord {

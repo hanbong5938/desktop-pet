@@ -2696,6 +2696,7 @@ mod tests {
             },
             source_label: "Local".into(),
             is_local: true,
+            is_tern: false,
             pane_id: format!("pane-{terminal}"),
             status: AgentStatus::Working,
             outcome: None,

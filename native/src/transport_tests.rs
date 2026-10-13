@@ -274,6 +274,7 @@ mod prompt {
                 error: None,
             });
             state.apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: true,
                 machines: vec![id],
@@ -1145,6 +1146,7 @@ mod worktree_remove {
                 error: None,
             });
             state.apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: true,
                 machines: vec![remote_id],
@@ -1405,7 +1407,7 @@ mod watcher_lifecycle {
     const DEADLINE: Duration = Duration::from_secs(12);
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum Plugin {
+    pub(super) enum Plugin {
         Missing,
         Enabled,
         Disabled,
@@ -1428,21 +1430,47 @@ mod watcher_lifecycle {
             Sender<PendingPluginObservation>,
             Sender<()>,
         ),
-        Reconcile(Sender<()>),
+        Reconcile(Option<(Sender<()>, Receiver<()>)>, Sender<()>),
         Stop,
     }
 
-    struct Server {
-        path: PathBuf,
+    pub(super) struct SnapshotPause {
+        observed: Receiver<()>,
+        release: Option<Sender<()>>,
+    }
+
+    impl SnapshotPause {
+        pub(super) fn wait(&self) {
+            self.observed
+                .recv_timeout(DEADLINE)
+                .expect("watcher snapshot request reached peer");
+        }
+
+        pub(super) fn release(mut self) {
+            self.release.take().unwrap().send(()).unwrap();
+        }
+    }
+
+    impl Drop for SnapshotPause {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    pub(super) struct Server {
+        pub(super) path: PathBuf,
         commands: Sender<Command>,
         queries: Receiver<Plugin>,
+        subscribed: Receiver<()>,
         join: Option<JoinHandle<()>>,
         terminal: String,
         pane: String,
     }
 
     impl Server {
-        fn new(initial: Plugin, label: &str) -> Self {
+        pub(super) fn new(initial: Plugin, label: &str) -> Self {
             let path = PathBuf::from("/tmp").join(format!(
                 "herdr-watch-{}-{}.sock",
                 std::process::id(),
@@ -1451,6 +1479,7 @@ mod watcher_lifecycle {
             let listener = UnixListener::bind(&path).expect("bind fixture socket");
             let (commands, rx) = mpsc::channel();
             let (query_tx, queries) = mpsc::channel();
+            let (subscription_tx, subscribed) = mpsc::channel();
             let terminal = format!("{label}-terminal");
             let pane = format!("{label}-pane");
             let server_terminal = terminal.clone();
@@ -1459,6 +1488,7 @@ mod watcher_lifecycle {
                 let mut plugin = initial;
                 let mut capture: Option<(Arc<Mutex<AppState>>, Sender<PendingPluginObservation>)> =
                     None;
+                let mut snapshot_pause: Option<(Sender<()>, Receiver<()>)> = None;
                 let mut subscriptions: Vec<UnixStream> = Vec::new();
                 loop {
                     while let Ok(command) = rx.try_recv() {
@@ -1472,7 +1502,14 @@ mod watcher_lifecycle {
                                 capture = Some((shared, sender));
                                 ack.send(()).expect("fixture capture ack");
                             }
-                            Command::Reconcile(ack) => {
+                            Command::Reconcile(pause, ack) => {
+                                if let Some(pause) = pause {
+                                    assert!(
+                                        snapshot_pause.is_none(),
+                                        "snapshot pause already armed"
+                                    );
+                                    snapshot_pause = Some(pause);
+                                }
                                 let event = json!({
                                     "event": "pane.agent_status_changed",
                                     "data": {
@@ -1525,17 +1562,25 @@ mod watcher_lifecycle {
                     let request: Value = serde_json::from_slice(&line).expect("request JSON");
                     let response = match request["method"].as_str().expect("request method") {
                         "ping" => json!({"type": "pong"}),
-                        "session.snapshot" => json!({
-                            "type": "session_snapshot",
-                            "snapshot": {
-                                "panes": [{"pane_id": server_pane}],
-                                "agents": [{
-                                    "terminal_id": server_terminal,
-                                    "pane_id": server_pane,
-                                    "agent_status": "idle"
-                                }]
+                        "session.snapshot" => {
+                            if let Some((observed, release)) = snapshot_pause.take() {
+                                observed.send(()).expect("report held snapshot request");
+                                release
+                                    .recv_timeout(DEADLINE)
+                                    .expect("release held snapshot response");
                             }
-                        }),
+                            json!({
+                                "type": "session_snapshot",
+                                "snapshot": {
+                                    "panes": [{"pane_id": server_pane}],
+                                    "agents": [{
+                                        "terminal_id": server_terminal,
+                                        "pane_id": server_pane,
+                                        "agent_status": "idle"
+                                    }]
+                                }
+                            })
+                        }
                         "plugin.list" => {
                             if let Some((shared, sender)) = capture.take() {
                                 let observation = {
@@ -1586,6 +1631,9 @@ mod watcher_lifecycle {
                             )
                             .expect("subscription ack");
                             subscriptions.push(stream);
+                            subscription_tx
+                                .send(())
+                                .expect("report fixture subscription");
                             continue;
                         }
                         method => panic!("unexpected fixture request: {method}"),
@@ -1603,6 +1651,7 @@ mod watcher_lifecycle {
                 commands,
                 join: Some(join),
                 queries,
+                subscribed,
                 terminal,
                 pane,
             }
@@ -1637,8 +1686,33 @@ mod watcher_lifecycle {
             receiver
         }
 
+        pub(super) fn await_live(&self, shared: &Arc<Mutex<AppState>>) -> u64 {
+            self.subscribed
+                .recv_timeout(DEADLINE)
+                .expect("watcher subscribed to configured peer");
+            // The event cannot be read until subscription convergence has
+            // published its coherent snapshot. Its next plugin query is a
+            // worker-order barrier, not a readiness polling interval.
+            let captured = self.capture_next_plugin(shared);
+            self.reconcile();
+            captured
+                .recv_timeout(DEADLINE)
+                .expect("post-publication watcher query");
+            live(shared, self).expect("configured peer has a coherent live row")
+        }
+
+        pub(super) fn hold_next_snapshot(&self) -> SnapshotPause {
+            let (arrived, observed) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            self.command(|ack| Command::Reconcile(Some((arrived, wait)), ack));
+            SnapshotPause {
+                observed,
+                release: Some(release),
+            }
+        }
+
         fn reconcile(&self) {
-            self.command(Command::Reconcile);
+            self.command(|ack| Command::Reconcile(None, ack));
         }
 
         fn query(&self) -> Plugin {
@@ -1667,6 +1741,10 @@ mod watcher_lifecycle {
 
     fn watchers(exit_with_herdr: bool) -> (Arc<Mutex<AppState>>, Watchers) {
         let shared = Arc::new(Mutex::new(AppState::new()));
+        shared
+            .lock()
+            .unwrap()
+            .set_observation_mode(herdr_update_coordinator::ObservationMode::Herdr);
         shared
             .lock()
             .unwrap()
@@ -1935,15 +2013,22 @@ mod watcher_lifecycle {
 
 #[cfg(target_os = "macos")]
 mod tern_control_boundary {
+    use super::watcher_lifecycle::{Plugin, Server};
     use crate::character_service::PackService;
     use crate::control::{send_command, send_tern_exchange, ControlServer};
     use crate::herdr::{PromptError, PromptReceipt, Watchers};
     use crate::lifecycle::{LifecycleSettings, Paths};
-    use crate::session_view::{Availability, SessionFilter, SessionListOptions};
-    use crate::state::AppState;
+    use crate::session::{AgentRecord, AgentStatus, SessionMetadata};
+    use crate::session_view::{
+        Availability, SessionFilter, SessionKey, SessionListOptions, SessionSort, SessionView,
+    };
+    use crate::sources::HostConnections;
+    use crate::state::tests::set_tern_test_last_seen;
+    use crate::state::{AppState, SourceCounts};
     use crate::tern::{
-        TernAgent, TernAgentState, TernExchangeErrorCode, TernExchangeRequest, TernResult,
-        TernResultStatus, FRESHNESS, MAX_EXCHANGE_BYTES, MAX_RESPONSE_BYTES,
+        TernAgent, TernAgentState, TernExchangeErrorCode, TernExchangeRequest, TernHostInventory,
+        TernHostStatus, TernResult, TernResultStatus, FRESHNESS, MAX_EXCHANGE_BYTES,
+        MAX_RESPONSE_BYTES, OFFLINE_GRACE,
     };
     use herdr_update_coordinator::{ExecutableIdentity, ObservationMode, UpdateContext};
     use parking_lot::{Condvar, Mutex as GateMutex};
@@ -1981,6 +2066,11 @@ mod tern_control_boundary {
 
     impl Fixture {
         fn new(mode: ObservationMode) -> Self {
+            Self::with_endpoint(mode, None)
+        }
+
+        fn with_endpoint(mode: ObservationMode, endpoint: Option<PathBuf>) -> Self {
+            let endpoint = endpoint.map(|path| crate::socket::canonical_endpoint(&path).unwrap());
             let root = PathBuf::from("/tmp").join(format!(
                 "pet-tern-{}-{}",
                 std::process::id(),
@@ -2003,9 +2093,11 @@ mod tern_control_boundary {
                 config_dir: paths.config_dir.clone(),
                 host_plugin_config_dir: None,
                 state_dir: paths.state_dir.clone(),
-                // Neither the listener nor its parent exists. This is a launch
-                // identity, not an active Herdr observation endpoint.
-                herdr_socket: root.join("not-running/herdr.sock"),
+                // Without a configured peer this is only a launch identity,
+                // not an active Herdr observation endpoint.
+                herdr_socket: endpoint
+                    .clone()
+                    .unwrap_or_else(|| root.join("not-running/herdr.sock")),
                 running: ExecutableIdentity {
                     path: executable.clone(),
                     sha256: "a".repeat(64),
@@ -2027,16 +2119,22 @@ mod tern_control_boundary {
                 });
             }
             let watchers = Arc::new(Mutex::new(Watchers::new(Arc::clone(&shared))));
+            if let Some(endpoint) = &endpoint {
+                lock(&watchers).register(endpoint.clone()).unwrap();
+            }
             let packs = PackService::new(paths.config_dir.clone(), root.join("assets"), None);
             let mut control = ControlServer::bind(
                 Arc::clone(&shared),
                 Arc::clone(&watchers),
                 paths.clone(),
-                None,
+                endpoint.clone(),
                 executable,
                 packs,
             )
             .unwrap();
+            if let Some(endpoint) = endpoint {
+                control.record_registered_endpoint(endpoint).unwrap();
+            }
             control.start().unwrap();
             Self {
                 root,
@@ -2065,10 +2163,27 @@ mod tern_control_boundary {
                 .map(|row| row.availability)
         }
 
+        fn rows(&self) -> Vec<SessionView> {
+            lock(&self.shared)
+                .session_snapshot(&SessionListOptions::default(), None)
+                .rows
+        }
+
+        fn row(&self, label: &str) -> SessionView {
+            self.rows()
+                .into_iter()
+                .find(|row| row.source_label == label)
+                .unwrap()
+        }
+
         fn raw_exchange(&self, value: &Value) -> Vec<u8> {
+            self.raw_json(&value.to_string())
+        }
+
+        fn raw_json(&self, json: &str) -> Vec<u8> {
             let mut stream = UnixStream::connect(&self.paths.control_socket).unwrap();
             stream.set_read_timeout(Some(REQUEST_TIMEOUT)).unwrap();
-            writeln!(stream, "{value}").unwrap();
+            writeln!(stream, "{json}").unwrap();
             let mut frame = Vec::new();
             BufReader::new(stream)
                 .read_until(b'\n', &mut frame)
@@ -2079,6 +2194,18 @@ mod tern_control_boundary {
         }
 
         fn peer_reply(&self, reply: Value) -> Result<crate::tern::TernExchangeReply, String> {
+            self.peer_json(reply.to_string())
+        }
+
+        fn peer_json(&self, reply: String) -> Result<crate::tern::TernExchangeReply, String> {
+            self.peer_inventory(&request("wire", "pane"), reply)
+        }
+
+        fn peer_inventory(
+            &self,
+            inventory: &TernExchangeRequest,
+            reply: String,
+        ) -> Result<crate::tern::TernExchangeReply, String> {
             let path = self.root.join("reply.sock");
             let listener = UnixListener::bind(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -2089,12 +2216,12 @@ mod tern_control_boundary {
                 let mut line = String::new();
                 BufReader::new(&stream).read_line(&mut line).unwrap();
                 let request: TernExchangeRequest = serde_json::from_str(&line).unwrap();
-                assert_eq!(request.window, "wire");
+                assert_eq!(request.version, 2);
                 // An oversize rejection can close the receiver while this
                 // write is in progress; that is an expected transport result.
                 let _ = writeln!(stream, "{reply}");
             });
-            let result = send_tern_exchange(&path, &request("wire", "pane"), REQUEST_TIMEOUT);
+            let result = send_tern_exchange(&path, inventory, REQUEST_TIMEOUT);
             peer.join().unwrap();
             fs::remove_file(path).unwrap();
             result
@@ -2109,33 +2236,60 @@ mod tern_control_boundary {
         }
     }
 
-    fn request(window: &str, pane: &str) -> TernExchangeRequest {
-        TernExchangeRequest {
-            version: 1,
-            kind: "tern".into(),
-            window: window.into(),
-            epoch: 1,
-            sequence: 1,
-            instance_id: None,
+    fn host(id: &str, label: &str, is_local: bool, pane: &str) -> TernHostInventory {
+        TernHostInventory {
+            host: id.into(),
+            label: label.into(),
+            is_local,
+            observation_generation: 1,
+            status: TernHostStatus::Available,
             agents: vec![TernAgent {
                 pane: pane.into(),
                 title: "fixture agent".into(),
                 cwd: "/tmp".into(),
-                session_id: None,
+                session_id: Some("shared-session".into()),
                 session_label: None,
                 tab_id: None,
                 tab_label: None,
                 state: TernAgentState::Idle,
                 delivery_error: None,
             }],
+        }
+    }
+
+    fn request(window: &str, pane: &str) -> TernExchangeRequest {
+        TernExchangeRequest {
+            version: 2,
+            kind: "tern".into(),
+            window: window.into(),
+            epoch: 1,
+            sequence: 1,
+            instance_id: None,
+            hosts: vec![host("0", "Local fixture", true, pane)],
             results: vec![],
         }
     }
 
+    fn three_hosts(window: &str) -> TernExchangeRequest {
+        let mut inventory = request(window, "local-pane");
+        inventory.hosts.push(host("1", "Remote A", false, "a-pane"));
+        inventory.hosts.push(host("2", "Remote B", false, "b-pane"));
+        inventory
+    }
+
+    fn generation(reply: &crate::tern::TernExchangeReply, host: &str) -> u64 {
+        reply
+            .hosts
+            .iter()
+            .find(|entry| entry.host == host)
+            .unwrap()
+            .generation
+    }
+
     fn inventory_with_json_bytes(bytes: usize) -> TernExchangeRequest {
         let mut inventory = request("request-budget", "pane");
-        let template = inventory.agents[0].clone();
-        inventory.agents = (0..128)
+        let template = inventory.hosts[0].agents[0].clone();
+        inventory.hosts[0].agents = (0..128)
             .map(|index| {
                 let mut agent = template.clone();
                 agent.pane = format!("pane-{index}");
@@ -2145,7 +2299,7 @@ mod tern_control_boundary {
             .collect();
         let overhead = serde_json::to_vec(&inventory).unwrap().len();
         let mut remaining = bytes.checked_sub(overhead).unwrap();
-        for agent in &mut inventory.agents {
+        for agent in &mut inventory.hosts[0].agents {
             let length = remaining.min(4096);
             agent.title = "x".repeat(length);
             remaining -= length;
@@ -2220,7 +2374,7 @@ mod tern_control_boundary {
             assert_eq!(reply["ok"], false);
             assert_eq!(reply["error_code"], "rejected");
             assert_eq!(reply["error"], expected);
-            assert_eq!(reply["generation"], 0);
+            assert_eq!(reply["hosts"], json!([]));
             assert_eq!(reply["command"], Value::Null);
             let after = fixture.status();
             assert_eq!(after.sessions, before.sessions);
@@ -2278,6 +2432,168 @@ mod tern_control_boundary {
     }
 
     #[test]
+    fn live_host_switch_activates_configured_peer_and_rejects_inflight_snapshot_over_ipc() {
+        let server = Server::new(Plugin::Enabled, "live-host");
+        let fixture = Fixture::with_endpoint(ObservationMode::Tern, Some(server.path.clone()));
+        let dormant = fixture.status();
+        assert!(dormant.ok && dormant.registration_accepted);
+        assert_eq!(dormant.observation_mode, "tern");
+        assert_eq!(dormant.host_connections, HostConnections::default());
+        assert_eq!(dormant.connected_sources, 0);
+        assert_eq!(dormant.disconnected_sources, 0);
+        assert!(!dormant.data_connected);
+
+        assert!(fixture.exchange(&request("survivor", "tern-pane")).ok);
+        assert_eq!(
+            fixture.status().host_connections,
+            HostConnections { herdr: 0, tern: 1 }
+        );
+        {
+            let mut state = lock(&fixture.shared);
+            let mut preferences = state.observation_preferences().clone();
+            preferences.host = ObservationMode::Both;
+            state.apply_observation_preferences(preferences);
+        }
+        let generation = server.await_live(&fixture.shared);
+        let simultaneous = fixture.status();
+        assert_eq!(simultaneous.observation_mode, "auto");
+        assert_eq!(
+            simultaneous.host_connections,
+            HostConnections { herdr: 1, tern: 1 }
+        );
+        assert_eq!(simultaneous.connected_sources, 2);
+        assert_eq!(simultaneous.sessions, 2);
+
+        let source = fixture.context.herdr_socket.to_string_lossy().into_owned();
+        let paused = server.hold_next_snapshot();
+        paused.wait();
+        {
+            let mut state = lock(&fixture.shared);
+            assert_eq!(state.source_generation(&source), Some(generation));
+            let mut preferences = state.observation_preferences().clone();
+            preferences.host = ObservationMode::Tern;
+            state.apply_observation_preferences(preferences);
+            assert_eq!(state.retired_source_generation(&source), Some(generation));
+        }
+        // Release only after the live change has retired the exact generation
+        // that issued this real snapshot request. Joining the watcher proves
+        // the late response was consumed, rather than merely still pending.
+        paused.release();
+        lock(&fixture.watchers).shutdown();
+
+        let after = fixture.status();
+        assert_eq!(after.observation_mode, "tern");
+        assert_eq!(
+            after.host_connections,
+            HostConnections { herdr: 0, tern: 1 }
+        );
+        assert_eq!(after.connected_sources, 1);
+        assert_eq!(after.disconnected_sources, 0);
+        assert_eq!(after.sessions, 1);
+        assert!(after.data_connected && !after.shutdown);
+        let state = lock(&fixture.shared);
+        assert_eq!(state.source_generation(&source), None);
+        let rows = state
+            .session_snapshot(&SessionListOptions::with_filter(SessionFilter::All), None)
+            .rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pane_id, "tern-pane");
+        assert_eq!(rows[0].availability, Availability::Live);
+    }
+
+    #[test]
+    fn offered_prompt_host_retirement_reports_unknown_and_never_reoffers_after_rebinding() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        let mut poll = request("host-retired", "pane");
+        let bound = fixture.exchange(&poll);
+        assert!(bound.ok && bound.command.is_none());
+        let key = lock(&fixture.shared)
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows[0]
+            .key
+            .clone();
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                key.clone(),
+                "host-retired",
+                1,
+                "0",
+                1,
+                "pane",
+                "deliver once",
+            )
+            .unwrap();
+        poll.instance_id = Some(fixture.context.instance_id.clone());
+        poll.sequence = 2;
+        let offered = fixture.exchange(&poll);
+        assert!(offered.ok);
+        let command = offered.command.unwrap();
+        assert_eq!(command.operation_id, operation);
+        assert_eq!(command.text, "deliver once");
+
+        {
+            let mut state = lock(&fixture.shared);
+            let mut preferences = state.observation_preferences().clone();
+            preferences.host = ObservationMode::Herdr;
+            state.apply_observation_preferences(preferences);
+        }
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::UnknownDelivery)
+        );
+        let disabled = fixture.status();
+        assert_eq!(disabled.observation_mode, "herdr");
+        assert_eq!(disabled.host_connections, HostConnections::default());
+        assert_eq!(disabled.sessions, 0);
+
+        poll.sequence = 3;
+        poll.results = vec![TernResult {
+            operation_id: operation,
+            pane: "pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        }];
+        let late = fixture.exchange(&poll);
+        assert!(!late.ok && late.command.is_none());
+        assert_eq!(late.error_code, Some(TernExchangeErrorCode::Rejected));
+        lock(&fixture.shared).set_observation_mode(ObservationMode::Both);
+        let retired = fixture.exchange(&poll);
+        assert!(!retired.ok && retired.command.is_none());
+        assert_eq!(
+            retired.error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+
+        poll.results.clear();
+        poll.instance_id = None;
+        let unbound_old = fixture.exchange(&poll);
+        assert!(!unbound_old.ok && unbound_old.command.is_none());
+        assert_eq!(
+            unbound_old.error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        poll.epoch = 2;
+        poll.sequence = 1;
+        let rebound = fixture.exchange(&poll);
+        assert!(rebound.ok && rebound.command.is_none());
+        assert!(generation(&rebound, "0") > generation(&bound, "0"));
+        poll.instance_id = Some(rebound.instance_id);
+        for sequence in 2..=3 {
+            poll.sequence = sequence;
+            let fresh_poll = fixture.exchange(&poll);
+            assert!(fresh_poll.ok && fresh_poll.command.is_none());
+        }
+        let state = lock(&fixture.shared);
+        let fresh_key = &state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows[0]
+            .key;
+        assert_ne!(fresh_key.source_id, key.source_id);
+        assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
+        assert_eq!(receipt.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    }
+
+    #[test]
     fn actual_exchange_forwards_typed_rejections_and_preserves_receipts_and_size_admission() {
         let fixture = Fixture::new(ObservationMode::Tern);
         let mut poll = request("bound", "pane");
@@ -2322,13 +2638,13 @@ mod tern_control_boundary {
         let escaped = "\u{1}".repeat(100_000);
         assert_eq!(
             lock(&fixture.shared)
-                .queue_tern_prompt(key.clone(), "bound", 1, "pane", &escaped)
+                .queue_tern_prompt(key.clone(), "bound", 1, "0", 1, "pane", &escaped)
                 .unwrap_err(),
             PromptError::TooLarge
         );
         let text = "✓\n".repeat(60_000);
         let (operation, receipt) = lock(&fixture.shared)
-            .queue_tern_prompt(key, "bound", 1, "pane", &text)
+            .queue_tern_prompt(key, "bound", 1, "0", 1, "pane", &text)
             .unwrap();
         let offered = fixture.exchange(&poll);
         assert!(offered.ok && offered.error_code.is_none());
@@ -2343,7 +2659,7 @@ mod tern_control_boundary {
             error: None,
         }];
         let rejected = fixture.exchange(&poll);
-        assert!(!rejected.ok && rejected.command.is_none() && rejected.generation == 0);
+        assert!(!rejected.ok && rejected.command.is_none() && rejected.hosts.is_empty());
         assert_eq!(
             rejected.error_code,
             Some(TernExchangeErrorCode::ReceiptRejected)
@@ -2367,17 +2683,17 @@ mod tern_control_boundary {
         let reply: Value = serde_json::from_slice(&fixture.raw_exchange(&invalid)).unwrap();
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error_code"], "rejected");
-        assert_eq!(reply["generation"], 0);
+        assert_eq!(reply["hosts"], json!([]));
         assert_eq!(reply["command"], Value::Null);
         let detail = reply["error"].as_str().unwrap();
         assert!(!detail.is_empty() && detail.len() <= 4096);
         let oversized = json!({"kind": "tern", "padding": "x".repeat(MAX_EXCHANGE_BYTES)});
         let reply: Value = serde_json::from_slice(&fixture.raw_exchange(&oversized)).unwrap();
         assert_eq!(reply["error_code"], "rejected");
-        assert_eq!(reply["generation"], 0);
+        assert_eq!(reply["hosts"], json!([]));
         assert_eq!(reply["command"], Value::Null);
         let mut oversized_poll = poll;
-        oversized_poll.agents[0].title = "x".repeat(MAX_EXCHANGE_BYTES);
+        oversized_poll.hosts[0].agents[0].title = "x".repeat(MAX_EXCHANGE_BYTES);
         assert!(send_tern_exchange(
             &fixture.paths.control_socket,
             &oversized_poll,
@@ -2390,7 +2706,7 @@ mod tern_control_boundary {
     fn helper_transport_rejects_invalid_error_contract_and_honors_response_lf_limit() {
         let fixture = Fixture::new(ObservationMode::Tern);
         let failed = json!({
-            "ok": false, "instance_id": "daemon", "generation": 0,
+            "ok": false, "instance_id": "daemon", "hosts": [],
             "command": null, "error": "rejected", "error_code": "source_retired"
         });
         assert_eq!(
@@ -2404,7 +2720,10 @@ mod tern_control_boundary {
         for (field, value) in [
             ("error_code", Value::Null),
             ("error_code", json!("unknown_code")),
-            ("generation", json!(1)),
+            (
+                "hosts",
+                json!([{"host":"0","observation_generation":1,"generation":1,"error":null}]),
+            ),
             ("error", json!("")),
             ("error", json!("e".repeat(4097))),
             ("command", json!({"operation_id":"o","pane":"p","text":"x"})),
@@ -2414,7 +2733,8 @@ mod tern_control_boundary {
             invalid.push(candidate);
         }
         let success = json!({
-            "ok": true, "instance_id": "daemon", "generation": 1,
+            "ok": true, "instance_id": "daemon",
+            "hosts": [{"host":"0","observation_generation":1,"generation":1,"error":null}],
             "command": null, "error": null
         });
         for value in [Value::Null, json!("rejected")] {
@@ -2428,9 +2748,13 @@ mod tern_control_boundary {
         let mut largest = success;
         largest["command"] = json!({"operation_id":"operation","pane":"pane","text":""});
         largest["command"]["text"] = json!("x".repeat(300 * 1024));
+        assert!(fixture.peer_reply(largest.clone()).is_err());
+        let mut bound_request = request("wire", "pane");
+        bound_request.instance_id = Some("daemon".into());
+        bound_request.sequence = 2;
         assert_eq!(
             fixture
-                .peer_reply(largest.clone())
+                .peer_inventory(&bound_request, largest.to_string())
                 .unwrap()
                 .command
                 .unwrap()
@@ -2448,7 +2772,7 @@ mod tern_control_boundary {
         );
         assert_eq!(
             fixture
-                .peer_reply(largest.clone())
+                .peer_inventory(&bound_request, largest.to_string())
                 .unwrap()
                 .command
                 .unwrap()
@@ -2456,7 +2780,1369 @@ mod tern_control_boundary {
             text
         );
         largest["command"]["text"] = json!(format!("{text}x"));
-        assert!(fixture.peer_reply(largest).is_err());
+        assert!(fixture
+            .peer_inventory(&bound_request, largest.to_string())
+            .is_err());
+    }
+
+    #[test]
+    fn tern_observes_all_hosts_automatically_and_keeps_same_pane_keys_disjoint() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        {
+            let mut state = lock(&fixture.shared);
+            let mut preferences = state.observation_preferences().clone();
+            preferences.local = false;
+            preferences.remote = false;
+            preferences.machines.clear();
+            state.apply_observation_preferences(preferences);
+        }
+        let mut inventory = three_hosts("automatic");
+        for entry in &mut inventory.hosts {
+            entry.agents[0].pane = "same-pane".into();
+        }
+        let bound = fixture.exchange(&inventory);
+        assert!(bound.ok && bound.command.is_none());
+        assert_eq!(
+            fixture.status().host_connections,
+            HostConnections { herdr: 0, tern: 3 }
+        );
+        assert_eq!(fixture.status().connected_sources, 3);
+        assert_eq!(fixture.status().sessions, 3);
+        let local = fixture.row("Local fixture");
+        let a = fixture.row("Remote A");
+        let b = fixture.row("Remote B");
+        assert!(local.is_local && local.is_tern);
+        assert!(!a.is_local && a.is_tern && !b.is_local && b.is_tern);
+        assert_ne!(local.key, a.key);
+        assert_ne!(a.key, b.key);
+        assert_ne!(local.key, b.key);
+        assert_eq!(local.key.terminal_id, a.key.terminal_id);
+        {
+            let mut state = lock(&fixture.shared);
+            assert_eq!(state.prompt_available(&a.key), Err(PromptError::ReadOnly));
+            assert_eq!(state.prompt_available(&b.key), Err(PromptError::ReadOnly));
+            assert_eq!(
+                state
+                    .queue_tern_prompt(
+                        a.key.clone(),
+                        "automatic",
+                        1,
+                        "1",
+                        1,
+                        "same-pane",
+                        "never remote"
+                    )
+                    .unwrap_err(),
+                PromptError::ReadOnly
+            );
+            assert_eq!(
+                state
+                    .queue_tern_prompt(
+                        local.key.clone(),
+                        "automatic",
+                        1,
+                        "1",
+                        1,
+                        "same-pane",
+                        "wrong host"
+                    )
+                    .unwrap_err(),
+                PromptError::StaleTarget
+            );
+            let selected = state.session_snapshot(&SessionListOptions::default(), Some(&a.key));
+            assert_eq!(selected.selected.as_ref(), Some(&a.key));
+        }
+        let mut other = request("other-window", "same-pane");
+        other.hosts[0].label = "Other window".into();
+        assert!(fixture.exchange(&other).ok);
+        let other_row = fixture.row("Other window");
+        assert_ne!(other_row.key, local.key);
+        assert_ne!(other_row.key, a.key);
+        {
+            let mut state = lock(&fixture.shared);
+            assert_eq!(
+                state
+                    .queue_tern_prompt(
+                        local.key.clone(),
+                        "other-window",
+                        1,
+                        "0",
+                        1,
+                        "same-pane",
+                        "wrong window"
+                    )
+                    .unwrap_err(),
+                PromptError::StaleTarget
+            );
+        }
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(local.key, "automatic", 1, "0", 1, "same-pane", "local only")
+            .unwrap();
+        inventory.instance_id = Some(bound.instance_id);
+        inventory.sequence = 2;
+        let offered = fixture.exchange(&inventory).command.unwrap();
+        assert_eq!(offered.operation_id, operation);
+        assert_eq!(offered.pane, "same-pane");
+        {
+            let mut state = lock(&fixture.shared);
+            let mut preferences = state.observation_preferences().clone();
+            preferences.local = true;
+            state.apply_observation_preferences(preferences.clone());
+            preferences.local = false;
+            preferences.remote = false;
+            preferences.machines.clear();
+            state.apply_observation_preferences(preferences);
+        }
+        assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(fixture.status().host_connections.tern, 4);
+        other.instance_id = Some(fixture.context.instance_id.clone());
+        other.sequence = 2;
+        assert!(fixture.exchange(&other).command.is_none());
+        inventory.sequence = 3;
+        inventory.results.push(TernResult {
+            operation_id: operation,
+            pane: "same-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        });
+        assert!(fixture.exchange(&inventory).command.is_none());
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Ok(PromptReceipt::Accepted)
+        );
+    }
+
+    #[test]
+    fn tern_maintenance_removes_63_offline_sources_without_another_registration() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut state = lock(&fixture.shared);
+        for index in 0..64 {
+            let inventory = request(&format!("retention-{index}"), &format!("pane-{index}"));
+            assert!(state.tern_exchange(inventory).ok);
+        }
+        let base = Instant::now();
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        for index in 0..64 {
+            set_tern_test_last_seen(
+                &mut state,
+                &format!("retention-{index}"),
+                None,
+                if index == 0 { deadline } else { base },
+            );
+        }
+        assert!(state.maintain_tern(base + FRESHNESS));
+        let offline = state.session_snapshot(
+            &SessionListOptions::with_filter(SessionFilter::Offline),
+            None,
+        );
+        assert_eq!(offline.total, 64);
+        assert_eq!(offline.matched, 63);
+        assert_eq!(offline.rows.len(), 63);
+        assert!(!state.maintain_tern(deadline - Duration::from_nanos(1)));
+        assert_eq!(
+            state
+                .session_snapshot(&SessionListOptions::default(), None)
+                .total,
+            64
+        );
+        assert!(state.maintain_tern(deadline));
+        let retained = state.session_snapshot(&SessionListOptions::default(), None);
+        assert_eq!(retained.total, 1);
+        assert_eq!(retained.rows.len(), 1);
+        assert_eq!(retained.rows[0].pane_id, "pane-0");
+        assert_eq!(retained.rows[0].availability, Availability::Live);
+        assert_eq!(
+            state
+                .session_snapshot(
+                    &SessionListOptions::with_filter(SessionFilter::Offline),
+                    None,
+                )
+                .matched,
+            0
+        );
+        assert!(!state.maintain_tern(deadline));
+        drop(state);
+        let status = fixture.status();
+        assert_eq!(status.sessions, 1);
+        assert_eq!(status.connected_sources, 1);
+        assert_eq!(status.disconnected_sources, 0);
+        assert_eq!(status.host_connections.tern, 1);
+    }
+
+    #[test]
+    fn tern_remote_grace_prune_preserves_live_parent_local_receipt_and_new_generation() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("child-grace");
+        let mut state = lock(&fixture.shared);
+        let first = state.tern_exchange(inventory.clone());
+        assert!(first.ok);
+        let rows = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows;
+        let local = rows.iter().find(|row| row.is_local).unwrap().key.clone();
+        let old_remote = rows
+            .iter()
+            .find(|row| row.source_label == "Remote A")
+            .unwrap()
+            .key
+            .clone();
+        let (operation, receipt) = state
+            .queue_tern_prompt(
+                local.clone(),
+                "child-grace",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "survive remote retirement",
+            )
+            .unwrap();
+        inventory.instance_id = Some(first.instance_id.clone());
+        inventory.sequence = 2;
+        assert_eq!(
+            state
+                .tern_exchange(inventory.clone())
+                .command
+                .unwrap()
+                .operation_id,
+            operation
+        );
+        let base = Instant::now();
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        set_tern_test_last_seen(&mut state, "child-grace", None, deadline);
+        set_tern_test_last_seen(&mut state, "child-grace", Some("1"), base);
+        assert!(state.maintain_tern(base + FRESHNESS));
+        assert_eq!(
+            state
+                .session_view_for_key(&old_remote)
+                .unwrap()
+                .availability,
+            Availability::Offline
+        );
+        assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(state.maintain_tern(deadline));
+        assert!(state.session_view_for_key(&old_remote).is_none());
+        assert_eq!(
+            state.session_view_for_key(&local).unwrap().availability,
+            Availability::Live
+        );
+        assert_eq!(
+            state
+                .session_snapshot(&SessionListOptions::default(), None)
+                .total,
+            2
+        );
+        assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        inventory.sequence = 3;
+        inventory.hosts[1].observation_generation = 2;
+        inventory.results.push(TernResult {
+            operation_id: operation,
+            pane: "local-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        });
+        let recovered = state.tern_exchange(inventory.clone());
+        assert!(recovered.ok && recovered.command.is_none());
+        assert!(generation(&recovered, "1") > generation(&first, "1"));
+        assert_eq!(generation(&recovered, "0"), generation(&first, "0"));
+        assert_eq!(receipt.try_recv().unwrap(), Ok(PromptReceipt::Accepted));
+        assert_eq!(receipt.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        let remote = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .into_iter()
+            .find(|row| row.source_label == "Remote A")
+            .unwrap();
+        assert_ne!(remote.key, old_remote);
+        assert_eq!(
+            state.prompt_available(&old_remote),
+            Err(PromptError::StaleTarget)
+        );
+        inventory.sequence = 4;
+        inventory.results.clear();
+        assert!(state.tern_exchange(inventory).command.is_none());
+        assert!(state.take_completions().is_empty());
+        drop(state);
+        assert_eq!(fixture.status().connected_sources, 3);
+        assert_eq!(fixture.status().disconnected_sources, 0);
+    }
+
+    #[test]
+    fn tern_host_loss_recovery_low_generations_and_empty_inventory_are_independent() {
+        for loss in ["disconnected", "unavailable", "missing"] {
+            let fixture = Fixture::new(ObservationMode::Tern);
+            let mut inventory = three_hosts(loss);
+            inventory.hosts[1].agents[0].state = TernAgentState::Working;
+            let first = fixture.exchange(&inventory);
+            let local = fixture.row("Local fixture").key;
+            let old_a = fixture.row("Remote A").key;
+            let b = fixture.row("Remote B").key;
+            let (operation, receipt) = lock(&fixture.shared)
+                .queue_tern_prompt(
+                    local.clone(),
+                    loss,
+                    1,
+                    "0",
+                    1,
+                    "local-pane",
+                    "survives remote loss",
+                )
+                .unwrap();
+            inventory.instance_id = Some(first.instance_id.clone());
+            inventory.sequence = 2;
+            assert_eq!(
+                fixture.exchange(&inventory).command.unwrap().operation_id,
+                operation
+            );
+            let mut lost = inventory.clone();
+            lost.sequence = 3;
+            if loss == "missing" {
+                lost.hosts.remove(1);
+            } else {
+                lost.hosts[1].status = if loss == "unavailable" {
+                    TernHostStatus::Unavailable
+                } else {
+                    TernHostStatus::Disconnected
+                };
+                lost.hosts[1].agents.clear();
+            }
+            lost.results = vec![TernResult {
+                operation_id: operation,
+                pane: "local-pane".into(),
+                status: TernResultStatus::Accepted,
+                error: None,
+            }];
+            let loss_reply = fixture.exchange(&lost);
+            assert!(loss_reply.ok && loss_reply.command.is_none());
+            if loss != "missing" {
+                assert_eq!(generation(&loss_reply, "1"), generation(&first, "1"));
+            }
+            let retained = fixture.row("Remote A");
+            assert_eq!(retained.key, old_a);
+            assert_eq!(retained.availability, Availability::Offline);
+            assert_eq!(fixture.row("Local fixture").key, local);
+            assert_eq!(
+                fixture.row("Local fixture").availability,
+                Availability::Live
+            );
+            assert_eq!(fixture.row("Remote B").key, b);
+            assert_eq!(fixture.row("Remote B").availability, Availability::Live);
+            assert_eq!(fixture.status().host_connections.tern, 2);
+            assert_eq!(
+                receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+                Ok(PromptReceipt::Accepted)
+            );
+            assert!(lock(&fixture.shared).take_completions().is_empty());
+            if loss != "unavailable" {
+                let mut stale = inventory.clone();
+                stale.sequence = 4;
+                let reply = fixture.exchange(&stale);
+                assert!(reply.ok && reply.command.is_none());
+                let rejected = reply.hosts.iter().find(|entry| entry.host == "1").unwrap();
+                assert_eq!(rejected.error_code, Some(TernExchangeErrorCode::Rejected));
+                assert_eq!(fixture.row("Remote A").availability, Availability::Offline);
+                assert_eq!(fixture.row("Remote B").key, b);
+            }
+            inventory.sequence = 5;
+            inventory.hosts[1].observation_generation = 2;
+            inventory.hosts[1].agents[0].state = TernAgentState::Idle;
+            let recovery = fixture.exchange(&inventory);
+            assert!(recovery.ok && recovery.command.is_none());
+            assert!(generation(&recovery, "1") > generation(&first, "1"));
+            let fresh_a = fixture.row("Remote A").key;
+            assert_ne!(fresh_a, old_a);
+            assert_eq!(fixture.row("Local fixture").key, local);
+            assert_eq!(fixture.row("Remote B").key, b);
+            assert!(lock(&fixture.shared).take_completions().is_empty());
+            assert_eq!(
+                lock(&fixture.shared).prompt_available(&old_a),
+                Err(PromptError::StaleTarget)
+            );
+            inventory.sequence = 6;
+            inventory.results.clear();
+            inventory.hosts[1].observation_generation = 1;
+            inventory.hosts[0].agents[0].state = TernAgentState::Working;
+            inventory.hosts[2].agents[0].state = TernAgentState::Working;
+            let low = fixture.exchange(&inventory);
+            assert!(low.ok);
+            assert_eq!(
+                low.hosts[1].error_code,
+                Some(TernExchangeErrorCode::Rejected)
+            );
+            assert_eq!(fixture.row("Remote A").key, fresh_a);
+            assert_eq!(fixture.row("Local fixture").status, AgentStatus::Working);
+            assert_eq!(fixture.row("Remote B").status, AgentStatus::Working);
+            let delayed = fixture.exchange(&inventory);
+            assert!(!delayed.ok && delayed.hosts.is_empty() && delayed.command.is_none());
+            assert_eq!(delayed.error_code, Some(TernExchangeErrorCode::Rejected));
+            inventory.sequence = 7;
+            inventory.hosts[1].observation_generation = 2;
+            inventory.hosts[1].agents.clear();
+            let empty = fixture.exchange(&inventory);
+            assert!(empty.ok);
+            assert_eq!(generation(&empty, "1"), generation(&recovery, "1"));
+            assert_eq!(fixture.status().connected_sources, 3);
+            assert_eq!(fixture.status().sessions, 2);
+            assert!(!fixture
+                .rows()
+                .iter()
+                .any(|row| row.source_label == "Remote A"));
+            assert!(lock(&fixture.shared).take_completions().is_empty());
+        }
+    }
+
+    #[test]
+    fn tern_missing_local_receipt_is_unknown_even_when_only_remote_host_is_lost() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("remote-loss-without-receipt");
+        let bound = fixture.exchange(&inventory);
+        let local = fixture.row("Local fixture").key;
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                local.clone(),
+                "remote-loss-without-receipt",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "deliver only once",
+            )
+            .unwrap();
+        inventory.instance_id = Some(bound.instance_id);
+        inventory.sequence = 2;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        inventory.sequence = 3;
+        inventory.hosts[1].status = TernHostStatus::Disconnected;
+        inventory.hosts[1].agents.clear();
+        let loss = fixture.exchange(&inventory);
+        assert!(loss.ok && loss.command.is_none());
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::UnknownDelivery)
+        );
+        assert_eq!(fixture.row("Local fixture").key, local);
+        assert_eq!(
+            fixture.row("Local fixture").availability,
+            Availability::Live
+        );
+        assert_eq!(fixture.row("Remote A").availability, Availability::Offline);
+        inventory.sequence = 4;
+        assert!(fixture.exchange(&inventory).command.is_none());
+    }
+
+    #[test]
+    fn tern_native_freshness_requires_new_keys_without_plugin_generation_change() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("native-expiry");
+        let first = fixture.exchange(&inventory);
+        let old: Vec<SessionKey> = fixture.rows().into_iter().map(|row| row.key).collect();
+        let local = fixture.row("Local fixture").key;
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                local.clone(),
+                "native-expiry",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "expiry is uncertain",
+            )
+            .unwrap();
+        inventory.instance_id = Some(first.instance_id.clone());
+        inventory.sequence = 2;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        assert!(lock(&fixture.shared)
+            .expire_tern(Instant::now() + FRESHNESS + Duration::from_millis(1)));
+        assert!(fixture
+            .rows()
+            .iter()
+            .all(|row| row.availability == Availability::Offline));
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::UnknownDelivery)
+        );
+        inventory.sequence = 3;
+        let recovered = fixture.exchange(&inventory);
+        assert!(recovered.ok && recovered.command.is_none());
+        for entry in &recovered.hosts {
+            assert!(entry.generation > generation(&first, &entry.host));
+            assert_eq!(entry.observation_generation, 1);
+        }
+        let state = lock(&fixture.shared);
+        for key in &old {
+            assert!(state.session_view_for_key(key).is_none());
+            assert_eq!(state.prompt_available(key), Err(PromptError::StaleTarget));
+        }
+        drop(state);
+        assert!(fixture
+            .rows()
+            .iter()
+            .all(|row| row.availability == Availability::Live));
+        assert_eq!(fixture.status().host_connections.tern, 3);
+        assert!(lock(&fixture.shared).take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_host_rename_preserves_key_selection_and_updates_search_and_sort() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("rename");
+        let first = fixture.exchange(&inventory);
+        let selected = fixture.row("Remote A").key;
+        inventory.instance_id = Some(first.instance_id.clone());
+        inventory.sequence = 2;
+        inventory.hosts[1].label = "Aardvark renamed host".into();
+        let renamed = fixture.exchange(&inventory);
+        assert_eq!(generation(&renamed, "1"), generation(&first, "1"));
+        assert_eq!(fixture.row("Aardvark renamed host").key, selected);
+        let state = lock(&fixture.shared);
+        let options = SessionListOptions {
+            query: "Aardvark renamed",
+            ..SessionListOptions::default()
+        };
+        let result = state.session_snapshot(&options, Some(&selected));
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, selected);
+        assert_eq!(result.selected.as_ref(), Some(&selected));
+        let old_name = SessionListOptions {
+            query: "Remote A",
+            ..SessionListOptions::default()
+        };
+        assert!(state.session_snapshot(&old_name, None).rows.is_empty());
+        let source_sort = SessionListOptions {
+            sort: SessionSort::SourceAsc,
+            ..SessionListOptions::default()
+        };
+        assert_eq!(
+            state.session_snapshot(&source_sort, Some(&selected)).rows[0].key,
+            selected
+        );
+    }
+
+    #[test]
+    fn tern_shared_source_limit_rejects_only_new_host_and_preserves_local_receipt() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        let mut herdr = Vec::new();
+        {
+            let mut state = lock(&fixture.shared);
+            for index in 0..61 {
+                let source = fixture
+                    .root
+                    .join(format!("herdr-{index}.sock"))
+                    .to_string_lossy()
+                    .into_owned();
+                let record = AgentRecord {
+                    terminal_id: format!("herdr-{index}"),
+                    pane_id: format!("herdr-pane-{index}"),
+                    status: AgentStatus::Idle,
+                    metadata: SessionMetadata::default(),
+                    outcome_authoritative: false,
+                    outcome: None,
+                };
+                assert!(state.begin_source(source.clone(), 1));
+                assert!(state.publish_source_snapshot(
+                    &source,
+                    1,
+                    [&record],
+                    SourceCounts {
+                        sessions: 1,
+                        ..SourceCounts::default()
+                    },
+                    Arc::from(vec![record.pane_id.clone()]),
+                    &[],
+                    Instant::now()
+                ));
+                herdr.push(source);
+            }
+        }
+        let mut inventory = three_hosts("capacity");
+        let first = fixture.exchange(&inventory);
+        let keys: Vec<SessionKey> = fixture.rows().into_iter().map(|row| row.key).collect();
+        assert_eq!(keys.len(), 64);
+        let local = fixture.row("Local fixture").key;
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                local.clone(),
+                "capacity",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "receipt survives capacity",
+            )
+            .unwrap();
+        inventory.instance_id = Some(first.instance_id);
+        inventory.sequence = 2;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        inventory.sequence = 3;
+        inventory
+            .hosts
+            .insert(0, host("3", "New remote", false, "new-pane"));
+        inventory.hosts[1].agents[0].state = TernAgentState::Working;
+        inventory.hosts[3].agents[0].state = TernAgentState::Working;
+        inventory.results = vec![TernResult {
+            operation_id: operation,
+            pane: "local-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        }];
+        let partial = fixture.exchange(&inventory);
+        assert!(partial.ok && partial.error.is_none() && partial.command.is_none());
+        assert_eq!(
+            partial
+                .hosts
+                .iter()
+                .map(|entry| entry.host.as_str())
+                .collect::<Vec<_>>(),
+            ["3", "0", "1", "2"]
+        );
+        assert_eq!(partial.hosts[0].generation, 0);
+        assert_eq!(
+            partial.hosts[0].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
+        assert!(partial.hosts[1..]
+            .iter()
+            .all(|entry| entry.error.is_none() && entry.error_code.is_none()));
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Ok(PromptReceipt::Accepted)
+        );
+        assert_eq!(fixture.row("Local fixture").key, local);
+        assert_eq!(fixture.row("Local fixture").status, AgentStatus::Working);
+        assert_eq!(fixture.row("Remote B").status, AgentStatus::Working);
+        assert_eq!(fixture.status().connected_sources, 64);
+        assert_eq!(
+            fixture.status().host_connections,
+            HostConnections { herdr: 61, tern: 3 }
+        );
+        let state = lock(&fixture.shared);
+        for key in &keys {
+            assert_eq!(
+                state.session_view_for_key(key).unwrap().availability,
+                Availability::Live
+            );
+        }
+        for source in &herdr {
+            assert_eq!(state.source_generation(source), Some(1));
+        }
+        drop(state);
+        assert!(lock(&fixture.shared).remove_source(&herdr[0], 1));
+        inventory.sequence = 4;
+        inventory.results.clear();
+        let admitted = fixture.exchange(&inventory);
+        assert!(admitted.ok && admitted.command.is_none());
+        assert!(admitted.hosts[0].generation > 0 && admitted.hosts[0].error.is_none());
+        assert_eq!(fixture.row("New remote").availability, Availability::Live);
+        assert_eq!(fixture.row("Local fixture").key, local);
+        assert_eq!(fixture.status().connected_sources, 64);
+    }
+
+    #[test]
+    fn tern_new_local_host_has_admission_priority_even_when_remote_is_first() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        {
+            let mut state = lock(&fixture.shared);
+            for index in 0..63 {
+                let source = fixture
+                    .root
+                    .join(format!("priority-{index}.sock"))
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(state.begin_source(source.clone(), 1));
+                assert!(state.publish_source_snapshot(
+                    &source,
+                    1,
+                    &[],
+                    SourceCounts::default(),
+                    Arc::from(Vec::<String>::new()),
+                    &[],
+                    Instant::now()
+                ));
+            }
+        }
+        let mut inventory = request("local-priority", "local-pane");
+        inventory
+            .hosts
+            .insert(0, host("2", "First remote", false, "remote-pane"));
+        let reply = fixture.exchange(&inventory);
+        assert!(reply.ok);
+        assert_eq!(reply.hosts[0].host, "2");
+        assert_eq!(reply.hosts[0].generation, 0);
+        assert_eq!(
+            reply.hosts[0].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
+        assert_eq!(reply.hosts[1].host, "0");
+        assert!(reply.hosts[1].generation > 0 && reply.hosts[1].error.is_none());
+        assert_eq!(
+            fixture.row("Local fixture").availability,
+            Availability::Live
+        );
+        assert_eq!(fixture.status().connected_sources, 64);
+    }
+
+    #[test]
+    fn tern_64_host_reply_accounts_for_escaped_utf8_and_lf_before_prompt_offer() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = request("reply-budget", "pane");
+        for index in 1..64 {
+            let mut remote = host(
+                &index.to_string(),
+                &format!("Remote {index}"),
+                false,
+                "unused",
+            );
+            remote.agents.clear();
+            inventory.hosts.push(remote);
+        }
+        let bound = fixture.exchange(&inventory);
+        assert!(bound.ok && bound.command.is_none());
+        assert_eq!(bound.hosts.len(), 64);
+        assert_eq!(fixture.status().connected_sources, 64);
+        let host_bytes = serde_json::to_vec(&bound.hosts).unwrap().len();
+        let mut wire = serde_json::to_value(&bound).unwrap();
+        wire["command"] = json!({"operation_id":"boundary","pane":"pane","text":""});
+        let overhead = serde_json::to_vec(&wire).unwrap().len() + 1;
+        let escaped = "\u{1}✓\n\\".repeat(10_000);
+        let encoded_text = serde_json::to_vec(&escaped).unwrap().len() - 2;
+        let text = format!(
+            "{escaped}{}",
+            "x".repeat(MAX_RESPONSE_BYTES - overhead - encoded_text)
+        );
+        wire["command"]["text"] = json!(text);
+        let typed: crate::tern::TernExchangeReply = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            crate::tern::serialize_response(&typed).unwrap().len(),
+            MAX_RESPONSE_BYTES
+        );
+        assert!(crate::tern::check_command_response(
+            &bound.instance_id,
+            host_bytes,
+            "boundary",
+            "pane",
+            &text
+        )
+        .is_ok());
+        assert!(fixture
+            .peer_inventory(&inventory, wire.to_string())
+            .is_err());
+        inventory.instance_id = Some(bound.instance_id.clone());
+        inventory.sequence = 2;
+        let reply = fixture
+            .peer_inventory(&inventory, wire.to_string())
+            .unwrap();
+        assert_eq!(reply.hosts.len(), 64);
+        assert_eq!(reply.command.unwrap().text, text);
+        let oversized = format!("{text}x");
+        assert_eq!(
+            crate::tern::check_command_response(
+                &bound.instance_id,
+                host_bytes,
+                "boundary",
+                "pane",
+                &oversized
+            ),
+            Err(PromptError::TooLarge)
+        );
+        wire["command"]["text"] = json!(oversized);
+        assert!(fixture
+            .peer_inventory(&inventory, wire.to_string())
+            .is_err());
+        let key = fixture.row("Local fixture").key;
+        assert_eq!(
+            lock(&fixture.shared)
+                .queue_tern_prompt(
+                    key,
+                    "reply-budget",
+                    1,
+                    "0",
+                    1,
+                    "pane",
+                    &"\u{1}".repeat(100_000)
+                )
+                .unwrap_err(),
+            PromptError::TooLarge
+        );
+        assert!(fixture.exchange(&inventory).command.is_none());
+
+        let growing = Fixture::new(ObservationMode::Tern);
+        let mut small = request("growing-reply", "pane");
+        let initial = growing.exchange(&small);
+        let key = growing.row("Local fixture").key;
+        let near_limit = format!("✓\n{}", "x".repeat(MAX_RESPONSE_BYTES - host_bytes));
+        let (_, receipt) = lock(&growing.shared)
+            .queue_tern_prompt(key, "growing-reply", 1, "0", 1, "pane", &near_limit)
+            .unwrap();
+        small.hosts.extend(inventory.hosts[1..].iter().cloned());
+        small.instance_id = Some(initial.instance_id);
+        small.sequence = 2;
+        let rejected_before_offer = growing.exchange(&small);
+        assert!(rejected_before_offer.ok && rejected_before_offer.command.is_none());
+        assert_eq!(rejected_before_offer.hosts.len(), 64);
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::TooLarge)
+        );
+        small.sequence = 3;
+        assert!(growing.exchange(&small).command.is_none());
+    }
+
+    #[test]
+    fn tern_provider_retirement_fences_every_child_and_preserves_unknown_delivery() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        let mut inventory = three_hosts("retire-children");
+        let first = fixture.exchange(&inventory);
+        let keys: Vec<SessionKey> = fixture.rows().into_iter().map(|row| row.key).collect();
+        let local = fixture.row("Local fixture").key;
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                local,
+                "retire-children",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "once before retirement",
+            )
+            .unwrap();
+        inventory.instance_id = Some(first.instance_id.clone());
+        inventory.sequence = 2;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        lock(&fixture.shared).set_observation_mode(ObservationMode::Herdr);
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::UnknownDelivery)
+        );
+        assert!(fixture.rows().is_empty());
+        assert_eq!(fixture.status().host_connections.tern, 0);
+        lock(&fixture.shared).set_observation_mode(ObservationMode::Both);
+        inventory.sequence = 3;
+        let stale = fixture.exchange(&inventory);
+        assert!(!stale.ok && stale.hosts.is_empty() && stale.command.is_none());
+        assert_eq!(stale.error_code, Some(TernExchangeErrorCode::SourceRetired));
+        inventory.instance_id = None;
+        inventory.epoch = 2;
+        inventory.sequence = 1;
+        let rebound = fixture.exchange(&inventory);
+        assert!(rebound.ok && rebound.command.is_none());
+        for entry in &rebound.hosts {
+            assert!(entry.generation > generation(&first, &entry.host));
+        }
+        {
+            let state = lock(&fixture.shared);
+            for key in &keys {
+                assert!(state.session_view_for_key(key).is_none());
+                assert_eq!(state.prompt_available(key), Err(PromptError::StaleTarget));
+            }
+        }
+        assert_eq!(fixture.status().host_connections.tern, 3);
+        inventory.instance_id = Some(rebound.instance_id);
+        inventory.sequence = 2;
+        assert!(fixture.exchange(&inventory).command.is_none());
+        inventory.sequence = 3;
+        inventory.results = vec![TernResult {
+            operation_id: operation,
+            pane: "local-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        }];
+        let old_receipt = fixture.exchange(&inventory);
+        assert!(!old_receipt.ok && old_receipt.command.is_none());
+        assert_eq!(
+            old_receipt.error_code,
+            Some(TernExchangeErrorCode::ReceiptRejected)
+        );
+        assert!(lock(&fixture.shared).take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_initial_disconnected_hosts_do_not_consume_source_slots() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("initial-offline");
+        inventory.hosts[1].status = TernHostStatus::Disconnected;
+        inventory.hosts[1].agents.clear();
+        inventory.hosts[2].status = TernHostStatus::Unavailable;
+        inventory.hosts[2].agents.clear();
+        let first = fixture.exchange(&inventory);
+        assert!(first.ok && first.hosts.len() == 3);
+        assert_eq!(generation(&first, "1"), 0);
+        assert_eq!(generation(&first, "2"), 0);
+        assert!(first.hosts.iter().all(|entry| entry.error.is_none()));
+        assert_eq!(fixture.status().connected_sources, 1);
+        assert_eq!(fixture.status().disconnected_sources, 0);
+        assert_eq!(fixture.rows().len(), 1);
+        inventory.instance_id = Some(first.instance_id);
+        inventory.sequence = 2;
+        inventory.hosts[1] = host("1", "Remote A", false, "a-pane");
+        inventory.hosts[1].observation_generation = 2;
+        let recovered = fixture.exchange(&inventory);
+        assert!(recovered.ok && generation(&recovered, "1") > 0);
+        assert_eq!(generation(&recovered, "2"), 0);
+        assert_eq!(fixture.status().connected_sources, 2);
+    }
+
+    #[test]
+    fn tern_stale_host_generation_cannot_borrow_other_hosts_heartbeats() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("host-freshness");
+        inventory.hosts[1].observation_generation = 2;
+        let first = fixture.exchange(&inventory);
+        let local = fixture.row("Local fixture").key;
+        let a = fixture.row("Remote A").key;
+        let b = fixture.row("Remote B").key;
+        inventory.instance_id = Some(first.instance_id.clone());
+        inventory.hosts[1].observation_generation = 1;
+        let deadline = Instant::now() + FRESHNESS + Duration::from_secs(2);
+        while fixture.row("Remote A").availability == Availability::Live {
+            assert!(
+                Instant::now() < deadline,
+                "stale host was kept fresh by other inventories"
+            );
+            inventory.sequence += 1;
+            let reply = fixture.exchange(&inventory);
+            assert!(reply.ok && reply.command.is_none());
+            assert_eq!(
+                reply.hosts[1].error_code,
+                Some(TernExchangeErrorCode::Rejected)
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(fixture.row("Remote A").key, a);
+        assert_eq!(fixture.row("Local fixture").key, local);
+        assert_eq!(fixture.row("Remote B").key, b);
+        assert_eq!(
+            fixture.row("Local fixture").availability,
+            Availability::Live
+        );
+        assert_eq!(fixture.row("Remote B").availability, Availability::Live);
+        assert_eq!(fixture.status().host_connections.tern, 2);
+        inventory.sequence += 1;
+        inventory.hosts[1].observation_generation = 2;
+        let recovered = fixture.exchange(&inventory);
+        assert!(recovered.ok && generation(&recovered, "1") > generation(&first, "1"));
+        assert_ne!(fixture.row("Remote A").key, a);
+        assert_eq!(fixture.row("Local fixture").key, local);
+        assert_eq!(fixture.row("Remote B").key, b);
+        assert!(lock(&fixture.shared).take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_invalid_nested_inventory_and_receipts_reject_before_any_mutation() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("shape");
+        let bound = fixture.exchange(&inventory);
+        let local = fixture.row("Local fixture").key;
+        let (operation, receipt) = lock(&fixture.shared)
+            .queue_tern_prompt(local, "shape", 1, "0", 1, "local-pane", "retain receipt")
+            .unwrap();
+        inventory.instance_id = Some(bound.instance_id);
+        inventory.sequence = 2;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        inventory.sequence = 3;
+        inventory.results = vec![TernResult {
+            operation_id: operation,
+            pane: "local-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        }];
+        let before = fixture.rows();
+        let base = serde_json::to_string(&inventory).unwrap();
+        for duplicate in [
+            base.replacen("\"host\":\"1\"", "\"host\":\"1\",\"host\":\"2\"", 1),
+            base.replacen(
+                "\"pane\":\"a-pane\"",
+                "\"pane\":\"a-pane\",\"pane\":\"different\"",
+                1,
+            ),
+            base.replacen(
+                "\"status\":\"accepted\"",
+                "\"status\":\"accepted\",\"status\":\"failed\"",
+                1,
+            ),
+        ] {
+            assert!(crate::read_tern_exchange_request(duplicate.as_bytes()).is_err());
+            let reply: Value = serde_json::from_slice(&fixture.raw_json(&duplicate)).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["hosts"], json!([]));
+            assert_eq!(reply["command"], Value::Null);
+            assert_eq!(fixture.rows(), before);
+            assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        let value = serde_json::to_value(&inventory).unwrap();
+        let mut invalid = Vec::new();
+        let mut duplicate_host = value.clone();
+        duplicate_host["hosts"][2]["host"] = json!("1");
+        invalid.push(duplicate_host);
+        let mut duplicate_pane = value.clone();
+        let extra = duplicate_pane["hosts"][1]["agents"][0].clone();
+        duplicate_pane["hosts"][1]["agents"]
+            .as_array_mut()
+            .unwrap()
+            .push(extra);
+        invalid.push(duplicate_pane);
+        for bad_id in ["01", "-1", "1.0", "9007199254740992"] {
+            let mut candidate = value.clone();
+            candidate["hosts"][1]["host"] = json!(bad_id);
+            invalid.push(candidate);
+        }
+        for (index, field, bad) in [
+            (0, "is_local", json!(false)),
+            (1, "is_local", json!(true)),
+            (1, "observation_generation", json!(0)),
+            (1, "observation_generation", json!(9_007_199_254_740_992u64)),
+            (1, "status", json!("unavailable")),
+            (1, "status", json!("disconnected")),
+        ] {
+            let mut candidate = value.clone();
+            candidate["hosts"][index][field] = bad;
+            invalid.push(candidate);
+        }
+        let mut too_many_agents = value.clone();
+        let agent = too_many_agents["hosts"][1]["agents"][0].clone();
+        too_many_agents["hosts"][1]["agents"] = Value::Array(
+            (0..129)
+                .map(|index| {
+                    let mut item = agent.clone();
+                    item["pane"] = json!(format!("pane-{index}"));
+                    item
+                })
+                .collect(),
+        );
+        invalid.push(too_many_agents);
+        let mut too_many_hosts = value.clone();
+        let remote = too_many_hosts["hosts"][1].clone();
+        too_many_hosts["hosts"] = Value::Array(
+            std::iter::once(value["hosts"][0].clone())
+                .chain((1..65).map(|index| {
+                    let mut item = remote.clone();
+                    item["host"] = json!(index.to_string());
+                    item
+                }))
+                .collect(),
+        );
+        invalid.push(too_many_hosts);
+        let mut empty_hosts = value.clone();
+        empty_hosts["hosts"] = json!([]);
+        invalid.push(empty_hosts);
+        for candidate in invalid {
+            let reply: Value = serde_json::from_slice(&fixture.raw_exchange(&candidate)).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["error_code"], "rejected");
+            assert_eq!(reply["hosts"], json!([]));
+            assert_eq!(reply["command"], Value::Null);
+            assert_eq!(fixture.rows(), before);
+            assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        assert!(fixture.exchange(&inventory).ok);
+        assert_eq!(
+            receipt.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Ok(PromptReceipt::Accepted)
+        );
+    }
+
+    #[test]
+    fn tern_helper_rejects_invalid_host_reply_identity_generation_and_nested_keys() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let success = json!({
+            "ok": true, "instance_id": "daemon",
+            "hosts": [{"host":"0","observation_generation":1,"generation":1,"error":null}],
+            "command": null, "error": null
+        });
+        let mut invalid = Vec::new();
+        let mut empty = success.clone();
+        empty["hosts"] = json!([]);
+        invalid.push(empty);
+        let mut duplicate = success.clone();
+        let entry = duplicate["hosts"][0].clone();
+        duplicate["hosts"].as_array_mut().unwrap().push(entry);
+        invalid.push(duplicate);
+        for (field, bad) in [
+            ("host", json!("1")),
+            ("host", json!("00")),
+            ("observation_generation", json!(2)),
+            ("observation_generation", json!(0)),
+            ("generation", json!(-1)),
+            ("generation", json!(9_007_199_254_740_992u64)),
+            ("error", json!("unexpected failure without code")),
+            ("error", json!("é".repeat(257))),
+            ("error_code", json!("rejected")),
+            ("error_code", Value::Null),
+        ] {
+            let mut candidate = success.clone();
+            candidate["hosts"][0][field] = bad;
+            invalid.push(candidate);
+        }
+        let mut rejected_without_detail = success.clone();
+        rejected_without_detail["hosts"][0]["generation"] = json!(0);
+        rejected_without_detail["hosts"][0]["error_code"] = json!("rejected");
+        invalid.push(rejected_without_detail);
+        for candidate in invalid {
+            assert!(fixture.peer_reply(candidate).is_err());
+        }
+        let duplicated_key = success.to_string().replacen(
+            "\"generation\":1",
+            "\"generation\":1,\"generation\":2",
+            1,
+        );
+        assert!(fixture.peer_json(duplicated_key).is_err());
+        let mut partial = success;
+        partial["hosts"][0]["generation"] = json!(0);
+        partial["hosts"][0]["error"] = json!("source capacity reached");
+        partial["hosts"][0]["error_code"] = json!("rejected");
+        let accepted = fixture.peer_reply(partial).unwrap();
+        assert!(accepted.ok && accepted.command.is_none());
+        assert_eq!(
+            accepted.hosts[0].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
+    }
+
+    #[test]
+    fn tern_wrong_protocol_combinations_fail_without_v1_retry_or_local_downgrade() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let old_request = json!({
+            "version":1, "kind":"tern", "window":"old-plugin", "epoch":1, "sequence":1,
+            "instance_id":null, "agents":[], "results":[]
+        });
+        let old_reply: Value = serde_json::from_slice(&fixture.raw_exchange(&old_request)).unwrap();
+        assert_eq!(old_reply["ok"], false);
+        assert_eq!(old_reply["hosts"], json!([]));
+        assert_eq!(old_reply["command"], Value::Null);
+        let mut wrong_version = serde_json::to_value(three_hosts("wrong-version")).unwrap();
+        wrong_version["version"] = json!(1);
+        let wrong: Value = serde_json::from_slice(&fixture.raw_exchange(&wrong_version)).unwrap();
+        assert_eq!(wrong["ok"], false);
+        assert_eq!(wrong["hosts"], json!([]));
+        assert_eq!(fixture.status().connected_sources, 0);
+        assert!(fixture.rows().is_empty());
+        let path = fixture.root.join("v1-peer.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let peer_finished = Arc::clone(&finished);
+        let peer = thread::spawn(move || {
+            let old = json!({"ok":true,"instance_id":"old-daemon","generation":1,"command":null,"error":null});
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            stream.set_write_timeout(Some(REQUEST_TIMEOUT)).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let sent: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(sent["version"], 2);
+            assert_eq!(sent["hosts"].as_array().unwrap().len(), 3);
+            assert!(sent.get("agents").is_none());
+            writeln!(stream, "{old}").unwrap();
+            line.clear();
+            let mut count = 1;
+            if reader.read_line(&mut line).is_ok_and(|bytes| bytes > 0) {
+                count += 1;
+                let _ = writeln!(stream, "{old}");
+            }
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + REQUEST_TIMEOUT + Duration::from_secs(1);
+            loop {
+                match listener.accept() {
+                    Ok((mut retry, _)) => {
+                        count += 1;
+                        retry.set_read_timeout(Some(REQUEST_TIMEOUT)).unwrap();
+                        let mut line = String::new();
+                        let _ = BufReader::new(&retry).read_line(&mut line);
+                        let _ = writeln!(retry, "{old}");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if peer_finished.load(Ordering::Acquire) {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("protocol peer accept failed: {error}"),
+                }
+            }
+            count
+        });
+        let result = send_tern_exchange(&path, &three_hosts("new-plugin"), REQUEST_TIMEOUT);
+        finished.store(true, Ordering::Release);
+        assert_eq!(
+            peer.join().unwrap(),
+            1,
+            "helper retried incompatible protocol"
+        );
+        assert!(result.is_err());
+        fs::remove_file(path).unwrap();
+        let mixed = json!({
+            "ok":true,"instance_id":"daemon","generation":1,
+            "hosts":[{"host":"0","observation_generation":1,"generation":1,"error":null}],
+            "command":null,"error":null
+        });
+        assert!(fixture.peer_reply(mixed).is_err());
+        assert!(fixture.rows().is_empty());
+    }
+
+    #[test]
+    fn tern_local_host_loss_distinguishes_unoffered_failure_from_unknown_delivery() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = three_hosts("local-loss");
+        let first = fixture.exchange(&inventory);
+        let old_local = fixture.row("Local fixture").key;
+        let a = fixture.row("Remote A").key;
+        let b = fixture.row("Remote B").key;
+        let (_, unoffered) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                old_local.clone(),
+                "local-loss",
+                1,
+                "0",
+                1,
+                "local-pane",
+                "not yet offered",
+            )
+            .unwrap();
+        inventory.instance_id = Some(first.instance_id);
+        inventory.sequence = 2;
+        let local_agents = inventory.hosts[0].agents.clone();
+        inventory.hosts[0].status = TernHostStatus::Disconnected;
+        inventory.hosts[0].agents.clear();
+        assert!(fixture.exchange(&inventory).command.is_none());
+        let definite = unoffered
+            .recv_timeout(REQUEST_TIMEOUT)
+            .unwrap()
+            .unwrap_err();
+        assert_ne!(definite, PromptError::UnknownDelivery);
+        assert_eq!(
+            fixture.row("Local fixture").availability,
+            Availability::Offline
+        );
+        assert_eq!(fixture.row("Remote A").key, a);
+        assert_eq!(fixture.row("Remote B").key, b);
+        assert_eq!(fixture.status().host_connections.tern, 2);
+        inventory.sequence = 3;
+        inventory.hosts[0].status = TernHostStatus::Available;
+        inventory.hosts[0].observation_generation = 2;
+        inventory.hosts[0].agents = local_agents.clone();
+        assert!(fixture.exchange(&inventory).command.is_none());
+        let local = fixture.row("Local fixture").key;
+        assert_ne!(local, old_local);
+        let (operation, offered) = lock(&fixture.shared)
+            .queue_tern_prompt(
+                local,
+                "local-loss",
+                1,
+                "0",
+                2,
+                "local-pane",
+                "possibly delivered",
+            )
+            .unwrap();
+        inventory.sequence = 4;
+        assert_eq!(
+            fixture.exchange(&inventory).command.unwrap().operation_id,
+            operation
+        );
+        inventory.sequence = 5;
+        inventory.hosts[0].status = TernHostStatus::Unavailable;
+        inventory.hosts[0].agents.clear();
+        assert!(fixture.exchange(&inventory).command.is_none());
+        assert_eq!(
+            offered.recv_timeout(REQUEST_TIMEOUT).unwrap(),
+            Err(PromptError::UnknownDelivery)
+        );
+        assert_eq!(fixture.row("Remote A").availability, Availability::Live);
+        assert_eq!(fixture.row("Remote B").availability, Availability::Live);
+        inventory.sequence = 6;
+        inventory.hosts[0].status = TernHostStatus::Available;
+        inventory.hosts[0].observation_generation = 3;
+        inventory.hosts[0].agents = local_agents;
+        assert!(fixture.exchange(&inventory).command.is_none());
+        inventory.sequence = 7;
+        inventory.results = vec![TernResult {
+            operation_id: operation,
+            pane: "local-pane".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        }];
+        let late = fixture.exchange(&inventory);
+        assert!(!late.ok && late.command.is_none());
+        assert_eq!(
+            late.error_code,
+            Some(TernExchangeErrorCode::ReceiptRejected)
+        );
+        assert_eq!(fixture.row("Remote A").key, a);
+        assert_eq!(fixture.row("Remote B").key, b);
+        assert!(lock(&fixture.shared).take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_provider_disable_retires_parent_binding_even_without_child_sources() {
+        let fixture = Fixture::new(ObservationMode::Both);
+        let mut inventory = request("empty-parent", "unused");
+        inventory.hosts[0].status = TernHostStatus::Disconnected;
+        inventory.hosts[0].agents.clear();
+        let first = fixture.exchange(&inventory);
+        assert!(first.ok && generation(&first, "0") == 0);
+        assert_eq!(fixture.status().connected_sources, 0);
+        lock(&fixture.shared).set_observation_mode(ObservationMode::Herdr);
+        lock(&fixture.shared).set_observation_mode(ObservationMode::Both);
+        inventory.instance_id = Some(first.instance_id);
+        inventory.sequence = 2;
+        let retired = fixture.exchange(&inventory);
+        assert!(!retired.ok && retired.hosts.is_empty() && retired.command.is_none());
+        assert_eq!(
+            retired.error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        inventory.instance_id = None;
+        inventory.epoch = 2;
+        inventory.sequence = 1;
+        inventory.hosts[0].status = TernHostStatus::Available;
+        let fresh = fixture.exchange(&inventory);
+        assert!(fresh.ok && generation(&fresh, "0") > 0 && fresh.command.is_none());
+        assert_eq!(fixture.status().connected_sources, 1);
+        assert_eq!(fixture.status().sessions, 0);
+    }
+
+    #[test]
+    fn tern_agent_limit_is_per_host_not_per_window() {
+        let fixture = Fixture::new(ObservationMode::Tern);
+        let mut inventory = request("agent-limits", "unused");
+        inventory.hosts.push(host("1", "Remote", false, "unused"));
+        for entry in &mut inventory.hosts {
+            let template = entry.agents[0].clone();
+            entry.agents = (0..128)
+                .map(|index| {
+                    let mut agent = template.clone();
+                    agent.pane = format!("same-pane-{index}");
+                    agent
+                })
+                .collect();
+        }
+        let reply = fixture.exchange(&inventory);
+        assert!(reply.ok && reply.hosts.len() == 2);
+        assert_eq!(fixture.status().sessions, 256);
+        assert_eq!(fixture.status().connected_sources, 2);
+        let normalized = inventory.normalize().unwrap();
+        assert_eq!(normalized[0].0.len(), 128);
+        assert_eq!(normalized[1].0.len(), 128);
+        assert_eq!(normalized[0].1.sessions, 128);
+        assert_eq!(normalized[1].1.sessions, 128);
     }
 
     struct BlockedHerdrPass {

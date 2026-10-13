@@ -569,6 +569,8 @@ pub struct ControlResponse {
     pub phase: String,
     #[serde(default = "default_observation_mode")]
     pub observation_mode: String,
+    #[serde(default)]
+    pub host_connections: crate::sources::HostConnections,
     pub ui_ready: bool,
     pub control_ready: bool,
     pub registration_accepted: bool,
@@ -634,6 +636,7 @@ impl ControlResponse {
         let scene = state.scene();
         let settings = state.lifecycle_settings();
         let observation_mode = state.observation_mode().as_str().to_owned();
+        let host_connections = state.host_connections();
         drop(state);
         let endpoint = lock_unpoisoned(&inner.registered);
         let registration_accepted = inner
@@ -657,10 +660,11 @@ impl ControlResponse {
             running: true,
             phase: scene.phase.as_str().to_owned(),
             observation_mode,
+            host_connections,
             ui_ready,
             control_ready: true,
             registration_accepted,
-            data_connected: scene.connected_sources > 0,
+            data_connected: host_connections.herdr > 0 || host_connections.tern > 0,
             connected_sources: scene.connected_sources,
             disconnected_sources: scene.disconnected_sources,
             sessions: scene.sessions,
@@ -778,12 +782,6 @@ impl ControlServer {
     }
 
     pub fn record_registered_endpoint(&self, endpoint: PathBuf) -> Result<(), String> {
-        if !lock_unpoisoned(&self.inner.shared)
-            .observation_mode()
-            .supports_herdr()
-        {
-            return Err("Herdr endpoint registration is unavailable in Tern mode".into());
-        }
         let canonical = socket::canonical_endpoint(&endpoint)?;
         {
             let _write_guard = lock_unpoisoned(&self.inner.lifecycle_writes);
@@ -847,7 +845,7 @@ fn accept_loop(listener: UnixListener, inner: Arc<ControlInner>) {
         let now = Instant::now();
         if now >= next_expiry {
             next_expiry = now + Duration::from_millis(100);
-            let changed = lock_unpoisoned(&inner.shared).expire_tern(now);
+            let changed = lock_unpoisoned(&inner.shared).maintain_tern(now);
             if changed {
                 ui::wake();
             }
@@ -1968,6 +1966,16 @@ fn pack_response_json(response: &PackReplyEnvelope) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn settings_admission(state: &AppState, stopping: bool) -> Result<(), String> {
+    if stopping || state.scene().shutdown {
+        return Err("desktop pet is stopping".to_owned());
+    }
+    if !state.is_ui_ready() {
+        return Err("desktop pet UI is not ready".to_owned());
+    }
+    state.update_mutation_allowed()
+}
+
 fn dispatch(inner: &ControlInner, command: &str, endpoint: Option<PathBuf>) -> ControlResponse {
     if inner.stopping.load(Ordering::Acquire) && command != "status" {
         return ControlResponse::error(command, inner, "desktop pet is stopping");
@@ -2040,6 +2048,16 @@ fn dispatch(inner: &ControlInner, command: &str, endpoint: Option<PathBuf>) -> C
             response
         }
         "status" | "ping" => ControlResponse::status(command, inner),
+        "settings" => {
+            let state = lock_unpoisoned(&inner.shared);
+            if let Err(error) = settings_admission(&state, inner.stopping.load(Ordering::Acquire)) {
+                drop(state);
+                return ControlResponse::error(command, inner, error);
+            }
+            drop(state);
+            ui::request_settings();
+            ControlResponse::status(command, inner)
+        }
         "stop" | "shutdown" => {
             let _lifecycle = lock_unpoisoned(&inner.lifecycle_writes);
             if let Err(error) = record_user_stop(&inner.paths.state_dir) {
@@ -2506,19 +2524,82 @@ pub(crate) fn send_tern_exchange(
         .map_err(|error| format!("invalid Tern exchange response: {error}"))?;
     let reply: TernExchangeReply = serde_json::from_slice(&frame)
         .map_err(|error| format!("invalid Tern exchange response: {error}"))?;
+    validate_tern_reply(&reply, request)?;
+    Ok(reply)
+}
+
+fn validate_tern_reply(
+    reply: &TernExchangeReply,
+    request: &TernExchangeRequest,
+) -> Result<(), String> {
+    use crate::tern::{canonical_host, TernHostStatus, MAX_HOST_ERROR_BYTES, MAX_SAFE_INTEGER};
     if reply.instance_id.is_empty()
+        || reply.instance_id.len() > 4096
+        || reply.instance_id.contains('\0')
         || (reply.ok
-            && (reply.error.is_some() || reply.error_code.is_some() || reply.generation == 0))
+            && (reply.error.is_some()
+                || reply.error_code.is_some()
+                || reply.hosts.len() != request.hosts.len()
+                || request
+                    .instance_id
+                    .as_deref()
+                    .is_some_and(|id| id != reply.instance_id)))
         || (!reply.ok
             && (reply.error.as_deref().is_none_or(str::is_empty)
-                || reply.error.as_ref().is_some_and(|error| error.len() > 4096)
+                || reply
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.len() > 4096 || error.contains('\0'))
                 || reply.error_code.is_none()
-                || reply.generation != 0
+                || !reply.hosts.is_empty()
                 || reply.command.is_some()))
     {
         return Err("invalid Tern exchange response fields".into());
     }
-    Ok(reply)
+    let mut seen = std::collections::HashSet::with_capacity(reply.hosts.len());
+    for (host, inventory) in reply.hosts.iter().zip(&request.hosts) {
+        if !canonical_host(&host.host)
+            || !seen.insert(host.host.as_str())
+            || host.host != inventory.host
+            || host.observation_generation == 0
+            || host.observation_generation > MAX_SAFE_INTEGER
+            || host.observation_generation != inventory.observation_generation
+            || host.generation > MAX_SAFE_INTEGER
+            || host.error.as_ref().is_some_and(|error| {
+                error.is_empty() || error.len() > MAX_HOST_ERROR_BYTES || error.contains('\0')
+            })
+            || host.error.is_some() != host.error_code.is_some()
+            || (inventory.status == TernHostStatus::Available
+                && host.generation == 0
+                && host.error.is_none())
+        {
+            return Err("invalid Tern host response fields or request correspondence".into());
+        }
+    }
+    if let Some(command) = &reply.command {
+        let local = request.hosts.iter().position(|host| host.is_local);
+        if !reply.ok
+            || request.instance_id.is_none()
+            || command.operation_id.is_empty()
+            || command.operation_id.len() > 4096
+            || command.operation_id.contains('\0')
+            || command.pane.is_empty()
+            || command.pane.len() > 4096
+            || command.pane.contains('\0')
+            || local.is_none_or(|index| {
+                request.hosts[index].status != TernHostStatus::Available
+                    || reply.hosts[index].generation == 0
+                    || reply.hosts[index].error.is_some()
+                    || !request.hosts[index]
+                        .agents
+                        .iter()
+                        .any(|agent| agent.pane == command.pane)
+            })
+        {
+            return Err("invalid or nonlocal Tern command response".into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn send_presentation_request(
@@ -3000,10 +3081,73 @@ mod tests {
     use crate::character_types::{CharacterRef, PackRecord};
     #[test]
     fn tern_exchange_rejects_nested_duplicate_keys_before_dispatch() {
-        let duplicate = br#"{"version":1,"kind":"tern","window":"w","epoch":1,"sequence":1,"instance_id":null,"agents":[{"pane":"p","pane":"other","title":"a","cwd":"/tmp","session_id":null,"session_label":null,"tab_id":null,"tab_label":null,"state":"idle","delivery_error":null}],"results":[]}"#;
+        let duplicate = br#"{"version":2,"kind":"tern","window":"w","epoch":1,"sequence":1,"instance_id":null,"hosts":[{"host":"0","label":"Local","is_local":true,"observation_generation":1,"status":"available","agents":[{"pane":"p","pane":"other","title":"a","cwd":"/tmp","session_id":null,"session_label":null,"tab_id":null,"tab_label":null,"state":"idle","delivery_error":null}]}],"results":[]}"#;
         assert!(decode_tern_exchange_request(duplicate).is_err());
         let oversized = vec![b' '; MAX_EXCHANGE_BYTES + 1];
         assert!(decode_tern_exchange_request(&oversized).is_err());
+    }
+
+    #[test]
+    fn tern_reply_validation_checks_each_host_and_local_command_authority() {
+        use crate::tern::{TernCommand, TernHostReply, MAX_SAFE_INTEGER};
+        let mut request = crate::state::tests::tern_test_request("reply-window");
+        request.instance_id = Some("daemon-a".into());
+        let mut remote = request.hosts[0].clone();
+        remote.host = "42".into();
+        remote.is_local = false;
+        remote.agents[0].pane = "remote-pane".into();
+        request.hosts.push(remote);
+        let reply = TernExchangeReply {
+            ok: true,
+            instance_id: "daemon-a".into(),
+            hosts: request
+                .hosts
+                .iter()
+                .map(|host| TernHostReply::new(host, 1, None))
+                .collect(),
+            command: Some(TernCommand {
+                operation_id: "op".into(),
+                pane: "pane-a".into(),
+                text: "ask".into(),
+            }),
+            error: None,
+            error_code: None,
+        };
+        assert!(validate_tern_reply(&reply, &request).is_ok());
+        let mut rejected = reply.clone();
+        rejected.hosts[1] = TernHostReply::new(&request.hosts[1], 0, Some("full".into()));
+        assert!(validate_tern_reply(&rejected, &request).is_ok());
+        let mut malformed = reply.clone();
+        malformed.hosts[1].host = "0".into();
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply.clone();
+        malformed.hosts.swap(0, 1);
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply.clone();
+        malformed.hosts[1].observation_generation = 2;
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply.clone();
+        malformed.hosts[1].generation = MAX_SAFE_INTEGER + 1;
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply.clone();
+        malformed.hosts[1].generation = 0;
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = rejected.clone();
+        malformed.hosts[1].error = Some("한".repeat(171));
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = rejected;
+        malformed.hosts[1].error_code = None;
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply.clone();
+        malformed.command.as_mut().unwrap().pane = "remote-pane".into();
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let mut malformed = reply;
+        malformed.hosts[0].error = Some("rejected".into());
+        malformed.hosts[0].error_code = Some(TernExchangeErrorCode::Rejected);
+        assert!(validate_tern_reply(&malformed, &request).is_err());
+        let legacy =
+            br#"{"ok":true,"instance_id":"daemon-a","generation":1,"command":null,"error":null}"#;
+        assert!(serde_json::from_slice::<TernExchangeReply>(legacy).is_err());
     }
 
     #[test]
@@ -3056,6 +3200,10 @@ mod tests {
         let accepted = dispatch(&inner, "ready", Some(secondary_alias));
         assert!(accepted.ok && accepted.ready && accepted.registration_accepted);
         assert_eq!(accepted.herdr_socket, primary.display().to_string());
+        assert_eq!(
+            accepted.host_connections,
+            crate::sources::HostConnections::default()
+        );
         let missing = dispatch(
             &inner,
             "ready",
@@ -3064,6 +3212,30 @@ mod tests {
         assert!(missing.ok && missing.ready && !missing.registration_accepted);
         let invalid = dispatch(&inner, "ready", Some(PathBuf::from("relative.sock")));
         assert!(!invalid.ok && !invalid.registration_accepted);
+        {
+            let mut state = lock_unpoisoned(&inner.shared);
+            let source = primary.to_string_lossy().into_owned();
+            assert!(state.begin_source(source.clone(), 1));
+            let empty: [crate::session::AgentRecord; 0] = [];
+            assert!(state.publish_source_snapshot(
+                &source,
+                1,
+                empty.iter(),
+                crate::state::SourceCounts::default(),
+                Arc::from([]),
+                &[],
+                Instant::now(),
+            ));
+        }
+        let connected = ControlResponse::status("status", &inner);
+        assert_eq!(connected.host_connections.herdr, 1);
+        lock_unpoisoned(&inner.shared)
+            .set_observation_mode(herdr_update_coordinator::ObservationMode::Tern);
+        let dormant = ControlResponse::status("status", &inner);
+        assert_eq!(dormant.observation_mode, "tern");
+        assert_eq!(dormant.host_connections.herdr, 0);
+        assert_eq!(dormant.herdr_socket, primary.display().to_string());
+        assert!(!dormant.shutdown);
     }
 
     #[test]
@@ -3409,6 +3581,33 @@ mod tests {
                 "{frame}"
             );
         }
+    }
+
+    #[test]
+    fn settings_view_requires_ready_live_ui_and_rejects_update_freeze() {
+        let mut state = AppState::new();
+        assert_eq!(
+            settings_admission(&state, false).unwrap_err(),
+            "desktop pet UI is not ready"
+        );
+        state.set_ui_ready();
+        let before = state.scene();
+        assert!(settings_admission(&state, false).is_ok());
+        assert!(settings_admission(&state, true).is_err());
+        let (reply, _receiver) = mpsc::channel();
+        state
+            .queue_update_prepare("update".into(), "token".into(), reply)
+            .unwrap();
+        assert!(state.update_mutation_allowed().is_err());
+        assert!(settings_admission(&state, false).is_err());
+        let after = state.scene();
+        assert_eq!(after.visible, before.visible);
+        assert_eq!(after.bubble_visible, before.bubble_visible);
+        state.request_shutdown();
+        assert_eq!(
+            settings_admission(&state, false).unwrap_err(),
+            "desktop pet is stopping"
+        );
     }
 
     #[test]

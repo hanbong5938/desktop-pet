@@ -116,7 +116,7 @@ fn update_context(
     executable: PathBuf,
     prefs: &Preferences,
 ) -> Result<UpdateContext, String> {
-    let environment = update_environment(config.observation_mode, |key| env::var(key).ok());
+    let environment = update_environment(prefs.observation_host(), |key| env::var(key).ok());
     let locale = ui::current_ui_locale(prefs.language()).tag();
     let mut context = UpdateContext {
         running: executable_identity(&executable)?,
@@ -186,9 +186,9 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
     packs.start()?;
 
     let mut initial_state = AppState::new();
-    initial_state.set_observation_mode(config.observation_mode);
     initial_state.set_lifecycle_settings(settings);
-    let prefs = Preferences::load_for_daemon(&config.paths.config_dir)?;
+    let mut prefs = Preferences::load_for_daemon(&config.paths.config_dir)?;
+    prefs.set_observation_host(config.observation_mode);
     initial_state.apply_observation_preferences(prefs.observation().clone());
     initial_state.set_preferences(&prefs);
     let automation =
@@ -211,6 +211,11 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         updater_generation,
         updater_token.as_deref(),
     )?;
+    // Token children already persisted the selected host under the launcher's
+    // lifecycle lock. Direct daemon entry saves only after update admission.
+    if config.startup_token.is_none() {
+        crate::persist_observation_mode(&config.paths.config_dir, config.observation_mode)?;
+    }
     let _active = if matches!(origin, InstallOrigin::Unknown { .. }) {
         None
     } else {
@@ -233,38 +238,30 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
     initial_state.set_automation(automation.clone());
     let shared = Arc::new(Mutex::new(initial_state));
     let watchers = Arc::new(Mutex::new(Watchers::new(Arc::clone(&shared))));
-    let mut remote_watchers = config
-        .observation_mode
-        .supports_herdr()
-        .then(|| RemoteWatchers::new(Arc::clone(&shared)));
-    let launch_endpoint = config
-        .observation_mode
-        .supports_herdr()
-        .then(|| socket::canonical_endpoint(&config.herdr_socket))
-        .transpose()?;
-    let mut accepted_endpoints = Vec::new();
-    if let Some(endpoint) = launch_endpoint.as_ref() {
-        let mut endpoints = vec![endpoint.clone()];
-        for endpoint in lifecycle::read_endpoints(&config.paths.config_dir)? {
-            if !endpoints.contains(&endpoint) {
-                endpoints.push(endpoint);
-            }
+    let mut remote_watchers = RemoteWatchers::new(Arc::clone(&shared));
+    // Remember the real configured endpoint even when Herdr starts dormant.
+    // Registration queues configuration only; the worker gates every request
+    // against the live observation host and epoch.
+    let launch_endpoint = socket::canonical_endpoint(&config.herdr_socket)?;
+    let mut endpoints = vec![launch_endpoint.clone()];
+    for endpoint in lifecycle::read_endpoints(&config.paths.config_dir)? {
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
         }
-        for endpoint in endpoints {
-            let result = {
-                let watcher = watchers
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                watcher.register(endpoint.clone())
-            };
-            match result {
-                Ok(()) => accepted_endpoints.push(endpoint),
-                Err(error) => {
-                    eprintln!(
-                        "desktop-pet: Herdr registration pending for {}: {error}",
-                        endpoint.display()
-                    );
-                }
+    }
+    let mut accepted_endpoints = Vec::new();
+    for endpoint in endpoints {
+        let result = watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .register(endpoint.clone());
+        match result {
+            Ok(()) => accepted_endpoints.push(endpoint),
+            Err(error) => {
+                eprintln!(
+                    "desktop-pet: Herdr registration pending for {}: {error}",
+                    endpoint.display()
+                );
             }
         }
     }
@@ -273,7 +270,7 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         Arc::clone(&shared),
         Arc::clone(&watchers),
         config.paths.clone(),
-        launch_endpoint,
+        Some(launch_endpoint),
         executable,
         Arc::clone(&packs),
     ) {
@@ -346,9 +343,7 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         watcher.shutdown();
     }
-    if let Some(watchers) = remote_watchers.as_mut() {
-        watchers.shutdown();
-    }
+    remote_watchers.shutdown();
     control.shutdown();
     packs.shutdown();
 

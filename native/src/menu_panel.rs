@@ -1,12 +1,13 @@
 use crate::bubble::BubblePlacement;
 use crate::i18n::{text, LanguagePreference, Message, UiLocale};
 use crate::lifecycle::LifecycleSettings;
-use crate::lifecycle_settings_ui::{LifecycleSettingsCard, CARD_HEIGHT};
+use crate::lifecycle_settings_ui::LifecycleSettingsCard;
 use crate::preferences::{BubbleAppearance, BubbleColor, BubblePalette, BubbleTheme, MenuBarMode};
-use crate::sources::{MachineStatus, ObservationPreferences, SourceCatalog};
+use crate::sources::{HostConnections, MachineStatus, ObservationPreferences, SourceCatalog};
 use crate::state::Scene;
 use crate::ui::MenuTarget;
 use crate::update_card::{AppUpdateCard, UpdateCardModel};
+use herdr_update_coordinator::ObservationMode;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
@@ -34,7 +35,7 @@ const FOOTER_HEIGHT: f64 = 50.0;
 const CHARACTER_VIEW_TOP: f64 = 106.0;
 const INITIAL_CHARACTER_HEIGHT: f64 = 72.0;
 const BUBBLE_CONTENT_HEIGHT: f64 = 578.0;
-const SETTINGS_BASE_HEIGHT: f64 = 308.0 + CARD_HEIGHT + 14.0;
+const SETTINGS_BASE_HEIGHT: f64 = 308.0 + 14.0;
 const MENU_BAR_CARD_TOP: f64 = 300.0;
 const MENU_BAR_CARD_GAP: f64 = 8.0;
 const MENU_BAR_CARD_BOTTOM: f64 = 14.0;
@@ -448,6 +449,22 @@ pub(crate) struct MenuPanel {
     update_card: AppUpdateCard,
     observation_card: Retained<MenuPanelCard>,
     observation_title: Retained<NSTextField>,
+    connection_host_label: Retained<NSTextField>,
+    connection_host_popup: Retained<NSPopUpButton>,
+    connection_status: Retained<NSTextField>,
+    connection_auto_help: Retained<NSTextField>,
+    connection_scope_toggle: Retained<NSButton>,
+    connection_settings_toggle: Retained<NSButton>,
+    connection_diagnostics_toggle: Retained<NSButton>,
+    connection_scope_expanded: bool,
+    connection_settings_expanded: bool,
+    connection_diagnostics_expanded: bool,
+    connection_profile_title: Retained<NSTextField>,
+    connection_profile_labels: [Retained<NSTextField>; 5],
+    connection_profile_values: [Retained<NSTextField>; 5],
+    connection_tern_title: Retained<NSTextField>,
+    connection_tern_help: Retained<NSTextField>,
+    connection_hosts: HostConnections,
     observation_local_label: Retained<NSTextField>,
     observation_local_help: Retained<NSTextField>,
     observation_remote_label: Retained<NSTextField>,
@@ -456,9 +473,7 @@ pub(crate) struct MenuPanel {
     observation_machines: Retained<NSTextField>,
     observation_registration: Retained<NSButton>,
     observation_notice: Retained<NSTextField>,
-    observation_error_toggle: Retained<NSButton>,
     observation_error: Retained<NSTextField>,
-    observation_error_expanded: bool,
     machine_rows: Vec<MachineRow>,
     observation_catalog: Option<SourceCatalog>,
     observation_preferences: Option<ObservationPreferences>,
@@ -477,10 +492,8 @@ struct MachineRow {
     title: Retained<NSTextField>,
     session: Retained<NSTextField>,
     status: Retained<NSTextField>,
-    error_toggle: Retained<NSButton>,
-    error: Retained<NSTextField>,
     copy: Retained<NSButton>,
-    error_expanded: bool,
+    copy_available: bool,
     copy_feedback: Option<Message>,
 }
 
@@ -569,7 +582,7 @@ impl MenuPanel {
         let settings_tab = MenuPanelDocument::new(
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(PANEL_WIDTH, SETTINGS_BASE_HEIGHT + 216.0),
+                NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
             ),
             mtm,
         );
@@ -951,7 +964,6 @@ impl MenuPanel {
             &*alpha_passthrough_switch,
             text(locale, Message::MenuAlphaPassthrough),
         );
-        settings_tab.addSubview(&appearance_card);
 
         let scale_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*scale_card, false);
@@ -967,7 +979,6 @@ impl MenuPanel {
         scale_card.addSubview(&scale_down);
         scale_card.addSubview(&scale_up);
         scale_card.addSubview(&scale_readout);
-        settings_tab.addSubview(&scale_card);
 
         let language_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*language_card, false);
@@ -989,7 +1000,6 @@ impl MenuPanel {
             make_selection_popup(&language_specs, locale, target, sel!(setLanguage:), mtm);
         language_card.addSubview(&language_label);
         language_card.addSubview(&language_popup);
-        settings_tab.addSubview(&language_card);
         let menu_bar_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*menu_bar_card, false);
         let menu_bar_label = label(
@@ -1111,16 +1121,100 @@ impl MenuPanel {
         menu_bar_card.addSubview(&menu_bar_restore);
         menu_bar_card.addSubview(&menu_bar_icon_help);
         menu_bar_card.addSubview(&menu_bar_icon_error);
-        settings_tab.addSubview(&menu_bar_card);
         let observation_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*observation_card, false);
         let observation_title = label(
-            text(locale, Message::ObservationTitle),
+            text(locale, Message::ConnectionTitle),
             12.5,
             true,
             primary(),
             mtm,
         );
+        let connection_host_label = label(
+            text(locale, Message::ConnectionHost),
+            11.5,
+            true,
+            primary(),
+            mtm,
+        );
+        let connection_host_popup = make_selection_popup(
+            &[
+                (Message::ConnectionHostAuto, 0),
+                (Message::ConnectionHostHerdr, 1),
+                (Message::ConnectionHostTern, 2),
+            ],
+            locale,
+            target,
+            sel!(setObservationHost:),
+            mtm,
+        );
+        let connection_status = label("", 10.5, false, secondary(), mtm);
+        connection_status.setMaximumNumberOfLines(0);
+        let connection_auto_help = label(
+            text(locale, Message::ConnectionAutoHelp),
+            10.0,
+            false,
+            secondary(),
+            mtm,
+        );
+        connection_auto_help.setMaximumNumberOfLines(0);
+        let connection_scope_toggle =
+            make_action_button("", target, sel!(toggleConnectionScope:), mtm);
+        let connection_settings_toggle =
+            make_action_button("", target, sel!(toggleConnectionSettings:), mtm);
+        let connection_diagnostics_toggle =
+            make_action_button("", target, sel!(toggleConnectionDiagnostics:), mtm);
+        let connection_profile_title = label(
+            text(locale, Message::ConnectionProfile),
+            11.0,
+            true,
+            primary(),
+            mtm,
+        );
+        let connection_profile_labels =
+            std::array::from_fn(|_| label("", 10.0, true, secondary(), mtm));
+        let connection_profile_values = std::array::from_fn(|_| {
+            let field = label("", 10.5, false, primary(), mtm);
+            field.setMaximumNumberOfLines(0);
+            field.setSelectable(true);
+            field.setRefusesFirstResponder(false);
+            field
+        });
+        let connection_tern_title = label(
+            text(locale, Message::ConnectionTernHelpTitle),
+            11.0,
+            true,
+            primary(),
+            mtm,
+        );
+        let connection_tern_help = label(
+            text(locale, Message::ConnectionTernHelpDetails),
+            10.5,
+            false,
+            secondary(),
+            mtm,
+        );
+        connection_tern_help.setMaximumNumberOfLines(0);
+        for view in [
+            &*connection_host_label as &NSView,
+            &*connection_host_popup,
+            &*connection_status,
+            &*connection_auto_help,
+            &*connection_scope_toggle,
+            &*connection_settings_toggle,
+            &*connection_diagnostics_toggle,
+            &*connection_profile_title,
+            &*connection_tern_title,
+            &*connection_tern_help,
+        ] {
+            observation_card.addSubview(view);
+        }
+        for field in connection_profile_labels
+            .iter()
+            .chain(connection_profile_values.iter())
+        {
+            observation_card.addSubview(field);
+        }
         let observation_local_label = label(
             text(locale, Message::ObservationLocal),
             12.0,
@@ -1165,15 +1259,9 @@ impl MenuPanel {
         let observation_notice = label("", 10.5, false, secondary(), mtm);
         observation_notice.setMaximumNumberOfLines(0);
         observation_notice.setHidden(true);
-        let observation_error_toggle = make_action_button(
-            text(locale, Message::ObservationDetails),
-            target,
-            sel!(toggleObservationCatalogError:),
-            mtm,
-        );
-        observation_error_toggle.setHidden(true);
         let observation_error = label("", 10.0, false, secondary(), mtm);
         observation_error.setMaximumNumberOfLines(0);
+        observation_error.setSelectable(true);
         observation_error.setHidden(true);
         for view in [
             &*observation_title as &NSView,
@@ -1185,12 +1273,15 @@ impl MenuPanel {
             &*observation_machines,
             &*observation_registration,
             &*observation_notice,
-            &*observation_error_toggle,
             &*observation_error,
         ] {
             observation_card.addSubview(view);
         }
         settings_tab.addSubview(&observation_card);
+        settings_tab.addSubview(&appearance_card);
+        settings_tab.addSubview(&scale_card);
+        settings_tab.addSubview(&language_card);
+        settings_tab.addSubview(&menu_bar_card);
         let lifecycle_card = LifecycleSettingsCard::new(locale, target, mtm);
         settings_tab.addSubview(lifecycle_card.view());
         let update_card = AppUpdateCard::new(locale, target, mtm);
@@ -1288,6 +1379,22 @@ impl MenuPanel {
             update_card,
             observation_card,
             observation_title,
+            connection_host_label,
+            connection_host_popup,
+            connection_status,
+            connection_auto_help,
+            connection_scope_toggle,
+            connection_settings_toggle,
+            connection_diagnostics_toggle,
+            connection_scope_expanded: false,
+            connection_settings_expanded: false,
+            connection_diagnostics_expanded: false,
+            connection_profile_title,
+            connection_profile_labels,
+            connection_profile_values,
+            connection_tern_title,
+            connection_tern_help,
+            connection_hosts: HostConnections::default(),
             observation_local_label,
             observation_local_help,
             observation_remote_label,
@@ -1296,9 +1403,7 @@ impl MenuPanel {
             observation_machines,
             observation_registration,
             observation_notice,
-            observation_error_toggle,
             observation_error,
-            observation_error_expanded: false,
             machine_rows: Vec::new(),
             observation_catalog: None,
             observation_preferences: None,
@@ -1555,6 +1660,7 @@ impl MenuPanel {
         lifecycle: LifecycleSettings,
         observation: &ObservationPreferences,
         catalog: &SourceCatalog,
+        connections: HostConnections,
     ) {
         self.character_visible_switch.setState(if scene.visible {
             NSControlStateValueOn
@@ -1625,7 +1731,7 @@ impl MenuPanel {
         }
         self.update_status_text();
         self.lifecycle_card.sync(lifecycle);
-        self.sync_observation(observation, catalog);
+        self.sync_observation(observation, catalog, connections);
         self.update_color_swatches();
         self.layout_root();
         if !self.frozen_controls.is_empty() {
@@ -1733,12 +1839,42 @@ impl MenuPanel {
         &mut self,
         preferences: &ObservationPreferences,
         catalog: &SourceCatalog,
+        connections: HostConnections,
     ) {
         if self.observation_catalog.as_ref() == Some(catalog)
             && self.observation_preferences.as_ref() == Some(preferences)
+            && self.connection_hosts == connections
         {
             return;
         }
+        self.connection_hosts = connections;
+        self.connection_host_popup
+            .selectItemWithTag(match preferences.host {
+                ObservationMode::Both => 0,
+                ObservationMode::Herdr => 1,
+                ObservationMode::Tern => 2,
+            });
+        self.lifecycle_card.set_observation_host(preferences.host);
+        let host_status = |enabled: bool, count: usize| {
+            text(
+                self.locale,
+                if !enabled {
+                    Message::ConnectionDisabled
+                } else if count > 0 {
+                    Message::ConnectionConnected
+                } else {
+                    Message::ConnectionWaiting
+                },
+            )
+        };
+        let status = format!(
+            "Herdr: {} · Tern: {}",
+            host_status(preferences.host.supports_herdr(), connections.herdr),
+            host_status(preferences.host.supports_tern(), connections.tern)
+        );
+        self.connection_status
+            .setStringValue(&NSString::from_str(&status));
+        set_accessibility_label(&self.connection_status, &status);
         self.observation_local_switch
             .setState(if preferences.local {
                 NSControlStateValueOn
@@ -1753,7 +1889,7 @@ impl MenuPanel {
             });
         let mut old = std::mem::take(&mut self.machine_rows);
         for machine in &catalog.machines {
-            let row = if let Some(index) = old.iter().position(|row| row.id == machine.id) {
+            let mut row = if let Some(index) = old.iter().position(|row| row.id == machine.id) {
                 old.remove(index)
             } else {
                 let toggle = make_switch(&self.target, sel!(setObservationMachine:), self.mtm);
@@ -1764,15 +1900,6 @@ impl MenuPanel {
                 title.setMaximumNumberOfLines(0);
                 session.setMaximumNumberOfLines(0);
                 status.setMaximumNumberOfLines(0);
-                let error_toggle = make_action_button(
-                    text(self.locale, Message::ObservationDetails),
-                    &self.target,
-                    sel!(toggleObservationMachineError:),
-                    self.mtm,
-                );
-                error_toggle.setIdentifier(Some(&NSString::from_str(&machine.id)));
-                let error = label("", 10.0, false, secondary(), self.mtm);
-                error.setMaximumNumberOfLines(0);
                 let copy = make_action_button(
                     text(self.locale, Message::ObservationCopyReconnect),
                     &self.target,
@@ -1780,15 +1907,7 @@ impl MenuPanel {
                     self.mtm,
                 );
                 copy.setIdentifier(Some(&NSString::from_str(&machine.id)));
-                for view in [
-                    &*toggle as &NSView,
-                    &*title,
-                    &*session,
-                    &*status,
-                    &*error_toggle,
-                    &*error,
-                    &*copy,
-                ] {
+                for view in [&*toggle as &NSView, &*title, &*session, &*status, &*copy] {
                     self.observation_card.addSubview(view);
                 }
                 MachineRow {
@@ -1797,10 +1916,8 @@ impl MenuPanel {
                     title,
                     session,
                     status,
-                    error_toggle,
-                    error,
                     copy,
-                    error_expanded: false,
+                    copy_available: false,
                     copy_feedback: None,
                 }
             };
@@ -1846,41 +1963,11 @@ impl MenuPanel {
             row.status.setStringValue(&NSString::from_str(status));
             set_accessibility_label(&row.toggle, &format!("{name} · {session} · {status}"));
             set_tooltip(&row.toggle, &format!("{name} · {session} · {status}"));
-            let error = machine.error.as_deref().unwrap_or("");
-            row.error.setStringValue(&NSString::from_str(error));
-            set_tooltip(&row.error, error);
-            set_accessibility_label(&row.error, error);
-            row.error_toggle.setHidden(error.is_empty());
-            row.error.setHidden(error.is_empty() || !row.error_expanded);
-            row.error_toggle.setTitle(&NSString::from_str(text(
-                self.locale,
-                if row.error_expanded {
-                    Message::ObservationHideDetails
-                } else {
-                    Message::ObservationDetails
-                },
-            )));
-            set_accessibility_label(
-                &row.error_toggle,
-                &format!(
-                    "{} · {}",
-                    name,
-                    text(
-                        self.locale,
-                        if row.error_expanded {
-                            Message::ObservationHideDetails
-                        } else {
-                            Message::ObservationDetails
-                        },
-                    )
-                ),
-            );
-            row.copy.setHidden(
-                !machine.enabled
-                    || !preferences.remote
-                    || !preferences.machines.contains(&machine.id)
-                    || machine.status != MachineStatus::Offline,
-            );
+            row.copy_available = machine.enabled
+                && preferences.remote
+                && preferences.machines.contains(&machine.id)
+                && machine.status == MachineStatus::Offline;
+            row.copy.setHidden(!row.copy_available);
             row.copy.setTitle(&NSString::from_str(text(
                 self.locale,
                 row.copy_feedback
@@ -1913,8 +2000,6 @@ impl MenuPanel {
                 &*row.title,
                 &*row.session,
                 &*row.status,
-                &*row.error_toggle,
-                &*row.error,
                 &*row.copy,
             ] {
                 view.removeFromSuperview();
@@ -1953,57 +2038,160 @@ impl MenuPanel {
             .setStringValue(&NSString::from_str(&notice_text));
         set_accessibility_label(&self.observation_notice, &notice_text);
         self.observation_notice.setHidden(notice_text.is_empty());
-        let error = catalog.error.as_deref().unwrap_or("");
+        let mut diagnostics = String::new();
+        if preferences.host.supports_herdr() {
+            if let Some(error) = &catalog.error {
+                diagnostics.push_str("Herdr: ");
+                diagnostics.push_str(error);
+            }
+            for machine in &catalog.machines {
+                if let Some(error) = &machine.error {
+                    if !diagnostics.is_empty() {
+                        diagnostics.push_str("\n\n");
+                    }
+                    diagnostics.push_str(&machine.label);
+                    diagnostics.push_str(": ");
+                    diagnostics.push_str(error);
+                }
+            }
+        }
         self.observation_error
-            .setStringValue(&NSString::from_str(error));
-        set_tooltip(&self.observation_error, error);
-        set_accessibility_label(&self.observation_error, error);
-        self.observation_error_toggle.setHidden(error.is_empty());
-        self.observation_error
-            .setHidden(error.is_empty() || !self.observation_error_expanded);
-        self.observation_error_toggle
-            .setTitle(&NSString::from_str(text(
-                self.locale,
-                if self.observation_error_expanded {
-                    Message::ObservationHideDetails
-                } else {
-                    Message::ObservationDetails
-                },
-            )));
-        set_accessibility_label(
-            &self.observation_error_toggle,
-            &format!(
-                "{} · {}",
-                text(self.locale, Message::ObservationMachines),
-                text(
-                    self.locale,
-                    if self.observation_error_expanded {
-                        Message::ObservationHideDetails
-                    } else {
-                        Message::ObservationDetails
-                    },
-                )
-            ),
-        );
+            .setStringValue(&NSString::from_str(&diagnostics));
+        set_tooltip(&self.observation_error, &diagnostics);
+        set_accessibility_label(&self.observation_error, &diagnostics);
         self.observation_catalog = Some(catalog.clone());
         self.observation_preferences = Some(preferences.clone());
         self.layout_documents();
     }
 
-    pub(crate) fn toggle_observation_error(&mut self, id: Option<&str>) {
-        if let Some(id) = id {
-            if let Some(row) = self.machine_rows.iter_mut().find(|row| row.id == id) {
-                row.error_expanded = !row.error_expanded;
-            }
-        } else {
-            self.observation_error_expanded = !self.observation_error_expanded;
+    pub(crate) fn set_connection_profile(
+        &mut self,
+        executable: &std::path::Path,
+        config: &std::path::Path,
+        state: &std::path::Path,
+        herdr_socket: &std::path::Path,
+    ) {
+        let control_socket = state.join("control.sock");
+        for (field, path) in self.connection_profile_values.iter().zip([
+            executable,
+            config,
+            state,
+            control_socket.as_path(),
+            herdr_socket,
+        ]) {
+            let value = path.to_string_lossy();
+            field.setStringValue(&NSString::from_str(&value));
+            set_tooltip(field, &value);
         }
-        if let (Some(preferences), Some(catalog)) = (
-            self.observation_preferences.clone(),
-            self.observation_catalog.clone(),
-        ) {
-            self.observation_catalog = None;
-            self.sync_observation(&preferences, &catalog);
+        self.localize_connection();
+        self.layout_documents();
+    }
+
+    pub(crate) fn toggle_observation_scope(&mut self) {
+        self.connection_scope_expanded = !self.connection_scope_expanded;
+        set_connection_disclosure(
+            &self.connection_scope_toggle,
+            self.locale,
+            Message::ObservationTitle,
+            self.connection_scope_expanded,
+        );
+        self.panel
+            .makeFirstResponder(Some(&*self.connection_scope_toggle));
+        self.layout_documents();
+    }
+
+    pub(crate) fn toggle_connection_settings(&mut self) {
+        self.connection_settings_expanded = !self.connection_settings_expanded;
+        set_connection_disclosure(
+            &self.connection_settings_toggle,
+            self.locale,
+            Message::ConnectionSettings,
+            self.connection_settings_expanded,
+        );
+        self.panel
+            .makeFirstResponder(Some(&*self.connection_settings_toggle));
+        self.layout_documents();
+    }
+
+    pub(crate) fn toggle_connection_diagnostics(&mut self) {
+        self.connection_diagnostics_expanded = !self.connection_diagnostics_expanded;
+        set_connection_disclosure(
+            &self.connection_diagnostics_toggle,
+            self.locale,
+            Message::ConnectionDiagnostics,
+            self.connection_diagnostics_expanded,
+        );
+        self.panel
+            .makeFirstResponder(Some(&*self.connection_diagnostics_toggle));
+        self.layout_documents();
+    }
+
+    fn localize_connection(&self) {
+        let locale = self.locale;
+        for (field, message) in [
+            (&self.connection_host_label, Message::ConnectionHost),
+            (&self.connection_auto_help, Message::ConnectionAutoHelp),
+            (&self.connection_profile_title, Message::ConnectionProfile),
+            (
+                &self.connection_tern_title,
+                Message::ConnectionTernHelpTitle,
+            ),
+            (
+                &self.connection_tern_help,
+                Message::ConnectionTernHelpDetails,
+            ),
+        ] {
+            let title = text(locale, message);
+            field.setStringValue(&NSString::from_str(title));
+            set_accessibility_label(field, title);
+        }
+        localize_popup_items(
+            &self.connection_host_popup,
+            locale,
+            &[
+                (Message::ConnectionHostAuto, 0),
+                (Message::ConnectionHostHerdr, 1),
+                (Message::ConnectionHostTern, 2),
+            ],
+        );
+        set_accessibility_label(
+            &self.connection_host_popup,
+            text(locale, Message::ConnectionHost),
+        );
+        for (button, message, expanded) in [
+            (
+                &self.connection_scope_toggle,
+                Message::ObservationTitle,
+                self.connection_scope_expanded,
+            ),
+            (
+                &self.connection_settings_toggle,
+                Message::ConnectionSettings,
+                self.connection_settings_expanded,
+            ),
+            (
+                &self.connection_diagnostics_toggle,
+                Message::ConnectionDiagnostics,
+                self.connection_diagnostics_expanded,
+            ),
+        ] {
+            set_connection_disclosure(button, locale, message, expanded);
+        }
+        for ((title, value), message) in self
+            .connection_profile_labels
+            .iter()
+            .zip(&self.connection_profile_values)
+            .zip([
+                Message::ConnectionExecutable,
+                Message::ConnectionConfigDirectory,
+                Message::ConnectionStateDirectory,
+                Message::ConnectionControlSocket,
+                Message::ConnectionHerdrSocket,
+            ])
+        {
+            let name = text(locale, message);
+            title.setStringValue(&NSString::from_str(name));
+            set_accessibility_label(value, &format!("{name}: {}", value.stringValue()));
         }
     }
 
@@ -2299,7 +2487,8 @@ impl MenuPanel {
         self.update_menu_bar_icon_labels();
         self.observation_catalog = None;
         self.observation_title
-            .setStringValue(&NSString::from_str(text(locale, Message::ObservationTitle)));
+            .setStringValue(&NSString::from_str(text(locale, Message::ConnectionTitle)));
+        self.localize_connection();
         self.observation_local_label
             .setStringValue(&NSString::from_str(text(locale, Message::ObservationLocal)));
         self.observation_local_help
@@ -2518,10 +2707,12 @@ impl MenuPanel {
 
     pub(crate) fn lifecycle_saved(&mut self, settings: LifecycleSettings) {
         self.lifecycle_card.saved(settings);
+        self.layout_documents();
     }
 
     pub(crate) fn lifecycle_failed(&mut self, settings: LifecycleSettings, detail: String) {
         self.lifecycle_card.failed(settings, detail);
+        self.layout_documents();
     }
 
     fn apply_tab_selection(&self) {
@@ -2895,6 +3086,7 @@ impl MenuPanel {
         settings_content_height(
             self.menu_bar_card_height(card_width),
             self.observation_height(card_width),
+            self.lifecycle_card.height(card_width),
             self.update_card.height(card_width),
         )
     }
@@ -2987,12 +3179,18 @@ impl MenuPanel {
 
     fn layout_settings(&self, card_width: f64) {
         let cards = self.settings_tab.subviews();
-        let appearance_card = cards.objectAtIndex(0);
-        let scale_card = cards.objectAtIndex(1);
-        let language_card = cards.objectAtIndex(2);
+        let appearance_card = cards.objectAtIndex(1);
+        let scale_card = cards.objectAtIndex(2);
+        let language_card = cards.objectAtIndex(3);
+        let observation_height = self.layout_observation(card_width, true);
+        self.observation_card.setFrame(NSRect::new(
+            NSPoint::new(8.0, 8.0),
+            NSSize::new(card_width, observation_height),
+        ));
+        let appearance_offset = observation_height + MENU_BAR_CARD_GAP;
 
         appearance_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 8.0),
+            NSPoint::new(8.0, 8.0 + appearance_offset),
             NSSize::new(card_width, 146.0),
         ));
         self.settings_appearance_label.setFrame(NSRect::new(
@@ -3031,7 +3229,7 @@ impl MenuPanel {
         ));
 
         scale_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 162.0),
+            NSPoint::new(8.0, 162.0 + appearance_offset),
             NSSize::new(card_width, 54.0),
         ));
         self.scale_label.setFrame(NSRect::new(
@@ -3052,7 +3250,7 @@ impl MenuPanel {
         ));
 
         language_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 224.0),
+            NSPoint::new(8.0, 224.0 + appearance_offset),
             NSSize::new(card_width, 68.0),
         ));
         self.language_label.setFrame(NSRect::new(
@@ -3065,21 +3263,17 @@ impl MenuPanel {
         ));
         let menu_bar_height = self.menu_bar_card_height(card_width);
         self.menu_bar_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, MENU_BAR_CARD_TOP),
+            NSPoint::new(8.0, MENU_BAR_CARD_TOP + appearance_offset),
             NSSize::new(card_width, menu_bar_height),
         ));
         self.layout_menu_bar_card(card_width, true);
-        let observation_height = self.layout_observation(card_width, true);
-        self.observation_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, MENU_BAR_CARD_TOP + menu_bar_height + MENU_BAR_CARD_GAP),
-            NSSize::new(card_width, observation_height),
-        ));
+        let lifecycle_height = self.lifecycle_card.height(card_width);
         self.lifecycle_card.layout(NSRect::new(
             NSPoint::new(
                 8.0,
                 MENU_BAR_CARD_TOP + menu_bar_height + MENU_BAR_CARD_GAP * 2.0 + observation_height,
             ),
-            NSSize::new(card_width, CARD_HEIGHT),
+            NSSize::new(card_width, lifecycle_height),
         ));
         let update_height = self.update_card.height(card_width);
         self.update_card.layout(NSRect::new(
@@ -3089,7 +3283,7 @@ impl MenuPanel {
                     + menu_bar_height
                     + MENU_BAR_CARD_GAP * 3.0
                     + observation_height
-                    + CARD_HEIGHT,
+                    + lifecycle_height,
             ),
             NSSize::new(card_width, update_height),
         ));
@@ -3102,6 +3296,65 @@ impl MenuPanel {
     fn layout_observation(&self, width: f64, apply: bool) -> f64 {
         let content_width = (width - 28.0).max(1.0);
         let row_width = (width - 96.0).max(1.0);
+        let host = self
+            .observation_preferences
+            .as_ref()
+            .map_or(ObservationMode::Both, |p| p.host);
+        let herdr = host.supports_herdr();
+        let scope = herdr && self.connection_scope_expanded;
+        let settings = self.connection_settings_expanded;
+        if apply {
+            self.connection_scope_toggle.setHidden(!herdr);
+            for view in [
+                &*self.observation_local_label as &NSView,
+                &*self.observation_local_help,
+                &*self.observation_local_switch,
+            ] {
+                view.setHidden(!scope);
+            }
+            for view in [
+                &*self.observation_remote_label as &NSView,
+                &*self.observation_remote_switch,
+                &*self.observation_registration,
+            ] {
+                view.setHidden(!scope || !herdr);
+            }
+            self.observation_machines
+                .setHidden(!scope || !herdr || self.machine_rows.is_empty());
+            self.observation_notice
+                .setHidden(!scope || !herdr || self.observation_notice.stringValue().length() == 0);
+            for row in &self.machine_rows {
+                for view in [
+                    &*row.toggle as &NSView,
+                    &*row.title,
+                    &*row.session,
+                    &*row.status,
+                ] {
+                    view.setHidden(!scope || !herdr);
+                }
+                row.copy.setHidden(!scope || !herdr || !row.copy_available);
+            }
+            self.connection_auto_help
+                .setHidden(!settings || host != ObservationMode::Both);
+            self.connection_profile_title.setHidden(!settings);
+            for (index, (title, value)) in self
+                .connection_profile_labels
+                .iter()
+                .zip(&self.connection_profile_values)
+                .enumerate()
+            {
+                title.setHidden(!settings || (index == 4 && !herdr));
+                value.setHidden(!settings || (index == 4 && !herdr));
+            }
+            self.connection_tern_title
+                .setHidden(!settings || !host.supports_tern());
+            self.connection_tern_help
+                .setHidden(!settings || !host.supports_tern());
+            self.observation_error.setHidden(
+                !self.connection_diagnostics_expanded
+                    || self.observation_error.stringValue().length() == 0,
+            );
+        }
         let mut y = 14.0;
         place_observation_label(
             &self.observation_title,
@@ -3112,35 +3365,139 @@ impl MenuPanel {
             apply,
         );
         y += 8.0;
-        for (index, (field, toggle)) in [
-            (
-                &self.observation_local_label,
-                &self.observation_local_switch,
-            ),
-            (
-                &self.observation_remote_label,
-                &self.observation_remote_switch,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let field_width = (width - 88.0).max(1.0);
-            let height = measured_label_height(field, field_width).max(30.0);
-            if apply {
-                field.setFrame(NSRect::new(
-                    NSPoint::new(14.0, y),
-                    NSSize::new(field_width, height),
-                ));
-                toggle.setFrame(NSRect::new(
-                    NSPoint::new(width - 60.0, y + (height - 30.0) / 2.0),
-                    NSSize::new(46.0, 30.0),
-                ));
+        let host_width = (content_width * 0.4).max(1.0);
+        let host_height = measured_label_height(&self.connection_host_label, host_width).max(28.0);
+        if apply {
+            self.connection_host_label.setFrame(NSRect::new(
+                NSPoint::new(14.0, y),
+                NSSize::new(host_width, host_height),
+            ));
+            self.connection_host_popup.setFrame(NSRect::new(
+                NSPoint::new(20.0 + host_width, y),
+                NSSize::new((content_width - host_width - 6.0).max(1.0), 28.0),
+            ));
+        }
+        y += host_height + 6.0;
+        place_observation_label(
+            &self.connection_status,
+            14.0,
+            content_width,
+            16.0,
+            &mut y,
+            apply,
+        );
+        y += 8.0;
+        if herdr {
+            place_connection_disclosure(&self.connection_scope_toggle, width, &mut y, apply);
+        }
+        if scope {
+            for (index, (field, toggle)) in [
+                (
+                    &self.observation_local_label,
+                    &self.observation_local_switch,
+                ),
+                (
+                    &self.observation_remote_label,
+                    &self.observation_remote_switch,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index == 1 && !herdr {
+                    continue;
+                }
+                let field_width = (width - 88.0).max(1.0);
+                let height = measured_label_height(field, field_width).max(30.0);
+                if apply {
+                    field.setFrame(NSRect::new(
+                        NSPoint::new(14.0, y),
+                        NSSize::new(field_width, height),
+                    ));
+                    toggle.setFrame(NSRect::new(
+                        NSPoint::new(width - 60.0, y + (height - 30.0) / 2.0),
+                        NSSize::new(46.0, 30.0),
+                    ));
+                }
+                y += height + 8.0;
+                if index == 0 {
+                    place_observation_label(
+                        &self.observation_local_help,
+                        14.0,
+                        content_width,
+                        16.0,
+                        &mut y,
+                        apply,
+                    );
+                    y += 8.0;
+                }
             }
-            y += height + 8.0;
-            if index == 0 {
+            if herdr {
+                if self.observation_notice.stringValue().length() > 0 {
+                    place_observation_label(
+                        &self.observation_notice,
+                        14.0,
+                        content_width,
+                        16.0,
+                        &mut y,
+                        apply,
+                    );
+                    y += 6.0;
+                }
+                if !self.machine_rows.is_empty() {
+                    place_observation_label(
+                        &self.observation_machines,
+                        30.0,
+                        content_width - 16.0,
+                        16.0,
+                        &mut y,
+                        apply,
+                    );
+                    y += 8.0;
+                }
+                for row in &self.machine_rows {
+                    let row_start = y;
+                    let height = measured_label_height(&row.title, row_width).max(17.0);
+                    if apply {
+                        row.title.setFrame(NSRect::new(
+                            NSPoint::new(30.0, y),
+                            NSSize::new(row_width, height),
+                        ));
+                        row.toggle.setFrame(NSRect::new(
+                            NSPoint::new(width - 60.0, y),
+                            NSSize::new(46.0, 30.0),
+                        ));
+                    }
+                    y += height + 3.0;
+                    place_observation_label(&row.session, 30.0, row_width, 15.0, &mut y, apply);
+                    y += 2.0;
+                    place_observation_label(&row.status, 30.0, row_width, 15.0, &mut y, apply);
+                    if row.copy_available {
+                        y += 6.0;
+                        if apply {
+                            row.copy.setFrame(NSRect::new(
+                                NSPoint::new(30.0, y),
+                                NSSize::new((content_width - 16.0).max(1.0), 26.0),
+                            ));
+                        }
+                        y += 26.0;
+                    }
+                    y = y.max(row_start + 56.0) + 8.0;
+                }
+                if apply {
+                    self.observation_registration.setFrame(NSRect::new(
+                        NSPoint::new(14.0, y),
+                        NSSize::new(content_width, 27.0),
+                    ));
+                }
+                y += 35.0;
+            }
+        }
+        place_connection_disclosure(&self.connection_settings_toggle, width, &mut y, apply);
+        if settings {
+            if host == ObservationMode::Both {
                 place_observation_label(
-                    &self.observation_local_help,
+                    &self.connection_auto_help,
                     14.0,
                     content_width,
                     16.0,
@@ -3149,10 +3506,55 @@ impl MenuPanel {
                 );
                 y += 8.0;
             }
-        }
-        if !self.observation_notice.isHidden() {
+            if host.supports_tern() {
+                place_observation_label(
+                    &self.connection_tern_title,
+                    14.0,
+                    content_width,
+                    16.0,
+                    &mut y,
+                    apply,
+                );
+                y += 4.0;
+                place_observation_label(
+                    &self.connection_tern_help,
+                    14.0,
+                    content_width,
+                    16.0,
+                    &mut y,
+                    apply,
+                );
+                y += 10.0;
+            }
             place_observation_label(
-                &self.observation_notice,
+                &self.connection_profile_title,
+                14.0,
+                content_width,
+                16.0,
+                &mut y,
+                apply,
+            );
+            y += 6.0;
+            for (index, (title, value)) in self
+                .connection_profile_labels
+                .iter()
+                .zip(&self.connection_profile_values)
+                .enumerate()
+            {
+                if index == 4 && !herdr {
+                    continue;
+                }
+                place_observation_label(title, 14.0, content_width, 15.0, &mut y, apply);
+                y += 2.0;
+                place_observation_label(value, 14.0, content_width, 16.0, &mut y, apply);
+                y += 8.0;
+            }
+        }
+        place_connection_disclosure(&self.connection_diagnostics_toggle, width, &mut y, apply);
+        if self.connection_diagnostics_expanded && self.observation_error.stringValue().length() > 0
+        {
+            place_observation_label(
+                &self.observation_error,
                 14.0,
                 content_width,
                 16.0,
@@ -3161,108 +3563,46 @@ impl MenuPanel {
             );
             y += 6.0;
         }
-        if !self.observation_error_toggle.isHidden() {
-            if apply {
-                self.observation_error_toggle.setFrame(NSRect::new(
-                    NSPoint::new(14.0, y),
-                    NSSize::new(content_width, 26.0),
-                ));
-            }
-            y += 30.0;
-            if !self.observation_error.isHidden() {
-                place_observation_label(
-                    &self.observation_error,
-                    14.0,
-                    content_width,
-                    16.0,
-                    &mut y,
-                    apply,
-                );
-                y += 6.0;
-            }
-        }
-        if !self.machine_rows.is_empty() {
-            y += 8.0;
-            place_observation_label(
-                &self.observation_machines,
-                30.0,
-                content_width - 16.0,
-                16.0,
-                &mut y,
-                apply,
-            );
-            y += 8.0;
-        }
-        for row in &self.machine_rows {
-            let row_start = y;
-            let title_height = measured_label_height(&row.title, row_width).max(17.0);
-            if apply {
-                row.title.setFrame(NSRect::new(
-                    NSPoint::new(30.0, y),
-                    NSSize::new(row_width, title_height),
-                ));
-                row.toggle.setFrame(NSRect::new(
-                    NSPoint::new(width - 60.0, y),
-                    NSSize::new(46.0, 30.0),
-                ));
-            }
-            y += title_height + 3.0;
-            place_observation_label(&row.session, 30.0, row_width, 15.0, &mut y, apply);
-            y += 2.0;
-            place_observation_label(&row.status, 30.0, row_width, 15.0, &mut y, apply);
-            if !row.copy.isHidden() {
-                y += 6.0;
-                if apply {
-                    row.copy.setFrame(NSRect::new(
-                        NSPoint::new(30.0, y),
-                        NSSize::new((content_width - 16.0).max(1.0), 26.0),
-                    ));
-                }
-                y += 26.0;
-            }
-            if !row.error_toggle.isHidden() {
-                y += 4.0;
-                if apply {
-                    row.error_toggle.setFrame(NSRect::new(
-                        NSPoint::new(30.0, y),
-                        NSSize::new((content_width - 16.0).max(1.0), 26.0),
-                    ));
-                }
-                y += 26.0;
-                if !row.error.isHidden() {
-                    y += 4.0;
-                    place_observation_label(
-                        &row.error,
-                        30.0,
-                        content_width - 16.0,
-                        16.0,
-                        &mut y,
-                        apply,
-                    );
-                }
-            }
-            y = y.max(row_start + 56.0) + 8.0;
-        }
-        if apply {
-            self.observation_registration.setFrame(NSRect::new(
-                NSPoint::new(14.0, y),
-                NSSize::new(content_width, 27.0),
-            ));
-        }
-        y += 27.0;
-        y + 14.0
+        y + 10.0
     }
+}
+
+fn set_connection_disclosure(
+    button: &NSButton,
+    locale: UiLocale,
+    message: Message,
+    expanded: bool,
+) {
+    let title = text(locale, message);
+    button.setTitle(&NSString::from_str(&format!(
+        "{} {title}",
+        if expanded { "▾" } else { "▸" }
+    )));
+    set_accessibility_label(button, title);
+    let _: () = unsafe { msg_send![button, setAccessibilityExpanded: expanded] };
+}
+
+fn place_connection_disclosure(button: &NSButton, width: f64, y: &mut f64, apply: bool) {
+    if apply {
+        button.setFrame(NSRect::new(
+            NSPoint::new(14.0, *y),
+            NSSize::new((width - 28.0).max(1.0), 26.0),
+        ));
+    }
+    *y += 30.0;
 }
 
 fn settings_content_height(
     menu_bar_height: f64,
     observation_height: f64,
+    lifecycle_height: f64,
     update_height: f64,
 ) -> f64 {
     SETTINGS_BASE_HEIGHT
         + MENU_BAR_CARD_GAP * 2.0
         + menu_bar_height
         + observation_height
+        + lifecycle_height
         + update_height
 }
 

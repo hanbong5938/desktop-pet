@@ -1,21 +1,14 @@
-use crate::control;
-use crate::i18n::{resolve_language, text, Message, UiLocale};
-use crate::lifecycle::{LifecycleSetting, LifecycleSettings, Paths};
-use crate::preferences::Preferences;
+use crate::i18n::{text, Message, UiLocale};
+use crate::lifecycle::{LifecycleSetting, LifecycleSettings};
+use herdr_update_coordinator::ObservationMode;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSBackingStoreType, NSBezierPath, NSColor, NSControlSize, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSEventType, NSFont,
-    NSRunningApplication, NSSwitch, NSTextField, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSBezierPath, NSColor, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSFont,
+    NSSwitch, NSTextField, NSView,
 };
-use objc2_foundation::{NSLocale, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use std::cell::RefCell;
-
-pub(crate) const CARD_HEIGHT: f64 = 300.0;
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 // SAFETY: This decorative AppKit view is constructed and used on the main thread.
 define_class!(
@@ -70,7 +63,7 @@ fn label(
         NSColor::colorWithSRGBRed_green_blue_alpha(0.95, 0.95, 0.97, 1.0)
     };
     field.setTextColor(Some(&color));
-    field.setMaximumNumberOfLines(3);
+    field.setMaximumNumberOfLines(0);
     field
 }
 
@@ -91,6 +84,8 @@ pub(crate) struct LifecycleSettingsCard {
     exit_help: Retained<NSTextField>,
     exit_switch: Retained<NSSwitch>,
     quit_help: Retained<NSTextField>,
+    persistent_help: Retained<NSTextField>,
+    observation_host: ObservationMode,
     error: Retained<NSTextField>,
     locale: UiLocale,
     error_detail: Option<String>,
@@ -108,6 +103,7 @@ impl LifecycleSettingsCard {
         let exit_label = label("", 12.0, true, false, mtm);
         let exit_help = label("", 10.5, false, true, mtm);
         let quit_help = label("", 10.5, false, true, mtm);
+        let persistent_help = label("", 10.5, false, true, mtm);
         let error = label("", 10.5, false, false, mtm);
         error.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
             1.0, 0.54, 0.50, 1.0,
@@ -135,6 +131,7 @@ impl LifecycleSettingsCard {
             &*exit_help,
             &*exit_switch,
             &*quit_help,
+            &*persistent_help,
             &*error,
         ] {
             view.addSubview(child);
@@ -149,6 +146,8 @@ impl LifecycleSettingsCard {
             exit_help,
             exit_switch,
             quit_help,
+            persistent_help,
+            observation_host: ObservationMode::Both,
             error,
             locale,
             error_detail: None,
@@ -161,47 +160,82 @@ impl LifecycleSettingsCard {
         &self.view
     }
 
+    pub(crate) fn height(&self, width: f64) -> f64 {
+        self.layout_content(width, false)
+    }
+
     pub(crate) fn layout(&self, frame: NSRect) {
         self.view.setFrame(frame);
-        let width = frame.size.width;
+        self.layout_content(frame.size.width, true);
+    }
+
+    fn layout_content(&self, width: f64, apply: bool) -> f64 {
         let text_width = (width - 82.0).max(1.0);
         let full_width = (width - 28.0).max(1.0);
-        self.heading.setFrame(NSRect::new(
-            NSPoint::new(14.0, 10.0),
-            NSSize::new(full_width, 20.0),
-        ));
-        self.auto_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 36.0),
-            NSSize::new(text_width, 32.0),
-        ));
-        self.auto_switch.setFrame(NSRect::new(
-            NSPoint::new(width - 58.0, 32.0),
-            NSSize::new(46.0, 30.0),
-        ));
-        self.auto_help.setFrame(NSRect::new(
-            NSPoint::new(14.0, 70.0),
-            NSSize::new(full_width, 40.0),
-        ));
-        self.exit_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 116.0),
-            NSSize::new(text_width, 32.0),
-        ));
-        self.exit_switch.setFrame(NSRect::new(
-            NSPoint::new(width - 58.0, 112.0),
-            NSSize::new(46.0, 30.0),
-        ));
-        self.exit_help.setFrame(NSRect::new(
-            NSPoint::new(14.0, 150.0),
-            NSSize::new(full_width, 48.0),
-        ));
-        self.quit_help.setFrame(NSRect::new(
-            NSPoint::new(14.0, 204.0),
-            NSSize::new(full_width, 36.0),
-        ));
-        self.error.setFrame(NSRect::new(
-            NSPoint::new(14.0, 246.0),
-            NSSize::new(full_width, 44.0),
-        ));
+        let mut y = 10.0;
+        let place = |field: &NSTextField, width: f64, minimum: f64, y: &mut f64| {
+            let height = field
+                .cell()
+                .expect("lifecycle label cell")
+                .cellSizeForBounds(NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(width, 100_000.0),
+                ))
+                .height
+                .ceil()
+                .max(minimum);
+            if apply {
+                field.setFrame(NSRect::new(
+                    NSPoint::new(14.0, *y),
+                    NSSize::new(width, height),
+                ));
+            }
+            *y += height;
+        };
+        place(&self.heading, full_width, 0.0, &mut y);
+        y += 6.0;
+        let auto_y = y;
+        place(&self.auto_label, text_width, 32.0, &mut y);
+        if apply {
+            self.auto_switch.setFrame(NSRect::new(
+                NSPoint::new(width - 58.0, auto_y),
+                NSSize::new(46.0, 30.0),
+            ));
+        }
+        y += 2.0;
+        place(&self.auto_help, full_width, 0.0, &mut y);
+        y += 6.0;
+        if self.observation_host == ObservationMode::Herdr {
+            let exit_y = y;
+            place(&self.exit_label, text_width, 32.0, &mut y);
+            if apply {
+                self.exit_switch.setFrame(NSRect::new(
+                    NSPoint::new(width - 58.0, exit_y),
+                    NSSize::new(46.0, 30.0),
+                ));
+            }
+            y += 2.0;
+            place(&self.exit_help, full_width, 0.0, &mut y);
+        } else {
+            place(&self.persistent_help, full_width, 0.0, &mut y);
+        }
+        y += 6.0;
+        place(&self.quit_help, full_width, 0.0, &mut y);
+        if !self.error.isHidden() {
+            y += 6.0;
+            place(&self.error, full_width, 0.0, &mut y);
+        }
+        y + 10.0
+    }
+
+    pub(crate) fn set_observation_host(&mut self, host: ObservationMode) {
+        self.observation_host = host;
+        let herdr_only = host == ObservationMode::Herdr;
+        self.exit_label.setHidden(!herdr_only);
+        self.exit_help.setHidden(!herdr_only);
+        self.exit_switch.setHidden(!herdr_only);
+        self.exit_switch.setEnabled(herdr_only);
+        self.persistent_help.setHidden(herdr_only);
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
@@ -213,6 +247,7 @@ impl LifecycleSettingsCard {
             (&self.exit_label, Message::LifecycleExit),
             (&self.exit_help, Message::LifecycleExitHelp),
             (&self.quit_help, Message::LifecycleQuitHelp),
+            (&self.persistent_help, Message::LifecyclePersistentHelp),
         ] {
             field.setStringValue(&NSString::from_str(text(locale, message)));
         }
@@ -223,6 +258,11 @@ impl LifecycleSettingsCard {
             text(locale, Message::LifecycleAutoStartHelp),
         );
         accessibility(&self.exit_help, text(locale, Message::LifecycleExitHelp));
+        accessibility(
+            &self.persistent_help,
+            text(locale, Message::LifecyclePersistentHelp),
+        );
+        self.set_observation_host(self.observation_host);
         self.display_error();
     }
 
@@ -270,133 +310,7 @@ impl LifecycleSettingsCard {
             })
             .unwrap_or_default();
         self.error.setStringValue(&NSString::from_str(&message));
+        self.error.setHidden(message.is_empty());
         accessibility(&self.error, &message);
     }
-}
-
-thread_local! { static WINDOW: RefCell<Option<Standalone>> = const { RefCell::new(None) }; }
-
-struct Standalone {
-    _window: Retained<NSWindow>,
-    _target: Retained<SettingsTarget>,
-    card: LifecycleSettingsCard,
-    paths: Paths,
-    settings: LifecycleSettings,
-}
-
-// SAFETY: All callbacks run on AppKit's main thread and use only main-thread-owned state.
-define_class!(
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[name = "OMPetLifecycleSettingsTarget"]
-    struct SettingsTarget;
-    unsafe impl NSObjectProtocol for SettingsTarget {}
-    unsafe impl NSWindowDelegate for SettingsTarget {
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _notification: &objc2_foundation::NSNotification) {
-            let app = NSApplication::sharedApplication(self.mtm());
-            app.stop(None);
-            if let Some(event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-                NSEventType::ApplicationDefined, NSPoint::new(0.0, 0.0),
-                NSEventModifierFlags::empty(), 0.0, 0, None, 0, 0, 0,
-            ) { app.postEvent_atStart(&event, true); }
-        }
-    }
-    impl SettingsTarget {
-        #[unsafe(method(toggleLifecycleAutoStart:))]
-        fn toggle_auto(&self, _sender: &AnyObject) { save(LifecycleSetting::AutoStart); }
-        #[unsafe(method(toggleLifecycleExit:))]
-        fn toggle_exit(&self, _sender: &AnyObject) { save(LifecycleSetting::ExitWithHerdr); }
-    }
-);
-
-fn save(key: LifecycleSetting) {
-    WINDOW.with(|slot| {
-        let mut borrow = slot.borrow_mut();
-        let Some(window) = borrow.as_mut() else {
-            return;
-        };
-        let value = window.card.value(key);
-        match control::set_lifecycle_setting(&window.paths, key, value) {
-            Ok(settings) => {
-                window.settings = settings;
-                window.card.saved(settings);
-            }
-            Err(error) => window.card.failed(window.settings, error),
-        }
-    });
-}
-
-pub(crate) fn run(paths: Paths) -> Result<(), String> {
-    let mtm = MainThreadMarker::new().ok_or("settings must run on the AppKit main thread")?;
-    let settings = control::get_lifecycle_settings(&paths)?;
-    let preference = Preferences::load(&paths.config_dir)
-        .unwrap_or_default()
-        .language();
-    let preferred = NSLocale::preferredLanguages();
-    let tags: Vec<_> = preferred.iter().map(|tag| tag.to_string()).collect();
-    let tags: Vec<_> = tags.iter().map(String::as_str).collect();
-    let locale = resolve_language(preference, &tags);
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // Complete AppKit launch before constructing the standalone window so it
-    // participates in the application's normal window and accessibility tree.
-    app.finishLaunching();
-    let target = SettingsTarget::alloc(mtm).set_ivars(());
-    let target: Retained<SettingsTarget> = unsafe { msg_send![super(target), init] };
-    let width = 400.0;
-    // SAFETY: NSWindow is allocated on AppKit's main thread and initialized once
-    // with a valid content rectangle and supported window style.
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(width, CARD_HEIGHT + 40.0),
-            ),
-            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    // SAFETY: Retained owns this window; AppKit must not release it on close.
-    unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&NSString::from_str(text(
-        locale,
-        Message::LifecycleWindowTitle,
-    )));
-    window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*target)));
-    let card = LifecycleSettingsCard::new(locale, &target, mtm);
-    card.layout(NSRect::new(
-        NSPoint::new(16.0, 20.0),
-        NSSize::new(width - 32.0, CARD_HEIGHT),
-    ));
-    card.sync(settings);
-    window
-        .contentView()
-        .ok_or("settings window has no content view")?
-        .addSubview(card.view());
-    WINDOW.with(|slot| {
-        *slot.borrow_mut() = Some(Standalone {
-            _window: window.clone(),
-            _target: target,
-            card,
-            paths,
-            settings,
-        })
-    });
-    window.center();
-    window.makeKeyAndOrderFront(None);
-    if app.respondsToSelector(sel!(activate)) {
-        app.activate();
-    } else {
-        // macOS 13 predates NSApplication.activate().
-        let _ = NSRunningApplication::currentApplication()
-            .activateWithOptions(NSApplicationActivationOptions::empty());
-    }
-    app.run();
-    WINDOW.with(|slot| {
-        slot.borrow_mut().take();
-    });
-    Ok(())
 }

@@ -8,9 +8,10 @@ pub const OBSERVATION_MODE_ENV: &str = "HERDR_PET_OBSERVATION_MODE";
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationMode {
-    #[default]
     Herdr,
     Tern,
+    #[default]
+    #[serde(rename = "auto", alias = "both")]
     Both,
 }
 
@@ -19,7 +20,7 @@ impl ObservationMode {
         match self {
             Self::Herdr => "herdr",
             Self::Tern => "tern",
-            Self::Both => "both",
+            Self::Both => "auto",
         }
     }
 
@@ -46,7 +47,7 @@ impl FromStr for ObservationMode {
         match value {
             "herdr" => Ok(Self::Herdr),
             "tern" => Ok(Self::Tern),
-            "both" => Ok(Self::Both),
+            "auto" | "both" => Ok(Self::Both),
             _ => Err(format!("invalid observation mode: {value:?}")),
         }
     }
@@ -55,6 +56,23 @@ impl FromStr for ObservationMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_selection_migrates_both_and_emits_only_auto() {
+        assert_eq!(ObservationMode::default(), ObservationMode::Both);
+        for token in ["auto", "both"] {
+            assert_eq!(token.parse::<ObservationMode>(), Ok(ObservationMode::Both));
+            assert_eq!(
+                serde_json::from_str::<ObservationMode>(&format!("\"{token}\"")).unwrap(),
+                ObservationMode::Both
+            );
+        }
+        assert_eq!(ObservationMode::Both.as_str(), "auto");
+        assert_eq!(
+            serde_json::to_string(&ObservationMode::Both).unwrap(),
+            "\"auto\""
+        );
+    }
 
     #[test]
     fn missing_capture_is_legacy_herdr_but_invalid_capture_is_not() {

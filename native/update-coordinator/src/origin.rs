@@ -2137,7 +2137,7 @@ mod tests {
         };
         assert!(context_valid(&context).is_ok());
         let default_context = context.clone();
-        for mode in ["herdr", "tern", "both"] {
+        for mode in ["herdr", "tern", "auto"] {
             context
                 .environment
                 .insert(OBSERVATION_MODE_ENV.into(), mode.into());
@@ -2154,6 +2154,19 @@ mod tests {
                 assert_ne!(retained, default_context);
             }
         }
+        let mut legacy = serde_json::to_value(&default_context).unwrap();
+        legacy["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
+        let migrated: UpdateContext = serde_json::from_value(legacy).unwrap();
+        assert!(context_valid(&migrated).is_ok());
+        assert_eq!(
+            migrated.observation_mode().unwrap(),
+            crate::ObservationMode::Both
+        );
+        assert_eq!(migrated.environment[OBSERVATION_MODE_ENV], "auto");
+        assert_eq!(
+            serde_json::to_value(&migrated).unwrap()["environment"][OBSERVATION_MODE_ENV],
+            "auto"
+        );
         context
             .environment
             .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
@@ -3112,7 +3125,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn prospective_host_requirement_uses_connected_process_version_not_disk_binary() {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         use std::os::unix::net::UnixListener;
         let (_dir, mut context, _registry, _plugin) = registry_fixture("0.3.3");
         let mut listener = UnixListener::bind(&context.herdr_socket).unwrap();
@@ -3141,13 +3154,28 @@ mod tests {
                     .unwrap();
             let responder = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 256];
-                assert!(stream.read(&mut request).unwrap() > 0);
+                let mut request = String::new();
+                BufReader::new((&mut stream).take(256))
+                    .read_line(&mut request)
+                    .unwrap();
+                assert!(
+                    request.ends_with('\n'),
+                    "incomplete host proof request: {request:?}"
+                );
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["id"], "updater-host-proof");
+                assert_eq!(request["method"], "session.snapshot");
+                assert_eq!(request["params"], serde_json::json!({}));
                 write!(stream, "{{\"id\":\"updater-host-proof\",\"result\":{{\"snapshot\":{{\"protocol\":1,\"version\":\"{live}\"}}}}}}\n").unwrap();
                 listener
             });
-            assert_eq!(check_host(&context, &host, &doc).is_ok(), compatible);
+            let result = check_host(&context, &host, &doc);
             listener = responder.join().unwrap();
+            assert_eq!(
+                result.is_ok(),
+                compatible,
+                "live={live}, requirement={requirement:?}: {result:?}"
+            );
         }
         drop(listener);
         fs::remove_file(&context.herdr_socket).unwrap();
