@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:f
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  CORE_REPOSITORY, fetchReleases, isPublishedRelease, parseStableTag, releaseHeading, releaseRepository, rewriteRelativeLinks,
+  CORE_REPOSITORY, LEGACY_REPOSITORY, fetchReleases, isPublishedRelease, parseStableTag, releaseHeading, releaseRepository, rewriteRelativeLinks,
   type ReleaseRecord,
 } from "./release-docs";
 
@@ -270,6 +270,15 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
     if (tag) noteHeading(text, tag);
     const sourceRepository = frozen && tag ? releaseRepository(tag) : options.repository;
     const rewritten = rewriteRelativeLinks(text, path, (repoPath, fragment, isImage) => {
+      // Host integration sources moved out of the core tree. Frozen releases
+      // keep their original tag-relative authority and validation below.
+      const integrationRoot = ["integrations/herdr", "integrations/omp"].find(
+        (ownedRoot) => repoPath === ownedRoot || repoPath.startsWith(`${ownedRoot}/`),
+      );
+      if (!frozen && integrationRoot) {
+        if (isImage) return `https://raw.githubusercontent.com/${LEGACY_REPOSITORY}/main/${repoPath.split("/").map(encodeURIComponent).join("/")}${fragment}`;
+        return `${sourceURL(LEGACY_REPOSITORY, "main", repoPath, repoPath === integrationRoot)}${fragment}`;
+      }
       let directory = false;
       if (frozen) {
         const kind = git(root, ["cat-file", "-t", `${tag}:${repoPath}`], true)?.trim();

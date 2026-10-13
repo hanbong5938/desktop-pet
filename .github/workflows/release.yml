@@ -112,6 +112,7 @@ jobs:
           done <<< "$dependencies"
           codesign --verify --deep --strict "$app"
           scratch="$(mktemp -d)"
+          scratch="$(cd -- "$scratch" && pwd -P)"
           trap 'rm -rf "$scratch"' EXIT
           "$binary" pack validate --path "$app/Contents/Resources/default" --config-dir "$scratch/config" --state-dir "$scratch/state"
           mkdir "$scratch/bin"
