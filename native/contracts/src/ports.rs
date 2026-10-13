@@ -15,6 +15,14 @@ use std::time::Instant;
 pub trait RuntimePort: Send + Sync {
     fn with_domain(&self, operation: &mut dyn FnMut(&mut dyn DomainAccess)) -> Result<(), String>;
     fn wake_ui(&self);
+    /// Durable common profile/update/migration admission. Called outside a
+    /// domain/registry transaction before host work; implementations may read
+    /// their actual common gates, never invent authority from adapter inputs.
+    /// Final domain mutation_allowed and adapter epoch checks remain required
+    /// in the separate linearizable handoff transaction.
+    fn mutation_admission(&self) -> Result<(), String> {
+        Err("runtime does not support durable mutation admission".to_owned())
+    }
 }
 
 /// Host-neutral operations on the already-locked domain. All references are

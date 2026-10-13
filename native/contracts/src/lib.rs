@@ -8,6 +8,7 @@ mod extensions;
 mod models;
 mod observation;
 mod ports;
+mod preferences_owner;
 pub mod profile_store;
 
 pub use extensions::*;

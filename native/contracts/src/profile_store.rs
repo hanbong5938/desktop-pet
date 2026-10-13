@@ -1,3 +1,5 @@
+use crate::preferences_owner::PreferencesOwner;
+use crate::ProfilePaths;
 use serde_json::{Map, Value};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
@@ -8,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const LIFECYCLE_FILE: &str = "lifecycle.json";
+pub const CONTROL_SOCKET_FILE: &str = "control.sock";
 pub const LOCK_FILE: &str = "desktop-pet.lock";
 const LOCK_MODE: u32 = 0o600;
 const DIRECTORY_MODE: u32 = 0o700;
@@ -91,6 +94,7 @@ pub struct LifecycleLock {
     file: File,
     state_dir: PathBuf,
     writes: Mutex<()>,
+    preferences_owner: Mutex<Option<Arc<PreferencesOwner>>>,
 }
 
 impl LifecycleLock {
@@ -170,6 +174,7 @@ impl LifecycleLock {
             file,
             state_dir: state_dir.to_path_buf(),
             writes: Mutex::new(()),
+            preferences_owner: Mutex::new(None),
         })
     }
 
@@ -189,6 +194,9 @@ impl LifecycleLock {
 impl Drop for LifecycleLock {
     fn drop(&mut self) {
         unsafe {
+            if let Ok(owner) = self.preferences_owner.get_mut() {
+                owner.take();
+            }
             let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
@@ -202,6 +210,8 @@ impl Drop for LifecycleLock {
 pub struct ProfileStore {
     config_dir: PathBuf,
     lock: Arc<LifecycleLock>,
+    owner: Arc<PreferencesOwner>,
+    preferences_validator: Option<fn(&Map<String, Value>) -> Result<(), String>>,
 }
 
 impl ProfileStore {
@@ -211,9 +221,28 @@ impl ProfileStore {
 
     pub fn with_lock(config_dir: &Path, lock: Arc<LifecycleLock>) -> Result<Self, String> {
         validate_directory(config_dir, true)?;
+        let config_dir = fs::canonicalize(config_dir).map_err(|error| error.to_string())?;
+        let mut cached = lock
+            .preferences_owner
+            .lock()
+            .map_err(|_| "preferences owner cache poisoned".to_owned())?;
+        let owner = match cached.as_ref() {
+            Some(owner) => {
+                owner.verify(&config_dir, lock.state_dir())?;
+                owner.clone()
+            }
+            None => {
+                let owner = Arc::new(PreferencesOwner::acquire(&config_dir, lock.state_dir())?);
+                *cached = Some(owner.clone());
+                owner
+            }
+        };
+        drop(cached);
         Ok(Self {
-            config_dir: config_dir.to_path_buf(),
+            config_dir,
             lock,
+            owner,
+            preferences_validator: None,
         })
     }
 
@@ -222,6 +251,63 @@ impl ProfileStore {
     }
     pub fn lifecycle_lock(&self) -> &Arc<LifecycleLock> {
         &self.lock
+    }
+
+    /// The common transport convention and the same physical profile pair.
+    pub fn paths(&self) -> ProfilePaths {
+        ProfilePaths {
+            config_dir: self.config_dir.clone(),
+            state_dir: self.lock.state_dir().to_path_buf(),
+            control_socket: self.lock.state_dir().join(CONTROL_SOCKET_FILE),
+        }
+    }
+
+    pub fn verify_owner(&self) -> Result<(), String> {
+        self.owner.verify(&self.config_dir, self.lock.state_dir())
+    }
+
+    /// Common-schema validation is supplied by core, never copied into an
+    /// integration or silently omitted by a committed-preference reader.
+    pub fn with_preferences_validator(
+        mut self,
+        validator: fn(&Map<String, Value>) -> Result<(), String>,
+    ) -> Self {
+        self.preferences_validator = Some(validator);
+        self
+    }
+
+    pub fn read_committed_preferences(&self) -> Result<Map<String, Value>, String> {
+        let validate = self
+            .preferences_validator
+            .ok_or("common committed preferences validator is not configured")?;
+        self.with_writer_lock(|| {
+            let path = self.config_dir.join("preferences.json");
+            let before = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Map::new()),
+                Err(error) => return Err(error.to_string()),
+            };
+            if !before.is_file() || before.file_type().is_symlink() {
+                return Err("committed preferences are not a regular file".into());
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+                .map_err(|error| error.to_string())?;
+            let actual = file.metadata().map_err(|error| error.to_string())?;
+            if !actual.is_file()
+                || actual.uid() != effective_uid()
+                || (before.dev(), before.ino()) != (actual.dev(), actual.ino())
+            {
+                return Err("committed preferences are not owned and stable".into());
+            }
+            let object: Map<String, Value> =
+                serde_json::from_reader(file).map_err(|error| error.to_string())?;
+            validate(&object)?;
+            self.verify_owner()?;
+            Ok(object)
+        })
     }
 
     /// Serializes a complete owner-defined read/validate/atomic-write
@@ -247,6 +333,7 @@ impl ProfileStore {
             .writes
             .lock()
             .map_err(|_| "profile writer lock poisoned".to_owned())?;
+        self.verify_owner()?;
         operation()
     }
 

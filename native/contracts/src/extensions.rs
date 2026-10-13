@@ -82,6 +82,27 @@ pub struct LifecycleActionView {
     pub copy_text: Option<String>,
 }
 
+/// Result from the common profile preference owner, not an adapter's desired
+/// candidate. Uncertain retains the original submitted operation identity;
+/// callers may observe that identity but must never replay it or save offline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreferenceCommit {
+    Committed(Map<String, Value>),
+    Uncertain {
+        instance_id: String,
+        operation_id: String,
+        current: Option<Map<String, Value>>,
+    },
+}
+
+/// Common selected-profile preference access, including live CAS/operation
+/// observation and exclusive offline mutation admission. Native adapter UI
+/// retains this port for workers rather than constructing another owner/store.
+pub trait PreferenceAccess: Send + Sync {
+    fn read(&self) -> Result<Map<String, Value>, String>;
+    fn apply(&self, patch: Map<String, Value>) -> Result<PreferenceCommit, String>;
+}
+
 /// A registered option within the common `preferences set` command, distinct
 /// from launch options. Names include their leading `--`; composition rejects
 /// collisions with common options and other owners.
@@ -155,6 +176,21 @@ pub trait LifecycleExtension: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Explicit adapter-owned activation for an action without copy_text.
+    /// Core rechecks the current enabled view before calling this outside its
+    /// domain/UI locks. Copy actions never reach this method. Implementations
+    /// own native presentation and host behavior; core interprets no commands.
+    fn activate_action(
+        &self,
+        _store: &ProfileStore,
+        _selection: &ObservationSelection,
+        _key: &str,
+        _locale: &str,
+        _preferences: Arc<dyn PreferenceAccess>,
+    ) -> Result<(), String> {
+        Err(format!("{} does not support action activation", self.provider()))
+    }
+
     /// Opaque top-level preference patch keys owned by this adapter. Core
     /// routes only registered keys and rejects unowned/duplicate ownership;
     /// it never interprets adapter settings or reconstructs their disk object.
@@ -197,11 +233,13 @@ pub trait LifecycleExtension: Send + Sync {
         ))
     }
 
-    /// Runs outside the writer/domain locks. Validate the complete owner patch
-    /// and capture authority here; apply then operates only on the caller's
-    /// loaded candidate. No persistence or live policy changes happen here.
+    /// Runs outside the writer/domain locks using the caller's actual selected
+    /// profile lease. Validate the complete owner patch and capture authority
+    /// here; apply then operates only on the loaded candidate. Do not retain
+    /// the supplied store in a long-lived adapter or persist/live-mutate here.
     fn prepare_preference_patch(
         &self,
+        _store: &ProfileStore,
         _patch: &Map<String, Value>,
     ) -> Result<Box<dyn PreparedPreferencePatch>, String> {
         Err(format!(
