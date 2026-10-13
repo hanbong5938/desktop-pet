@@ -16,13 +16,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "desktop-pet-contracts-{}-{}",
+            "desktop-pet-contracts-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         let config = root.join("config");
         let state = root.join("state");

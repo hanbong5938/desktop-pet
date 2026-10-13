@@ -127,6 +127,16 @@ pub trait PreparedPreferencePatch: Send + Sync {
 /// succeeds; calls run outside a domain transaction and may obtain one itself.
 pub trait LifecycleExtension: Send + Sync {
     fn provider(&self) -> &'static str;
+    /// Pure initialization of this owner's defaults when lifecycle.json was
+    /// absent at the start of a common writer transaction. Called before the
+    /// sole atomic save, never for an existing object or a read-only query.
+    /// Only owner keys may change; preserve other owners' and unknown fields.
+    /// No store/domain reentry, lock acquisition, host I/O, or live mutation.
+    /// Err discards the entire candidate without creating lifecycle.json.
+    fn initialize_lifecycle(&self, _candidate: &mut Map<String, Value>) -> Result<(), String> {
+        Ok(())
+    }
+
     fn settings(
         &self,
         store: &ProfileStore,
