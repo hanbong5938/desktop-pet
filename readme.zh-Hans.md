@@ -101,6 +101,8 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 文档与网站
 
+[Desktop Pet Wiki](https://github.com/hanbong5938/desktop-pet/wiki) 是 core 维护的生成阅读视图，以审阅后的源码为原本。实际 Wiki 发布需另行验证。旧 Herdr 网站仅是集成与迁移入口，不复制共同应用网站。
+
 - [使用与恢复](docs/usage.zh-Hans.md) · [开发与安装（英语）](docs/development.md) · [原生自动化 CLI 契约（英语）](docs/cli.md#english) · [打补丁的主程序集成（英语）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - [发行历史（英语）](docs/releases/README.md) · [v0.3.6 变更（英语／韩语）](docs/releases/v0.3.6.md) · [v0.3 升级指南（英语）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [历史测试版／预览版指南（英语）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 迁移（英语）](docs/migrations/v0.1.11-to-v0.2.0.md)。
 - 宣传网站提供[简体中文](https://hanbong5938.github.io/desktop-pet/zh-Hans/)、[韩语](https://hanbong5938.github.io/desktop-pet/)、[英语](https://hanbong5938.github.io/desktop-pet/en/)和[日语](https://hanbong5938.github.io/desktop-pet/ja/)版本，介绍的是此**原生**应用；应用不能在浏览器中运行。中立 Pages 部署尚未在此验证。网站开发／部署参阅 [GitHub Pages 指南（英语）](docs/development.md#website-github-pages)。独立的[角色图库](https://hanbong5938.github.io/herdr-characters/)展示可选角色包，仅提供英语和韩语。

@@ -101,6 +101,8 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 
 ## 資料とウェブサイト
 
+[Desktop Pet Wiki](https://github.com/hanbong5938/desktop-pet/wiki) は core 所有の生成された閲覧文書で、レビュー済みソースが原本です。実際の Wiki 公開は別途確認します。旧 Herdr サイトは第二のアプリサイトではなく連携・移行の入口です。
+
 - [使い方と復旧](docs/usage.ja.md) · [開発とインストール（英語）](docs/development.md) · [ネイティブ自動化 CLI 契約（英語）](docs/cli.md#english) · [パッチ済みホスト連携（英語）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - [リリース履歴（英語）](docs/releases/README.md) · [v0.3.6 の変更点（英語／韓国語）](docs/releases/v0.3.6.md) · [v0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [過去のベータ／プレビュー案内（英語）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 移行（英語）](docs/migrations/v0.1.11-to-v0.2.0.md)。
 - 宣伝用の[日本語](https://hanbong5938.github.io/desktop-pet/ja/)・[韓国語](https://hanbong5938.github.io/desktop-pet/)・[英語](https://hanbong5938.github.io/desktop-pet/en/)・[簡体字中国語](https://hanbong5938.github.io/desktop-pet/zh-Hans/)ウェブサイトはこの**ネイティブ**アプリを紹介しています。ブラウザー内でアプリを動かすものではありません。中立 Pages の公開はここでは未確認です。ウェブサイトの開発／公開は [GitHub Pages ガイド（英語）](docs/development.md#website-github-pages)を参照してください。別の[キャラクターギャラリー](https://hanbong5938.github.io/herdr-characters/)では追加パックを紹介しており、対応言語は英語と韓国語のみです。

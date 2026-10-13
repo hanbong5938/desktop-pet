@@ -99,6 +99,8 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 ## 문서 및 웹사이트
 
+[Desktop Pet Wiki](https://github.com/hanbong5938/desktop-pet/wiki)는 core 소유의 생성된 읽기용 문서이며 원본은 검토된 소스입니다. 실제 Wiki 게시 여부는 별도 확인합니다. 이전 Herdr 사이트는 공통 앱을 복제하지 않는 연동·이전 입구입니다.
+
 [사용 안내](docs/usage.ko.md) · [개발 안내](docs/development.ko.md) · [v0.3.6 한영 노트](docs/releases/v0.3.6.md) · [CLI 계약](docs/cli.md#한국어) · [호스트 연동 (English)](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) · [릴리스 기록](docs/releases/README.ko.md) · [0.3 업그레이드/대응 베타](docs/releases/0.3.md#한국어--v03-계열) · [과거 베타·프리뷰](docs/migrations/unreleased.ko.md).
 
 [한국어 웹사이트](https://hanbong5938.github.io/desktop-pet/) · [영어 웹사이트](https://hanbong5938.github.io/desktop-pet/en/) · [중국어 간체 웹사이트](https://hanbong5938.github.io/desktop-pet/zh-Hans/) · [일본어 웹사이트](https://hanbong5938.github.io/desktop-pet/ja/): 네이티브 앱 소개 페이지이며 브라우저에서 앱을 실행하지 않습니다. 별도 캐릭터 갤러리는 영어·한국어만 제공합니다. 이 중립 Pages 배포는 아직 확인하지 않았습니다. 웹사이트 개발·배포는 [개발 안내](docs/development.ko.md#웹사이트-github-pages)에 있습니다.

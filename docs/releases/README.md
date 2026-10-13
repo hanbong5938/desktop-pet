@@ -8,6 +8,8 @@
 
 Reviewed Markdown in this repository is the canonical version documentation. The GitHub Wiki is a generated reading view, not a separately edited source. These pages describe versions; use the [root overview and installation](../../readme.md), [current usage guide](../usage.md), [development guide](../development.md), and [Herdr integration guide](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md) for their respective procedures.
 
+Current app documentation and installation: [English](../../readme.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). Current app usage: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). The four-locale app site and generated app Wiki are core-owned; the original Herdr site/docs now provide only integration/migration entrypoints. Hosted availability is separately verified.
+
 ## Choose the right source
 
 | What you need | Where to go |

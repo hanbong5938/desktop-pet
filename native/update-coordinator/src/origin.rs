@@ -947,6 +947,93 @@ pub(crate) fn os_home() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
+fn process_is_provably_zombie(pid: libc::pid_t) -> bool {
+    // Public sys/proc_info.h ABI; unlike full BSDINFO this flavor can inspect
+    // other UIDs. A nonzero arg includes zombies, which have no proc_pidpath.
+    #[repr(C)]
+    struct ShortBsdInfo {
+        pid: u32,
+        ppid: u32,
+        pgid: u32,
+        status: u32,
+        comm: [libc::c_char; libc::MAXCOMLEN],
+        flags: u32,
+        uid: libc::uid_t,
+        gid: libc::gid_t,
+        ruid: libc::uid_t,
+        rgid: libc::gid_t,
+        svuid: libc::uid_t,
+        svgid: libc::gid_t,
+        reserved: u32,
+    }
+    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+    let mut info: ShortBsdInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDT_SHORTBSDINFO,
+            1,
+            (&mut info as *mut ShortBsdInfo).cast(),
+            size,
+        )
+    };
+    read == size && info.pid == pid as u32 && info.status == libc::SZOMB
+}
+
+#[cfg(target_os = "macos")]
+fn installation_process_admitted(
+    pid: libc::pid_t,
+    roots: &[PathBuf],
+    authorized: &[(u32, ExecutableIdentity)],
+    buffer: &mut [u8; 4096],
+) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let n = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if n <= 0 {
+        if process_is_provably_zombie(pid) {
+            return Ok(());
+        }
+        if unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        {
+            return Err(format!("cannot authenticate live process image {pid}"));
+        }
+        return Ok(());
+    }
+    let end = buffer
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or("unterminated process path")?;
+    let path = Path::new(std::ffi::OsStr::from_bytes(&buffer[..end]));
+    if path
+        .file_name()
+        .is_none_or(|name| name != "desktop-pet" && name != "herdr-desktop-pet")
+    {
+        return Ok(());
+    }
+    ensure_absolute(path)?;
+    let physical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if authorized.iter().any(|(allowed_pid, image)| {
+        *allowed_pid == pid as u32
+            && image.path == path
+            && executable_identity(path).as_ref() == Ok(image)
+    }) {
+        return Ok(());
+    }
+    if roots
+        .iter()
+        .any(|root| physical.starts_with(root) || path.starts_with(root))
+    {
+        return Err(format!(
+            "live installation process {pid} uses {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn installation_roots_admitted(
     roots: &[PathBuf],
     authorized: &[(u32, ExecutableIdentity)],
@@ -997,44 +1084,7 @@ pub(crate) fn installation_roots_admitted(
         return Err("process enumeration changed; retry when quiet".into());
     }
     for pid in pids.into_iter().take(read as usize).filter(|pid| *pid > 0) {
-        let n = unsafe { proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-        if n <= 0 {
-            if unsafe { libc::kill(pid, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-            {
-                return Err(format!("cannot authenticate live process image {pid}"));
-            }
-            continue;
-        }
-        let end = buffer
-            .iter()
-            .position(|b| *b == 0)
-            .ok_or("unterminated process path")?;
-        let path = Path::new(std::ffi::OsStr::from_bytes(&buffer[..end]));
-        if path
-            .file_name()
-            .is_none_or(|name| name != "desktop-pet" && name != "herdr-desktop-pet")
-        {
-            continue;
-        }
-        ensure_absolute(path)?;
-        let physical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if authorized.iter().any(|(allowed_pid, image)| {
-            *allowed_pid == pid as u32
-                && image.path == path
-                && executable_identity(path).as_ref() == Ok(image)
-        }) {
-            continue;
-        }
-        if roots
-            .iter()
-            .any(|root| physical.starts_with(root) || path.starts_with(root))
-        {
-            return Err(format!(
-                "live installation process {pid} uses {}",
-                path.display()
-            ));
-        }
+        installation_process_admitted(pid, roots, authorized, &mut buffer)?;
     }
     Ok(())
 }
@@ -1173,6 +1223,38 @@ mod process_admission_tests {
         let unrelated = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(unrelated.path()).unwrap();
         assert!(installation_roots_admitted(&[root], &[(pid, image)]).is_err());
+    }
+
+    #[test]
+    fn exited_unreaped_process_cannot_authorize_or_block_an_installation() {
+        struct Reap(libc::pid_t);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                unsafe { libc::waitpid(self.0, std::ptr::null_mut(), 0) };
+            }
+        }
+        let image = executable_identity(&std::env::current_exe().unwrap()).unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let _reap = Reap(pid);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if process_is_provably_zombie(pid) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(installation_roots_admitted(&[], &[(pid as u32, image)]).is_err());
+        let unrelated = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(unrelated.path()).unwrap();
+        assert_eq!(
+            installation_process_admitted(pid, &[root], &[], &mut [0u8; 4096]),
+            Ok(())
+        );
     }
 }
 
