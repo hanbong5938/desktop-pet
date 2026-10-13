@@ -4,8 +4,8 @@ use coordinator::protocol::{
     UpdateControlReply, UpdateControlRequest,
 };
 use coordinator::{
-    ExecutableIdentity, InstallOrigin, OperationPhase, OperationRecord, UpdatePlan,
-    VerifiedInstallation,
+    ExecutableIdentity, InstallOrigin, ObservationMode, OperationPhase, OperationRecord,
+    UpdatePlan, VerifiedInstallation, OBSERVATION_MODE_ENV,
 };
 use herdr_update_coordinator as coordinator;
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,8 @@ struct Status {
     config_dir: PathBuf,
     state_dir: PathBuf,
     herdr_socket: PathBuf,
+    #[serde(default)]
+    observation_mode: Option<ObservationMode>,
     assets_override: Option<PathBuf>,
 }
 
@@ -414,12 +416,26 @@ fn status(plan: &UpdatePlan) -> Result<Status, String> {
     )
 }
 fn same_endpoint(actual: &Path, captured: &Path) -> bool {
+    if !actual.is_absolute() || !captured.is_absolute() {
+        return false;
+    }
+    if actual == captured {
+        return true;
+    }
+    if let (Ok(actual), Ok(captured)) = (fs::canonicalize(actual), fs::canonicalize(captured)) {
+        return actual == captured;
+    }
     let canonical_parent = |path: &Path| -> Option<PathBuf> {
         let parent = fs::canonicalize(path.parent()?).ok()?;
         Some(parent.join(path.file_name()?))
     };
     canonical_parent(actual)
         .is_some_and(|actual| canonical_parent(captured).as_ref() == Some(&actual))
+}
+fn status_mode_matches(plan: &UpdatePlan, response: &Status) -> Result<bool, String> {
+    let expected = plan.context.observation_mode()?;
+    Ok(response.observation_mode == Some(expected)
+        || expected == ObservationMode::Herdr && response.observation_mode.is_none())
 }
 fn verify_status(plan: &UpdatePlan, response: &Status) -> Result<(), String> {
     let c = &plan.context;
@@ -434,8 +450,12 @@ fn verify_status(plan: &UpdatePlan, response: &Status) -> Result<(), String> {
         || response.state_dir != c.state_dir
         || !same_endpoint(&response.herdr_socket, &c.herdr_socket)
         || response.assets_override != c.assets_override
+        || !status_mode_matches(plan, response)?
     {
-        return Err("live daemon does not match immutable instance/image/profile/assets".into());
+        return Err(
+            "live daemon does not match immutable instance/image/profile/assets/observation mode"
+                .into(),
+        );
     }
     if process_path(response.pid)?.as_deref() != Some(plan.running.path.as_path()) {
         return Err("live daemon process image differs from plan".into());
@@ -868,7 +888,7 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
         60,
     )?;
     let binary = extracted.join(app).join("Contents/MacOS/herdr-desktop-pet");
-    let image = coordinator::validate_candidate(&binary)?;
+    let image = coordinator::validate_candidate_for_context(&binary, &plan.context)?;
     let actual_version = stage_command(
         &image.path,
         &["--version"],
@@ -879,7 +899,7 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
     if actual_version.trim() != format!("herdr-desktop-pet {}", release.version) {
         return Err("staged signed app version differs from approved release".into());
     }
-    let helper = coordinator::helper_path(&image.path)?;
+    let helper = coordinator::helper_path_for_context(&image.path, &plan.context)?;
     #[cfg(target_os = "macos")]
     stage_command(
         Path::new("/usr/bin/codesign"),
@@ -899,13 +919,7 @@ fn stage_release(plan: &UpdatePlan) -> Result<(), String> {
         4096,
         5,
     )?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&capabilities).map_err(|e| e.to_string())?;
-    if parsed.get("protocol").and_then(serde_json::Value::as_u64)
-        != Some(protocol::UPDATER_PROTOCOL.into())
-    {
-        return Err("release helper does not match updater protocol 3".into());
-    }
+    coordinator::validate_helper_capabilities(&capabilities, &plan.context)?;
     let bytes = serde_json::to_vec(&image).map_err(|e| e.to_string())?;
     protocol::write_private_bytes(&staged_release_path(plan)?, &bytes, 0o600)
 }
@@ -1145,7 +1159,21 @@ fn launch(
     if reservation.user_stop_requested()? {
         return Err("user stop superseded updater start".into());
     }
+    let token = reservation
+        .issued_start_token_for(&installed.origin)?
+        .ok_or("startup token was not durably issued for installed origin")?;
+    start_command(plan, installed, &token, reservation.stop_generation)?
+        .spawn()
+        .map_err(|e| format!("verified installation start failed: {e}"))
+}
+fn start_command(
+    plan: &UpdatePlan,
+    installed: &VerifiedInstallation,
+    token: &str,
+    generation: u64,
+) -> Result<Command, String> {
     let c = &plan.context;
+    let mode = c.observation_mode()?;
     let managed_host = if let InstallOrigin::Herdr { host, .. } = &plan.origin {
         let captured = c
             .environment
@@ -1161,11 +1189,7 @@ fn launch(
     } else {
         None
     };
-    let token = reservation
-        .issued_start_token_for(&installed.origin)?
-        .ok_or("startup token was not durably issued for installed origin")?;
-    let image = &installed.image;
-    let mut cmd = Command::new(&image.path);
+    let mut cmd = Command::new(&installed.image.path);
     cmd.arg("start")
         .arg("--config-dir")
         .arg(&c.config_dir)
@@ -1173,6 +1197,9 @@ fn launch(
         .arg(&c.state_dir)
         .arg("--socket")
         .arg(&c.herdr_socket);
+    if mode.supports_tern() {
+        cmd.arg("--host").arg(mode.as_str());
+    }
     if let Some(assets) = &c.assets_override {
         cmd.arg("--assets").arg(assets);
     }
@@ -1181,10 +1208,11 @@ fn launch(
         .env("HERDR_PLUGIN_CONFIG_DIR", &c.config_dir)
         .env("HERDR_PLUGIN_STATE_DIR", &c.state_dir)
         .env("HERDR_SOCKET_PATH", &c.herdr_socket)
+        .env(OBSERVATION_MODE_ENV, mode.as_str())
         .env("HERDR_DESKTOP_PET_UPDATER_TOKEN", token)
         .env(
             "HERDR_DESKTOP_PET_UPDATER_GENERATION",
-            reservation.stop_generation.to_string(),
+            generation.to_string(),
         )
         .current_dir(&c.state_dir)
         .stdin(Stdio::null())
@@ -1201,8 +1229,7 @@ fn launch(
     if let Some(host) = managed_host {
         cmd.env("HERDR_BIN_PATH", host);
     }
-    cmd.spawn()
-        .map_err(|e| format!("verified installation start failed: {e}"))
+    Ok(cmd)
 }
 fn new_ready(
     plan: &UpdatePlan,
@@ -1226,6 +1253,7 @@ fn new_ready(
         && reply.state_dir == plan.context.state_dir
         && same_endpoint(&reply.herdr_socket, &plan.context.herdr_socket)
         && reply.assets_override == plan.context.assets_override
+        && status_mode_matches(plan, reply)?
         && process_path(reply.pid)?.as_deref() == Some(image.path.as_path())
         && startup_quiescent(&plan.context.config_dir)?)
     {
@@ -2774,6 +2802,276 @@ mod tests {
         }
     }
 
+    fn live_status(plan: &UpdatePlan) -> Status {
+        let c = &plan.context;
+        Status {
+            ok: true,
+            running: true,
+            shutdown: false,
+            ready: true,
+            ui_ready: true,
+            control_ready: true,
+            instance_id: c.instance_id.clone(),
+            running_sha256: plan.running.sha256.clone(),
+            pid: std::process::id(),
+            executable_path: plan.running.path.clone(),
+            config_dir: c.config_dir.clone(),
+            state_dir: c.state_dir.clone(),
+            herdr_socket: c.herdr_socket.clone(),
+            observation_mode: None,
+            assets_override: c.assets_override.clone(),
+        }
+    }
+
+    #[test]
+    fn configured_socket_identity_does_not_require_a_listener_or_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("absent/host.sock");
+        assert!(same_endpoint(&missing, &missing));
+        for invalid in [
+            Path::new(""),
+            Path::new("host.sock"),
+            Path::new("absent/host.sock"),
+        ] {
+            assert!(!same_endpoint(invalid, invalid));
+            assert!(!same_endpoint(invalid, &missing));
+            assert!(!same_endpoint(&missing, invalid));
+        }
+        assert!(!same_endpoint(
+            &missing,
+            &root.path().join("absent/other.sock")
+        ));
+
+        let directory = root.path().join("real");
+        fs::create_dir(&directory).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        assert!(same_endpoint(
+            &directory.join("host.sock"),
+            &alias.join("host.sock")
+        ));
+        assert!(!same_endpoint(
+            &directory.join("host.sock"),
+            &alias.join("other.sock")
+        ));
+
+        let socket = directory.join("host.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let leaf_alias = root.path().join("leaf.sock");
+        std::os::unix::fs::symlink(&socket, &leaf_alias).unwrap();
+        assert!(same_endpoint(&leaf_alias, &socket));
+        assert!(same_endpoint(&socket, &leaf_alias));
+    }
+
+    #[test]
+    fn tern_status_and_readiness_keep_configured_socket_proof_without_herdr_listener() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = plan(root.path());
+        plan.context.herdr_socket = root.path().join("absent/host.sock");
+        plan.context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "tern".into());
+        // Use the actual test process image to exercise the complete live proof.
+        plan.running.path = process_path(std::process::id()).unwrap().unwrap();
+        plan.context.executable = plan.running.path.clone();
+        plan.context.running = plan.running.clone();
+        let mut reply = live_status(&plan);
+        reply.observation_mode = Some(ObservationMode::Tern);
+        assert!(verify_status(&plan, &reply).is_ok());
+        let installed = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        reply.instance_id = "fresh-instance".into();
+        for invalid in [
+            PathBuf::new(),
+            PathBuf::from("relative.sock"),
+            root.path().join("absent/other.sock"),
+        ] {
+            reply.herdr_socket = invalid;
+            for purpose in [StartupPurpose::Original, StartupPurpose::Candidate] {
+                assert!(!new_ready(&plan, &installed, purpose, None, &reply).unwrap());
+            }
+            reply.instance_id = plan.context.instance_id.clone();
+            assert!(verify_status(&plan, &reply).is_err());
+            reply.instance_id = "fresh-instance".into();
+        }
+    }
+
+    #[test]
+    fn captured_mode_controls_launch_and_live_proof_without_legacy_tern_fallback() {
+        for mode in [
+            ObservationMode::Herdr,
+            ObservationMode::Tern,
+            ObservationMode::Both,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut plan = plan(root.path());
+            if mode != ObservationMode::Herdr {
+                plan.context
+                    .environment
+                    .insert(OBSERVATION_MODE_ENV.into(), mode.as_str().into());
+            }
+            let installed = VerifiedInstallation {
+                image: plan.running.clone(),
+                origin: plan.origin.clone(),
+            };
+            let cmd = start_command(&plan, &installed, "captured-token", 7).unwrap();
+            let args: Vec<_> = cmd.get_args().collect();
+            if mode.supports_tern() {
+                assert!(args.windows(2).any(|pair| {
+                    pair[0].to_str() == Some("--host") && pair[1].to_str() == Some(mode.as_str())
+                }));
+            } else {
+                assert!(!args.iter().any(|arg| arg.to_str() == Some("--host")));
+            }
+            assert_eq!(
+                cmd.get_envs()
+                    .find(|(key, _)| key.to_str() == Some(OBSERVATION_MODE_ENV))
+                    .and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new(mode.as_str()))
+            );
+            let mut reply = live_status(&plan);
+            assert_eq!(
+                status_mode_matches(&plan, &reply).unwrap(),
+                !mode.supports_tern()
+            );
+            if mode.supports_tern() {
+                assert!(verify_status(&plan, &reply)
+                    .unwrap_err()
+                    .contains("observation mode"));
+                assert!(
+                    !new_ready(&plan, &installed, StartupPurpose::Original, None, &reply).unwrap()
+                );
+            }
+            reply.observation_mode = Some(mode);
+            assert!(status_mode_matches(&plan, &reply).unwrap());
+            reply.observation_mode = Some(if mode == ObservationMode::Herdr {
+                ObservationMode::Tern
+            } else {
+                ObservationMode::Herdr
+            });
+            assert!(!status_mode_matches(&plan, &reply).unwrap());
+            assert!(verify_status(&plan, &reply)
+                .unwrap_err()
+                .contains("observation mode"));
+            assert!(
+                !new_ready(&plan, &installed, StartupPurpose::Candidate, None, &reply).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_captured_mode_never_defaults_to_legacy_herdr() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = plan(root.path());
+        plan.context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
+        let installed = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        assert!(start_command(&plan, &installed, "captured-token", 7).is_err());
+        assert!(verify_status(&plan, &live_status(&plan)).is_err());
+    }
+
+    #[test]
+    fn captured_managed_host_drift_cannot_be_replaced_by_socket_or_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = plan(root.path());
+        let captured_host = root.path().join("captured-host");
+        let changed_host = root.path().join("changed-host");
+        fs::write(&captured_host, b"host").unwrap();
+        fs::write(&changed_host, b"host").unwrap();
+        let captured_host = fs::canonicalize(captured_host).unwrap();
+        plan.origin = InstallOrigin::Herdr {
+            host: captured_host.clone(),
+            host_config_dir: root.path().join("host-config"),
+            checkout_root: root.path().join("checkout"),
+            plugin_root: root.path().join("checkout/plugin"),
+            source: "owner/repository".into(),
+            requested_ref: None,
+            resolved_commit: None,
+            enabled: true,
+        };
+        plan.context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "tern".into());
+        plan.context
+            .environment
+            .insert("HERDR_BIN_PATH".into(), changed_host.display().to_string());
+        let installed = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        assert!(start_command(&plan, &installed, "token", 1)
+            .unwrap_err()
+            .contains("captured host routing changed"));
+        plan.context
+            .environment
+            .insert("HERDR_BIN_PATH".into(), captured_host.display().to_string());
+        let cmd = start_command(&plan, &installed, "token", 1).unwrap();
+        assert!(cmd.get_args().collect::<Vec<_>>().windows(2).any(|pair| {
+            pair[0].to_str() == Some("--host") && pair[1].to_str() == Some("tern")
+        }));
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(key, _)| key.to_str() == Some("HERDR_BIN_PATH"))
+                .and_then(|(_, value)| value),
+            Some(captured_host.as_os_str())
+        );
+    }
+
+    #[test]
+    fn release_helper_capability_follows_captured_encoding_before_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = plan(root.path());
+        let legacy = r#"{"protocol":3}"#;
+        assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_ok());
+        assert!(
+            coordinator::validate_helper_capabilities(r#"{"protocol":2}"#, &plan.context).is_err()
+        );
+        for mode in [
+            ObservationMode::Herdr,
+            ObservationMode::Tern,
+            ObservationMode::Both,
+        ] {
+            plan.context
+                .environment
+                .insert(OBSERVATION_MODE_ENV.into(), mode.as_str().into());
+            assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_err());
+            assert!(coordinator::validate_helper_capabilities(
+                r#"{"protocol":3,"observation_mode":1}"#,
+                &plan.context
+            )
+            .is_ok());
+            assert!(coordinator::validate_helper_capabilities(
+                r#"{"protocol":2,"observation_mode":1}"#,
+                &plan.context
+            )
+            .is_err());
+            for incompatible in [
+                r#"{"protocol":3,"observation_mode":0}"#,
+                r#"{"protocol":3,"observation_mode":2}"#,
+                r#"{"protocol":3,"observation_mode":"1"}"#,
+                r#"{"protocol":3,"observation_mode":null}"#,
+            ] {
+                assert!(
+                    coordinator::validate_helper_capabilities(incompatible, &plan.context).is_err()
+                );
+            }
+        }
+        plan.context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
+        assert!(coordinator::validate_helper_capabilities(
+            r#"{"protocol":3,"observation_mode":1}"#,
+            &plan.context
+        )
+        .is_err());
+    }
+
     fn herdr_pair(plan: &UpdatePlan, commit: char, hash: char) -> VerifiedInstallation {
         let root = plan.context.state_dir.parent().unwrap();
         VerifiedInstallation {
@@ -3225,6 +3523,19 @@ mod tests {
             "herdr_socket": c.herdr_socket,
             "assets_override": c.assets_override,
         });
+        let mut tern_response = response.clone();
+        tern_response["observation_mode"] = serde_json::json!("tern");
+        let mut tern_plan = plan.clone();
+        tern_plan
+            .context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "tern".into());
+        let proof: Status = serde_json::from_value(tern_response.clone()).unwrap();
+        assert!(status_mode_matches(&tern_plan, &proof).unwrap());
+        tern_response["observation_mode"] = serde_json::json!("TERN");
+        assert!(serde_json::from_value::<Status>(tern_response).is_err());
+        let missing: Status = serde_json::from_value(response.clone()).unwrap();
+        assert!(!status_mode_matches(&tern_plan, &missing).unwrap());
         let server = thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
             let mut request = Vec::new();
@@ -3243,6 +3554,8 @@ mod tests {
         });
         let reply = status(&plan).unwrap();
         assert!(reply.ok && reply.running && reply.ready && reply.control_ready);
+        assert_eq!(reply.observation_mode, None);
+        assert!(status_mode_matches(&plan, &reply).unwrap());
         server.join().unwrap();
     }
 
@@ -3413,6 +3726,7 @@ mod tests {
             config_dir: original.original_config_dir.clone(),
             state_dir: original.original_state_dir.clone(),
             herdr_socket: original.original_socket.clone(),
+            observation_mode: None,
             assets_override: None,
         };
         let staged_replacement = root.path().join("replacement");

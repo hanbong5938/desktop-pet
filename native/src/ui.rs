@@ -48,7 +48,7 @@ use crate::dialogue_editor::{
 };
 use crate::display_geometry::{DisplayGeometry, BASE_HEIGHT, BASE_WIDTH};
 use crate::herdr::{
-    PromptError, PromptResult, PromptSender, RequestOrigin, WorktreeRemoveError,
+    PromptError, PromptReceipt, PromptResult, PromptSender, RequestOrigin, WorktreeRemoveError,
     WorktreeRemoveSender,
 };
 use crate::i18n::{
@@ -7379,7 +7379,7 @@ impl Ui {
         while let Some(result) = self.queued_composer_results.pop_front() {
             let submission = result.submission;
             let status = match result.result {
-                Ok(()) => {
+                Ok(receipt) => {
                     let marked: bool = unsafe { msg_send![&*self.composer_view, hasMarkedText] };
                     let current = !marked
                         && !self.prompt_sender.is_pending()
@@ -7403,7 +7403,14 @@ impl Ui {
                                 && self.composer_pending_key.as_ref() == Some(&submission.key),
                         );
                     }
-                    text(self.locale, Message::ComposerSent).to_owned()
+                    text(
+                        self.locale,
+                        match receipt {
+                            PromptReceipt::Acknowledged => Message::ComposerSent,
+                            PromptReceipt::Accepted => Message::ComposerAccepted,
+                        },
+                    )
+                    .to_owned()
                 }
                 Err(error) => self.composer_error_text(&error),
             };
@@ -14885,7 +14892,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_gui_result_only_removes_exact_draft_without_new_same_key_send() {
+    fn completed_gui_receipts_only_remove_exact_draft_without_new_same_key_send() {
         let a = SessionKey {
             source_id: 1,
             generation: 2,
@@ -14896,16 +14903,30 @@ mod tests {
             generation: 1,
             terminal_id: "b".into(),
         };
-        let mut drafts = VecDeque::from([
-            (a.clone(), "sent".to_owned()),
-            (b.clone(), "keep".to_owned()),
-        ]);
-        clear_completed_composer_draft(&mut drafts, &a, "sent", true);
-        assert_eq!(drafts.len(), 2);
-        clear_completed_composer_draft(&mut drafts, &a, "edited", false);
-        assert_eq!(drafts.len(), 2);
-        clear_completed_composer_draft(&mut drafts, &a, "sent", false);
-        assert_eq!(drafts, VecDeque::from([(b, "keep".to_owned())]));
+        for receipt in [PromptReceipt::Acknowledged, PromptReceipt::Accepted] {
+            let mut drafts = VecDeque::from([
+                (a.clone(), "sent".to_owned()),
+                (b.clone(), "keep".to_owned()),
+            ]);
+            clear_completed_composer_draft(&mut drafts, &a, "sent", true);
+            assert_eq!(drafts.len(), 2);
+            clear_completed_composer_draft(&mut drafts, &a, "edited", false);
+            assert_eq!(drafts.len(), 2);
+            clear_completed_composer_draft(&mut drafts, &a, "sent", false);
+            assert_eq!(drafts, VecDeque::from([(b.clone(), "keep".to_owned())]));
+            let message = match receipt {
+                PromptReceipt::Acknowledged => Message::ComposerSent,
+                PromptReceipt::Accepted => Message::ComposerAccepted,
+            };
+            assert_ne!(
+                text(UiLocale::En, message),
+                text(UiLocale::En, Message::ComposerUnknownDelivery)
+            );
+        }
+        assert_ne!(
+            text(UiLocale::En, Message::ComposerAccepted),
+            text(UiLocale::En, Message::ComposerSent)
+        );
     }
 
     #[test]
@@ -15343,7 +15364,7 @@ mod tests {
             source: "/local.sock".into(),
             pane_id: "pane".into(),
             workspace_id: "workspace".into(),
-            worktree: Arc::new(crate::herdr_protocol::WorkspaceWorktreeInfo {
+            worktree: Arc::new(crate::session::WorkspaceWorktreeInfo {
                 repo_key: "key".into(),
                 repo_name: repo.clone(),
                 repo_root: "/parent".into(),

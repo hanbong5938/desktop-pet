@@ -8,7 +8,7 @@
 
 [浏览可选角色与服装图库](https://hanbong5938.github.io/herdr-characters/)（网站默认英语，可选择 KO 查看韩语）· [角色包源码与许可](https://github.com/hanbong5938/herdr-characters)。**仅露贝莉娅（`default@0`）随应用附带。**
 
-**v0.3.5 是此检出版本的稳定源码／默认预构建目标**，不能仅凭此断言二进制文件、安装器或 Homebrew 配方已经发布。预构建安装前请核实实际的[发布资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)；参阅[英韩双语 v0.3.5 说明](docs/releases/v0.3.5.md)。采琳是可选角色包，并不替代内置的露贝莉娅。
+v0.3.6 是新的稳定源码／预构建目标，不表示已经发布。准确的非草稿 v0.3.6 arm64 资产、校验和及稳定 Homebrew 配方发布后，预构建安装无需 Rust 或源码工具链。以实际[发布资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)为准；参阅 [v0.3.6 发行说明](docs/releases/v0.3.6.md)。历史 v0.3.5 和 beta 资产保持不变。
 
 ## 功能
 
@@ -26,7 +26,7 @@
 
 ## 使用 Homebrew 安装：首次连接
 
-[个人 tap](https://github.com/hanbong5938/homebrew-tap) 与非草稿版 v0.3.5 arm64 压缩包／校验和已公开；安装前仍请检查实际的[发布资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)和配方。在要显示角色的 Mac 上，先运行现有的本地 Herdr 服务器，然后执行：
+v0.3.6 是新的稳定源码／预构建目标，不表示已经发布。准确的非草稿 v0.3.6 arm64 资产、校验和及稳定 Homebrew 配方发布后，预构建安装无需 Rust 或源码工具链。以实际[发布资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)为准；参阅 [v0.3.6 发行说明](docs/releases/v0.3.6.md)。历史 v0.3.5 和 beta 资产保持不变。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -54,7 +54,7 @@ herdr-desktop-pet start
 herdr-desktop-pet status
 ```
 
-确认 CLI 报告 `0.3.5`，并且重启后 `status` 同时显示 `app_version: 0.3.5` **和预期的运行中可执行文件**。配方把应用安装在 Homebrew 前缀中，**不是** `/Applications`，并把 CLI 放在 `PATH` 上；它既不安装 Herdr 插件，也不提供打过补丁的主程序。旧守护进程必须先停止。有关配置隔离和旧 cask 迁移，参阅 [0.3 升级说明（英语）](docs/releases/0.3.md#upgrade-from-v021-or-beta)。配方能否安装取决于实际发布情况，而不是此源码目标。
+确认 CLI 报告 `0.3.6`，并且重启后 `status` 同时显示 `app_version: 0.3.6` **和预期的运行中可执行文件**。配方把应用安装在 Homebrew 前缀中，**不是** `/Applications`，并把 CLI 放在 `PATH` 上；它既不安装 Herdr 插件，也不提供打过补丁的主程序。旧守护进程必须先停止。有关配置隔离和旧 cask 迁移，参阅 [0.3 升级说明（英语）](docs/releases/0.3.md#upgrade-from-v021-or-beta)。配方能否安装取决于实际发布情况，而不是此源码目标。
 
 ### 不连接 Herdr 的独立角色
 
@@ -78,7 +78,7 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 herdr plugin action invoke start --plugin desktop-pet
 ```
 
-管理式安装运行 `bash scripts/install.sh`：先尝试清单指定的 v0.3.5 仅含 `.app` 的压缩包，并验证校验和、归档条目、arm64 签名及内置角色。必须有**非草稿的 v0.3.5 Release，包含完整压缩包／校验和及已更新的安装器**；单独上传的来源证明附属文件不在安装器归档中。预构建资产缺失或无效时，默认安装器会报告问题并从当前检出源码构建；显式 `--prebuilt` 则会失败，不会回退；`--source` 构建当前检出。安装插件不会为 Herdr 打补丁或构建 Herdr。要使用连接自动启动，请依照[指南（英语）](integrations/herdr/README.md#build-in-separate-checkouts)准备打过补丁的主程序；上述手动原生观察均不需要它。
+管理式安装运行 `bash scripts/install.sh`：先尝试清单指定的 v0.3.6 仅含 `.app` 的压缩包，并验证校验和、归档条目、arm64 签名及内置角色。必须有**非草稿的 v0.3.6 Release，包含完整压缩包／校验和及已更新的安装器**；单独上传的来源证明附属文件不在安装器归档中。预构建资产缺失或无效时，默认安装器会报告问题并从当前检出源码构建；显式 `--prebuilt` 则会失败，不会回退；`--source` 构建当前检出。安装插件不会为 Herdr 打补丁或构建 Herdr。要使用连接自动启动，请依照[指南（英语）](integrations/herdr/README.md#build-in-separate-checkouts)准备打过补丁的主程序；上述手动原生观察均不需要它。
 
 ## 从此检出源码安装，供管理式集成使用
 
@@ -92,6 +92,25 @@ bash scripts/install.sh --source
 
 `plugin link` **不会**执行清单构建；请先构建角色。在已经运行的主程序上关联／启用也不会立即启动角色：手动调用一次 `start`，或在启用 `auto_start` 后等待下一次符合条件的 shell／终端客户端连接。检查关联警告：未知的 `client.attached` 钩子表示主程序缺少所需补丁。Herdr 操作要求主程序已运行且已启用；服务器启动时也会自动执行 `ensure`。
 清单中的生命周期与操作命令使用 `scripts/run-native.sh`：稳定清单版本选择 `HerdrDesktopPet.app`，`-beta.N` 选择 `HerdrDesktopPetBeta.app`；缺少对应包时会失败，不会改用另一个渠道。直接从源码自动化可使用 `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`；先停止旧守护进程，或同时隔离**配置和状态**路径，然后用 `status` 核对实际可执行文件／版本。参阅[源码开发（英语）](docs/development.md#source-development)。
+
+
+## Tern 安装与独立配置档
+
+满足上述发布条件后，先安装原生应用，再显式安装独立的公开插件。插件不会暗中下载、构建或启动应用。
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+PET="$(command -v herdr-desktop-pet)"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
+"$PET" --version
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+```
+
+默认宿主仍为 Herdr。`--host tern` 无需 Herdr 服务器、套接字或插件。在实际 Tern 窗口中用 **Configure desktop pet connection** 设置绝对可执行文件 `PET` 以及上述配置和状态两个路径，再用 **Connect to desktop pet** 连接。输入实际路径，不是变量名。检查窗口连接和同一配置档的原生 `status`；发现插件不等于已连接。更换程序或模式前先停止同一配置档。源码开发仍为可选：在当前检出运行 `bash scripts/install.sh --source`，设置 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`，无需特殊分支。应用／辅助程序必须匹配 protocol 3，附加 JSON 能力为 `protocol: 3` 和 `observation_mode: 1`。英语、韩语、简体中文、日语均保留。**接收测试版更新**默认关闭，需主动选择；检查不会安装或重启。
 
 ## 首次使用
 
@@ -137,7 +156,7 @@ bash scripts/install.sh --source
 ## 文档与网站
 
 - [使用与恢复](docs/usage.zh-Hans.md) · [开发与安装（英语）](docs/development.md) · [原生自动化 CLI 契约（英语）](docs/cli.md#english) · [打补丁的主程序集成（英语）](integrations/herdr/README.md)。
-- [发行历史（英语）](docs/releases/README.md) · [v0.3.5 变更（英语／韩语）](docs/releases/v0.3.5.md) · [v0.3 升级指南（英语）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [历史测试版／预览版指南（英语）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 迁移（英语）](docs/migrations/v0.1.11-to-v0.2.0.md)。
+- [发行历史（英语）](docs/releases/README.md) · [v0.3.6 变更（英语／韩语）](docs/releases/v0.3.6.md) · [v0.3 升级指南（英语）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [历史测试版／预览版指南（英语）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 迁移（英语）](docs/migrations/v0.1.11-to-v0.2.0.md)。
 - 宣传网站提供[简体中文](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/)、[韩语](https://hanbong5938.github.io/herdr-desktop-pet/)、[英语](https://hanbong5938.github.io/herdr-desktop-pet/en/)和[日语](https://hanbong5938.github.io/herdr-desktop-pet/ja/)版本，介绍的是此**原生**应用；应用不能在浏览器中运行。网站开发／部署参阅 [GitHub Pages 指南（英语）](docs/development.md#website-github-pages)。独立的[角色图库](https://hanbong5938.github.io/herdr-characters/)展示可选角色包，仅提供英语和韩语。
 
 ## 美术与许可

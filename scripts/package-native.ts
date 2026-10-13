@@ -116,8 +116,12 @@ async function runTool(command: string[], label: string, input?: string): Promis
 
 async function requireProtocolThree(binary: string, label: string): Promise<void> {
   const output = await runTool([binary, "update-capabilities"], `${label} update capabilities`);
-  if (output.trim() !== '{"protocol":3}') {
+  const capabilities: unknown = JSON.parse(output);
+  if (typeof capabilities !== "object" || capabilities === null || !("protocol" in capabilities) || capabilities.protocol !== 3) {
     fail(`${label} does not support updater protocol 3`);
+  }
+  if (!("observation_mode" in capabilities) || capabilities.observation_mode !== 1) {
+    fail(`${label} does not support observation-mode capability 1`);
   }
 }
 
@@ -210,6 +214,7 @@ async function main(): Promise<void> {
   await requireFile(helperBinary, "release update coordinator");
   await requireArm64(nativeBinary, "release native binary");
   await requireProtocolThree(nativeBinary, "release native binary");
+  await requireProtocolThree(helperBinary, "release update coordinator");
   await requireDirectory(assetsSource, "Rubelia rig default");
   await requireFile(thumbnailSource, "Rubelia menu thumbnail");
   await requireFile(join(rigBuild, "libherdr_rig.dylib"), "release native rig library");

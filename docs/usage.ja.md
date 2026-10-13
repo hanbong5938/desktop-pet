@@ -2,11 +2,11 @@
 
 [English](usage.md) · [한국어](usage.ko.md) · [简体中文](usage.zh-Hans.md) · **日本語** · [インストールと要件](../readme.ja.md) · [CLI 仕様（英語）](cli.md)
 
-このガイドは v0.3.5 安定版の**ソースチェックアウトと標準／ビルド済み対象**について説明します。v0.3.4 の目の側のマスク、ABI の同一性と出所、v0.3.3 の公式ブラウザ／カード、リモートのポートレート、処理中→アイドル管理の修正、v0.3.2 の検索、サイズ変更、セリフの下書き、ネイティブ自動操作を引き継ぎます。このチェックアウトには後述の protocol-3 更新機能とベータポリシーがありますが、公開済みの旧 protocol-2 ビルドは変わりません。v0.3.5 ではポインタ捕捉の復旧、吹き出しの配置、IME 変換中の返信の表示を改善し、キャラクター選択は変更しません。**ソースにあることは公開の証明ではありません**。ビルド済み版の利用前に、正式な [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases)、完全な arm64 アーカイブ／チェックサム、独立した rig の来歴サイドカー、インストーラ／formula の切り替えを確認してください（[英韓のリリースノート](releases/v0.3.5.md)、[アップグレード案内（英語）](releases/0.3.md#upgrade-from-v021-or-beta)）。文書の変更だけで旧バイナリに機能は増えず、スクリプトの検査は実際の GUI／IME／アクセシビリティ入力を保証しません。
+このガイドは v0.3.6 安定版の**ソースチェックアウトと標準／ビルド済み対象**について説明します。v0.3.4 の目の側のマスク、ABI の同一性と出所、v0.3.3 の公式ブラウザ／カード、リモートのポートレート、処理中→アイドル管理の修正、v0.3.2 の検索、サイズ変更、セリフの下書き、ネイティブ自動操作を引き継ぎます。このチェックアウトには後述の protocol-3 更新機能とベータポリシーがありますが、公開済みの旧 protocol-2 ビルドは変わりません。v0.3.5 ではポインタ捕捉の復旧、吹き出しの配置、IME 変換中の返信の表示を改善し、キャラクター選択は変更しません。**ソースにあることは公開の証明ではありません**。ビルド済み版の利用前に、正式な [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases)、完全な arm64 アーカイブ／チェックサム、独立した rig の来歴サイドカー、インストーラ／formula の切り替えを確認してください（[英韓のリリースノート](releases/v0.3.6.md)、[アップグレード案内（英語）](releases/0.3.md#upgrade-from-v021-or-beta)）。文書の変更だけで旧バイナリに機能は増えず、スクリプトの検査は実際の GUI／IME／アクセシビリティ入力を保証しません。
 
 ## 最初の起動：ローカルホストまたは単独のペット
 
-Apple Silicon Mac（macOS 13 以降）に公開済み Homebrew formula をインストールし、**既に稼働しているローカル Herdr サーバー**に対してペットを手動で起動します。
+v0.3.6 は新しい安定版ソース／ビルド済み対象であり、公開済みという意味ではありません。正確な非ドラフト v0.3.6 arm64 資産・チェックサムと安定版 Homebrew formula の公開後は Rust やソースのツールチェーンなしで導入できます。実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)を基準とし、[v0.3.6 ノート](releases/v0.3.6.md)を参照してください。過去の v0.3.5 とベータ資産は変更しません。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -15,7 +15,7 @@ herdr-desktop-pet start
 herdr-desktop-pet status
 ```
 
-実際の [v0.3.5 Release アセット](https://github.com/hanbong5938/herdr-desktop-pet/releases)と tap formula は、このチェックアウトとは別に確認してください。`--version` はインストール済み CLI、`status` は実行中デーモンの `app_version` と実行ファイルを識別します。`start` は旧デーモンを再利用し得るので、更新またはバックエンド変更の前に停止します。吹き出しを開くとローカルのカードが見えます。Herdr 0.9.0 以降で実際のエージェントセッションが観測可能なスナップショットを提供します。ネイティブの手動観測にプラグイン、パッチ、`client.attached` フックは不要です。ローカル返信には別途サーバーの `agent.prompt` が必要で、その ACK は送信受付であって完了ではありません。サーバーのバックエンドソケットが継承環境／既定値と異なる場合は**実際の**パスを調べて指定します（例示パスは置き換え、推測しないでください）。
+実際の [v0.3.6 Release アセット](https://github.com/hanbong5938/herdr-desktop-pet/releases)と tap formula は、このチェックアウトとは別に確認してください。`--version` はインストール済み CLI、`status` は実行中デーモンの `app_version` と実行ファイルを識別します。`start` は旧デーモンを再利用し得るので、更新またはバックエンド変更の前に停止します。吹き出しを開くとローカルのカードが見えます。Herdr 0.9.0 以降で実際のエージェントセッションが観測可能なスナップショットを提供します。ネイティブの手動観測にプラグイン、パッチ、`client.attached` フックは不要です。ローカル返信には別途サーバーの `agent.prompt` が必要で、その ACK は送信受付であって完了ではありません。サーバーのバックエンドソケットが継承環境／既定値と異なる場合は**実際の**パスを調べて指定します（例示パスは置き換え、推測しないでください）。
 
 ```sh
 herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
@@ -32,6 +32,25 @@ herdr-desktop-pet status
 ```
 
 起動**後**に `herdr-desktop-pet hide_bubble` を実行すれば空の吹き出しなしでキャラクターを表示できます。Herdr のインストール／プラグインは不要です。約 30 秒で消えた場合は `settings get` と `status` を確認します。新規プロファイルでは `exit_with_herdr` が既定でオンのため、健全なサーバーがないと猶予時間後に終了します。同じ設定／状態プロファイルでオフにしてから再起動してください。ただし登録済みのローカルプラグインエンドポイントがすべて明示的に無効化／リンク解除されたと確定すれば、オフでも終了します。リモート観測は[独立した任意の経路](#観測元)です。管理下の attach による自動起動には[パッチ適用済みホスト連携（英語）](../integrations/herdr/README.md#build-in-separate-checkouts)が必要です。
+
+
+## Tern の導入と独立プロファイル
+
+上記の公開条件を満たした後、まずネイティブアプリ、次に独立した公開プラグインを明示的に導入します。プラグインがアプリを密かにダウンロード、ビルド、起動することはありません。
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+PET="$(command -v herdr-desktop-pet)"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
+"$PET" --version
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+```
+
+既定のホストは Herdr のままです。`--host tern` に Herdr サーバー、ソケット、プラグインは不要です。実際の Tern ウィンドウで **Configure desktop pet connection** に絶対実行ファイル `PET` と上記の設定・状態の両方のパスを指定し、**Connect to desktop pet** を実行します。変数名ではなく実際のパスを入力してください。ウィンドウの接続と同じプロファイルのネイティブ `status` を確認します。プラグインの検出だけでは接続の証明になりません。バイナリやモードを変える前に同じプロファイルを停止します。ソース開発は任意です。現在のチェックアウトで `bash scripts/install.sh --source` を実行し、`PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"` を指定できます。特別なブランチは不要です。アプリ／ヘルパーは対応する protocol 3 のペアで、追加 JSON 能力は `protocol: 3` と `observation_mode: 1` です。英語・韓国語・簡体字中国語・日本語を維持します。**ベータ更新を受け取る**は既定でオフで明示的な選択が必要です。確認だけではインストールや再起動をしません。
 
 ## 操作
 

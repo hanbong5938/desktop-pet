@@ -8,7 +8,7 @@
 
 [追加キャラクター・衣装ギャラリー](https://hanbong5938.github.io/herdr-characters/)（最初は英語表示、韓国語は KO を選択）· [キャラクターパックのソースとライセンス](https://github.com/hanbong5938/herdr-characters)。**同梱されるのはルベリア（`default@0`）だけです。**
 
-**v0.3.5 はこのチェックアウトの安定版ソース／標準のビルド済みパッケージ対象**であり、バイナリ、インストーラー、Homebrew formula の公開を証明するものではありません。ビルド済み版を導入する前に実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)を確認してください。[英韓併記の v0.3.5 ノート](docs/releases/v0.3.5.md)も参照してください。チェリンは追加キャラクターパックであり、同梱のルベリアに代わるものではありません。
+v0.3.6 は新しい安定版ソース／ビルド済み対象であり、公開済みという意味ではありません。正確な非ドラフト v0.3.6 arm64 資産・チェックサムと安定版 Homebrew formula の公開後は Rust やソースのツールチェーンなしで導入できます。実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)を基準とし、[v0.3.6 ノート](docs/releases/v0.3.6.md)を参照してください。過去の v0.3.5 とベータ資産は変更しません。
 
 ## 機能
 
@@ -26,7 +26,7 @@
 
 ## Homebrew でのインストール：最初の接続
 
-[個人 tap](https://github.com/hanbong5938/homebrew-tap)と非ドラフトの v0.3.5 arm64 アーカイブ／チェックサムは公開されています。導入前に実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)と formula を確認してください。キャラクターを表示する Mac で既存のローカル Herdr サーバーを起動してから実行します。
+v0.3.6 は新しい安定版ソース／ビルド済み対象であり、公開済みという意味ではありません。正確な非ドラフト v0.3.6 arm64 資産・チェックサムと安定版 Homebrew formula の公開後は Rust やソースのツールチェーンなしで導入できます。実際の[リリース資産](https://github.com/hanbong5938/herdr-desktop-pet/releases)を基準とし、[v0.3.6 ノート](docs/releases/v0.3.6.md)を参照してください。過去の v0.3.5 とベータ資産は変更しません。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -54,7 +54,7 @@ herdr-desktop-pet start
 herdr-desktop-pet status
 ```
 
-CLI が `0.3.5` を報告し、再起動後の `status` に `app_version: 0.3.5` **と想定した実行中の実行ファイル**が表示されることを確認します。formula はアプリを Homebrew のプレフィックス以下に置き、**`/Applications` には置きません**。CLI は `PATH` 上に配置されます。Herdr プラグインやパッチ済みホストは導入されません。古いデーモンは先に停止してください。プロファイルの分離と旧 cask からの移行については [0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta)を参照してください。formula の利用可否はソースの対象バージョンではなく実際の公開状況によります。
+CLI が `0.3.6` を報告し、再起動後の `status` に `app_version: 0.3.6` **と想定した実行中の実行ファイル**が表示されることを確認します。formula はアプリを Homebrew のプレフィックス以下に置き、**`/Applications` には置きません**。CLI は `PATH` 上に配置されます。Herdr プラグインやパッチ済みホストは導入されません。古いデーモンは先に停止してください。プロファイルの分離と旧 cask からの移行については [0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta)を参照してください。formula の利用可否はソースの対象バージョンではなく実際の公開状況によります。
 
 ### Herdr を使わない単独のキャラクター
 
@@ -78,7 +78,7 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 herdr plugin action invoke start --plugin desktop-pet
 ```
 
-管理下でのインストールは `bash scripts/install.sh` を実行します。まずマニフェスト指定の v0.3.5 の `.app` 専用アーカイブを試し、チェックサム、アーカイブのエントリー、arm64 署名、同梱キャラクターを検証します。**完全なアーカイブ／チェックサムと更新済みインストーラーがある非ドラフト v0.3.5 Release** が必要です。別途アップロードされる来歴サイドカーはインストーラーのアーカイブに含まれません。ビルド済み資産が存在しないか無効なら、標準のインストーラーはその旨を報告し、このチェックアウトをソースからビルドします。明示的な `--prebuilt` はフォールバックせず失敗し、`--source` はこのチェックアウトをビルドします。プラグインの導入は Herdr へのパッチ適用も Herdr のビルドも行いません。接続時の自動起動には[こちら（英語）](integrations/herdr/README.md#build-in-separate-checkouts)のパッチ済みホストを用意してください。前述の手動によるネイティブ観測には不要です。
+管理下でのインストールは `bash scripts/install.sh` を実行します。まずマニフェスト指定の v0.3.6 の `.app` 専用アーカイブを試し、チェックサム、アーカイブのエントリー、arm64 署名、同梱キャラクターを検証します。**完全なアーカイブ／チェックサムと更新済みインストーラーがある非ドラフト v0.3.6 Release** が必要です。別途アップロードされる来歴サイドカーはインストーラーのアーカイブに含まれません。ビルド済み資産が存在しないか無効なら、標準のインストーラーはその旨を報告し、このチェックアウトをソースからビルドします。明示的な `--prebuilt` はフォールバックせず失敗し、`--source` はこのチェックアウトをビルドします。プラグインの導入は Herdr へのパッチ適用も Herdr のビルドも行いません。接続時の自動起動には[こちら（英語）](integrations/herdr/README.md#build-in-separate-checkouts)のパッチ済みホストを用意してください。前述の手動によるネイティブ観測には不要です。
 
 ## 管理下の連携用にこのチェックアウトをソースからインストール
 
@@ -92,6 +92,25 @@ bash scripts/install.sh --source
 
 `plugin link` はマニフェストのビルドを**実行しません**。先にキャラクターをビルドしてください。既に稼働中のホストでリンク／有効化しても、それだけではキャラクターは起動しません。一度 `start` を呼び出すか、`auto_start` を有効にした上で対象となる次の shell／ターミナルクライアントの接続を待ちます。リンク時の警告を確認してください。未知の `client.attached` フックは必要なパッチがホストにないことを示します。Herdr の操作には稼働中で有効なホストが必要です。サーバー起動時にも自動的に `ensure` が実行されます。
 マニフェストのライフサイクル／操作コマンドは `scripts/run-native.sh` を使用し、安定版のマニフェストバージョンなら `HerdrDesktopPet.app`、`-beta.N` なら `HerdrDesktopPetBeta.app` を選びます。対応するバンドルがなければ失敗し、別チャネルのバンドルは実行しません。直接ソースから自動化する場合は `./dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet` を使用します。古いデーモンを停止するか**設定と状態の両方**のパスを分離し、`status` で実際の実行ファイル／バージョンを確認してください。[ソース開発（英語）](docs/development.md#source-development)。
+
+
+## Tern の導入と独立プロファイル
+
+上記の公開条件を満たした後、まずネイティブアプリ、次に独立した公開プラグインを明示的に導入します。プラグインがアプリを密かにダウンロード、ビルド、起動することはありません。
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+PET="$(command -v herdr-desktop-pet)"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
+"$PET" --version
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+```
+
+既定のホストは Herdr のままです。`--host tern` に Herdr サーバー、ソケット、プラグインは不要です。実際の Tern ウィンドウで **Configure desktop pet connection** に絶対実行ファイル `PET` と上記の設定・状態の両方のパスを指定し、**Connect to desktop pet** を実行します。変数名ではなく実際のパスを入力してください。ウィンドウの接続と同じプロファイルのネイティブ `status` を確認します。プラグインの検出だけでは接続の証明になりません。バイナリやモードを変える前に同じプロファイルを停止します。ソース開発は任意です。現在のチェックアウトで `bash scripts/install.sh --source` を実行し、`PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"` を指定できます。特別なブランチは不要です。アプリ／ヘルパーは対応する protocol 3 のペアで、追加 JSON 能力は `protocol: 3` と `observation_mode: 1` です。英語・韓国語・簡体字中国語・日本語を維持します。**ベータ更新を受け取る**は既定でオフで明示的な選択が必要です。確認だけではインストールや再起動をしません。
 
 ## 初回利用
 
@@ -137,7 +156,7 @@ IME 変換中は**決して送信されません**。Escape はまず変換を�
 ## 資料とウェブサイト
 
 - [使い方と復旧](docs/usage.ja.md) · [開発とインストール（英語）](docs/development.md) · [ネイティブ自動化 CLI 契約（英語）](docs/cli.md#english) · [パッチ済みホスト連携（英語）](integrations/herdr/README.md)。
-- [リリース履歴（英語）](docs/releases/README.md) · [v0.3.5 の変更点（英語／韓国語）](docs/releases/v0.3.5.md) · [v0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [過去のベータ／プレビュー案内（英語）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 移行（英語）](docs/migrations/v0.1.11-to-v0.2.0.md)。
+- [リリース履歴（英語）](docs/releases/README.md) · [v0.3.6 の変更点（英語／韓国語）](docs/releases/v0.3.6.md) · [v0.3 更新ガイド（英語）](docs/releases/0.3.md#upgrade-from-v021-or-beta) · [過去のベータ／プレビュー案内（英語）](docs/migrations/unreleased.md) · [v0.1.11 → v0.2.0 移行（英語）](docs/migrations/v0.1.11-to-v0.2.0.md)。
 - 宣伝用の[日本語](https://hanbong5938.github.io/herdr-desktop-pet/ja/)・[韓国語](https://hanbong5938.github.io/herdr-desktop-pet/)・[英語](https://hanbong5938.github.io/herdr-desktop-pet/en/)・[簡体字中国語](https://hanbong5938.github.io/herdr-desktop-pet/zh-Hans/)ウェブサイトはこの**ネイティブ**アプリを紹介しています。ブラウザー内でアプリを動かすものではありません。ウェブサイトの開発／公開は [GitHub Pages ガイド（英語）](docs/development.md#website-github-pages)を参照してください。別の[キャラクターギャラリー](https://hanbong5938.github.io/herdr-characters/)では追加パックを紹介しており、対応言語は英語と韓国語のみです。
 
 ## アートとライセンス

@@ -2,11 +2,11 @@
 
 [English](usage.md) · [한국어](usage.ko.md) · **简体中文** · [日本語](usage.ja.md) · [安装与要求](../readme.zh-Hans.md) · [CLI 契约（英文）](cli.md)
 
-本指南说明 v0.3.5 稳定版的**源码检出与默认/预构建目标**。它保留 v0.3.4 的眼部侧遮罩、ABI 身份及来源记录，v0.3.3 的官方角色浏览器/卡片、远程肖像和忙碌→空闲管理修复，以及 v0.3.2 的搜索、调整大小、对话草稿和原生自动化。本检出增加下述 protocol-3 更新器和 beta 策略；已发布的旧 protocol-2 构建不会随之改变。v0.3.5 改善指针捕获恢复、附着气泡布局和输入法组合期间回复的可见性；角色选择不变。**源码事实不代表已发布**：使用预构建包前，请核对非草稿 [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases)、完整 arm64 压缩包及校验和、独立 rig 来源附档以及安装器/公式切换，参阅[双语发行说明（英文/韩文）](releases/v0.3.5.md)和[升级指南（英文）](releases/0.3.md#upgrade-from-v021-or-beta)。旧安装程序不会因文档更新获得功能；脚本检查不能认证真实 GUI、IME 和辅助功能输入。
+本指南说明 v0.3.6 稳定版的**源码检出与默认/预构建目标**。它保留 v0.3.4 的眼部侧遮罩、ABI 身份及来源记录，v0.3.3 的官方角色浏览器/卡片、远程肖像和忙碌→空闲管理修复，以及 v0.3.2 的搜索、调整大小、对话草稿和原生自动化。本检出增加下述 protocol-3 更新器和 beta 策略；已发布的旧 protocol-2 构建不会随之改变。v0.3.5 改善指针捕获恢复、附着气泡布局和输入法组合期间回复的可见性；角色选择不变。**源码事实不代表已发布**：使用预构建包前，请核对非草稿 [GitHub Release](https://github.com/hanbong5938/herdr-desktop-pet/releases)、完整 arm64 压缩包及校验和、独立 rig 来源附档以及安装器/公式切换，参阅[双语发行说明（英文/韩文）](releases/v0.3.6.md)和[升级指南（英文）](releases/0.3.md#upgrade-from-v021-or-beta)。旧安装程序不会因文档更新获得功能；脚本检查不能认证真实 GUI、IME 和辅助功能输入。
 
 ## 首次运行：本地宿主或独立宠物
 
-在 Apple Silicon Mac（macOS 13+）安装已发布的 Homebrew 公式，针对**已运行的本地 Herdr 服务器**手动启动原生宠物：
+v0.3.6 是新的稳定源码／预构建目标，不表示已经发布。准确的非草稿 v0.3.6 arm64 资产、校验和及稳定 Homebrew 配方发布后，预构建安装无需 Rust 或源码工具链。以实际[发布资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)为准；参阅 [v0.3.6 发行说明](releases/v0.3.6.md)。历史 v0.3.5 和 beta 资产保持不变。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -15,7 +15,7 @@ herdr-desktop-pet start
 herdr-desktop-pet status
 ```
 
-请独立核对真正的 [v0.3.5 Release 资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)和 tap 公式。`--version` 标识安装的 CLI；`status` 显示正在运行的守护进程的 `app_version` 和可执行文件。`start` 可能复用旧守护进程，升级或换后端前应先停止。打开气泡查看本地卡片：Herdr 0.9.0+ 上真实的代理会话提供可观察快照。原生手动观察无需插件、补丁或 `client.attached` 钩子。本地回复另外要求服务器支持 `agent.prompt`；其 ACK 仅表示提交，不表示完成。后端套接字与继承环境/默认值不同时，应查明该服务器的**实际**套接字路径再启动（替换示例路径，切勿猜测）：
+请独立核对真正的 [v0.3.6 Release 资产](https://github.com/hanbong5938/herdr-desktop-pet/releases)和 tap 公式。`--version` 标识安装的 CLI；`status` 显示正在运行的守护进程的 `app_version` 和可执行文件。`start` 可能复用旧守护进程，升级或换后端前应先停止。打开气泡查看本地卡片：Herdr 0.9.0+ 上真实的代理会话提供可观察快照。原生手动观察无需插件、补丁或 `client.attached` 钩子。本地回复另外要求服务器支持 `agent.prompt`；其 ACK 仅表示提交，不表示完成。后端套接字与继承环境/默认值不同时，应查明该服务器的**实际**套接字路径再启动（替换示例路径，切勿猜测）：
 
 ```sh
 herdr-desktop-pet --socket /actual/path/to/herdr-api.sock start
@@ -32,6 +32,25 @@ herdr-desktop-pet status
 ```
 
 启动**后**可选用 `herdr-desktop-pet hide_bubble` 保留角色而不显示空气泡；无需安装 Herdr 或插件。若宠物约 30 秒后消失，检查 `settings get` 和 `status`：新配置默认开启 `exit_with_herdr`，无健康服务器时经过宽限期便退出。在同一配置/状态配置档中关闭后重启。所有已登记本地插件端点确认禁用/解绑后，即使此开关关闭也会退出。远程观察是[单独的可选途径](#观察来源)；托管的 attach 自动启动需要[已打补丁的宿主集成（英文）](../integrations/herdr/README.md#build-in-separate-checkouts)。
+
+
+## Tern 安装与独立配置档
+
+满足上述发布条件后，先安装原生应用，再显式安装独立的公开插件。插件不会暗中下载、构建或启动应用。
+
+```sh
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+PET="$(command -v herdr-desktop-pet)"
+PET_CONFIG="$HOME/.config/herdr/plugins/config/desktop-pet-tern"
+PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" stop
+"$PET" --version
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+"$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+```
+
+默认宿主仍为 Herdr。`--host tern` 无需 Herdr 服务器、套接字或插件。在实际 Tern 窗口中用 **Configure desktop pet connection** 设置绝对可执行文件 `PET` 以及上述配置和状态两个路径，再用 **Connect to desktop pet** 连接。输入实际路径，不是变量名。检查窗口连接和同一配置档的原生 `status`；发现插件不等于已连接。更换程序或模式前先停止同一配置档。源码开发仍为可选：在当前检出运行 `bash scripts/install.sh --source`，设置 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`，无需特殊分支。应用／辅助程序必须匹配 protocol 3，附加 JSON 能力为 `protocol: 3` 和 `observation_mode: 1`。英语、韩语、简体中文、日语均保留。**接收测试版更新**默认关闭，需主动选择；检查不会安装或重启。
 
 ## 操作
 

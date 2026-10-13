@@ -1325,7 +1325,7 @@ fn domain_mutation(
     loop {
         if operation.state.terminal() || deadline.is_none() {
             super::print_json(
-                &serde_json::json!({"ok": !operation.state.terminal() || matches!(operation.state,DomainOperationState::Applied|DomainOperationState::AgentPrompted), "operation":operation}),
+                &serde_json::json!({"ok": !operation.state.terminal() || matches!(operation.state,DomainOperationState::Applied|DomainOperationState::AgentPrompted|DomainOperationState::PromptAccepted), "operation":operation}),
             )?;
             return if matches!(
                 operation.state,
@@ -1640,7 +1640,7 @@ pub(crate) fn execute_domain(command: DomainCommand, socket: &Path) -> Result<()
                 ));
             }
             super::print_json(
-                &serde_json::json!({"ok":matches!(operation.state,DomainOperationState::Accepted|DomainOperationState::Pending|DomainOperationState::Applied|DomainOperationState::AgentPrompted),"operation":operation}),
+                &serde_json::json!({"ok":matches!(operation.state,DomainOperationState::Accepted|DomainOperationState::Pending|DomainOperationState::Applied|DomainOperationState::AgentPrompted|DomainOperationState::PromptAccepted),"operation":operation}),
             )?;
             if matches!(
                 operation.state,

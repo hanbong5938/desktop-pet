@@ -1,8 +1,8 @@
 use crate::{
-    ensure_absolute, executable_identity, now, owned_file, releases, validate_candidate,
-    CheckSnapshot, CheckStatus, ExecutableIdentity, InstallOrigin, ReleaseCandidate,
-    ReleaseChannel, ReleaseTarget, UpdateAction, UpdateContext, UpdatePlan, UpdatePolicy,
-    VerifiedInstallation,
+    ensure_absolute, executable_identity, now, owned_file, releases,
+    validate_candidate_for_context, CheckSnapshot, CheckStatus, ExecutableIdentity, InstallOrigin,
+    ReleaseCandidate, ReleaseChannel, ReleaseTarget, UpdateAction, UpdateContext, UpdatePlan,
+    UpdatePolicy, VerifiedInstallation, OBSERVATION_MODE_ENV,
 };
 use semver::Version;
 use serde_json::Value;
@@ -98,6 +98,7 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
         return Err("invalid immutable running identity".into());
     }
     version(&c.version)?;
+    c.observation_mode()?;
     for (key, value) in &c.environment {
         if !matches!(
             key.as_str(),
@@ -110,6 +111,7 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
                 | "XDG_CONFIG_HOME"
                 | "XDG_STATE_HOME"
                 | "HOME"
+                | OBSERVATION_MODE_ENV
         ) || value.len() > 4096
             || value.contains('\0')
         {
@@ -1233,7 +1235,7 @@ fn changed_candidate(
     if image.sha256 == c.running.sha256 {
         return Ok(None);
     }
-    let verified = validate_candidate(locator)?;
+    let verified = validate_candidate_for_context(locator, c)?;
     let output = command_output(locator, &["--version"], 4096, 5)?;
     let candidate_version = output
         .split_whitespace()
@@ -1487,14 +1489,30 @@ pub struct ManagerCommand {
 
 fn resolved_parent_path(path: &Path) -> Result<PathBuf, String> {
     ensure_absolute(path)?;
-    if let Ok(real) = fs::canonicalize(path) {
-        return Ok(real);
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut real) => {
+                for name in suffix.into_iter().rev() {
+                    real.push(name);
+                }
+                return Ok(real);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Only append genuinely absent components. A dangling symlink
+                // must not hide a target inside the replaceable installation.
+                match fs::symlink_metadata(ancestor) {
+                    Ok(_) => return Err(error.to_string()),
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(other) => return Err(other.to_string()),
+                }
+                suffix.push(ancestor.file_name().ok_or("path has no basename")?);
+                ancestor = ancestor.parent().ok_or("path has no parent")?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
-    let parent = path.parent().ok_or("path has no parent")?;
-    let name = path.file_name().ok_or("path has no basename")?;
-    Ok(fs::canonicalize(parent)
-        .map_err(|e| e.to_string())?
-        .join(name))
 }
 
 /// Refresh the approved public identity only on explicitly consented execution,
@@ -1878,7 +1896,7 @@ fn installed_image(
         InstallOrigin::Manual { locator } => (locator.clone(), expected.clone()),
         InstallOrigin::Unknown { .. } => return Err("unknown installation has no candidate".into()),
     };
-    let candidate = validate_candidate(&locator)?;
+    let candidate = validate_candidate_for_context(&locator, &plan.context)?;
     // An explicit local rebuild may reproducibly produce the same image.
     // Application is proved by a fresh, profile-bound ready instance, not a hash delta.
     if candidate.sha256 == plan.running.sha256
@@ -2095,6 +2113,134 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn immutable_context_accepts_only_canonical_captured_selection() {
+        let mut context = UpdateContext {
+            executable: "/tmp/original".into(),
+            version: "0.3.3".into(),
+            instance_id: "original".into(),
+            config_dir: "/tmp/profile".into(),
+            host_plugin_config_dir: None,
+            state_dir: "/tmp/state".into(),
+            herdr_socket: "/tmp/host.sock".into(),
+            running: ExecutableIdentity {
+                path: "/tmp/original".into(),
+                sha256: "a".repeat(64),
+            },
+            running_origin: Some(Box::new(InstallOrigin::Local {
+                root: "/tmp".into(),
+            })),
+            assets_override: None,
+            environment: BTreeMap::new(),
+            locale: "en".into(),
+        };
+        assert!(context_valid(&context).is_ok());
+        let default_context = context.clone();
+        for mode in ["herdr", "tern", "both"] {
+            context
+                .environment
+                .insert(OBSERVATION_MODE_ENV.into(), mode.into());
+            assert!(context_valid(&context).is_ok());
+            let bytes = serde_json::to_vec(&context).unwrap();
+            let retained: UpdateContext = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(retained, context);
+            assert_eq!(serde_json::to_vec(&retained).unwrap(), bytes);
+            if mode == "herdr" {
+                assert_eq!(
+                    retained.observation_mode().unwrap(),
+                    crate::ObservationMode::Herdr
+                );
+                assert_ne!(retained, default_context);
+            }
+        }
+        context
+            .environment
+            .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());
+        assert!(context_valid(&context).is_err());
+        context.environment.remove(OBSERVATION_MODE_ENV);
+        context
+            .environment
+            .insert("UNAPPROVED_ROUTING".into(), "value".into());
+        assert!(context_valid(&context).is_err());
+    }
+
+    #[test]
+    fn recheck_preserves_isolation_with_missing_socket_ancestors() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("installation");
+        let binary = root.join(APP);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts/install.sh"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            root.join("herdr-plugin.toml"),
+            b"id = 'desktop-pet'\nversion = '0.3.3'\nplatforms = ['macos']\n",
+        )
+        .unwrap();
+        fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let running = executable_identity(&binary).unwrap();
+        let origin = InstallOrigin::Local { root: root.clone() };
+        let plan = UpdatePlan {
+            version: crate::protocol::UPDATER_PROTOCOL,
+            operation_id: "0123456789abcdef0123456789abcdef".into(),
+            context: UpdateContext {
+                executable: binary,
+                version: "0.3.3".into(),
+                instance_id: "tern-original".into(),
+                config_dir: base.join("profile"),
+                host_plugin_config_dir: None,
+                state_dir: base.join("state"),
+                herdr_socket: base.join("missing/parent/herdr.sock"),
+                running: running.clone(),
+                running_origin: Some(Box::new(origin.clone())),
+                assets_override: None,
+                environment: BTreeMap::from([(OBSERVATION_MODE_ENV.into(), "tern".into())]),
+                locale: "en".into(),
+            },
+            origin,
+            target: None,
+            action: UpdateAction::LocalRebuild,
+            running,
+            candidate: None,
+        };
+        let original = serde_json::to_vec(&plan).unwrap();
+        assert!(recheck_plan(&plan).is_ok());
+        assert_eq!(serde_json::to_vec(&plan).unwrap(), original);
+        assert!(!base.join("missing").exists());
+
+        let alias = base.join("installation-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        for socket in [
+            root.join("missing/parent/herdr.sock"),
+            alias.join("missing/parent/herdr.sock"),
+        ] {
+            let mut unsafe_plan = plan.clone();
+            unsafe_plan.context.herdr_socket = socket;
+            assert_eq!(
+                recheck_plan(&unsafe_plan).unwrap_err(),
+                "profile path is inside replaceable installation"
+            );
+        }
+        let external_alias = base.join("external-alias");
+        std::os::unix::fs::symlink(&base, &external_alias).unwrap();
+        let mut aliased_plan = plan.clone();
+        aliased_plan.context.herdr_socket = external_alias.join("missing/parent/herdr.sock");
+        assert!(recheck_plan(&aliased_plan).is_ok());
+
+        // Files and dangling aliases cannot be treated as absent directories.
+        let blocked = base.join("not-a-directory");
+        fs::write(&blocked, b"file").unwrap();
+        let mut blocked_plan = plan.clone();
+        blocked_plan.context.herdr_socket = blocked.join("herdr.sock");
+        assert!(recheck_plan(&blocked_plan).is_err());
+        let dangling = base.join("dangling-alias");
+        std::os::unix::fs::symlink(root.join("missing"), &dangling).unwrap();
+        blocked_plan.context.herdr_socket = dangling.join("herdr.sock");
+        assert!(recheck_plan(&blocked_plan).is_err());
+    }
 
     #[test]
     fn beta_manifest_selects_beta_bundle_and_requires_reviewed_release_launcher() {
