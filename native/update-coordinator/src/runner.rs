@@ -2962,6 +2962,32 @@ mod tests {
     }
 
     #[test]
+    fn migrated_both_launches_only_canonical_auto_and_keeps_exact_live_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let original = plan(root.path());
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy["context"]["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
+        let plan: UpdatePlan = serde_json::from_value(legacy).unwrap();
+        assert_eq!(plan.context.environment[OBSERVATION_MODE_ENV], "auto");
+        let installed = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        let cmd = start_command(&plan, &installed, "captured-token", 7).unwrap();
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.windows(2).any(|pair| {
+            pair[0].to_str() == Some("--host") && pair[1].to_str() == Some("auto")
+        }));
+        assert!(!args.iter().any(|arg| arg.to_str() == Some("both")));
+        let mut reply = live_status(&plan);
+        assert!(!status_mode_matches(&plan, &reply).unwrap());
+        reply.observation_mode = Some(ObservationMode::Both);
+        assert!(status_mode_matches(&plan, &reply).unwrap());
+        reply.config_dir = root.path().join("other-profile");
+        assert!(verify_status(&plan, &reply).is_err());
+    }
+
+    #[test]
     fn invalid_captured_mode_never_defaults_to_legacy_herdr() {
         let root = tempfile::tempdir().unwrap();
         let mut plan = plan(root.path());
@@ -3029,6 +3055,24 @@ mod tests {
         let mut plan = plan(root.path());
         let legacy = r#"{"protocol":3}"#;
         assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_ok());
+        for capability in [1, 2] {
+            assert!(coordinator::validate_helper_capabilities(
+                &format!(r#"{{"protocol":3,"observation_mode":{capability}}}"#),
+                &plan.context
+            )
+            .is_ok());
+        }
+        for incompatible in [
+            r#"{"protocol":3,"observation_mode":0}"#,
+            r#"{"protocol":3,"observation_mode":3}"#,
+            r#"{"protocol":3,"observation_mode":"1"}"#,
+            r#"{"protocol":3,"observation_mode":"2"}"#,
+            r#"{"protocol":3,"observation_mode":null}"#,
+        ] {
+            assert!(
+                coordinator::validate_helper_capabilities(incompatible, &plan.context).is_err()
+            );
+        }
         assert!(
             coordinator::validate_helper_capabilities(r#"{"protocol":2}"#, &plan.context).is_err()
         );
@@ -3041,8 +3085,16 @@ mod tests {
                 .environment
                 .insert(OBSERVATION_MODE_ENV.into(), mode.as_str().into());
             assert!(coordinator::validate_helper_capabilities(legacy, &plan.context).is_err());
+            assert_eq!(
+                coordinator::validate_helper_capabilities(
+                    r#"{"protocol":3,"observation_mode":1}"#,
+                    &plan.context
+                )
+                .is_ok(),
+                mode != ObservationMode::Both
+            );
             assert!(coordinator::validate_helper_capabilities(
-                r#"{"protocol":3,"observation_mode":1}"#,
+                r#"{"protocol":3,"observation_mode":2}"#,
                 &plan.context
             )
             .is_ok());
@@ -3053,14 +3105,19 @@ mod tests {
             .is_err());
             for incompatible in [
                 r#"{"protocol":3,"observation_mode":0}"#,
-                r#"{"protocol":3,"observation_mode":2}"#,
+                r#"{"protocol":3,"observation_mode":3}"#,
                 r#"{"protocol":3,"observation_mode":"1"}"#,
+                r#"{"protocol":3,"observation_mode":"2"}"#,
                 r#"{"protocol":3,"observation_mode":null}"#,
             ] {
                 assert!(
                     coordinator::validate_helper_capabilities(incompatible, &plan.context).is_err()
                 );
             }
+            assert_eq!(
+                plan.context.environment[OBSERVATION_MODE_ENV],
+                mode.as_str()
+            );
         }
         plan.context
             .environment

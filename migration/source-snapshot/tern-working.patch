@@ -1,0 +1,236 @@
+diff --git a/README.ko.md b/README.ko.md
+index 60ca20d5e6d87022d3db7b96028838aadf13af45..da30b5bd928822a54507e158d961aed9e562ff08 100644
+--- a/README.ko.md
++++ b/README.ko.md
+@@ -6,7 +6,7 @@
+ 
+ ## 준비 및 설치
+ 
+-Apple Silicon macOS 13+에서 별도로 설치한 [Herdr Desktop Pet 네이티브 앱](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 이상**이 필요합니다. 기본 설치 경로는 Homebrew의 사전 빌드 네이티브 앱을 설치한 뒤 공개 Tern 플러그인을 설치하는 **두 번의 명시적 설치**입니다. 플러그인은 앱을 몰래 다운로드하거나 앱 설치기를 실행하거나 앱을 빌드하지 않습니다. 이 바이너리 경로에는 네이티브 소스 체크아웃, Rust/Cargo, Bun, Node.js/npm이 필요하지 않습니다. 네이티브 CLI는 `tern-exchange`, `--host tern`과 `update-capabilities`의 **두 필드** `protocol: 3`, `observation_mode: 1`을 지원해야 합니다. 구형 앱에서 `tern-exchange`가 알 수 없는 명령으로 나오면 이 플러그인과 작동하지 않습니다.
++Apple Silicon macOS 13+에서 별도로 설치한 [Herdr Desktop Pet 네이티브 앱](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 이상**이 필요합니다. 기본 공개 설치 경로는 Homebrew의 사전 빌드 네이티브 앱을 설치한 뒤 공개 Tern 플러그인을 설치하는 **두 번의 명시적 설치**입니다. 플러그인은 앱을 몰래 다운로드하거나 앱 설치기를 실행하거나 앱을 빌드하지 않습니다. 이 바이너리 경로에는 네이티브 소스 체크아웃, Rust/Cargo, Bun, Node.js/npm이 필요하지 않습니다. 네이티브 CLI는 `tern-exchange`, `--host tern`과 `update-capabilities`의 `protocol: 3`, `observation_mode: 1`(공개 v0.3.6) 또는 `2`(현재 통합 네이티브 소스)를 지원해야 합니다. 구형 앱에서 `tern-exchange`가 알 수 없는 명령으로 나오면 이 플러그인과 작동하지 않습니다. Capability 2를 위해 새 플러그인 스키마나 API가 필요하지는 않습니다.
+ 
+ [v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 검증된 공개 arm64 자산·체크섬과 갱신된 안정판 Homebrew 포뮬러를 갖춘 최신 공개 안정판입니다. 일치하는 앱·도우미 쌍은 `protocol: 3`, `observation_mode: 1`을 보고합니다. 과거 v0.3.5와 베타 자산은 변경하지 않습니다. 공개 플러그인 설치와 네이티브 앱 설치는 별개이며 기존 바이너리는 명시적으로 업그레이드해야 합니다.
+ 
+@@ -16,7 +16,7 @@ Apple Silicon macOS 13+에서 별도로 설치한 [Herdr Desktop Pet 네이티
+ 
+ **이전에 수행한 로컬 실제 에이전트 검증:** 로그인된 기존 Tern 0.6.1 창에서 분리된 검증 프로필을 사용해 로컬 에이전트 pane이 창 플러그인과 네이티브 펫에 표시되는 것을 확인했습니다. 임시 탭의 에이전트에게 의미 기반 질문을 보내자 네이티브 상태에 `prompt_accepted`, 전달 상태에 `accepted_may_be_queued`가 나타났습니다. 이후 실제 Tern 에이전트 대화 기록에서 요청한 `TERN_PET_SMOKE_OK` 답변을 확인했고, 에이전트 상태는 일치하는 마지막 메시지를 가진 idle이었습니다. 대화 기록은 이 특정 답변의 전달을 별도로 확인해 주지만, 접수 상태나 idle 상태만으로 완료를 확정할 수는 없습니다. 이 과거 관측은 아래의 현재 수정 회귀 검증과 별개입니다. 공개 릴리스나 최소 버전 보증이 아닌, 공개되지 않은 로컬 소스의 검증입니다.
+ 
+-네이티브 앱을 먼저 설치하고 플러그인을 설치하세요. formula가 이미 설치되어 있다면 첫 명령 대신 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`를 사용합니다. 모든 네이티브 명령과 Tern 명령 팔레트 설정에서 동일하게 분리된 네이티브 config/state 경로를 사용하세요: 기존 네이티브 프로필·환경설정은 유지됩니다.
++네이티브 앱을 먼저 설치하고 플러그인을 설치하세요. formula가 이미 설치되어 있다면 첫 명령 대신 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`를 사용합니다. 아래 **공개 v0.3.6 Tern 전용 예시**는 기존 Herdr 펫에 영향을 주지 않도록 선택형 분리 프로필을 사용합니다. 모든 네이티브 명령과 Tern 명령 팔레트 설정에서 config/state 경로를 동일하게 유지하세요. 이 분리 경로는 새 필수 기본값이 아니며 기존 네이티브 프로필·환경설정은 유지됩니다.
+ 
+ ```sh
+ brew install hanbong5938/tap/herdr-desktop-pet
+@@ -28,7 +28,7 @@ PET_STATE="$HOME/.local/state/tern-desktop-pet/native"
+ 
+ "$PET_BIN" --version
+ "$PET_BIN" update-capabilities
+-# 0.3.6 이상, protocol: 3, observation_mode: 1을 확인한 뒤에만 계속하세요.
++# 공개 v0.3.6: 버전, protocol: 3, observation_mode: 1을 확인하세요.
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" settings set exit_with_herdr off
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+@@ -37,11 +37,11 @@ tern plugin reload
+ tern plugin list
+ ```
+ 
+-앱을 시작하기 **전에** 버전이 **0.3.6 이상**이고 capability에 **두 필드**가 모두 있는지 확인하세요. 위 명령 실행만으로 확인을 대신할 수는 없습니다. 공용 네이티브 앱의 기본 모드는 Herdr이므로 `--host tern`을 명시적으로 유지하세요. 다음으로 로그인된 Tern 창을 열고 명령 팔레트의 **Configure desktop pet connection** (`configure`)에서 아래 설명대로 `PET_BIN`과 분리된 두 경로의 확장된 값을 저장하세요. 셸 변수만으로 플러그인이 설정되지는 않습니다.
++앱을 시작하기 **전에** 버전이 **0.3.6 이상**이고 해당 빌드의 capability 필드가 맞는지 확인하세요. 위 명령 실행만으로 확인을 대신할 수는 없습니다. 공개 v0.3.6 앱의 기본 모드는 Herdr이므로 해당 바이너리에는 `--host tern`을 명시적으로 유지하세요. 이 공개 앱에는 아래에서 설명하는 현재 소스의 Auto 드롭다운이나 실시간 호스트 환경설정이 들어 있지 않습니다. 다음으로 로그인된 Tern 창의 명령 팔레트에서 **Configure desktop pet connection** (`configure`)으로 `PET_BIN`과 프로필 두 경로의 확장된 값을 저장한 뒤 **Connect to desktop pet** (`connect`)을 선택하세요. 셸 변수만으로 플러그인이 설정되지는 않습니다.
+ 
+-### 소스 개발용 대안
++### 공개 네이티브 태그 빌드
+ 
+-선택형 네이티브 소스 개발에는 Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools와 `codesign`이 필요하며 의존성을 내려받을 수 있습니다. `PET_SOURCE`를 실제 절대 경로로 지정하고 새 clone에는 미사용 디렉터리를 사용하세요. 아래 공개 v0.3.6 태그를 빌드하며 별도 연동 브랜치는 필요하지 않습니다:
++선택형 네이티브 소스 개발에는 Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools와 `codesign`이 필요하며 의존성을 내려받을 수 있습니다. **공개 capability-1 앱**을 재현하려면 `PET_SOURCE`를 실제 절대 경로로 지정하고 새 clone에는 미사용 디렉터리를 사용하세요. 아래 공개 v0.3.6 태그를 빌드하며, 이는 통합 capability-2 소스가 아닙니다:
+ 
+ ```sh
+ PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+@@ -55,7 +55,35 @@ PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+ "$PET_BIN" update-capabilities
+ ```
+ 
+-기존 네이티브 체크아웃이라면 clone 명령만 건너뛰세요. 소스 설치기는 앱을 해당 체크아웃의 `dist/HerdrDesktopPet.app`에 패키징하며 플러그인 체크아웃에 복사하지 않습니다. 이후 위의 동일하게 분리된 `PET_CONFIG`/`PET_STATE`, 명시적인 `--host tern` settings/start/status 명령과 공개 플러그인 설치를 사용하되 `PET_BIN`은 이 소스 빌드 경로로 바꾸세요.
++기존 네이티브 체크아웃이라면 clone 명령만 건너뛰되, 자신의 변경이 있는 체크아웃을 공개 태그로 전환하지 마세요. 소스 설치기는 앱을 해당 체크아웃의 `dist/HerdrDesktopPet.app`에 패키징하며 플러그인 체크아웃에 복사하지 않습니다. 이 공개 태그 빌드에는 위의 선택형 분리 `PET_CONFIG`/`PET_STATE`, 명시적인 `--host tern` settings/start/status 명령과 공개 플러그인 설치를 사용하되 `PET_BIN`은 이 소스 빌드 경로로 바꾸세요.
++
++### 현재 통합 네이티브 소스 (공개 릴리스 아님)
++
++현재 네이티브 체크아웃의 통합 연결 기능은 **소스 전용**입니다. 일치하는 앱·도우미 쌍은 `protocol: 3`, `observation_mode: 2`를 보고합니다. 공개 v0.3.6을 설치하거나 해당 태그를 빌드해도 이 기능은 제공되지 않습니다. 통합 변경이 들어 있는 기존 네이티브 체크아웃에서 `bash scripts/install.sh --source`로 빌드하고, 구형 `PATH` 바이너리가 아닌 해당 체크아웃의 `dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`을 사용하세요.
++
++네이티브 **연결(Connection)** 카드에는 **Auto / Herdr / Tern** 드롭다운이 있습니다. **Auto**는 우선 공급자를 정하지 않고 Herdr와 로컬 Tern 연결을 함께 허용합니다. 설치만으로 연결을 확인할 수는 없습니다. 공급자별 **연결됨(Connected) / 대기 중(Waiting) / 비활성화됨(Disabled)** 상태는 실제 연결을 반영합니다. 모드를 선택하면 저장 후 재시작 없이 **같은 실행 중 앱에 즉시 적용**되며, 저장에 실패하면 이전 모드를 유지합니다. 비활성화된 공급자는 브리지로 전송할 수 없습니다. Auto에서 호스트 연결이 끊겨도 펫은 종료되지 않으며 대기 중 답장은 원래 공급자 식별자를 유지하고 다른 곳으로 재전송되지 않습니다.
++
++새 네이티브 프로필의 기본값은 Auto이며, 명시적인 실행 옵션이나 앱이 사용하는 환경 설정이 있으면 그것이 우선합니다. 기존에 저장된 선택은 유지되며 호스트 필드가 없는 레거시 환경설정 파일은 Herdr를 유지합니다. 현재 소스는 `auto`, `herdr`, `tern`을 기록하고, 레거시 `both`는 마이그레이션 입력으로만 받습니다. 드롭다운이나 `preferences set --observation-host auto|herdr|tern`으로 실행 중 프로필을 변경하세요. 읽기/status 명령에는 `--host`를 반복할 필요가 없습니다.
++
++플러그인은 이미 **네이티브와 동일한 기본 프로필 경로**를 사용하므로 이 통합 소스에는 별도 Tern 프로필이 필요하지 않습니다. 수동 명령에서는 주입된 `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`을 해제하거나 맞춘 뒤, 일치하는 실행 파일과 프로필을 사용하세요:
++
++```sh
++PET_SOURCE=/absolute/path/to/native-checkout-with-unified-changes
++PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
++PET_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/desktop-pet"
++PET_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/desktop-pet"
++
++"$PET_BIN" update-capabilities
++# 이 소스 빌드의 protocol: 3, observation_mode: 2를 확인하세요.
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
++# 기존 Herdr 프로필을 포함해 이 프로필에서 Auto를 명시적으로 선택:
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" preferences set --observation-host auto
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
++```
++
++대신 **기존 기준 프로필**을 공유하려면 네이티브 연결 카드의 접힌 **연결 설정(Connection settings)**을 열고 실제 실행 파일·config 디렉터리·state 디렉터리를 아래 플러그인의 Configure 질문 세 개에 복사하세요. 서로 다른 프로필의 경로를 섞지 말고 사용할 프로필을 선택하세요. 세 값 전체를 검증·저장한 뒤 Connect를 선택합니다. 이는 플러그인 연결 대상만 바꾸며 네이티브 프로필 파일을 이동·병합·덮어쓰기·삭제하지 않습니다. 기존 분리 프로필과 저장된 플러그인 연결은 직접 다른 대상을 선택하지 않는 한 유지됩니다.
++
++**관찰 범위(Observation scope)**, **연결 설정(Connection settings)**, **진단(Diagnostics)**은 처음에 접혀 있습니다. Tern 전용 모드에서는 Herdr 원격 머신 컨트롤을 숨기되 기존 선택을 지우지 않습니다. **앱 실행(App launch)** 카드의 자동 실행 옵션은 여전히 Herdr 전용이며, Herdr와 함께 종료하는 옵션은 Auto나 Tern이 아닌 Herdr 전용 모드에서만 사용할 수 있습니다. Tern 자동 시작 기능을 의미하지는 않습니다.
+ 
+ ### 로컬 플러그인 체크아웃 대안
+ 
+@@ -71,25 +99,27 @@ tern plugin list
+ 
+ 플러그인 체크아웃이 이미 있다면 해당 clone 명령을 건너뛰세요. 로컬 연결은 개발용 대안이며 별도의 네이티브 앱을 빌드하거나 설치하지 않습니다.
+ 
+-실제 경로로 바꿔 실행하세요. `PET_*` 셸 변수는 편의를 위한 것이며 Tern의 영구 설정이 아닙니다. capability JSON에서 **두** 필드를 확인하고 `status`에서 실행 중인 앱의 실제 실행 파일과 `observation_mode: tern`을 확인하세요. `start`는 이미 실행 중인 데몬을 재사용합니다. 다른 모드 또는 구형 데몬이 같은 프로필을 사용한다면 동일한 config/state 경로로 먼저 중지한 뒤 새 앱을 시작하세요. 두 경로를 함께 분리해야 기존 Herdr 펫 프로필과 충돌하지 않습니다. 네이티브 `--socket`은 **Herdr** 백엔드용이며 Tern 전용 실행에는 필요하지 않습니다. `--host tern`을 명시해 상속된 호스트 모드 환경 설정에 의존하지 않고, `exit_with_herdr off`로 Herdr 없이 독립 실행한 펫을 유지합니다. 셸에 `HERDR_PLUGIN_CONFIG_DIR` 또는 `HERDR_PLUGIN_STATE_DIR`이 설정되어 있다면 수동 명령 실행 시 해제하거나 위 프로필과 일치시키세요. 주입된 플러그인 경로가 CLI 경로보다 우선합니다.
++실제 경로로 바꿔 예시를 실행하세요. `PET_*` 셸 변수는 편의를 위한 것이며 Tern의 영구 설정이 아닙니다. capability JSON에서 해당 앱 버전/capability를 확인하고 `status`에서 실행 중인 실행 파일과 실제 `observation_mode`를 확인하세요(공개 예시는 `tern`). 다른 앱이나 구형 데몬이 선택한 프로필을 사용한다면 동일한 config/state 경로로 그 데몬을 먼저 중지한 뒤 의도한 실행 파일을 시작하세요. 이 바이너리 교체는 중지가 필요 없는 capability-2의 실시간 호스트 변경과 별개입니다. 선택형 분리 프로필은 구형 바이너리에 여전히 유용하며 통합 소스와 플러그인은 네이티브 기본 프로필을 공유할 수 있습니다. 네이티브 `--socket`은 **Herdr** 백엔드용이며 Tern 전용 실행에는 필요하지 않습니다. 공개 예시의 명시적인 `--host tern`은 상속된 호스트 모드 환경 설정에 의존하지 않게 하고, `exit_with_herdr off`는 Herdr 없이 독립 실행한 해당 구형 앱을 유지합니다. 셸에 `HERDR_PLUGIN_CONFIG_DIR` 또는 `HERDR_PLUGIN_STATE_DIR`이 설정되어 있다면 수동 명령 실행 시 해제하거나 의도한 프로필과 일치시키세요. 주입된 플러그인 경로가 CLI 경로보다 우선합니다.
+ 
+-`status.herdr_socket`은 Tern 전용 모드에서도 네이티브 앱의 업데이트 컨텍스트에 보존된 Herdr 소켓 설정 경로를 표시합니다. 실제 Herdr 엔드포인트가 살아 있다는 증거가 아닙니다. Tern 전용 실행에는 Herdr 등록도, 해당 경로의 소켓도, 그 부모 디렉터리도 필요하지 않습니다. 공용 앱은 `--host herdr|tern|both`를 지원하며 이 플러그인이 별도의 네이티브 앱을 도입하는 것은 아닙니다. Tern/Both 업데이트는 프로토콜 3을 유지하면서 서명된 앱과 서명된 헬퍼 모두 `observation_mode: 1`을 지원해야 하며, 재시작된 앱의 상태가 요청한 모드와 정확히 일치해야 합니다.
++`status.herdr_socket`은 Tern 전용 모드에서도 네이티브 앱의 업데이트 컨텍스트에 보존된 Herdr 소켓 설정 경로를 표시합니다. 실제 Herdr 엔드포인트가 살아 있다는 증거가 아닙니다. Tern 전용 실행에는 Herdr 등록도, 해당 경로의 소켓도, 그 부모 디렉터리도 필요하지 않습니다. 이 플러그인이 별도의 네이티브 앱을 도입하는 것은 아닙니다. 공개 v0.3.6의 Tern 업데이트에는 `protocol: 3`, `observation_mode: 1`을 지원하는 일치하는 서명된 앱·도우미 쌍이 필요합니다. 통합 소스의 Auto/실시간 호스트 계약에는 capability 2가 필요하며, 업데이터는 저장된/실제 호스트를 보존하고 호환되지 않는 대상을 거부해야 합니다. 선택한 동작을 잃는 capability-1 앱을 조용히 설치하는 것이 아닙니다.
+ 
+ `tern plugin link`는 이 체크아웃을 제자리에서 참조하며 공개하거나 복사하지 않습니다. `tern plugin reload`는 실행 중인 데몬의 플러그인을 다시 읽고 `tern plugin list`는 로딩 상태/오류를 표시합니다. `window.luau`를 수정했다면 다시 `tern plugin reload`를 실행하세요. 로그인 후 로컬 에이전트 pane이 있는 실제 Tern **창**을 여세요. 창이 없다면 데몬에서 독립적으로 계속 폴링하지 않습니다. 헤드리스 데몬의 플러그인 목록만으로는 플러그인 런타임을 실행·확인한 것이 아닙니다. Tern 명령 팔레트에서 **Connect to desktop pet** (`connect`)을 선택하면 즉시 교환을 요청합니다. 플러그인은 약 1.2초 간격으로도 폴링하고 관련 pane/tab/명령 변경에 반응합니다.
+ 
+ ## 창 플러그인 설정
+ 
+-실제 Tern 창의 명령 팔레트에서 **Configure desktop pet connection** (`configure`)을 선택하세요. 다음 세 질문에 순서대로 답합니다.
++실제 Tern 창에서 사용할 네이티브 기준 프로필을 먼저 선택한 뒤 명령 팔레트의 **Configure desktop pet connection** (`configure`)을 선택하세요. 통합 소스에서는 네이티브 **연결 설정(Connection settings)**에 표시된 실제 값을 복사하고, 공개 분리 프로필 예시에서는 확장된 `PET_*` 값을 사용하세요. 다음 세 질문에 순서대로 답합니다.
+ 
+-1. **Desktop pet executable (path or command):** 위 셸에서 `printf '%s\n' "$PET_BIN"`으로 출력한 전체 절대 경로를 입력합니다(변수명이나 `.app` 디렉터리가 아닙니다). 소스 개발용 대안의 경우 `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`입니다.
+-2. **Absolute desktop pet config directory:** `PET_CONFIG`와 동일한, 확장된 절대 경로를 입력합니다.
+-3. **Absolute desktop pet state directory:** `PET_STATE`와 동일한, 확장된 절대 경로를 입력합니다.
++1. **Desktop pet executable (path or command):** 실제 실행 파일의 전체 절대 경로를 입력합니다. 예를 들어 `printf '%s\n' "$PET_BIN"`으로 출력한 값이며, 변수명이나 `.app` 디렉터리가 아닙니다. 소스 빌드는 `/absolute/path/to/native-checkout/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`을 사용합니다.
++2. **Absolute desktop pet config directory:** 선택한 기준 프로필의 실제 확장된 config 경로이며, 셸 예시를 사용한다면 `PET_CONFIG`와 일치해야 합니다.
++3. **Absolute desktop pet state directory:** 같은 기준 프로필의 실제 확장된 state 경로이며 `PET_STATE`와 일치해야 합니다.
+ 
+ 창 플러그인은 단일 정식 `tern.kv` 키 `connection`에 `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }` 객체를 저장합니다. 후보 전체(버전/필드, 비어 있지 않은 실행 파일, 절대 config/state 경로, NUL 바이트 없음)를 검증한 뒤 **한 번의 KV 쓰기**로 저장하고, 그 후 활성 프로필을 전환하고 소스 인스턴스를 초기화해 즉시 교환합니다. 어느 질문에서든 취소하거나, 질문/검증에 오류가 나거나, 저장이 실패하면 이전 저장 연결과 활성 연결을 유지합니다. 일부만 입력한 프로필은 활성화되지 않습니다.
+ 
++세 값 전체를 검증하고 성공적으로 저장한 뒤 **Connect to desktop pet** (`connect`)을 선택해 해당 대상과 교환하세요. Configure는 저장된/활성 플러그인 연결만 바꾸며 네이티브 파일에는 손대지 않습니다. 이전 프로필이나 대상 프로필을 복사·이동·병합·삭제하지 않고 기존 별도 Tern 프로필도 계속 사용할 수 있습니다. 결과가 불확실한 ask를 새로 선택한 프로필에 재실행하지 않습니다.
++
+ `connection`이 없을 때에만 예전 세 키 `executable`, `config_dir`, `state_dir`를 함께 가져오고 누락된 값은 기본값으로 채웁니다. 이 일회성 마이그레이션은 정식 객체 전체를 검증·저장한 뒤 레거시 키 제거를 시도합니다. 제거 실패는 로그에 남지만 이미 저장한 객체를 되돌리지 않습니다. 기존 `connection`이 잘못된 형식이면 오류이며, 예전 키로 되돌아갈 근거가 **절대 아닙니다**. **Configure desktop pet connection**으로 수정하세요.
+ 
+-설정하지 않았을 때 기본값은 실행 파일 `herdr-desktop-pet`, config `${XDG_CONFIG_HOME}/herdr/plugins/config/desktop-pet` 또는 `~/.config/herdr/plugins/config/desktop-pet`, state `${XDG_STATE_HOME}/herdr/plugins/desktop-pet` 또는 `~/.local/state/herdr/plugins/desktop-pet`입니다. 이 기본 프로필은 위에서 분리한 경로와 **다르며**, `PATH`의 실행 파일은 구형 앱일 수 있으므로 세 값을 모두 명시하세요. 플러그인은 `tern-exchange`를 호출할 뿐 네이티브 펫을 시작하지 않으므로 해당 프로필에서 펫을 먼저 실행해야 합니다.
++설정하지 않았을 때 기본값은 실행 파일 `herdr-desktop-pet`, config `${XDG_CONFIG_HOME}/herdr/plugins/config/desktop-pet` 또는 `~/.config/herdr/plugins/config/desktop-pet`, state `${XDG_STATE_HOME}/herdr/plugins/desktop-pet` 또는 `~/.local/state/herdr/plugins/desktop-pet`입니다. 이는 **네이티브 기본값과 같으며**, 필수 별도 Tern 프로필이 아닙니다. 기존에 저장된 `connection`은 자동으로 다른 대상으로 바꾸지 않고 보존합니다. 다른 기준 프로필이나 선택형 공개 분리 프로필 예시를 사용한다면 세 값을 모두 명시적으로 설정하세요. 구형 `PATH` 바이너리를 피하려면 실행 파일도 절대 경로로 지정하세요. 선택한 프로필에서 Tern을 활성화한 네이티브 펫이 이미 실행 중이어야 합니다(통합 소스에서는 Auto 또는 Tern). 플러그인은 `tern-exchange`를 호출할 뿐 펫을 시작하지 않습니다.
+ 
+ 전체 연결을 설정한 뒤, 이전 오류로 창의 타이머 훅이 비활성화되었다면 명시적으로 `tern plugin reload`를 실행하세요. 예를 들어 잘못된 기본 실행 파일 경로를 사용한 뒤 콜백 예산 초과 오류가 난 경우입니다. 올바른 프로필을 저장하거나 **Connect to desktop pet**을 선택해도 Tern이 비활성화한 훅은 다시 켜지지 않으며, 다시 로드할 때까지 비활성 상태를 유지합니다. 이후 데몬의 플러그인 목록만이 아니라 로그인된 실제 창을 확인하세요. 이번 수정에서 사용자의 기존 창 로그인은 정상 동작했습니다. 일반적인 로그인 또는 Keychain 문제의 증거가 아닙니다.
+ 
+diff --git a/README.md b/README.md
+index 9b2dc0b6c00eef165d1774057d9f80c655bae5ea..3197e72ad4b2bd24caa58155961eb4fe6c3d3111 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@
+ 
+ ## Requirements and installation
+ 
+-Use an Apple Silicon Mac running macOS 13+ with the separately installed [Herdr Desktop Pet native app](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 or newer**. The primary path is the Homebrew prebuilt native app, then the public Tern plugin: two explicit installs. The plugin never silently downloads, executes an installer for, or builds the app. This binary path needs neither a native source checkout nor Rust/Cargo, Bun, or Node.js/npm. The native CLI must support `tern-exchange`, `--host tern`, and `update-capabilities` reporting **both** `protocol: 3` and `observation_mode: 1`; an older app with an unknown `tern-exchange` command cannot work.
++Use an Apple Silicon Mac running macOS 13+ with the separately installed [Herdr Desktop Pet native app](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 or newer**. The primary public installation path is the Homebrew prebuilt native app, then the public Tern plugin: two explicit installs. The plugin never silently downloads, executes an installer for, or builds the app. This binary path needs neither a native source checkout nor Rust/Cargo, Bun, or Node.js/npm. The native CLI must support `tern-exchange`, `--host tern`, and `update-capabilities` reporting `protocol: 3` with `observation_mode: 1` (published v0.3.6) or `2` (the current unified native source). An older app with an unknown `tern-exchange` command cannot work. Capability 2 does not require a new plugin schema or API.
+ 
+ [v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is the published latest stable release, with verified public arm64 assets/checksums and the updated stable Homebrew formula. The matched app/helper pair reports `protocol: 3` and `observation_mode: 1`. Historical v0.3.5 and beta assets remain unchanged. The public plugin install is separate from native installation; existing binaries must still be explicitly upgraded.
+ 
+@@ -16,7 +16,7 @@ Tern is currently a closed beta requiring a signed-in account. Install/open a co
+ 
+ **Earlier local live-agent verification:** in an existing signed-in Tern 0.6.1 window, a local agent pane was observed through the window plugin and native pet using an isolated verification profile. A semantic ask to an agent in a disposable tab returned native `prompt_accepted` with delivery `accepted_may_be_queued`; Tern's actual agent transcript subsequently showed the requested `TERN_PET_SMOKE_OK` assistant reply, and its state became idle with a matching last message. The transcript independently confirms this particular reply was delivered; neither the accepted receipt nor idle state alone is an authoritative completion event. This historic observation is separate from the current repair regression evidence below. It was local verification of unpublished source, not a published release or a minimum-version guarantee.
+ 
+-Install the native app first, then the plugin. If the formula is already installed, replace the first command with `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`. Keep the same isolated native config/state paths in every native command and in the Tern command-palette configuration: Existing native profiles/preferences are preserved.
++Install the native app first, then the plugin. If the formula is already installed, replace the first command with `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`. The following **published v0.3.6 Tern-only example** uses an optional isolated profile to avoid affecting an existing Herdr pet. Keep its config/state paths identical in all native commands and in the Tern command-palette configuration. These isolated paths are not new mandatory defaults; existing native profiles/preferences are preserved.
+ 
+ ```sh
+ brew install hanbong5938/tap/herdr-desktop-pet
+@@ -28,7 +28,7 @@ PET_STATE="$HOME/.local/state/tern-desktop-pet/native"
+ 
+ "$PET_BIN" --version
+ "$PET_BIN" update-capabilities
+-# Continue only after confirming 0.3.6+, protocol: 3 and observation_mode: 1.
++# Published v0.3.6: confirm version, protocol: 3 and observation_mode: 1.
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" settings set exit_with_herdr off
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
+ "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
+@@ -37,11 +37,11 @@ tern plugin reload
+ tern plugin list
+ ```
+ 
+-Confirm version **0.3.6+** and both capability fields **before** starting the app; the commands above are not a substitute for those checks. The shared native app defaults to Herdr mode, so retain explicit `--host tern`. Next open a signed-in Tern window and use **Configure desktop pet connection** (`configure`) in its command palette to save `PET_BIN` and the two expanded isolated paths as described below; shell variables do not configure the plugin.
++Confirm version **0.3.6+** and the appropriate capability fields **before** starting the app; the commands above are not a substitute for those checks. The published v0.3.6 app defaults to Herdr mode, so retain explicit `--host tern` for that binary. It does not contain the current-source Auto dropdown or live host preference described below. Next open a signed-in Tern window and use **Configure desktop pet connection** (`configure`) to save `PET_BIN` and the two expanded profile paths, then **Connect to desktop pet** (`connect`); shell variables do not configure the plugin.
+ 
+-### Source-development alternative
++### Build the published native tag
+ 
+-Optional native source development requires Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools and `codesign`; builds can download dependencies. Set `PET_SOURCE` to an actual absolute checkout path, using an unused directory for a new clone. Build the published v0.3.6 tag below; no integration branch is required:
++Optional native source development requires Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools and `codesign`; builds can download dependencies. To reproduce the **published capability-1 app**, set `PET_SOURCE` to an actual absolute checkout path, using an unused directory for a new clone. Build the published v0.3.6 tag below; this is not the unified capability-2 source:
+ 
+ ```sh
+ PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+@@ -55,7 +55,35 @@ PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+ "$PET_BIN" update-capabilities
+ ```
+ 
+-For an existing native checkout, skip only the clone command. The source installer packages the app into that checkout's `dist/HerdrDesktopPet.app`; it does not copy it into the plugin checkout. Then use the same isolated `PET_CONFIG`/`PET_STATE`, explicit `--host tern` settings/start/status commands and public plugin installation above, substituting this source-built `PET_BIN`.
++For an existing native checkout, skip only the clone command, and do not switch a checkout containing your own changes to the published tag. The source installer packages the app into that checkout's `dist/HerdrDesktopPet.app`; it does not copy it into the plugin checkout. For this published-tag build, use the same optional isolated `PET_CONFIG`/`PET_STATE`, explicit `--host tern` settings/start/status commands and public plugin installation above, substituting this source-built `PET_BIN`.
++
++### Current unified native source (not a published release)
++
++The current native checkout's unified connection feature is **source-only**. Its matching app/helper pair reports `protocol: 3` and `observation_mode: 2`; installing public v0.3.6 or building its tag does not supply this feature. In an existing native checkout containing the unified changes, build with `bash scripts/install.sh --source` and use its `dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`, not an older `PATH` binary.
++
++The native **Connection** card has an **Auto / Herdr / Tern** dropdown. **Auto** enables Herdr and local Tern connections together without choosing a preferred provider; installation alone is not proof of a connection. Per-provider **Connected / Waiting / Disabled** status reflects actual connections. Selecting a mode saves it and applies it **live to the same running app**, without a restart; a failed save retains the prior mode. A disabled provider cannot send through the bridge. Disconnecting a host in Auto does not close the pet, and pending replies keep their original provider identity rather than being replayed elsewhere.
++
++A new native profile defaults to Auto, unless an explicit launch option or owned environment overrides it. Existing saved choices are preserved; a legacy preferences file without a host field keeps Herdr. The current source writes `auto`, `herdr`, or `tern`; legacy `both` is accepted only as a migration input. Use the dropdown or `preferences set --observation-host auto|herdr|tern` to change the running profile. Read/status commands do not require repeating `--host`.
++
++The plugin already uses the **same native default profile paths**, so a separate Tern profile is unnecessary for this unified source. For manual commands, clear or align any injected `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`, then use the matching executable and profile:
++
++```sh
++PET_SOURCE=/absolute/path/to/native-checkout-with-unified-changes
++PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
++PET_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/desktop-pet"
++PET_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/desktop-pet"
++
++"$PET_BIN" update-capabilities
++# Confirm protocol: 3 and observation_mode: 2 for this source build.
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
++# Explicitly opt this profile into Auto, including an existing Herdr profile:
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" preferences set --observation-host auto
++"$PET_BIN" --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
++```
++
++To share an **existing base profile** instead, open the native Connection card's collapsed **Connection settings**, and copy its actual executable, config directory, and state directory into the plugin's three Configure prompts below. Select the profile you intend to use, not a mixture of paths from different profiles. Validate/save the complete triple, then choose Connect. This changes plugin routing only: it never moves, merges, overwrites, or deletes native profile files. Existing isolated profiles and saved plugin connections remain untouched unless you explicitly select a different route.
++
++**Observation scope**, **Connection settings**, and **Diagnostics** start collapsed. Tern-only mode hides Herdr remote-machine controls without erasing their choices. The **App launch** card's automatic launch option remains Herdr-specific; exit-with-Herdr is available only in Herdr-only mode, not Auto or Tern. There is no implied Tern autostart.
+ 
+ ### Local plugin checkout alternative
+ 
+@@ -71,25 +99,27 @@ tern plugin list
+ 
+ If the plugin checkout already exists, skip its clone command. Linking is a development alternative; it does not build or install the separate native app.
+ 
+-Run these after substituting real paths; the `PET_*` shell variables are only conveniences, not persistent Tern settings. Inspect the capability JSON for **both** required fields, and inspect `status` for the running app executable and `observation_mode: tern`. `start` reuses an already-running daemon; if a different/older daemon owns this profile, stop it using the same config/state paths before starting the new one. Isolating both paths avoids disturbing an existing Herdr pet profile. The native `--socket` option points to a **Herdr** backend and is not needed for Tern-only operation. Explicit `--host tern` avoids relying on an inherited host-mode environment setting; `exit_with_herdr off` keeps this independently launched pet available without Herdr. If your shell exports `HERDR_PLUGIN_CONFIG_DIR` or `HERDR_PLUGIN_STATE_DIR`, unset them for these manual commands or ensure they match the displayed profile: injected plugin paths take precedence over CLI paths.
++Run the examples after substituting real paths; `PET_*` shell variables are conveniences, not persistent Tern settings. Inspect capability JSON for the matching app version/capability and `status` for the running executable and effective `observation_mode` (`tern` in the published example). If a different/older daemon owns the selected profile, stop that daemon using the same config/state paths before starting the intended executable. This binary replacement is distinct from capability-2 live host changes, which do not require stopping. Optional isolated profiles remain useful for old binaries; the unified source and plugin can share the native default profile. The native `--socket` option points to a **Herdr** backend and is unnecessary for Tern-only operation. The published example's explicit `--host tern` avoids inherited host-mode environment settings, and `exit_with_herdr off` keeps that independently launched old app available without Herdr. If your shell exports `HERDR_PLUGIN_CONFIG_DIR` or `HERDR_PLUGIN_STATE_DIR`, unset them for manual commands or match the intended profile: injected plugin paths take precedence over CLI paths.
+ 
+-`status.herdr_socket` reports the configured Herdr socket path retained by the native app's update context, even in Tern-only mode; it is not evidence of a live Herdr endpoint. Tern-only operation needs neither a Herdr registration nor a socket at that path (nor its parent directory). The shared app supports `--host herdr|tern|both`; this plugin does not introduce a second native application. Tern/Both updates require the signed app and signed helper to support `observation_mode: 1` while retaining protocol 3, and the restarted app's status must match the requested mode.
++`status.herdr_socket` reports the configured Herdr socket path retained by the native app's update context, even in Tern-only mode; it is not evidence of a live Herdr endpoint. Tern-only operation needs neither a Herdr registration nor a socket at that path (nor its parent directory). This plugin does not introduce a second native application. Published v0.3.6 Tern updates require a matching signed app/helper pair supporting `protocol: 3` and `observation_mode: 1`. The unified source's Auto/live-host contract requires capability 2; its updater must preserve the saved/effective host and reject an incompatible target, rather than silently installing a capability-1 app that loses the selected behavior.
+ 
+ `tern plugin link` uses this checkout in place (rather than publishing or copying it). `tern plugin reload` reloads installed plugins in the running daemon; `tern plugin list` reports loading/errors. Run `tern plugin reload` after editing `window.luau`. Open an actual Tern **window** after signing in, with a local agent pane. Plugin execution is window-local, not a daemon-side background poll when there is no window: a headless daemon's plugin catalog alone does not exercise the plugin runtime. Use Tern's command palette entry **Connect to desktop pet** (`connect`) to request an immediate exchange; the plugin also polls about every 1.2 seconds and observes relevant pane/tab/command changes.
+ 
+ ## Configure the window plugin
+ 
+-In the actual Tern window, choose **Configure desktop pet connection** (`configure`) from the command palette. Its three prompts, in order, are:
++In the actual Tern window, choose the desired native base profile first, then **Configure desktop pet connection** (`configure`) from the command palette. For the unified source, copy the actual values shown under native **Connection settings**; for the published isolated example, use the expanded `PET_*` values. Its three prompts, in order, are:
+ 
+-1. **Desktop pet executable (path or command):** enter the full absolute path printed by `printf '%s\n' "$PET_BIN"` in the shell above (not the variable name or app bundle directory). For the source-development alternative, this is `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`.
+-2. **Absolute desktop pet config directory:** the same expanded absolute path as `PET_CONFIG`.
+-3. **Absolute desktop pet state directory:** the same expanded absolute path as `PET_STATE`.
++1. **Desktop pet executable (path or command):** enter the actual executable's full absolute path, for example the value printed by `printf '%s\n' "$PET_BIN"` (not a variable name or app bundle directory). A source build uses `/absolute/path/to/native-checkout/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`.
++2. **Absolute desktop pet config directory:** the selected base profile's actual expanded config path, matching `PET_CONFIG` when using a shell example.
++3. **Absolute desktop pet state directory:** that same base profile's actual expanded state path, matching `PET_STATE`.
+ 
+ The window plugin stores one canonical `tern.kv` key, `connection`, containing `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }`. It validates the entire candidate (version/fields, a nonempty executable, absolute config/state paths, and no NUL bytes), then saves it in **one KV write**, before switching the active profile, resetting the source incarnation, and immediately exchanging. Canceling any prompt, a prompt/validation error, or a failed save leaves the previous saved and active connection intact; no partially entered profile becomes active.
+ 
++After the complete triple validates and saves successfully, choose **Connect to desktop pet** (`connect`) to request an exchange against that route. Configure changes only the saved/active plugin connection, not native files: it does not copy, move, merge, or delete either the old or target profile. An existing separate Tern profile remains available. No uncertain ask is replayed into the newly selected profile.
++
+ Only when `connection` is absent does the plugin adopt the old three keys `executable`, `config_dir`, and `state_dir` together, filling missing values from defaults. This one-time migration validates and commits the canonical object before attempting to remove the legacy keys. Cleanup failure is logged but does not undo the committed object. A malformed existing `connection` is an error, **never** a reason to fall back to old keys; use **Configure desktop pet connection** to repair it.
+ 
+-Defaults, if left unconfigured, are executable `herdr-desktop-pet`, config `${XDG_CONFIG_HOME}/herdr/plugins/config/desktop-pet` or `~/.config/herdr/plugins/config/desktop-pet`, and state `${XDG_STATE_HOME}/herdr/plugins/desktop-pet` or `~/.local/state/herdr/plugins/desktop-pet`. Those default profile paths are **not** the isolated paths above, and a `PATH` binary may be an older app, so explicitly configure all three. The native pet must already be running in that profile; the plugin invokes `tern-exchange` and does not start it.
++Defaults, if left unconfigured, are executable `herdr-desktop-pet`, config `${XDG_CONFIG_HOME}/herdr/plugins/config/desktop-pet` or `~/.config/herdr/plugins/config/desktop-pet`, and state `${XDG_STATE_HOME}/herdr/plugins/desktop-pet` or `~/.local/state/herdr/plugins/desktop-pet`. These are **the native defaults too**, not a mandatory separate Tern profile. An existing saved `connection` is preserved rather than automatically redirected. If choosing another base profile or the optional isolated published example, explicitly configure all three values; also select an absolute executable to avoid an older `PATH` binary. The native pet must already be running in the selected profile with Tern enabled (Auto or Tern in the unified source); the plugin invokes `tern-exchange` and does not start it.
+ 
+ After configuring the complete connection, explicitly run `tern plugin reload` if an earlier error disabled the window's timer hook (for example, an invalid default executable followed by a callback-budget error). Saving the corrected profile or choosing **Connect to desktop pet** does not re-enable a hook that Tern has disabled; it stays disabled until reload. Then check the actual signed-in window, not only the daemon's plugin catalog. The user's existing window login was working in this repair; this is not evidence of a general login or Keychain problem.
+ 

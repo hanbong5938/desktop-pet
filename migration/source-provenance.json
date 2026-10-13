@@ -1,0 +1,341 @@
+{
+  "version": 1,
+  "kind": "independent_core_source_snapshot",
+  "scope": "Snapshot preparation only; not an architecture cutover, release, or publication proof.",
+  "captured_at_utc": "2026-10-13T04:21:33.740837+00:00",
+  "copied_and_compared_at_utc": "2026-10-13T04:22:39.719287+00:00",
+  "source": {
+    "path": "/Users/han/.herdr/worktrees/herdr-pet/worktree-rapid-river-3bc6",
+    "head": "ed1fe248199697b3a61d208f9a42bc741e52a858",
+    "head_reference": "docs/v0.3.6-published",
+    "remotes": "origin\thttps://github.com/hanbong5938/herdr-desktop-pet.git (fetch)\norigin\thttps://github.com/hanbong5938/herdr-desktop-pet.git (push)\n",
+    "git_directory": "/Users/han/workspace/herdr-pet/.git/worktrees/worktree-rapid-river-3bc6",
+    "common_git_directory": "/Users/han/workspace/herdr-pet/.git",
+    "shallow": false,
+    "status": " M docs/cli.md\n M docs/development.ko.md\n M docs/development.md\n M docs/releases/unreleased.md\n M docs/usage.ja.md\n M docs/usage.ko.md\n M docs/usage.md\n M docs/usage.zh-Hans.md\n M integrations/herdr/README.md\n M native/src/app_update.rs\n M native/src/automation_cli.rs\n M native/src/control.rs\n M native/src/daemon.rs\n M native/src/herdr.rs\n M native/src/i18n.rs\n M native/src/i18n/ja.rs\n M native/src/i18n/zh_hans.rs\n M native/src/lifecycle.rs\n M native/src/lifecycle_settings_ui.rs\n M native/src/main.rs\n M native/src/menu_panel.rs\n M native/src/preferences.rs\n M native/src/remote.rs\n M native/src/session_view.rs\n M native/src/sources.rs\n M native/src/state.rs\n M native/src/tern.rs\n M native/src/transport_tests.rs\n M native/src/ui.rs\n M native/src/ui_preferences.rs\n M native/update-coordinator/src/lib.rs\n M native/update-coordinator/src/main.rs\n M native/update-coordinator/src/observation.rs\n M native/update-coordinator/src/origin.rs\n M native/update-coordinator/src/runner.rs\n M readme.ja.md\n M readme.ko.md\n M readme.md\n M readme.zh-Hans.md\n M scripts/install.sh\n M scripts/package-native.ts\n",
+    "refs_sha256": "eb9a098059bb89fd9ff14cd05df7f430ee14502d213827a9712c90619ac6a135",
+    "tracked_path_count": 290,
+    "tracked_content_bytes": 36516977,
+    "changed_path_count": 41,
+    "head_tree_sha256": "185441896a1a1abad1df4aca387f538f4ea65a2d5e39e677110465a704df6313",
+    "index_entries_sha256": "acfbc6b60a9e72995cb595d2c8839a323d591c0a18f4fb503f773cc6e6cc5587",
+    "head_to_working_patch": {
+      "path": "migration/source-snapshot/source-working.patch",
+      "bytes": 616008,
+      "sha256": "3db72c4ad616583f73275ff06d4ce8f0fd10b2991bd604069b50d7bbf13520a7",
+      "command": "git --no-optional-locks diff --binary --full-index --no-ext-diff --no-textconv --no-renames HEAD --"
+    },
+    "head_to_index_patch": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "empty": true
+    },
+    "index_to_working_patch": {
+      "same_as": "head_to_working_patch",
+      "sha256": "3db72c4ad616583f73275ff06d4ce8f0fd10b2991bd604069b50d7bbf13520a7"
+    },
+    "content_manifest": {
+      "path": "migration/source-snapshot/source-content-manifest.json",
+      "sha256": "3e77bda912b43e9a215991da4a13a1472dfc325477b34f8d874d577604544239"
+    },
+    "refs_artifact": "migration/source-snapshot/source-refs.txt",
+    "reachable_commit_count": 134,
+    "head_history_commit_count": 109,
+    "reachable_commit_set_sha256": "8fe5aa5864c9ca29db04cc6cd0f268465f9ea78159d97821c0b6f5e61768e604"
+  },
+  "tern_initial": {
+    "path": "/Users/han/.herdr/worktrees/herdr-pet/tern-desktop-pet",
+    "head": "9a3f0bca4970c2adf69879b4a7a24525fa70f136",
+    "head_reference": "main",
+    "remotes": "origin\thttps://github.com/hanbong5938/tern-desktop-pet.git (fetch)\norigin\thttps://github.com/hanbong5938/tern-desktop-pet.git (push)\n",
+    "git_directory": "/Users/han/.herdr/worktrees/herdr-pet/tern-desktop-pet/.git",
+    "common_git_directory": "/Users/han/.herdr/worktrees/herdr-pet/tern-desktop-pet/.git",
+    "shallow": false,
+    "status": " M README.ko.md\n M README.md\n",
+    "refs_sha256": "0b388d67419ae9254bb8c910875c96c135beac87f9d51af7d293340c144dc073",
+    "changed_path_count": 2,
+    "head_to_working_patch": {
+      "path": "migration/source-snapshot/tern-working.patch",
+      "bytes": 44947,
+      "sha256": "443c12bfa1acae7ef4ccfb25a00e2b3e5e013324b7efe74b3bf44760e5e8fc1b"
+    },
+    "head_to_index_patch": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "empty": true
+    },
+    "content_manifest": {
+      "path": "migration/source-snapshot/tern-content-manifest.json",
+      "sha256": "c72f782e209c0fd43637c7205abd0d7d5af80e2b156f6683e7b14b3b1ba0b8a7"
+    },
+    "native_code_copied_to_core": false
+  },
+  "destination": {
+    "path": "/Users/han/.herdr/worktrees/herdr-pet/desktop-pet",
+    "head": "ed1fe248199697b3a61d208f9a42bc741e52a858",
+    "head_reference": "docs/v0.3.6-published",
+    "origin": "https://github.com/hanbong5938/desktop-pet",
+    "git_database": "Standalone .git directory cloned with --mirror --no-local; no worktree gitfile or object alternates.",
+    "source_remote_refs_preserved": [
+      {
+        "original": "refs/remotes/origin/HEAD",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/HEAD",
+        "oid": "7a8f7cee60ad977ac0b3bd05680a52fc9130a3fa"
+      },
+      {
+        "original": "refs/remotes/origin/buble",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/buble",
+        "oid": "a279b0446c13ae861d1db396f22aca6a9273dafd"
+      },
+      {
+        "original": "refs/remotes/origin/docs/v0.3.3-publication",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/docs/v0.3.3-publication",
+        "oid": "d8bc560f14922370fb5493c5f248442458da472a"
+      },
+      {
+        "original": "refs/remotes/origin/docs/v0.3.5-publication",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/docs/v0.3.5-publication",
+        "oid": "98bca53aede26e62d0da3f0d431487976e22cae2"
+      },
+      {
+        "original": "refs/remotes/origin/docs/v0.3.6-published",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/docs/v0.3.6-published",
+        "oid": "ed1fe248199697b3a61d208f9a42bc741e52a858"
+      },
+      {
+        "original": "refs/remotes/origin/feat/inline-session-replies",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/feat/inline-session-replies",
+        "oid": "09735b242f3f5ce682bccc6267009dbc505fb9d0"
+      },
+      {
+        "original": "refs/remotes/origin/feat/no-applications-install",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/feat/no-applications-install",
+        "oid": "9cb3061eef63a378fe59fb447f289358647e2d3b"
+      },
+      {
+        "original": "refs/remotes/origin/fix/review-0.1.6",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/fix/review-0.1.6",
+        "oid": "b2fd2d4d32c6b937f0486640ba45547a4d8f6a67"
+      },
+      {
+        "original": "refs/remotes/origin/fix/symlinked-executable-resources",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/fix/symlinked-executable-resources",
+        "oid": "5534d0cc0df49e8dd2249ea95b6cc7debb7b0845"
+      },
+      {
+        "original": "refs/remotes/origin/hide-completed-character-summary",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/hide-completed-character-summary",
+        "oid": "f1c866bfc4dbf7d0a7ff90a1850e0eecbde0ed24"
+      },
+      {
+        "original": "refs/remotes/origin/main",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/main",
+        "oid": "7a8f7cee60ad977ac0b3bd05680a52fc9130a3fa"
+      },
+      {
+        "original": "refs/remotes/origin/pages",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/pages",
+        "oid": "81796223034a0af35c3ba46d52cebfa35f810a94"
+      },
+      {
+        "original": "refs/remotes/origin/plugin",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/plugin",
+        "oid": "908e86cbd48ece586bfb07194bf25a4bd732fd74"
+      },
+      {
+        "original": "refs/remotes/origin/release/0.2.1-reference-mesh",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/0.2.1-reference-mesh",
+        "oid": "8a96ef7abd96caef336a378e0097485e9e43603e"
+      },
+      {
+        "original": "refs/remotes/origin/release/0.3.3-beta.1",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/0.3.3-beta.1",
+        "oid": "fc2f7c9d95fc2d1d34d40df83be9d605d1921c51"
+      },
+      {
+        "original": "refs/remotes/origin/release/chaerin-eyes-20261009-JcR34G",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/chaerin-eyes-20261009-JcR34G",
+        "oid": "8ec6ce494034b398f513c39ded205eb03372c41d"
+      },
+      {
+        "original": "refs/remotes/origin/release/v0.3.1",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/v0.3.1",
+        "oid": "71856a0356e5ec5b42043678c3600cfb85a2e43a"
+      },
+      {
+        "original": "refs/remotes/origin/release/v0.3.2",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/v0.3.2",
+        "oid": "e1361b7cd267a4047dfce357b0c3b3220b9f037c"
+      },
+      {
+        "original": "refs/remotes/origin/release/v0.3.3",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/v0.3.3",
+        "oid": "13103f87b33a5c9a85ab4c0f9f43eda29bc1ea54"
+      },
+      {
+        "original": "refs/remotes/origin/release/v0.3.5",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/v0.3.5",
+        "oid": "b3faebb17fa9c50ec14f1e8a0b80a66b403301aa"
+      },
+      {
+        "original": "refs/remotes/origin/release/v0.3.6-fixture",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/release/v0.3.6-fixture",
+        "oid": "73fae2c8229706a09209ded65b693c2cd14d2803"
+      },
+      {
+        "original": "refs/remotes/origin/tern-desktop-pet-integration",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/tern-desktop-pet-integration",
+        "oid": "39c2f62f92fbc5a6c1b32228fbb4ba01fc3f2a3b"
+      },
+      {
+        "original": "refs/remotes/origin/wiki",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/wiki",
+        "oid": "b1cab427f4b0d8fad43c2e77f6ac25b2084baf27"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/brave-cloud-14c8",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/brave-cloud-14c8",
+        "oid": "6dd9eeb3b1edf2785d8f9d24f5ba2329114a34b7"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/brave-forest-6fd8",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/brave-forest-6fd8",
+        "oid": "6e1c05e6f7d7c3aa9a89a3317e02f85eb8695f61"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/brave-harbor-df60",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/brave-harbor-df60",
+        "oid": "cf1db14f98867ae8d7ad81345575201c8cf67fe6"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/calm-meadow-dd69",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/calm-meadow-dd69",
+        "oid": "9e6a86eb819156b2a9ff1be9210e7ec4d204310b"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/calm-river-5301",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/calm-river-5301",
+        "oid": "63cbbaaed3d53f7d7ba5a3b7c6e01e59f5ad49f8"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/clear-field-94d2",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/clear-field-94d2",
+        "oid": "e13633ebfdfa9713d1dd51065ae40e1852c09e00"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/clear-forest-f39a",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/clear-forest-f39a",
+        "oid": "aff53d4c3f0caf5a841b7bbef38bb0672f30bb6c"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/clear-harbor-2a22",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/clear-harbor-2a22",
+        "oid": "ffaaaeb761e1e55f3f99ec4ff8d8d66e0e659842"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/lucky-forest-091c",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/lucky-forest-091c",
+        "oid": "e0973692805e413654ca44fc07ad2efe0869a670"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/lucky-river-6244",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/lucky-river-6244",
+        "oid": "e1bfc7d7ffc54dbaf3bcbf231f28c19bf540acfc"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/lucky-stone-3434",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/lucky-stone-3434",
+        "oid": "ca5af1aaeefdacc81c4a6bc71dc4a61d95bc13f9"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/lucky-valley-45bc",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/lucky-valley-45bc",
+        "oid": "38b63f9e5b929ca89e2c6b013c6675327c803c7d"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/quiet-forest-6a1d",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/quiet-forest-6a1d",
+        "oid": "41591fb11fd212b27f487018edc6a39fdbf2c232"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/rapid-field-4856",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/rapid-field-4856",
+        "oid": "24dd51db0d1f35ee06a74eb15f6a5d1f64c56df1"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/rapid-harbor-d2a6",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/rapid-harbor-d2a6",
+        "oid": "810a450cd9d60c999bc4d5df8b649322f61bedca"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/rapid-harbor-e566",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/rapid-harbor-e566",
+        "oid": "743bda1aa44838fe68eb660243701641eb3b2cb3"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/rapid-harbor-ece6",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/rapid-harbor-ece6",
+        "oid": "fd9f3be3d32e16c9fee0af855f1d54a17daf9c6f"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/rapid-river-3346",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/rapid-river-3346",
+        "oid": "59dcf90d28173fe54d52cfeaebf321eaeaa852d0"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/silver-field-f2d7",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/silver-field-f2d7",
+        "oid": "bf361d32da0e03750ed10ad0a6068e0db75c96b0"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/silver-forest-c25f",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/silver-forest-c25f",
+        "oid": "9cbe43738a5052ff8dd38d55b02dec59e329cb60"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/silver-harbor-6e67",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/silver-harbor-6e67",
+        "oid": "0f0a6b3131a73eb2b19bf0fc822901dfac4eb2a1"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/silver-harbor-7027",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/silver-harbor-7027",
+        "oid": "22326b386f7828aa1122f6babfd4886ca840be9f"
+      },
+      {
+        "original": "refs/remotes/origin/worktree/silver-river-8807",
+        "archived": "refs/migration-source/herdr-desktop-pet/remotes/origin/worktree/silver-river-8807",
+        "oid": "e758cfb7f42360a24dcd1c3709a0562588050de7"
+      }
+    ],
+    "reachable_commit_set_matches_source": true,
+    "copied_content_sha256": "3e77bda912b43e9a215991da4a13a1472dfc325477b34f8d874d577604544239",
+    "content_digest_excludes": "New migration provenance artifacts and later implementation changes; applies only to the source tracked path set.",
+    "copy_method": "NUL-delimited tracked HEAD/index union archived directly from working tree with tar --no-recursion --no-xattrs; absent tracked paths remain absent. git read-tree set the new core index to the original HEAD without rewriting working bytes.",
+    "generated_artifacts": "No untracked or ignored files copied; no tracked node_modules, target, dist, or __pycache__ paths existed.",
+    "staging": "Original had no staged changes; core baseline dirty working files remain uncommitted."
+  },
+  "race_detection": {
+    "source_identity_changed": false,
+    "source_patch_changed": false,
+    "source_index_changed": false,
+    "source_head_tree_changed": false,
+    "source_manifest_changed": false,
+    "tern_identity_changed": false,
+    "tern_patch_changed": false,
+    "tern_manifest_changed": false,
+    "source_manifest_read_races": [],
+    "tern_manifest_read_races": [],
+    "core_manifest_read_races": [],
+    "core_manifest_matches_source": true
+  },
+  "integrity": {
+    "manifest_format": "UTF-8 JSON array, entries sorted by path, object keys sorted, separators comma/colon without whitespace, trailing newline; SHA-256 of exact manifest bytes.",
+    "manifest_entry_semantics": "Path, file/symlink/missing kind, byte length and SHA-256, file executable bit or symlink target. Tar retained working file permissions and bytes.",
+    "history_digest_format": "Unique reachable commit object IDs sorted bytewise, one per line, trailing newline.",
+    "originals_modified": false,
+    "commit_created": false,
+    "pushed": false,
+    "builds_tests_linters_formatters_run": false
+  }
+}

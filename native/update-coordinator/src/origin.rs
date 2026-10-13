@@ -2137,7 +2137,7 @@ mod tests {
         };
         assert!(context_valid(&context).is_ok());
         let default_context = context.clone();
-        for mode in ["herdr", "tern", "both"] {
+        for mode in ["herdr", "tern", "auto"] {
             context
                 .environment
                 .insert(OBSERVATION_MODE_ENV.into(), mode.into());
@@ -2154,6 +2154,19 @@ mod tests {
                 assert_ne!(retained, default_context);
             }
         }
+        let mut legacy = serde_json::to_value(&default_context).unwrap();
+        legacy["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
+        let migrated: UpdateContext = serde_json::from_value(legacy).unwrap();
+        assert!(context_valid(&migrated).is_ok());
+        assert_eq!(
+            migrated.observation_mode().unwrap(),
+            crate::ObservationMode::Both
+        );
+        assert_eq!(migrated.environment[OBSERVATION_MODE_ENV], "auto");
+        assert_eq!(
+            serde_json::to_value(&migrated).unwrap()["environment"][OBSERVATION_MODE_ENV],
+            "auto"
+        );
         context
             .environment
             .insert(OBSERVATION_MODE_ENV.into(), "TERN".into());

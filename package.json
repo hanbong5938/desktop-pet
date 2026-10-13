@@ -1,15 +1,15 @@
 {
-  "name": "herdr-desktop-pet",
-  "version": "0.3.6",
+  "name": "desktop-pet",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Native desktop character companion for Herdr",
+  "description": "Native desktop character companion",
   "scripts": {
     "check": "tsc --noEmit",
-    "build:native": "set --; if [ -n \"${HERDR_PET_CARGO_TARGET:-}\" ]; then set -- --target \"$HERDR_PET_CARGO_TARGET\"; fi; cargo build --release --locked --target-dir native/target \"$@\" --manifest-path native/Cargo.toml && cargo build --release --locked --target-dir native/target \"$@\" --manifest-path native/update-coordinator/Cargo.toml",
-    "test:native": "cargo test --manifest-path native/Cargo.toml",
+    "build:native": "set --; if [ -n \"${DESKTOP_PET_CARGO_TARGET:-}\" ]; then set -- --target \"$DESKTOP_PET_CARGO_TARGET\"; fi; cargo build --release --locked --workspace --target-dir native/target \"$@\" --manifest-path native/Cargo.toml",
+    "test:native": "cargo test --locked --workspace --manifest-path native/Cargo.toml",
     "package:native": "bun scripts/package-native.ts",
-    "install:local": "bash scripts/install.sh --local-build"
+    "install:local": "bash scripts/install.sh --source"
   },
   "devDependencies": {
     "@types/bun": "^1.2.20",

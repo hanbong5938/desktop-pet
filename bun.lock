@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "omp-pet",
+      "name": "desktop-pet",
       "dependencies": {
         "mdast-util-from-markdown": "^2.1.0",
         "micromark-core-commonmark": "^2.0.4",

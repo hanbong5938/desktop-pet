@@ -1,5 +1,5 @@
 //! Real AppKit composer geometry regression, executed by Cargo without libtest's worker threads.
-#[path = "../src/composer_layout.rs"]
+#[path = "../core/src/composer_layout.rs"]
 mod composer_layout;
 
 use composer_layout::{
