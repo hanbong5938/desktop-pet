@@ -1,7 +1,7 @@
 //! Retained incoming preference ownership/CAS/delivery race tests, generalized
 //! from one optional field to the common preference snapshot protocol.
 use super::*;
-use crate::automation::{lock_automation, new_automation, PresentationTarget};
+use crate::automation::lock_automation;
 use crate::preferences::{PreferencePatch, Preferences};
 use crate::state::AppState;
 use std::fs::Permissions;
