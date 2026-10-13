@@ -4,9 +4,29 @@
 
 [v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 是已公开的最新稳定版，公开 arm64 资产、校验和与更新的稳定 Homebrew 配方已验证。匹配的应用／辅助程序报告 `protocol: 3` 和 `observation_mode: 1`。历史 v0.3.5 和 beta 资产保持不变。
 
+## 统一连接设置（仅源码检出）
+
+当前源码增加单一的 **连接 → 主机**下拉菜单：**自动(Auto) / Herdr / Tern**。**已公开的 v0.3.6 预构建包不包含此功能**。显式运行 `bash scripts/install.sh --source` 构建后，此源码应用／辅助程序通过 `update-capabilities` 报告 `protocol: 3`、`observation_mode: 2`。仅构建并不能满足当前插件的安装要求，请参阅下方兼容性前提。历史 Homebrew／预构建示例使用旧启动时宿主契约和当时匹配的插件。
+
+**自动同时观察 Herdr 与 Tern 的实际连接**，不是按优先级选择或故障回退。仅已安装不代表已连接。每个提供方分别显示基于实际连接的 **已连接 / 等待连接 / 已禁用**；即使标题／路径相同也不合并来源。新配置档默认 Auto；已有偏好没有宿主字段时保留 Herdr，已有保存选择也保留。源码启动优先级为显式 `--host auto|herdr|tern` → 显式 `HERDR_PET_OBSERVATION_MODE` → 已保存的 `observation.host` → 新配置的 Auto。旧 `both` 仅作为读取迁移输入，保存／输出为 `auto`。
+
+修改会**先保存，再即时应用到同一运行实例**；保存失败保留原选择／运行状态，切换宿主无需停止／重启。延迟快照不能恢复已禁用来源，排队回复不会悄悄在另一提供方重放。源码 CLI 使用同一偏好：
+
+```sh
+herdr-desktop-pet preferences set --observation-host auto
+herdr-desktop-pet preferences get
+herdr-desktop-pet status
+```
+
+使用运行中源码宠物的同一可执行文件、配置／状态路径；单一提供方改存 `herdr` 或 `tern`。源码读取／`status` 无需重复 `--host`；显式以不兼容宿主启动会报错，而非修改现有守护进程。重启／更新保留当前选择模式。
+
+**观察范围 / 连接设置 / 诊断**默认折叠。范围中的本地／远程／保存设备设置**仅针对 Herdr**；Tern 专用隐藏这些控件而不删除保存选择，切回后恢复。这些设置不限制 Tern 观察：启用 Tern 后，即使 Herdr 本地和远程均关闭，也自动观察所有已连接的 Tern 本地／远程主机，没有额外的 Tern 主机选择 UI。连接设置显示可选择复制的实际可执行文件、配置／状态路径、控制套接字，以及相关模式的 Herdr 后端套接字／Tern 连接说明。原始错误放在诊断中，不当作已连接证据。
+
+**应用启动**中的自动启动明确仅针对 Herdr；**没有 Tern 自动启动**。随 Herdr 断连退出只在 Herdr 专用模式可用。Auto/Tern 不因宿主断连或 Herdr 禁用／解绑而退出；Tern 专用不进行 Herdr 后端 I/O、注册或退出处理。下方详细 Herdr 退出规则仅用于 Herdr 专用及公开预构建包的 Herdr 启动。
+
 ## 首次运行：本地宿主或独立宠物
 
-使用下面的稳定配方安装公开预构建包，无需 Rust/Cargo、Bun、Node.js 或源码检出。已有 Brew 用户请使用下方升级命令。现有配置档与偏好设置会保留。 升级前运行 `herdr-desktop-pet stop`，再运行 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`，随后显式 `start` 与 `status`。
+本节首次运行命令及独立运行退出设置描述默认 Herdr、启动时选模式的**公开 v0.3.6 预构建包**。源码专用 Auto／即时切换见[统一连接设置](#统一连接设置仅源码检出)。使用下面的稳定配方安装公开预构建包，无需 Rust/Cargo、Bun、Node.js 或源码检出。已有 Brew 用户请使用下方升级命令。现有配置档与偏好设置会保留。升级前运行 `herdr-desktop-pet stop`，再运行 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`，随后显式 `start` 与 `status`。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -31,12 +51,15 @@ herdr-desktop-pet start
 herdr-desktop-pet status
 ```
 
-启动**后**可选用 `herdr-desktop-pet hide_bubble` 保留角色而不显示空气泡；无需安装 Herdr 或插件。若宠物约 30 秒后消失，检查 `settings get` 和 `status`：新配置默认开启 `exit_with_herdr`，无健康服务器时经过宽限期便退出。在同一配置/状态配置档中关闭后重启。所有已登记本地插件端点确认禁用/解绑后，即使此开关关闭也会退出。远程观察是[单独的可选途径](#观察来源)；托管的 attach 自动启动需要[已打补丁的宿主集成（英文）](../integrations/herdr/README.md#build-in-separate-checkouts)。
+启动**后**可选用 `herdr-desktop-pet hide_bubble` 保留角色而不显示空气泡；无需安装 Herdr 或插件。在公开预构建包的 Herdr 模式或源码 Herdr 专用模式中，若宠物约 30 秒后消失，检查 `settings get` 和 `status`：新配置默认开启 `exit_with_herdr`，无健康服务器时经过宽限期便退出。在同一配置／状态配置档中关闭后重启。Herdr 专用中，所有已登记本地插件端点确认禁用／解绑后，即使此开关关闭也会退出；源码 Auto/Tern 不使用此 Herdr 退出规则。远程观察是[单独的可选途径](#观察来源)；托管的 attach 自动启动需要[已打补丁的宿主集成（英文）](../integrations/herdr/README.md#build-in-separate-checkouts)。
 
 
-## Tern 安装与独立配置档
+<a id="tern-安装与独立配置档"></a>
+## Tern 安装与配置档选择
 
-先安装原生应用，再显式安装独立的公开插件。插件不会下载、构建或启动应用。
+先安装原生应用，再显式安装独立插件。插件不会下载、构建或启动应用。下方是使用旧启动时宿主参数和当时匹配插件的**历史公开 v0.3.6 本地专用 Tern**的**可选独立配置档**示例。它记录发布时的路径，不表示兼容当前插件仓库 HEAD。当时路径无需 Rust／源码检出。`desktop-pet-tern` 独立路径不是必需默认值。
+
+**当前源码兼容性前提：**多主机观察需要成对的 exchange-v2 生产端与原生消费端（`hosts` 数组），没有 v1 回退。当前中立插件安装策略要求已签名的 `DesktopPet.app/Contents/MacOS/desktop-pet`、匹配的中立辅助程序、`integration_api: 1`、`protocol: 4` 和 `observation_mode: 2`。此原生检出仍打包 `HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`，报告 updater `protocol: 3`、模式 `2`，未提供该安装集成 API。因此匹配的实际安装**受阻**，并未得到证明；不要绕过插件检查。真实远程 SDK 代理支持、公开发布、完整端到端及视觉验收仍未验证。
 
 ```sh
 brew install hanbong5938/tap/herdr-desktop-pet
@@ -50,13 +73,27 @@ PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
 "$PET" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 ```
 
-默认宿主仍为 Herdr。`--host tern` 无需 Herdr 服务器、套接字或插件。在实际 Tern 窗口中用 **Configure desktop pet connection** 设置绝对可执行文件 `PET` 以及上述配置和状态两个路径，再用 **Connect to desktop pet** 连接。输入实际路径，不是变量名。检查窗口连接和同一配置档的原生 `status`；发现插件不等于已连接。更换程序或模式前先停止同一配置档。源码开发仍为可选：在当前检出运行 `bash scripts/install.sh --source`，设置 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`，无需特殊分支。应用／辅助程序必须匹配 protocol 3，附加 JSON 能力为 `protocol: 3` 和 `observation_mode: 1`。英语、韩语、简体中文、日语均保留。**接收测试版更新**默认关闭，需主动选择；检查不会安装或重启。
+公开 v0.3.6 二进制默认宿主仍为 Herdr。`--host tern` 无需 Herdr 服务器、套接字或插件。在实际 Tern 窗口中用 **Configure desktop pet connection** 设置绝对可执行文件 `PET` 以及上述配置和状态两个路径，再用 **Connect to desktop pet** 连接。输入实际路径，不是变量名。检查窗口连接和同一配置档的原生 `status`；发现插件不等于已连接。更换程序或旧程序的启动模式前先停止同一配置档。基本 Tern 路线不要求源码开发，但[统一连接功能](#统一连接设置仅源码检出)需要：运行 `bash scripts/install.sh --source`，使用 `PET="$PWD/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"`。公开 v0.3.6 的能力为 `observation_mode: 1`，当前源码应用／辅助程序为 `2`，两者均为 updater `protocol: 3`。英语、韩语、简体中文、日语均保留。**接收测试版更新**默认关闭，需主动选择；检查不会安装或重启。
+
+上述源码可执行文件路径标识此检出的构建产物，**不是当前中立插件接受的安装**。下方源码连接／配置档说明须满足前述匹配安装前提；仅源码构建或路径一致不能解决差异。
+
+**共享默认值与安全选择已有基础配置档：**新 Tern 连接采用与原生相同的 `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/desktop-pet` 和 `${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/desktop-pet`。已有独立 Tern 配置档不自动修改、合并、移动、覆盖或删除。若在源码中明确共享所选的**已有基础配置档**，打开该宠物的 **连接 → 连接设置**，复制实际可执行文件／配置／状态值，将三者一起填入 Tern 现有 **Configure desktop pet connection**，再执行 **Connect to desktop pet**。基础宠物应已以 Auto 或 Tern 运行。这里只改插件保存的连接目标，不改两边配置文件；保留原配置供可选独立使用。三值一起验证并原子保存后才切换活动连接，取消／验证／保存失败保留旧连接。旧连接延迟回调不会作用于新连接；切换后不要重放不确定的排队提示。
+
+**当前源码**同时观察用 **自动(Auto)** 或 `preferences set --observation-host auto`，切到 Herdr/Tern 也无需停止。实际 Herdr 卡片需要健康服务器，但 Tern 连接／Auto 启动不需要；`--socket PATH` 只选择 Herdr 后端。源码读取／`status` 使用匹配配置路径，不重复宿主参数。**仅公开 v0.3.6 等旧 capability-1 二进制**要求切模式时停止／启动，并在命令中沿用启动宿主参数。注入的 `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR` 优先于 CLI 路径参数；明确手动操作前解除或对齐，两路径都放在可变应用安装目录之外。
+
+**当前源码 exchange-v2 观察：**窗口 VM 自动收集所有已连接 Tern 本地／远程主机的代理，与 Herdr 范围及保存设备无关。卡片显示主机名及**本地 / 远程**标签。主机标识区分同一 pane 上不同主机的代理，改名后仍保持。各主机观察生命周期独立，五秒没有新快照即变为**离线**；某一主机失败／过期不会使其他主机离线，保留卡片不代表实时状态。不保证未观察到的传输重连的代际边界。插件通过 `tern.process.run` 向本地私有控制套接字上的 `tern-exchange` 发送有界 `hosts` 快照；`--socket` 仍只用于 Herdr 后端。上限为64主机、每主机128代理、共享64来源、64父项；请求256 KiB、含 LF 的响应512 KiB、主机错误512字节。
+
+**当前源码的 Tern 离线保留（尚未发布）：**失联后，缓存卡片在单调时钟计时的30秒宽限期内保持离线／未知。自然过期从最后新鲜快照加五秒起算；明确断连、不可用、完整清单中遗漏或 epoch 切换从首次有效观察到失联起算。重复失联报告或其他主机的 heartbeat 不延长期限。宽限期结束后的下一次维护 tick 无需新窗口就移除来源、卡片、汇总计数和注册表子项；空的离线来源也会移除，但健康可用且没有代理的主机仍保持连接。移除前接受一致的恢复快照会清除计时；若先移除，旧绑定请求以 `SourceRetired` 拒绝，旧会话键／游标仍无效。移除远程子项保留存活父项的绑定以及本地观察／待处理工作。共享64来源的容量紧张时，可在待处理工作结算后早于宽限期回收离线 Tern 来源，但不驱逐存活来源或 Herdr 来源，也不复用已退役 ID。存活来源／Herdr 来源不按 TTL 移除；Herdr 独立的离线保留策略和公开 v0.3.6 行为均不变。
+
+远程 Tern 卡片为**只读**，没有回复框或发送按钮，也不生成 `agents:ask` 命令。本地回复保留：插件重新核对本地主机和 pane 后仅调用一次语义 `agents:ask`。不使用 shell／PTY 输入、不静默重试、不删除 Tern 工作树。提交 ACK 与后续 `prompt_accepted` 不同；接受的消息仍可能排队，`committed: false`，不代表完成。`idle` 不是成功证明。交换过期／失败或结果未知时，不假定成功或盲目重发。Herdr 远程卡片也保持只读。
+
+安装／链接／列表不能证明实际窗口已连接；命令缺失或旧代码时显式重载该窗口的插件。不正确路径曾触发 Tern 50 ms 回调限制时，修正三项连接值后仍需显式重载，钩子可能在重载前保持禁用。回复结果不确定时先检查实际对话记录，再决定是否手动重发。
 
 ## 操作
 
 | 操作 | 效果 |
 | --- | --- |
-| 左键点击菜单栏图标、键盘激活或 AXPress | 打开已有的三标签设置面板（角色、观察来源、气泡/设置）；再次左键将同一面板置前，不关闭也不重置标签。使用兼容 macOS 13 的现行系统 API 请求激活，但系统不保证键盘焦点转移。 |
+| 左键点击菜单栏图标、键盘激活或 AXPress | 打开三标签设置面板（角色、观察来源、气泡／设置）；源码的观察标签包含统一连接设置。再次左键将同一面板置前，不关闭也不重置标签。使用兼容 macOS 13 的现行系统 API 请求激活，但系统不保证键盘焦点转移。 |
 | 右键/Control-点击菜单栏图标 | 先隐藏面板再打开原生**设置…**、**退出**及必要时的**显示并启用角色**菜单。 |
 | 点击头部/身体、在头部往复移动 | 触发反应、抚摸角色。 |
 | 拖动角色身体/背景、按 Option 拖动角色窗口；右下角把手 | 移动或调整角色大小。 |
@@ -78,6 +115,7 @@ PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
 ## 会话搜索和排序
 
 卡片优先采用观察到的终端标题，再用命名标签，最后用工作区/目录上下文；无名称有明确回退，重复名称显示区分标记。悬停查看完整标题、工作目录和内部 ID。标题变化保留选择/滚动；断线卡片保留最后标题并显示**离线**。
+当前源码的 Tern 卡片仅在上述离线宽限期内保留最后标题，随后与来源一起消失。
 
 **搜索**去除两端空白，对标题、标签/工作区、代理、来源显示名、完整工作目录或备用名做不区分大小写的子串匹配，不搜索 ID 或套接字路径。搜索与**状态**筛选相交，不改变整体观察状态或反应。**排序**可选**稳定**（原顺序）、**名称**、**来源**，分隔线下另有独立的**运行中优先**；所有纳入来源的运行中会话靠前，组内按所选顺序排列。关闭的菜单和辅助功能值都包含两项选择，并非按全部状态排序。GUI 在筛选/排序**后**最多展示 128 张卡片并报告省略数；CLI `sessions list --limit` 是**分页大小**，不是总行上限（[CLI，英文](cli.md#sessions-and-agent-prompt)）。
 
@@ -89,7 +127,7 @@ PET_STATE="$HOME/.local/state/herdr/plugins/desktop-pet-tern"
 
 IME 组合时选择、筛选变化和结构性行替换等待，不丢失标记文本；取消标记后应用最新筛选及仍可见有效的选择。已提交文本始终属于原会话和连接代次，实时状态/发送资格仍更新。输入框有清晰边框和来自配色的非透明背景；紧凑原生发送按钮随资格变化，改主题保留草稿/预编辑。
 
-传递**仅使用**所选本地 Herdr 来源的 `agent.prompt` API，不调用全局 CLI、shell、SSH 或原始 pane 输入。排除本地观察、离线来源、过期/未就绪会话或不支持的服务器都会禁用发送；`unsupported_method` 会报告错误，不采取绕过措施。保留的远程卡片亦不能发送。审批/提问请在真实终端处理。`agent.prompt` 已在 Herdr 0.9.2 验证；本地观察最低 0.9.0 并不证明运行的服务器支持它。提交 ACK **不是**代理完成；不自动重试，不确定时先核实再手动重发。API 发送给当前 pane 占用者，没有原子预期会话保护，瞬间更换占用者/会话仍可能发生。自动化参阅[CLI 会话身份和发送（英文）](cli.md#sessions-and-agent-prompt)，它不是 GUI 回退。
+Herdr 卡片传递**仅使用**所选本地 Herdr 来源的 `agent.prompt` API；Tern 卡片使用上文的单次 `agents:ask`，不回退 Herdr。不调用全局 CLI、shell、SSH 或原始 pane 输入。排除本地观察、离线来源、过期／未就绪会话或不支持的服务器都会禁用发送；`unsupported_method` 会报告错误，不采取绕过措施。保留的远程卡片亦不能发送。审批／提问请在真实终端处理。`agent.prompt` 已在 Herdr 0.9.2 验证；本地观察最低 0.9.0 并不证明运行的服务器支持它。提交 ACK **不是**代理完成；不自动重试，不确定时先核实再手动重发。API 发送给当前 pane 占用者，没有原子预期会话保护，瞬间更换占用者／会话仍可能发生。自动化参阅[CLI 会话身份和发送（英文）](cli.md#sessions-and-agent-prompt)，它不是 GUI 回退。
 
 ## 可见性与菜单栏恢复
 
@@ -112,6 +150,8 @@ IME 组合时选择、筛选变化和结构性行替换等待，不丢失标记�
 仅仍在线、连贯、本地且拥有明确有效关联工作树元数据的来源符合条件；主根目录、远程/保留/离线卡片、缺失/错误元数据及不支持它的旧服务器都不符合。不支持 `worktree.remove` 时报告错误，不调用 Git/shell/SSH 强删。活跃 IME 禁用删除，提交前还会复查。一次只允许一项操作并冻结选中目标；确认后按新快照复查，只发送一次 `worktree.remove` 且 `force: false`，不重试或乐观删行。脏的受跟踪/未跟踪文件或锁可导致服务器拒绝，但被忽略文件**仍可能被删除**。可见行由 5 秒 watcher 刷新；选择/行/窗口变化后反馈仍在。不确定写入结果必须**先独立检查服务器与工作树**，再考虑手动重试。请求指定 `workspace_id`，没有原子的预期检出/代次 CAS；客户端复查不能消除重启/重绑定竞态。[CLI 检查与令牌契约（英文）](cli.md#worktree-removal)增加 60 秒一次性已检查目标，并区分上游 ACK、随后观察 pane/会话消失与实际文件系统证明；切勿拿正在使用的检出试验。历史 beta 观察不是稳定版真实输入认证（[记录，英文](releases/unreleased.md)）。
 
 ## 气泡和角色设置
+
+源码中无附加参数的原生 `settings` 与 Herdr 插件 Settings 操作也打开同一统一设置标签，不再打开单独生命周期窗口。离线时按保存配置启动、保留隐藏状态及可选 `--assets` 见[设置入口](#生命周期与插件操作)。
 
 通过菜单栏面板或上下文**设置…**进入。原生下拉菜单可选择气泡主题与 UI 语言：**系统**按 macOS 首选语言顺序解析；直接覆盖可选韩语（`ko`）、英语（`en`）、简体中文（`zh-Hans`）、日语（`ja`）。系统语言识别日语和简体中文（`zh`、`zh-Hans`、`zh-CN`、`zh-SG`）；显式繁体（`zh-Hant`、`zh-TW`、`zh-HK`、`zh-MO`）不会映射为简体，而是继续查找下一种支持语言，最终回退英语。保存的规范语言值只有 `system`、`ko`、`en`、`zh-Hans`、`ja`。主题/语言即时保存，自定义颜色需点**应用颜色**。窗口打开时安静的颜色冲突检查只更新控件资格/标签，不改草稿、色块、焦点、选择和撤销；关窗停止。原生下拉菜单、滚动条或拖动跟踪期间推迟气泡显示/位置变化，结束后应用最新设置/状态。
 
@@ -141,7 +181,11 @@ Rubelia（`default@0`）是**唯一内置角色**；可选 PNG/rig 与服装包�
 
 ## 观察来源
 
-远程观察首次出现在 v0.1.6；稳定版 v0.2.0 加入精简观察设置、只复制的重连命令，并修复独立远程模式 watcher 启动。**设置 → 观察来源**中，**此 Mac** 默认开，**远程机器**默认关。远程使用前在**交互式终端**按 [Herdr 保存机器指南（英文）](https://herdr.dev/docs/0.9.2/connecting-machines/)添加并认证 SSH 机器（例如 `herdr machine add workbox`），完成任何被要求的远程服务器安装；再启用远程机器并在**要观察的机器**中明确选择已启用配置。一个配置只观察**一个保存的远程 Herdr 会话**，不是整个主机；注册/attach 本身不会选中。宠物应在显示桌面的**本地 Mac**上运行，兼容的远程 Herdr 服务器**无需**宠物应用/插件；本地 CLI 轮询选中远程配置。
+本节的范围、开关、保存设备轮询及“全部来源关闭”行为**仅描述 Herdr 观察**。当前源码展开默认折叠的 **连接 → 观察范围**；公开 v0.3.6 使用 **设置 → 观察来源**。Herdr 远程观察用于 Auto/Herdr；Tern 专用隐藏这些 Herdr 控件但保留保存选择。启用 Tern 时，本地／远程观察始终独立自动进行；关闭 Herdr 两个范围不会关闭 Tern 卡片、计数或反应。
+
+远程观察首次出现在 v0.1.6；稳定版 v0.2.0 加入精简观察设置、只复制的重连命令，并修复独立远程模式 watcher 启动。本地**此 Mac**默认开，**远程机器**默认关。远程使用前在**交互式终端**按 [Herdr 保存机器指南（英文）](https://herdr.dev/docs/0.9.2/connecting-machines/)添加并认证 SSH 机器（例如 `herdr machine add workbox`），完成任何被要求的远程服务器安装；再启用远程机器并在**要观察的机器**中明确选择已启用配置。一个配置只观察**一个保存的远程 Herdr 会话**，不是整个主机；注册/attach 本身不会选中。宠物应在显示桌面的**本地 Mac**上运行，兼容的远程 Herdr 服务器**无需**宠物应用/插件；本地 CLI 轮询选中远程配置。
+
+下文的 30 秒退出规避与确认禁用退出只适用于 **Herdr 专用模式**（包括公开预构建包的 Herdr 启动）。源码 Auto 不需要此规避设置。
 
 远程独立运行且无健康本地服务器时，可在**首次启动前**用已安装原生 CLI 执行 `herdr-desktop-pet settings set exit_with_herdr off`，避免配置过程中 30 秒生命周期退出；远程轮询健康后可再开启。该设置不要求远程插件或 Herdr 插件操作。关闭**此 Mac**会排除本地卡片，但**不会**注销本地生命周期端点或覆盖确认禁用后的退出。保存机器目录即使远程关闭也每 **5 秒**刷新；启用的已选配置在远程开启时每 **5 秒**轮询。选择跨重启和远程关闭保留；改名仍保留，禁用/删除配置则排除它而不终止进程。本地与各远程来源即使会话 ID 相同也有独立标签/身份。
 
@@ -151,13 +195,17 @@ Rubelia（`default@0`）是**唯一内置角色**；可选 PNG/rig 与服装包�
 
 ## 生命周期与插件操作
 
+源码卡片名为 **应用启动**。自动启动仅针对 Herdr，没有 Tern 自动启动；退出开关仅在 **主机 = Herdr** 可用。下方端点／退出规则只用于 Herdr 专用。Auto/Tern 不因 Herdr 断连、禁用／解绑退出，并保留设置供以后切回 Herdr。
+
 设置有分别控制**Herdr 启动时自动启动**（`auto_start`）和**所有 Herdr 服务器断连时退出**（`exit_with_herdr`）的开关，新配置都默认开。旧 `lifecycle.json` 布尔值 `enabled`（包括 false）迁移为 `auto_start`；已有配置缺少 `exit_with_herdr` 时默认关以保留旧独立运行行为。两者仅存于 `lifecycle.json` 而非 `preferences.json`；端点、启动元数据和无关字段保留。坏 JSON/值报错，不重置默认值；保存失败保留开关/运行策略并报告。
 
 自动启动开启时，服务器启动或**成功的 shell/终端客户端 attach** 会启动缺席的宠物；关闭时自动 `ensure` 对缺席宠物报告成功跳过，可登记已有进程的端点，绝不显示已隐藏的宠物。手动 `start` 在自动启动关闭时仍可用，不改变设置。`stop`/原生**退出**结束本次运行（包括待处理启动）；`restart` 手动启动，保留设置/位置/缩放。自动启动仍开启则下次合格事件可重启；想阻止就关闭开关。Herdr 插件禁用/解绑是**独立宿主操作**，不是首选项。原版 Herdr 0.9.0/0.9.3 **没有** `client.attached` 实现，需给官方 0.9.3 安装随附补丁，或使用真正支持该钩子的未来宿主版本。未知钩子的 link 警告不代表成功，按[宿主集成（英文）](../integrations/herdr/README.md)操作。
 
 在**新**本地端点上，有效 `plugin_list` 缺少 `desktop-pet` 表示未安装，**不是**禁用；仍可观察本地快照/选中远程配置。显式 `enabled: false` 解绑端点。本守护进程一旦在端点观察到已启用**或禁用**的条目，之后缺失表示观察到解绑；该记忆跨检查/重连但新守护进程会清除。**所有已登记本地端点**确认禁用/解绑时**立即**退出，即使远程健康或 `exit_with_herdr` 关闭；最初就缺失不算。否则退出开关开启时，失去**最后一个健康服务器连接**（包括初始无法连接）提供 **30 秒**恢复窗口。客户端 detach 不是服务器断线；过期端点/失败重试不延长窗口。关闭退出开关取消倒计时；断线时再开启会从头计时 30 秒。另有健康连接则保持运行；退出关闭时手动启动的宠物可无 Herdr 运行。切换自动启动不停止/显示当前宠物；`show`/`hide`/`toggle` 仅改可见性。
 
-针对运行且启用的 Herdr 宿主，可用 `herdr plugin action invoke status --plugin desktop-pet`，`settings`、`restart`、`stop` 也采用相同 action-invoke 形式。全局 `settings` 即使宠物停止也只打开**生命周期设置**，但依赖宿主。原生可执行文件在无宿主时可执行 `settings`、`settings get`、`settings set auto_start off`、`settings set exit_with_herdr on`；get/set 返回结构化 JSON；set 只接受两个键与准确的 `on|off`，不启动宠物，拒绝无效输入/保存失败且不重置其他设置；`status` 报告两项。其他 action ID 有生命周期 `start`、`ensure`、`stop`、`restart`、`status`、`settings`；可见性 `show`、`hide`、`toggle`；`passthrough`、`alpha_passthrough`；气泡 `show_bubble`、`hide_bubble`、`bubble_above|below|left|right|auto`；几何 `reset`、`bigger`、`smaller`。[原生自动化契约（英文）](cli.md#english)区分命令式操作、绝对表示/首选项、私有套接字及各操作类别状态恢复；没有公开 `orchestrate` 或 HTTP 服务。
+针对运行且启用的 Herdr 宿主，可用 `herdr plugin action invoke status --plugin desktop-pet`，`settings`、`restart`、`stop` 也采用相同 action-invoke 形式。**当前源码：**无附加参数的原生 `herdr-desktop-pet settings` 与现有 Herdr 插件 Settings 操作打开**同一统一设置标签**，不再使用单独的生命周期窗口。宠物停止时，显式 `settings` 以所选配置档保存的宿主启动，同时保留角色／气泡的隐藏状态；源码离线 `settings` 也可接受 `--assets PATH`。请使用匹配的配置／状态路径。原生入口无需 Herdr 宿主，插件操作仍需该宿主。**公开 v0.3.6** 保留旧的独立生命周期设置窗口行为，宠物停止时也可打开。
+
+原生 `settings get`、`settings set auto_start off`、`settings set exit_with_herdr on` 的生命周期专用 CLI 契约不变：get/set 返回结构化 JSON；set 只接受两个键与准确的 `on|off`，不启动宠物，拒绝无效输入／保存失败且不重置其他设置；`status` 报告两项。其他 action ID 有生命周期 `start`、`ensure`、`stop`、`restart`、`status`、`settings`；可见性 `show`、`hide`、`toggle`；`passthrough`、`alpha_passthrough`；气泡 `show_bubble`、`hide_bubble`、`bubble_above|below|left|right|auto`；几何 `reset`、`bigger`、`smaller`。[原生自动化契约（英文）](cli.md#english)区分命令式操作、绝对表示／首选项、私有套接字及各操作类别状态恢复；没有公开 `orchestrate` 或 HTTP 服务。
 
 ## 应用内更新
 
@@ -175,7 +223,7 @@ Rubelia（`default@0`）是**唯一内置角色**；可选 PNG/rig 与服装包�
 ## 配置与问题排查
 
 - `HERDR_PLUGIN_CONFIG_DIR` 指向 `lifecycle.json`（两个生命周期开关）、`preferences.json`（其他设置/对话）、托管 `characters/` 与 `menu-bar-icons/`；`HERDR_PLUGIN_STATE_DIR` 指向进程锁、`<state-dir>/control.sock`、守护进程 `desktop-pet.log` 和更新状态。未注入时采用 Herdr 的 XDG 插件配置/状态目录。原生 `--config-dir`/`--state-dir` 可隔离配置，但注入环境路径优先；启动、命令、停止和备份时都用**匹配的两个实际路径**，稳定/beta 并存尤须注意。`--socket PATH` 指向 Herdr 后端，**不是**私有 CLI 控制套接字。参阅[CLI 连接（英文）](cli.md#connection-identity-and-operations)。
-- 独立运行无健康服务器约 30 秒后消失时检查 `settings get` 和 `status`，在同一配置/状态档案中重启前设 `exit_with_herdr off`，区分窗口隐藏与守护进程退出。所有已登记本地端点明确禁用/解绑造成的立即退出不受此开关覆盖。
+- Herdr 专用模式（包括公开预构建包默认 Herdr 启动）中，无健康服务器约 30 秒后消失时检查 `settings get` 和 `status`，在同一配置／状态档案中重启前设 `exit_with_herdr off`，区分窗口隐藏与守护进程退出。Herdr 专用中所有已登记本地端点明确禁用／解绑造成的立即退出不受此开关覆盖。源码 Auto/Tern 不使用此 Herdr 退出政策。
 - 窗口隐藏或全窗口穿透不等于启动失败，可用上文菜单栏恢复。`plugin link` 后没运行时检查 `client.attached` 警告，手动 `start`，查看守护进程 `status`/日志；`auto_start` 关闭本来就跳过自动启动。链接运行中的宿主不会单独启动宠物。客户端 attach 宿主补丁的隔离部署与钩子确认见[宿主集成（英文）](../integrations/herdr/README.md)。
 - 遇到 `Herdr watchers are shutting down`，检查继承的 `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`、`PATH` 中真实 CLI 可执行文件/版本及拥有套接字的服务器。对**另一服务器**执行 `herdr plugin list` 无法诊断守护进程端点。要针对相同 CLI/套接字/会话；远程错误还需检查保存机器转发/版本/所选配置。补丁宿主提供自动启动，不会在每台服务器安装插件。
 - 远程错误参阅[观察来源](#观察来源)：配置状态、交互认证/重连及兼容转发 CLI。GUI 应在本地 Mac 启动，而非 SSH 到远程期待本地窗口。`agent.prompt` 限制和远程只读行为见[上文](#内联回复与消息传递)。

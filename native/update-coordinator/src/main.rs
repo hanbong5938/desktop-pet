@@ -12,7 +12,7 @@ fn run() -> Result<(), String> {
             return Err("update-capabilities accepts no arguments".into());
         }
         println!(
-            "{{\"protocol\":{},\"observation_mode\":1}}",
+            "{{\"protocol\":{},\"observation_mode\":2}}",
             protocol::UPDATER_PROTOCOL
         );
         return Ok(());

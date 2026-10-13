@@ -7,6 +7,7 @@ use crate::lifecycle::LifecycleSettings;
 use crate::session::{AgentRecord, AgentStatus, OutcomeObservation, Snapshot, SnapshotCounts};
 use crate::session_view::{SessionKey, WorktreeRemoveTarget, WorktreeRemoveTargetError};
 use crate::state::{AppState, SessionStatusUpdate, SourceCounts};
+use herdr_update_coordinator::ObservationMode;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -147,9 +148,21 @@ impl PromptSender {
             return Err(PromptError::StaleTarget);
         }
         let tern_request = match &route {
-            crate::sources::SourceRoute::TernWindow { window, epoch } => {
-                let (operation_id, receipt) =
-                    state.queue_tern_prompt(key.clone(), window, *epoch, &target.pane_id, &text)?;
+            crate::sources::SourceRoute::TernWindow {
+                window,
+                epoch,
+                host,
+                observation_generation,
+            } => {
+                let (operation_id, receipt) = state.queue_tern_prompt(
+                    key.clone(),
+                    window,
+                    *epoch,
+                    host,
+                    *observation_generation,
+                    &target.pane_id,
+                    &text,
+                )?;
                 Some((window.clone(), operation_id, receipt))
             }
             _ => None,
@@ -226,7 +239,9 @@ fn wait_tern_prompt(
             if let Ok(mut state) = shared.lock() {
                 state.cancel_tern_prompt(window, operation_id);
             }
-            Err(PromptError::UnknownDelivery)
+            receipt
+                .try_recv()
+                .unwrap_or(Err(PromptError::UnknownDelivery))
         }
     }
 }
@@ -241,11 +256,24 @@ fn send_prompt(
         .map_err(|_| PromptError::Offline)?
         .prompt_route(key)?;
     let route_path = match route {
-        crate::sources::SourceRoute::TernWindow { window, epoch } => {
+        crate::sources::SourceRoute::TernWindow {
+            window,
+            epoch,
+            host,
+            observation_generation,
+        } => {
             let (operation_id, receipt) = shared
                 .lock()
                 .map_err(|_| PromptError::Offline)?
-                .queue_tern_prompt(key.clone(), &window, epoch, &target.pane_id, text)?;
+                .queue_tern_prompt(
+                    key.clone(),
+                    &window,
+                    epoch,
+                    &host,
+                    observation_generation,
+                    &target.pane_id,
+                    text,
+                )?;
             return wait_tern_prompt(shared, &window, &operation_id, receipt);
         }
         crate::sources::SourceRoute::HerdrLocal(path) => path,
@@ -599,6 +627,8 @@ type RegistrationState = Arc<Mutex<HashMap<PathBuf, bool>>>;
 
 struct ExitPolicy {
     settings: LifecycleSettings,
+    mode: ObservationMode,
+    observation_epoch: Option<u64>,
     connected: usize,
     remote_connected: bool,
     deadline: Option<Instant>,
@@ -609,6 +639,8 @@ impl ExitPolicy {
     fn new(settings: LifecycleSettings, now: Instant) -> Self {
         Self {
             settings,
+            mode: ObservationMode::Herdr,
+            observation_epoch: None,
             connected: 0,
             remote_connected: false,
             deadline: settings
@@ -617,7 +649,42 @@ impl ExitPolicy {
             finalized: false,
         }
     }
+    fn reconcile_observation(&mut self, mode: ObservationMode, epoch: u64, now: Instant) -> bool {
+        let epoch_changed = self
+            .observation_epoch
+            .is_some_and(|previous| previous != epoch);
+        self.observation_epoch = Some(epoch);
+        if self.mode == mode && !epoch_changed {
+            return false;
+        }
+        // An epoch can include a complete disable/re-enable cycle between
+        // worker ticks, even when its final host equals the previous host.
+        self.mode = mode;
+        self.connected = 0;
+        self.remote_connected = false;
+        self.deadline = (mode == ObservationMode::Herdr && self.settings.exit_with_herdr)
+            .then_some(now + DISCONNECTION_GRACE);
+        true
+    }
 
+    fn observe_connections(&mut self, connected: usize, now: Instant) {
+        if self.connected == connected {
+            return;
+        }
+        let was_connected = self.connected > 0;
+        self.connected = connected;
+        if connected > 0 {
+            self.deadline = None;
+        } else if was_connected
+            && !self.remote_connected
+            && self.mode == ObservationMode::Herdr
+            && self.settings.exit_with_herdr
+        {
+            self.deadline = Some(now + DISCONNECTION_GRACE);
+        }
+    }
+
+    #[cfg(test)]
     fn observe_connection(&mut self, was_connected: bool, is_connected: bool, now: Instant) {
         if was_connected == is_connected {
             return;
@@ -627,7 +694,11 @@ impl ExitPolicy {
             self.deadline = None;
         } else {
             self.connected -= 1;
-            if self.connected == 0 && !self.remote_connected && self.settings.exit_with_herdr {
+            if self.connected == 0
+                && !self.remote_connected
+                && self.mode == ObservationMode::Herdr
+                && self.settings.exit_with_herdr
+            {
                 self.deadline = Some(now + DISCONNECTION_GRACE);
             }
         }
@@ -640,19 +711,25 @@ impl ExitPolicy {
         self.remote_connected = connected;
         if connected {
             self.deadline = None;
-        } else if self.connected == 0 && self.settings.exit_with_herdr {
+        } else if self.connected == 0
+            && self.mode == ObservationMode::Herdr
+            && self.settings.exit_with_herdr
+        {
             self.deadline = Some(now + DISCONNECTION_GRACE);
         }
     }
 
     fn change_settings(&mut self, settings: LifecycleSettings, now: Instant) {
         if settings.exit_with_herdr != self.settings.exit_with_herdr {
-            self.deadline =
-                if settings.exit_with_herdr && self.connected == 0 && !self.remote_connected {
-                    Some(now + DISCONNECTION_GRACE)
-                } else {
-                    None
-                };
+            self.deadline = if self.mode == ObservationMode::Herdr
+                && settings.exit_with_herdr
+                && self.connected == 0
+                && !self.remote_connected
+            {
+                Some(now + DISCONNECTION_GRACE)
+            } else {
+                None
+            };
         }
         self.settings = settings;
     }
@@ -681,11 +758,17 @@ impl Watchers {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_QUEUE);
         let stop = Arc::new(AtomicBool::new(false));
         let registry = Arc::new(Mutex::new(HashMap::new()));
-        let settings = shared
+        let state = shared
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .lifecycle_settings();
-        let policy = Arc::new(Mutex::new(ExitPolicy::new(settings, Instant::now())));
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut exit_policy = ExitPolicy::new(state.lifecycle_settings(), Instant::now());
+        exit_policy.reconcile_observation(
+            state.observation_mode(),
+            state.observation_epoch(),
+            Instant::now(),
+        );
+        drop(state);
+        let policy = Arc::new(Mutex::new(exit_policy));
         let worker_shared = Arc::clone(&shared);
         let worker_policy = Arc::clone(&policy);
         let worker_stop = Arc::clone(&stop);
@@ -876,6 +959,7 @@ enum EventRecordUpdate<'a> {
 struct EventPublication<'a> {
     source: &'a str,
     generation: u64,
+    observation_epoch: Option<u64>,
     terminal_id: &'a str,
     pane_id: &'a str,
     status: AgentStatus,
@@ -886,6 +970,13 @@ struct EventPublication<'a> {
 
 fn publish_event(shared: &Arc<Mutex<AppState>>, publication: EventPublication<'_>) {
     if let Ok(mut state) = shared.lock() {
+        if !state.observation_mode().supports_herdr()
+            || publication
+                .observation_epoch
+                .is_some_and(|epoch| state.observation_epoch() != epoch)
+        {
+            return;
+        }
         let _ = state.update_session_status(SessionStatusUpdate {
             source: publication.source,
             generation: publication.generation,
@@ -1025,8 +1116,48 @@ impl Endpoint {
     }
 
     fn epoch_matches(&self, state: &AppState) -> bool {
-        self.observation_epoch
-            .is_none_or(|epoch| state.observation_epoch() == epoch)
+        state.observation_mode().supports_herdr()
+            && self
+                .observation_epoch
+                .is_none_or(|epoch| state.observation_epoch() == epoch)
+    }
+    fn reconcile_observation(&mut self, shared: &Arc<Mutex<AppState>>, now: Instant) -> bool {
+        let state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        let epoch = state.observation_epoch();
+        let enabled = state.observation_mode().supports_herdr();
+        drop(state);
+        if self.observation_epoch != Some(epoch) {
+            self.observation_epoch = Some(epoch);
+            self.generation = 0;
+            self.source_admission_pending = false;
+            self.stream = None;
+            self.agents.clear();
+            self.duplicate_agents.clear();
+            self.pending_prime.clear();
+            self.outcomes.clear();
+            self.outcome_snapshot_unix_ms = None;
+            self.ambiguous_terminal_ids.clear();
+            self.last_sessions = 0;
+            self.pane_ids = Arc::from([]);
+            self.next_attempt = now;
+            self.next_reconcile = now;
+            self.backoff = INITIAL_BACKOFF;
+            self.disabled = false;
+            self.seen_plugin_present = false;
+            self.set_registration_disabled(false);
+        }
+        enabled
+    }
+
+    fn check_observation(&self, shared: &Arc<Mutex<AppState>>) -> Result<(), ProtocolError> {
+        let state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        if self.epoch_matches(&state) {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidResponse(
+                "Herdr observation host or epoch changed".to_owned(),
+            ))
+        }
     }
 
     fn set_registration_disabled(&self, disabled: bool) {
@@ -1034,8 +1165,23 @@ impl Endpoint {
             registry.insert(self.path.clone(), disabled);
         }
     }
-    fn begin_generation(&mut self, shared: &Arc<Mutex<AppState>>) {
-        self.next_generation = self.next_generation.saturating_add(1).max(1);
+    fn begin_generation(&mut self, shared: &Arc<Mutex<AppState>>) -> bool {
+        let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        if self.observation_epoch.is_none() {
+            self.observation_epoch = Some(state.observation_epoch());
+        }
+        if !self.epoch_matches(&state) {
+            return false;
+        }
+        let Some(generation) = self
+            .next_generation
+            .max(state.source_generation(&self.source).unwrap_or(0))
+            .max(state.retired_source_generation(&self.source).unwrap_or(0))
+            .checked_add(1)
+        else {
+            return false;
+        };
+        self.next_generation = generation;
         self.generation = self.next_generation;
         self.source_admission_pending = true;
         if !self.agents.is_empty() {
@@ -1049,11 +1195,10 @@ impl Endpoint {
         self.outcome_snapshot_unix_ms = None;
         self.ambiguous_terminal_ids.clear();
         self.pane_ids = Arc::from([]);
-        if let Ok(mut state) = shared.lock() {
-            self.source_admission_pending =
-                !state.begin_source(self.source.clone(), self.generation);
-        }
+        self.source_admission_pending = !state.begin_source(self.source.clone(), self.generation);
+        drop(state);
         wake_ui();
+        true
     }
 
     fn counts(&self) -> SnapshotCounts {
@@ -1512,11 +1657,7 @@ fn watcher_loop(
             {
                 break;
             }
-            let was_connected = endpoint.stream.is_some();
             process_endpoint(endpoint, &shared, &mut request_counter, Instant::now());
-            let mut guard = policy.lock().unwrap_or_else(|p| p.into_inner());
-            guard.observe_connection(was_connected, endpoint.stream.is_some(), Instant::now());
-            drop(guard);
             if stop.load(Ordering::Acquire)
                 || claim_shutdown(&shared, &policy, Instant::now(), false)
             {
@@ -1554,26 +1695,18 @@ fn claim_shutdown(
     if policy.finalized {
         return true;
     }
-    if shared
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .observation_mode()
-        .supports_tern()
-    {
+    let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+    let observation_changed =
+        policy.reconcile_observation(state.observation_mode(), state.observation_epoch(), now);
+    if policy.mode != ObservationMode::Herdr {
         return false;
     }
-    if !all_disabled && policy.connected == 0 {
-        let remote_connected = shared
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .has_healthy_observed_remote();
-        policy.observe_remote_connection(remote_connected, now);
-    }
-    if !all_disabled && !policy.expired(now) {
+    policy.observe_connections(state.host_connections().herdr, now);
+    policy.observe_remote_connection(state.has_healthy_observed_remote(), now);
+    if (observation_changed || !all_disabled) && !policy.expired(now) {
         return false;
     }
     policy.finalized = true;
-    let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
     state.request_shutdown();
     drop(state);
     drop(policy);
@@ -1620,12 +1753,16 @@ fn handle_command(
                     endpoint.disabled = false;
                     endpoint.next_attempt = Instant::now();
                     endpoint.backoff = INITIAL_BACKOFF;
-                    endpoint.begin_generation(shared);
+                    if endpoint.reconcile_observation(shared, Instant::now()) {
+                        endpoint.begin_generation(shared);
+                    }
                 }
                 return;
             }
             let mut endpoint = Endpoint::with_registry(path.clone(), Arc::clone(registry));
-            endpoint.begin_generation(shared);
+            if endpoint.reconcile_observation(shared, Instant::now()) {
+                endpoint.begin_generation(shared);
+            }
             endpoints.insert(path, endpoint);
         }
     }
@@ -1641,7 +1778,7 @@ fn process_endpoint(
     request_counter: &mut u64,
     now: Instant,
 ) {
-    if endpoint.disabled {
+    if !endpoint.reconcile_observation(shared, now) || endpoint.disabled {
         return;
     }
     if endpoint.stream.is_none() {
@@ -1679,6 +1816,7 @@ fn process_endpoint(
                         EventPublication {
                             source,
                             generation,
+                            observation_epoch: endpoint.observation_epoch,
                             terminal_id,
                             pane_id: &pane_id,
                             status,
@@ -1713,22 +1851,34 @@ fn connect_endpoint(
     request_counter: &mut u64,
     now: Instant,
 ) {
-    endpoint.begin_generation(shared);
+    if !endpoint.begin_generation(shared) {
+        return;
+    }
     let result = (|| -> Result<Option<(SubscriptionReader, Snapshot)>, ProtocolError> {
-        let ping = request(endpoint, request_counter, "ping", serde_json::json!({}))?.result()?;
+        let ping = request(
+            endpoint,
+            shared,
+            request_counter,
+            "ping",
+            serde_json::json!({}),
+        )?
+        .result()?;
         if ping.get("type").and_then(serde_json::Value::as_str) != Some("pong") {
             return Err(ProtocolError::InvalidResponse(
                 "expected pong result".to_owned(),
             ));
         }
-        let first = herdr_snapshot(endpoint, request_counter)?;
+        let first = herdr_snapshot(endpoint, shared, request_counter)?;
         endpoint.replace_snapshot(first.clone());
-        let availability = herdr_plugin(endpoint, request_counter)?;
+        let availability = herdr_plugin(endpoint, shared, request_counter)?;
         if !plugin_allows_observation(endpoint, availability) {
             return Ok(None);
         }
-        converge_subscription(endpoint, request_counter, first).map(Some)
+        converge_subscription(endpoint, shared, request_counter, first).map(Some)
     })();
+    if endpoint.check_observation(shared).is_err() {
+        return;
+    }
 
     match result {
         Ok(Some((stream, snapshot))) => {
@@ -1747,8 +1897,11 @@ fn reconcile_endpoint(
     request_counter: &mut u64,
     now: Instant,
 ) {
-    match herdr_plugin(endpoint, request_counter) {
+    match herdr_plugin(endpoint, shared, request_counter) {
         Ok(availability) => {
+            if endpoint.check_observation(shared).is_err() {
+                return;
+            }
             if !plugin_allows_observation(endpoint, availability) {
                 detach_endpoint(endpoint, shared);
                 return;
@@ -1759,16 +1912,22 @@ fn reconcile_endpoint(
             return;
         }
     }
-    let Ok(snapshot) = herdr_snapshot(endpoint, request_counter) else {
+    let Ok(snapshot) = herdr_snapshot(endpoint, shared, request_counter) else {
         endpoint.mark_retry(shared, now);
         return;
     };
+    if endpoint.check_observation(shared).is_err() {
+        return;
+    }
     let completions;
     if snapshot.pane_ids().as_slice() != endpoint.pane_ids.as_ref() {
         completions = Vec::new();
         endpoint.replace_snapshot(snapshot.clone());
-        match converge_subscription(endpoint, request_counter, snapshot) {
+        match converge_subscription(endpoint, shared, request_counter, snapshot) {
             Ok((stream, snapshot)) => {
+                if endpoint.check_observation(shared).is_err() {
+                    return;
+                }
                 endpoint.stream = Some(stream);
                 endpoint.replace_snapshot(snapshot);
             }
@@ -1784,13 +1943,14 @@ fn reconcile_endpoint(
 
 fn converge_subscription(
     endpoint: &Endpoint,
+    shared: &Arc<Mutex<AppState>>,
     request_counter: &mut u64,
     mut snapshot: Snapshot,
 ) -> Result<(SubscriptionReader, Snapshot), ProtocolError> {
     for _ in 0..=MAX_PANE_CONVERGENCE {
         let target_panes = snapshot.pane_ids();
-        let stream = subscribe(endpoint, request_counter, &target_panes)?;
-        let fresh = herdr_snapshot(endpoint, request_counter)?;
+        let stream = subscribe(endpoint, shared, request_counter, &target_panes)?;
+        let fresh = herdr_snapshot(endpoint, shared, request_counter)?;
         if fresh.pane_ids() == target_panes {
             return Ok((stream, fresh));
         }
@@ -1814,20 +1974,27 @@ fn plugin_allows_observation(endpoint: &mut Endpoint, availability: PluginAvaila
     }
 }
 fn detach_endpoint(endpoint: &mut Endpoint, shared: &Arc<Mutex<AppState>>) {
+    let Ok(mut state) = shared.lock() else {
+        return;
+    };
+    if !endpoint.epoch_matches(&state) {
+        return;
+    }
     endpoint.stream = None;
     endpoint.disabled = true;
     endpoint.set_registration_disabled(true);
-    if let Ok(mut state) = shared.lock() {
-        let _ = state.remove_source(&endpoint.source, endpoint.generation);
-    }
+    let _ = state.remove_source(&endpoint.source, endpoint.generation);
+    drop(state);
     wake_ui();
 }
 fn request(
     endpoint: &Endpoint,
+    shared: &Arc<Mutex<AppState>>,
     request_counter: &mut u64,
     method: &str,
     params: serde_json::Value,
 ) -> Result<herdr_protocol::Response, ProtocolError> {
+    endpoint.check_observation(shared)?;
     *request_counter = request_counter.wrapping_add(1);
     let id = format!("desktop-pet-{}", *request_counter);
     herdr_protocol::request(&endpoint.path, &id, method, params, REQUEST_TIMEOUT)
@@ -1835,10 +2002,12 @@ fn request(
 
 fn herdr_snapshot(
     endpoint: &Endpoint,
+    shared: &Arc<Mutex<AppState>>,
     request_counter: &mut u64,
 ) -> Result<Snapshot, ProtocolError> {
     let response = request(
         endpoint,
+        shared,
         request_counter,
         "session.snapshot",
         serde_json::json!({}),
@@ -1848,10 +2017,12 @@ fn herdr_snapshot(
 
 fn herdr_plugin(
     endpoint: &Endpoint,
+    shared: &Arc<Mutex<AppState>>,
     request_counter: &mut u64,
 ) -> Result<PluginAvailability, ProtocolError> {
     let response = request(
         endpoint,
+        shared,
         request_counter,
         "plugin.list",
         serde_json::json!({ "plugin_id": "desktop-pet" }),
@@ -1861,9 +2032,11 @@ fn herdr_plugin(
 
 fn subscribe(
     endpoint: &Endpoint,
+    shared: &Arc<Mutex<AppState>>,
     request_counter: &mut u64,
     pane_ids: &[String],
 ) -> Result<SubscriptionReader, ProtocolError> {
+    endpoint.check_observation(shared)?;
     *request_counter = request_counter.wrapping_add(1);
     let id = format!("desktop-pet-{}", *request_counter);
     herdr_protocol::subscribe(&endpoint.path, &id, pane_ids, REQUEST_TIMEOUT)
@@ -2022,6 +2195,272 @@ mod tests {
     }
 
     #[test]
+    fn dormant_registration_activates_real_socket_and_fences_each_host_epoch() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        fn serve(listener: UnixListener) -> JoinHandle<Vec<UnixStream>> {
+            let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+            let worker = thread::spawn(move || {
+                let mut subscriptions = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(4);
+                ready_tx.send(()).unwrap();
+                for _ in 0..5 {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "missing Herdr request");
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("accept failed: {error}"),
+                        }
+                    };
+                    // Darwin can inherit O_NONBLOCK from the listening socket.
+                    // A read timeout bounds a blocking read; it does not make
+                    // an inherited nonblocking socket wait for the request.
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut line = String::new();
+                    let read = BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    assert!(read > 0, "Herdr request closed before its frame");
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let result = match method {
+                        "ping" => serde_json::json!({"type": "pong"}),
+                        "session.snapshot" => serde_json::json!({
+                            "type": "session_snapshot", "snapshot": {"panes": [], "agents": []}
+                        }),
+                        "plugin.list" => serde_json::json!({
+                            "type": "plugin_list",
+                            "plugins": [{"plugin_id": "desktop-pet", "enabled": true}]
+                        }),
+                        "events.subscribe" => serde_json::json!({"type": "subscription_started"}),
+                        other => panic!("unexpected Herdr method: {other}"),
+                    };
+                    writeln!(
+                        stream,
+                        "{}",
+                        serde_json::json!({"id": request["id"], "result": result})
+                    )
+                    .unwrap();
+                    if method == "events.subscribe" {
+                        subscriptions.push(stream);
+                    }
+                }
+                subscriptions
+            });
+            // Do not start the product request deadline while the fixture
+            // thread is still waiting to be scheduled for the first time.
+            ready_rx.recv().unwrap();
+            worker
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = PathBuf::from(format!(
+            "/tmp/herdr-live-host-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let shared = Arc::new(Mutex::new(AppState::new()));
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Tern);
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let policy = Arc::new(Mutex::new(ExitPolicy::new(settings(true), Instant::now())));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut endpoints = HashMap::new();
+        handle_command(
+            Command::Register(path.clone()),
+            &shared,
+            &mut endpoints,
+            &stop,
+            &registry,
+            &policy,
+        );
+        let endpoint = endpoints.get_mut(&path).unwrap();
+        let mut counter = 0;
+        process_endpoint(endpoint, &shared, &mut counter, Instant::now());
+        assert_eq!(counter, 0);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_generation(&endpoint.source),
+            None
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Both);
+        let first = serve(listener.try_clone().unwrap());
+        process_endpoint(endpoint, &shared, &mut counter, Instant::now());
+        let _first_peers = first.join().unwrap();
+        assert!(endpoint.stream.is_some());
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            1
+        );
+        let mut stale = Endpoint::with_registry(path.clone(), Arc::clone(&registry));
+        stale.generation = endpoint.generation;
+        stale.observation_epoch = endpoint.observation_epoch;
+
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        let second = serve(listener.try_clone().unwrap());
+        process_endpoint(endpoint, &shared, &mut counter, Instant::now());
+        let _second_peers = second.join().unwrap();
+        assert!(endpoint.generation > stale.generation);
+        stale.publish(&shared, false);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            1
+        );
+        assert_eq!(counter, 10);
+        detach_endpoint(endpoint, &shared);
+        assert!(endpoint.disabled);
+
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Tern);
+        process_endpoint(endpoint, &shared, &mut counter, Instant::now());
+        assert!(endpoint.stream.is_none());
+        assert_eq!(counter, 10);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            0
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(!claim_shutdown(
+            &shared,
+            &policy,
+            Instant::now() + DISCONNECTION_GRACE * 2,
+            true
+        ));
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Both);
+        let third = serve(listener.try_clone().unwrap());
+        process_endpoint(endpoint, &shared, &mut counter, Instant::now());
+        let _third_peers = third.join().unwrap();
+        assert!(!endpoint.disabled);
+        assert!(endpoint.stream.is_some());
+        assert_eq!(counter, 15);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            1
+        );
+        assert!(!claim_shutdown(
+            &shared,
+            &policy,
+            Instant::now() + DISCONNECTION_GRACE * 2,
+            true
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn auto_and_tern_survive_disabled_endpoints_and_reenabled_herdr_gets_fresh_grace() {
+        let start = Instant::now();
+        let shared = Arc::new(Mutex::new(AppState::new()));
+        let policy = Arc::new(Mutex::new(ExitPolicy::new(settings(true), start)));
+        for mode in [ObservationMode::Both, ObservationMode::Tern] {
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_observation_mode(mode);
+            assert!(!claim_shutdown(
+                &shared,
+                &policy,
+                start + DISCONNECTION_GRACE * 5,
+                true
+            ));
+        }
+        let enabled = start + DISCONNECTION_GRACE * 6;
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        assert!(!claim_shutdown(&shared, &policy, enabled, false));
+        assert!(!claim_shutdown(
+            &shared,
+            &policy,
+            enabled + DISCONNECTION_GRACE - Duration::from_nanos(1),
+            false
+        ));
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Tern);
+        assert!(!claim_shutdown(
+            &shared,
+            &policy,
+            enabled + DISCONNECTION_GRACE * 4,
+            true
+        ));
+        assert!(!policy.lock().unwrap_or_else(|p| p.into_inner()).finalized);
+        let reenabled = enabled + DISCONNECTION_GRACE * 5;
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        assert!(!claim_shutdown(&shared, &policy, reenabled, false));
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Tern);
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        let rapidly_reenabled = reenabled + DISCONNECTION_GRACE * 2;
+        assert!(!claim_shutdown(&shared, &policy, rapidly_reenabled, false));
+        assert!(claim_shutdown(
+            &shared,
+            &policy,
+            rapidly_reenabled + DISCONNECTION_GRACE,
+            false
+        ));
+    }
+
+    #[test]
     fn disconnect_grace_requires_last_healthy_connection_and_expires_at_boundary() {
         let start = Instant::now();
         let grace = DISCONNECTION_GRACE;
@@ -2087,6 +2526,7 @@ mod tests {
             error: None,
         });
         state.apply_observation_preferences(ObservationPreferences {
+            host: herdr_update_coordinator::ObservationMode::Herdr,
             local: false,
             remote: true,
             machines: vec!["east".to_owned()],
@@ -2271,6 +2711,10 @@ mod tests {
     #[test]
     fn initial_disabled_membership_survives_reactivation_and_finalized_policy() {
         let shared = Arc::new(Mutex::new(AppState::new()));
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
         let registry: RegistrationState = Arc::new(Mutex::new(HashMap::new()));
         let policy = Arc::new(Mutex::new(ExitPolicy::new(settings(false), Instant::now())));
         let stop = Arc::new(AtomicBool::new(false));
@@ -2528,7 +2972,7 @@ mod tests {
                     .key
                     .clone();
                 let (_, receipt) = state
-                    .queue_tern_prompt(key, "window-0", 1, "pane-a", "pending")
+                    .queue_tern_prompt(key, "window-0", 1, "0", 1, "pane-a", "pending")
                     .unwrap();
                 let mut request = tern_test_request("window-0");
                 request.instance_id = Some("daemon-a".into());
@@ -2561,7 +3005,7 @@ mod tests {
                 assert_eq!(state.scene().unknown, 0);
                 assert_eq!(state.source_generation(&endpoint.source), Some(generation));
                 assert_eq!(
-                    state.source_generation(&crate::tern::source_id("window-0")),
+                    state.source_generation(&crate::tern::source_id("window-0", "0")),
                     None
                 );
                 assert!(state.take_completions().is_empty());
@@ -2682,6 +3126,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.remove_source("/tmp/live-0.sock", 1));
             state.apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: false,
                 machines: vec!["machine-one".to_owned()],
@@ -2694,6 +3139,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.source_generation(&source), None);
             state.apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: true,
                 machines: vec!["machine-one".to_owned()],
@@ -2773,6 +3219,7 @@ mod tests {
             error: None,
         });
         state.apply_observation_preferences(ObservationPreferences {
+            host: herdr_update_coordinator::ObservationMode::Herdr,
             local: true,
             remote: true,
             machines: vec!["machine-one".to_owned()],
@@ -2869,6 +3316,7 @@ mod tests {
             .lock()
             .unwrap()
             .apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: false,
                 machines: vec!["machine-one".to_owned()],
@@ -2878,6 +3326,7 @@ mod tests {
             .lock()
             .unwrap()
             .apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: true,
                 machines: vec!["machine-one".to_owned()],
@@ -2959,6 +3408,7 @@ mod tests {
             .lock()
             .unwrap()
             .apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: false,
                 machines: vec!["machine-one".to_owned()],
@@ -2967,6 +3417,7 @@ mod tests {
             .lock()
             .unwrap()
             .apply_observation_preferences(ObservationPreferences {
+                host: herdr_update_coordinator::ObservationMode::Herdr,
                 local: true,
                 remote: true,
                 machines: vec!["machine-one".to_owned()],

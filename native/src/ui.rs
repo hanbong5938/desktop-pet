@@ -75,7 +75,7 @@ use crate::status_indicator::{
 };
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use herdr_update_coordinator::UpdatePolicy;
+use herdr_update_coordinator::{ObservationMode, UpdatePolicy};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{
@@ -113,6 +113,7 @@ use std::sync::{mpsc, Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 static NEXT_UI_OPERATION: AtomicU64 = AtomicU64::new(1);
 static UI_USER_STOP_RECORDED: AtomicBool = AtomicBool::new(false);
+static SETTINGS_REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
 
 enum PendingNative {
     Preparing {
@@ -1548,6 +1549,7 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             with_ui_internal(|ui| ui.frame_tick());
+            present_requested_settings();
         }
 
         #[unsafe(method(prepareTick:))]
@@ -1972,7 +1974,7 @@ impl BubblePanel {
         NSMenu::popUpContextMenu_withEvent_forView(&menu, event, &root);
         drop(worktree_target);
         if take_context_settings_request() {
-            present_settings_at(anchor);
+            present_settings_at(anchor, None);
         }
         true
     }
@@ -2322,6 +2324,43 @@ define_class!(
             with_ui_mut(|ui| ui.set_language_preference(preference));
         }
 
+        #[unsafe(method(setObservationHost:))]
+        fn set_observation_host(&self, sender: Option<&AnyObject>) {
+            let Some(popup) = sender.and_then(|sender| sender.downcast_ref::<NSPopUpButton>()) else { return };
+            let Some(item) = popup.selectedItem() else { return };
+            let host = match item.tag() {
+                0 => ObservationMode::Both,
+                1 => ObservationMode::Herdr,
+                2 => ObservationMode::Tern,
+                _ => return,
+            };
+            with_ui_mut(|ui| ui.change_observation(|candidate| candidate.host = host));
+        }
+
+        #[unsafe(method(toggleConnectionScope:))]
+        fn toggle_connection_scope(&self, _sender: Option<&AnyObject>) {
+            with_ui_mut(|ui| {
+                ui.menu_panel.toggle_observation_scope();
+                ui.reanchor_menu_panel();
+            });
+        }
+
+        #[unsafe(method(toggleConnectionSettings:))]
+        fn toggle_connection_settings(&self, _sender: Option<&AnyObject>) {
+            with_ui_mut(|ui| {
+                ui.menu_panel.toggle_connection_settings();
+                ui.reanchor_menu_panel();
+            });
+        }
+
+        #[unsafe(method(toggleConnectionDiagnostics:))]
+        fn toggle_connection_diagnostics(&self, _sender: Option<&AnyObject>) {
+            with_ui_mut(|ui| {
+                ui.menu_panel.toggle_connection_diagnostics();
+                ui.reanchor_menu_panel();
+            });
+        }
+
         #[unsafe(method(setObservationLocal:))]
         fn set_observation_local(&self, sender: Option<&AnyObject>) {
             let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
@@ -2343,30 +2382,33 @@ define_class!(
 
         #[unsafe(method(showObservationHelp:))]
         fn show_observation_help(&self, _sender: Option<&AnyObject>) {
-            let Some((mtm, locale)) = with_ui_read(|ui| (ui.mtm, ui.locale)) else { return };
+            let Some((mtm, locale, host)) =
+                with_ui_read(|ui| (ui.mtm, ui.locale, ui.prefs.observation().host)) else { return };
+            let (title, details) = match host {
+                ObservationMode::Herdr => (
+                    Message::ObservationHelpTitle,
+                    text(locale, Message::ObservationHelpDetails).to_owned(),
+                ),
+                ObservationMode::Tern => (
+                    Message::ConnectionTernHelpTitle,
+                    text(locale, Message::ConnectionTernHelpDetails).to_owned(),
+                ),
+                ObservationMode::Both => (
+                    Message::ConnectionTitle,
+                    format!(
+                        "{}\n{}\n\n{}\n{}",
+                        text(locale, Message::ObservationHelpTitle),
+                        text(locale, Message::ObservationHelpDetails),
+                        text(locale, Message::ConnectionTernHelpTitle),
+                        text(locale, Message::ConnectionTernHelpDetails),
+                    ),
+                ),
+            };
             let alert = NSAlert::new(mtm);
-            alert.setMessageText(&NSString::from_str(text(locale, Message::ObservationHelpTitle)));
-            alert.setInformativeText(&NSString::from_str(text(locale, Message::ObservationHelpDetails)));
+            alert.setMessageText(&NSString::from_str(text(locale, title)));
+            alert.setInformativeText(&NSString::from_str(&details));
             alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Close)));
             let _ = alert.runModal();
-        }
-
-        #[unsafe(method(toggleObservationCatalogError:))]
-        fn toggle_observation_catalog_error(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_observation_error(None);
-                ui.sync_character_menu_frame();
-            });
-        }
-
-        #[unsafe(method(toggleObservationMachineError:))]
-        fn toggle_observation_machine_error(&self, sender: Option<&AnyObject>) {
-            let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else { return };
-            let Some(id) = button.identifier().map(|id| id.to_string()) else { return };
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_observation_error(Some(&id));
-                ui.sync_character_menu_frame();
-            });
         }
 
         #[unsafe(method(copyObservationReconnect:))]
@@ -2473,7 +2515,7 @@ define_class!(
             };
 
             match action {
-                StatusItemAction::Primary => present_settings_at(anchor),
+                StatusItemAction::Primary => present_settings_at(anchor, None),
                 StatusItemAction::Context => {
                     let Some(event) = event else { return };
                     let mut menu = None;
@@ -2502,7 +2544,7 @@ define_class!(
                         open_settings = std::mem::take(&mut ui.context_settings_requested);
                     });
                     if open_settings {
-                        present_settings_at(anchor);
+                        present_settings_at(anchor, None);
                     }
                 }
             }
@@ -2924,7 +2966,7 @@ impl PetView {
         );
         NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
         if take_context_settings_request() {
-            present_settings_at(anchor);
+            present_settings_at(anchor, None);
         }
     }
 
@@ -4052,10 +4094,62 @@ fn take_context_settings_request() -> bool {
     requested
 }
 
-fn present_settings_at(anchor: NSRect) {
+pub(crate) fn request_settings() {
+    if !SETTINGS_REQUEST_PENDING.swap(true, Ordering::AcqRel) {
+        DispatchQueue::main().exec_async(present_requested_settings);
+    }
+}
+
+fn present_requested_settings() {
+    if !SETTINGS_REQUEST_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    // Capture AppKit's real geometry, then release UI before presentation can
+    // activate the app or dispatch native callbacks.
+    let anchor: Result<Option<NSRect>, ()> = UI.with(|cell| {
+        let slot = cell.try_borrow_mut().map_err(|_| ())?;
+        SETTINGS_REQUEST_PENDING.store(false, Ordering::Release);
+        Ok(slot.as_ref().and_then(|ui| {
+            if ui.update_frozen.is_some()
+                || ui.composer_marked()
+                || ui.cards.is_composing()
+                || ui.menu_panel.bubble_colors_marked()
+                || ui.menu_bar_icon_shutdown()
+            {
+                return None;
+            }
+            if ui._status_item.isVisible() {
+                if let Some(anchor) = ui
+                    ._status_item
+                    .button(ui.mtm)
+                    .and_then(|button| status_button_rect(&button))
+                {
+                    return Some(anchor);
+                }
+            }
+            if ui.panel.isVisible() {
+                return Some(ui.panel.frame());
+            }
+            NSScreen::mainScreen(ui.mtm)
+                .or_else(|| NSScreen::screens(ui.mtm).firstObject())
+                .map(|screen| screen.visibleFrame())
+        }))
+    });
+    if let Ok(Some(anchor)) = anchor {
+        present_settings_at(anchor, Some(2));
+    }
+    // A nested AppKit callback may still hold UI. Leave the coalesced intent
+    // pending for the existing frame timer after its UI borrow is released.
+}
+
+fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
     let mut shown_on = None;
     with_ui_mut(|ui| {
-        if ui.composer_marked() || ui.cards.is_composing() || ui.menu_bar_icon_shutdown() {
+        if ui.composer_marked()
+            || ui.cards.is_composing()
+            || ui.menu_panel.bubble_colors_marked()
+            || ui.menu_bar_icon_shutdown()
+        {
             return;
         }
         ui.settings_anchor = Some(anchor);
@@ -4063,6 +4157,9 @@ fn present_settings_at(anchor: NSRect) {
         ui.refresh_character_menu();
         if !was_visible && !ui.last_scene.shutdown {
             ui.sync_menu_panel_state();
+        }
+        if let Some(tab) = tab {
+            ui.menu_panel.select_tab(tab);
         }
         if let Some(frame) = anchor_visible_frame(ui.mtm, anchor) {
             ui.menu_panel.reanchor_at(anchor, frame);
@@ -4645,7 +4742,7 @@ fn choose_menu_bar_icon() {
         }
     });
     if let Some(anchor) = reopen_anchor {
-        present_settings_at(anchor);
+        present_settings_at(anchor, None);
     }
 }
 
@@ -5324,6 +5421,14 @@ impl Ui {
 
         let dialogue_editor = DialogueEditor::new(&menu_target, locale, mtm);
         let mut menu_panel = MenuPanel::new(&menu_target, character_menu.view(), locale, mtm);
+        if let Some(context) = update_context.as_ref() {
+            menu_panel.set_connection_profile(
+                &context.executable,
+                &context.config_dir,
+                &context.state_dir,
+                &context.herdr_socket,
+            );
+        }
         menu_panel.set_bubble_appearance(bubble_appearance);
         menu_panel.set_show_status_indicators(prefs.show_status_indicators());
         menu_panel.set_menu_bar_mode(prefs.menu_bar_mode());
@@ -6531,6 +6636,7 @@ impl Ui {
                 state.lifecycle_settings(),
                 state.observation_preferences(),
                 state.observation_catalog(),
+                state.host_connections(),
             );
         }
     }
@@ -12334,6 +12440,7 @@ impl Ui {
         if candidate != *self.prefs.observation() {
             let current = self.prefs.observation();
             let patch = crate::preferences::PreferencePatch {
+                observation_host: (candidate.host != current.host).then_some(candidate.host),
                 observation_local: (candidate.local != current.local).then_some(candidate.local),
                 observation_remote: (candidate.remote != current.remote)
                     .then_some(candidate.remote),
@@ -12363,10 +12470,13 @@ impl Ui {
 
     fn sync_observation_panel(&mut self) {
         if let Ok(state) = self.shared.lock() {
-            self.menu_panel
-                .sync_observation(self.prefs.observation(), state.observation_catalog());
+            self.menu_panel.sync_observation(
+                self.prefs.observation(),
+                state.observation_catalog(),
+                state.host_connections(),
+            );
         }
-        self.sync_character_menu_frame();
+        self.reanchor_menu_panel();
     }
 
     fn select_menu_tab(&mut self, index: usize) {

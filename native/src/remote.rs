@@ -68,20 +68,60 @@ fn run_coordinator(shared: Shared, stop: Arc<AtomicBool>) {
     let mut selected = HashSet::<String>::new();
     let mut scratch = Vec::<String>::new();
     let mut retired = Vec::<JoinHandle<()>>::new();
-    let mut catalog_job: Option<JoinHandle<()>> = None;
+    let mut catalog_job: Option<Job> = None;
     let mut next_catalog = Instant::now();
     let cli = resolve_cli();
+    let mut observation_epoch = None;
     while !stop.load(Ordering::Acquire) {
-        if catalog_job.as_ref().is_some_and(JoinHandle::is_finished) {
-            let _ = catalog_job.take().expect("finished discovery").join();
+        let (epoch, enabled) = {
+            let state = shared.lock().unwrap_or_else(|p| p.into_inner());
+            (
+                state.observation_epoch(),
+                state.observation_mode().supports_herdr(),
+            )
+        };
+        if observation_epoch != Some(epoch) {
+            observation_epoch = Some(epoch);
+            for (_, job) in jobs.drain() {
+                job.stop.store(true, Ordering::Release);
+                retired.push(job.handle);
+            }
+            if let Some(job) = catalog_job.take() {
+                job.stop.store(true, Ordering::Release);
+                retired.push(job.handle);
+            }
+            selected.clear();
+            next_catalog = Instant::now();
         }
-        if Instant::now() >= next_catalog && catalog_job.is_none() {
+        if catalog_job
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            let _ = catalog_job
+                .take()
+                .expect("finished discovery")
+                .handle
+                .join();
+        }
+        if enabled && Instant::now() >= next_catalog && catalog_job.is_none() {
             let catalog_shared = Arc::clone(&shared);
-            let catalog_stop = Arc::clone(&stop);
+            let catalog_global = Arc::clone(&stop);
+            let catalog_stop = Arc::new(AtomicBool::new(false));
+            let catalog_cancellation = Arc::clone(&catalog_stop);
             let catalog_cli = cli.clone();
-            catalog_job = Some(thread::spawn(move || {
-                discover(&catalog_shared, &catalog_stop, catalog_cli.as_ref())
-            }));
+            let handle = thread::spawn(move || {
+                discover(
+                    &catalog_shared,
+                    &catalog_global,
+                    &catalog_cancellation,
+                    catalog_cli.as_ref(),
+                    epoch,
+                )
+            });
+            catalog_job = Some(Job {
+                stop: catalog_stop,
+                handle,
+            });
             next_catalog = Instant::now() + INTERVAL;
         }
         {
@@ -92,7 +132,10 @@ fn run_coordinator(shared: Shared, stop: Arc<AtomicBool>) {
                 .machines
                 .iter()
                 .filter(|machine| {
-                    machine.enabled && prefs.remote && prefs.machines.contains(&machine.id)
+                    state.observation_mode().supports_herdr()
+                        && machine.enabled
+                        && prefs.remote
+                        && prefs.machines.contains(&machine.id)
                 });
             let desired_count = desired.clone().count();
             if desired_count != selected.len()
@@ -105,7 +148,10 @@ fn run_coordinator(shared: Shared, stop: Arc<AtomicBool>) {
                         .machines
                         .iter()
                         .filter(|machine| {
-                            machine.enabled && prefs.remote && prefs.machines.contains(&machine.id)
+                            state.observation_mode().supports_herdr()
+                                && machine.enabled
+                                && prefs.remote
+                                && prefs.machines.contains(&machine.id)
                         })
                         .take(64)
                         .map(|machine| machine.id.clone()),
@@ -152,6 +198,7 @@ fn run_coordinator(shared: Shared, stop: Arc<AtomicBool>) {
                     machine_stop,
                     machine_cli,
                     machine_id,
+                    epoch,
                 )
             });
             jobs.insert(
@@ -178,23 +225,37 @@ fn run_coordinator(shared: Shared, stop: Arc<AtomicBool>) {
     for (_, job) in jobs {
         let _ = job.handle.join();
     }
-    if let Some(handle) = catalog_job {
-        let _ = handle.join();
+    if let Some(job) = catalog_job {
+        job.stop.store(true, Ordering::Release);
+        let _ = job.handle.join();
     }
     for handle in retired {
         let _ = handle.join();
     }
 }
 
-fn discover(shared: &Shared, stop: &AtomicBool, cli: Option<&PathBuf>) {
+fn discover(
+    shared: &Shared,
+    global: &AtomicBool,
+    stop: &AtomicBool,
+    cli: Option<&PathBuf>,
+    epoch: u64,
+) {
     let result = cli
         .ok_or_else(|| "Herdr CLI not found; install Herdr or add its binary to PATH".to_owned())
-        .and_then(|cli| run_cli(cli, &["machine", "list", "--json"], stop, CATALOG_BYTES))
+        .and_then(|cli| {
+            run_cli_until(cli, &["machine", "list", "--json"], CATALOG_BYTES, || {
+                cancelled(global, stop) || !observation_current(shared, epoch, None)
+            })
+        })
         .and_then(|bytes| parse_catalog(&bytes));
-    if stop.load(Ordering::Acquire) {
+    if cancelled(global, stop) {
         return;
     }
     let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+    if !state.observation_mode().supports_herdr() || state.observation_epoch() != epoch {
+        return;
+    }
     update_catalog(&mut state, result);
     drop(state);
     crate::ui::wake();
@@ -288,21 +349,23 @@ fn poll_machine(
     stop: Arc<AtomicBool>,
     cli: Option<PathBuf>,
     id: String,
+    epoch: u64,
 ) {
     let source = remote_source(&id);
-    let mut epoch = u64::MAX;
+    {
+        let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        if state.observation_epoch() != epoch || !state.observation_mode().supports_herdr() {
+            return;
+        }
+        if let Some(generation) = state.source_generation(&source) {
+            state.mark_source_offline(&source, generation);
+        }
+    }
+    // A poller belongs to one observation epoch. The coordinator creates a
+    // replacement rather than rebinding late work to a newly enabled host.
     let mut endpoint: Option<Endpoint> = None;
     let mut baseline = true;
-    while !cancelled(&global, &stop) {
-        let current_epoch = {
-            let state = shared.lock().unwrap_or_else(|p| p.into_inner());
-            state.observation_epoch()
-        };
-        if current_epoch != epoch {
-            endpoint = None;
-            epoch = current_epoch;
-            baseline = true;
-        }
+    while !cancelled(&global, &stop) && observation_current(&shared, epoch, Some(&id)) {
         if baseline {
             set_status(&shared, &id, epoch, MachineStatus::Connecting, None);
         }
@@ -313,11 +376,11 @@ fn poll_machine(
                 "Herdr CLI not found; install Herdr or add its binary to PATH".to_owned()
             })
             .and_then(|cli| {
-                run_cli(
+                run_cli_until(
                     cli,
                     &["--machine", &id, "api", "snapshot"],
-                    &stop,
                     herdr_protocol::MAX_FRAME_BYTES,
+                    || cancelled(&global, &stop) || !observation_current(&shared, epoch, Some(&id)),
                 )
             })
             .and_then(|bytes| {
@@ -327,17 +390,27 @@ fn poll_machine(
                     .map_err(|e| e.to_string())?;
                 herdr_protocol::parse_snapshot(response).map_err(|e| e.to_string())
             });
-        if cancelled(&global, &stop) {
+        if cancelled(&global, &stop) || !observation_current(&shared, epoch, Some(&id)) {
             break;
         }
         match result {
             Ok(snapshot) => {
                 if endpoint.is_none() {
-                    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
                     let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
-                    if state.observation_epoch() != epoch {
+                    if state.observation_epoch() != epoch
+                        || !state.observation_mode().supports_herdr()
+                    {
                         continue;
                     }
+                    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+                    let previous = state
+                        .source_generation(&source)
+                        .unwrap_or(0)
+                        .max(state.retired_source_generation(&source).unwrap_or(0));
+                    let Some(generation) = previous.checked_add(1).map(|next| generation.max(next))
+                    else {
+                        break;
+                    };
                     if state.begin_source(source.clone(), generation) {
                         endpoint = Some(Endpoint::remote(source.clone(), generation, epoch));
                         drop(state);
@@ -370,15 +443,34 @@ fn poll_machine(
             }
         }
         let until = Instant::now() + INTERVAL;
-        while Instant::now() < until && !cancelled(&global, &stop) {
+        while Instant::now() < until
+            && !cancelled(&global, &stop)
+            && observation_current(&shared, epoch, Some(&id))
+        {
             thread::sleep(TICK);
         }
     }
 }
 
+fn observation_current(shared: &Shared, epoch: u64, machine: Option<&str>) -> bool {
+    let state = shared.lock().unwrap_or_else(|p| p.into_inner());
+    state.observation_mode().supports_herdr()
+        && state.observation_epoch() == epoch
+        && machine.is_none_or(|id| {
+            let prefs = state.observation_preferences();
+            prefs.remote
+                && prefs.machines.iter().any(|selected| selected == id)
+                && state
+                    .observation_catalog()
+                    .machines
+                    .iter()
+                    .any(|machine| machine.id == id && machine.enabled)
+        })
+}
+
 fn set_status(shared: &Shared, id: &str, epoch: u64, status: MachineStatus, error: Option<String>) {
     let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
-    if state.observation_epoch() != epoch {
+    if state.observation_epoch() != epoch || !state.observation_mode().supports_herdr() {
         return;
     }
     if status != MachineStatus::NotSelected
@@ -452,12 +544,25 @@ fn resolve_cli() -> Option<PathBuf> {
         })
 }
 
+#[cfg(test)]
 fn run_cli(
     cli: &PathBuf,
     args: &[&str],
     stop: &AtomicBool,
     limit: usize,
 ) -> Result<Vec<u8>, String> {
+    run_cli_until(cli, args, limit, || stop.load(Ordering::Acquire))
+}
+
+fn run_cli_until(
+    cli: &PathBuf,
+    args: &[&str],
+    limit: usize,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    if should_cancel() {
+        return Err("Herdr command cancelled".to_owned());
+    }
     let mut command = Command::new(cli);
     command
         .args(args)
@@ -492,9 +597,10 @@ fn run_cli(
     let mut out_open = true;
     let mut err_open = true;
     loop {
-        if stop.load(Ordering::Acquire) || start.elapsed() >= DEADLINE {
+        let cancellation = should_cancel();
+        if cancellation || start.elapsed() >= DEADLINE {
             terminate(&mut child);
-            return Err(if stop.load(Ordering::Acquire) {
+            return Err(if cancellation {
                 "Herdr command cancelled"
             } else {
                 "Herdr command timed out"
@@ -678,6 +784,179 @@ mod tests {
     }
 
     #[test]
+    fn tern_dormancy_cancels_remote_processes_and_reenable_uses_a_new_generation() {
+        use crate::sources::ObservationPreferences;
+        use herdr_update_coordinator::ObservationMode;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn start_poll(shared: &Shared, global: &Arc<AtomicBool>, cli: PathBuf) -> JoinHandle<()> {
+            let epoch = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .observation_epoch();
+            let shared = Arc::clone(shared);
+            let global = Arc::clone(global);
+            thread::spawn(move || {
+                poll_machine(
+                    shared,
+                    global,
+                    Arc::new(AtomicBool::new(false)),
+                    Some(cli),
+                    "m".into(),
+                    epoch,
+                )
+            })
+        }
+
+        fn await_connection(shared: &Shared) {
+            let deadline = Instant::now() + DEADLINE + Duration::from_secs(2);
+            while shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr
+                == 0
+            {
+                assert!(Instant::now() < deadline, "remote snapshot never connected");
+                thread::sleep(TICK);
+            }
+        }
+
+        let root = env::temp_dir().join(format!(
+            "herdr-remote-host-{}-{}",
+            std::process::id(),
+            NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let counter = root.join("runs");
+        let fast = root.join("fast");
+        let slow = root.join("slow");
+        let profile = r#"[{"id":"m","label":"Machine","target":"ssh","session":"default","enabled":true,"selected":false}]"#;
+        let snapshot = r#"{"id":"cli:api:snapshot","result":{"type":"session_snapshot","snapshot":{"panes":[],"agents":[]}}}"#;
+        std::fs::write(&fast, format!(
+            "#!/bin/sh\necho run >> '{}'\nif [ \"$1\" = machine ]; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi\n",
+            counter.display(), profile, snapshot,
+        )).unwrap();
+        std::fs::write(
+            &slow,
+            format!(
+                "#!/bin/sh\necho run >> '{}'\nsleep 30\nprintf '%s\\n' '{}'\n",
+                counter.display(),
+                snapshot,
+            ),
+        )
+        .unwrap();
+        for script in [&fast, &slow] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut state = AppState::new();
+        update_catalog(&mut state, parse_catalog(profile.as_bytes()));
+        state.apply_observation_preferences(ObservationPreferences {
+            host: ObservationMode::Tern,
+            local: true,
+            remote: true,
+            machines: vec!["m".into()],
+        });
+        let shared = Arc::new(Mutex::new(state));
+        let global = Arc::new(AtomicBool::new(false));
+        let stop = AtomicBool::new(false);
+        let dormant_epoch = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .observation_epoch();
+        discover(&shared, &global, &stop, Some(&fast), dormant_epoch);
+        start_poll(&shared, &global, fast.clone()).join().unwrap();
+        assert!(!counter.exists());
+        assert!(shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .observation_catalog()
+            .error
+            .is_none());
+
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Both);
+        let active_epoch = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .observation_epoch();
+        discover(&shared, &global, &stop, Some(&fast), active_epoch);
+        let first = start_poll(&shared, &global, fast.clone());
+        await_connection(&shared);
+        let source = remote_source("m");
+        let first_generation = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_generation(&source)
+            .unwrap();
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        first.join().unwrap();
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            1
+        );
+        let dormant_runs = std::fs::read_to_string(&counter).unwrap();
+        let inflight = start_poll(&shared, &global, slow);
+        let deadline = Instant::now() + DEADLINE;
+        while std::fs::read_to_string(&counter).unwrap() == dormant_runs {
+            assert!(Instant::now() < deadline, "remote command never started");
+            thread::sleep(TICK);
+        }
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host_connections()
+                .herdr,
+            0
+        );
+        let cancelled_at = Instant::now();
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Tern);
+        inflight.join().unwrap();
+        assert!(cancelled_at.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_generation(&source),
+            None
+        );
+        let dormant_runs = std::fs::read_to_string(&counter).unwrap();
+        discover(&shared, &global, &stop, Some(&fast), active_epoch);
+        start_poll(&shared, &global, fast.clone()).join().unwrap();
+        assert_eq!(std::fs::read_to_string(&counter).unwrap(), dormant_runs);
+        shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_observation_mode(ObservationMode::Herdr);
+        let resumed = start_poll(&shared, &global, fast);
+        await_connection(&shared);
+        assert!(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_generation(&source)
+                .unwrap()
+                > first_generation
+        );
+        global.store(true, Ordering::Release);
+        resumed.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cli_output_is_bounded_and_cancelled_process_group_is_reaped() {
         let stop = Arc::new(AtomicBool::new(false));
         assert!(run_cli(
@@ -784,6 +1063,7 @@ mod tests {
             initialized: true,
         });
         state.apply_observation_preferences(ObservationPreferences {
+            host: herdr_update_coordinator::ObservationMode::Herdr,
             local: true,
             remote: true,
             machines: vec!["m".to_owned()],
@@ -799,7 +1079,13 @@ mod tests {
             let global = Arc::clone(&global);
             let stop = Arc::clone(&stop);
             let script = script.clone();
-            thread::spawn(move || poll_machine(shared, global, stop, Some(script), "m".to_owned()))
+            let epoch = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .observation_epoch();
+            thread::spawn(move || {
+                poll_machine(shared, global, stop, Some(script), "m".to_owned(), epoch)
+            })
         };
         // Await rejection before observing the retry interval; process startup
         // can exceed one second when the full suite runs concurrently.

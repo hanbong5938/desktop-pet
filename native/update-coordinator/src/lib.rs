@@ -5,7 +5,7 @@ mod origin;
 pub mod protocol;
 pub mod releases;
 
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -39,6 +39,10 @@ pub struct UpdateContext {
     #[serde(default)]
     pub running_origin: Option<Box<InstallOrigin>>,
     pub assets_override: Option<PathBuf>,
+    #[serde(
+        serialize_with = "serialize_environment",
+        deserialize_with = "deserialize_environment"
+    )]
     pub environment: BTreeMap<String, String>,
     pub locale: String,
 }
@@ -48,6 +52,39 @@ impl UpdateContext {
     pub fn observation_mode(&self) -> Result<ObservationMode, String> {
         ObservationMode::from_environment(&self.environment)
     }
+}
+
+fn serialize_environment<S>(
+    environment: &BTreeMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(environment.len()))?;
+    for (key, value) in environment {
+        let value = if key == OBSERVATION_MODE_ENV && value == "both" {
+            "auto"
+        } else {
+            value.as_str()
+        };
+        map.serialize_entry(key, value)?;
+    }
+    map.end()
+}
+
+fn deserialize_environment<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut environment = BTreeMap::<String, String>::deserialize(deserializer)?;
+    if let Some(value) = environment.get_mut(OBSERVATION_MODE_ENV) {
+        if value == "both" {
+            value.clear();
+            value.push_str("auto");
+        }
+    }
+    Ok(environment)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -331,13 +368,34 @@ fn validate_capabilities(
     {
         return Err("candidate does not support updater protocol 3".into());
     }
-    if mode.supports_tern()
-        && capabilities
-            .get("observation_mode")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
-    {
-        return Err("candidate does not support observation mode capability 1".into());
+    validate_observation_capability(capabilities, mode, false)
+}
+
+fn validate_observation_capability(
+    capabilities: &serde_json::Value,
+    mode: ObservationMode,
+    explicit_herdr: bool,
+) -> Result<(), String> {
+    let capability = capabilities
+        .get("observation_mode")
+        .and_then(serde_json::Value::as_u64);
+    let supported = match mode {
+        ObservationMode::Both => capability == Some(2),
+        ObservationMode::Tern => matches!(capability, Some(1 | 2)),
+        ObservationMode::Herdr => {
+            matches!(capability, Some(1 | 2))
+                || !explicit_herdr
+                    && !capabilities
+                        .as_object()
+                        .is_some_and(|fields| fields.contains_key("observation_mode"))
+        }
+    };
+    if !supported {
+        let required = if mode == ObservationMode::Both { 2 } else { 1 };
+        return Err(format!(
+            "cannot preserve host {}: observation mode capability {required} is required",
+            mode.as_str()
+        ));
     }
     Ok(())
 }
@@ -350,16 +408,11 @@ pub fn validate_helper_capabilities(response: &str, context: &UpdateContext) -> 
     {
         return Err("release helper does not match updater protocol 3".into());
     }
-    context.observation_mode()?;
-    if context.environment.contains_key(OBSERVATION_MODE_ENV)
-        && parsed
-            .get("observation_mode")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
-    {
-        return Err("release helper does not support observation mode capability 1".into());
-    }
-    Ok(())
+    validate_observation_capability(
+        &parsed,
+        context.observation_mode()?,
+        context.environment.contains_key(OBSERVATION_MODE_ENV),
+    )
 }
 
 pub fn helper_path_for_context(
@@ -492,29 +545,72 @@ mod observation_capability_tests {
     use super::*;
 
     #[test]
-    fn old_protocol_three_candidate_remains_herdr_only() {
+    fn capabilities_distinguish_auto_contract_from_legacy_single_host_support() {
         let legacy = serde_json::json!({"protocol": 3});
         assert!(validate_capabilities(&legacy, ObservationMode::Herdr).is_ok());
         for mode in [ObservationMode::Tern, ObservationMode::Both] {
             assert!(validate_capabilities(&legacy, mode).is_err());
-            for value in [serde_json::json!(0), serde_json::json!("1")] {
+        }
+        let old_modes = serde_json::json!({"protocol": 3, "observation_mode": 1});
+        assert!(validate_capabilities(&old_modes, ObservationMode::Herdr).is_ok());
+        assert!(validate_capabilities(&old_modes, ObservationMode::Tern).is_ok());
+        assert!(validate_capabilities(&old_modes, ObservationMode::Both)
+            .unwrap_err()
+            .contains("capability 2"));
+        let live_modes = serde_json::json!({"protocol": 3, "observation_mode": 2});
+        for mode in [
+            ObservationMode::Herdr,
+            ObservationMode::Tern,
+            ObservationMode::Both,
+        ] {
+            assert!(validate_capabilities(&live_modes, mode).is_ok());
+            for value in [
+                serde_json::json!(0),
+                serde_json::json!(3),
+                serde_json::json!("2"),
+            ] {
                 assert!(validate_capabilities(
                     &serde_json::json!({"protocol": 3, "observation_mode": value}),
                     mode
                 )
                 .is_err());
             }
-            assert!(validate_capabilities(
-                &serde_json::json!({"protocol": 3, "observation_mode": 1}),
-                mode
+        }
+        assert!(validate_capabilities(
+            &serde_json::json!({"protocol": 2, "observation_mode": 2}),
+            ObservationMode::Both
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn helper_requires_explicit_mode_support_and_auto_contract() {
+        assert!(validate_observation_capability(
+            &serde_json::json!({"protocol": 3}),
+            ObservationMode::Herdr,
+            true
+        )
+        .is_err());
+        for mode in [ObservationMode::Herdr, ObservationMode::Tern] {
+            assert!(validate_observation_capability(
+                &serde_json::json!({"observation_mode": 1}),
+                mode,
+                true
             )
             .is_ok());
         }
-        assert!(validate_capabilities(
-            &serde_json::json!({"protocol": 2, "observation_mode": 1}),
-            ObservationMode::Tern
+        assert!(validate_observation_capability(
+            &serde_json::json!({"observation_mode": 1}),
+            ObservationMode::Both,
+            true
         )
         .is_err());
+        assert!(validate_observation_capability(
+            &serde_json::json!({"observation_mode": 2}),
+            ObservationMode::Both,
+            true
+        )
+        .is_ok());
     }
 }
 
@@ -523,7 +619,7 @@ mod plan_protocol_tests {
     use super::*;
 
     #[test]
-    fn old_private_plan_cannot_enter_protocol_three_and_retains_original_bytes() {
+    fn durable_reader_rejects_old_protocols_but_migrates_both_without_rewriting_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("profile");
         fs::create_dir(&state).unwrap();
@@ -574,5 +670,41 @@ mod plan_protocol_tests {
             assert!(read_plan(&state, &id).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
+        let id = "00000000000000000000000000000003";
+        let legacy = UpdatePlan {
+            version: protocol::UPDATER_PROTOCOL,
+            operation_id: id.into(),
+            context,
+            origin,
+            action: UpdateAction::ApplyInstalled,
+            running: identity,
+            candidate: None,
+            target: None,
+        };
+        let mut record = serde_json::to_value(&legacy).unwrap();
+        record["context"]["environment"][OBSERVATION_MODE_ENV] = serde_json::json!("both");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let path = protocol::private_updates(&state)
+            .unwrap()
+            .join(format!("{id}.plan.json"));
+        protocol::write_private_new(&path, &bytes, 0o600).unwrap();
+        let migrated = read_plan(&state, id).unwrap();
+        assert_eq!(
+            migrated.context.observation_mode().unwrap(),
+            ObservationMode::Both
+        );
+        assert_eq!(migrated.context.environment[OBSERVATION_MODE_ENV], "auto");
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert!(validate_helper_capabilities(
+            r#"{"protocol":3,"observation_mode":1}"#,
+            &migrated.context
+        )
+        .unwrap_err()
+        .contains("capability 2"));
+        assert!(validate_helper_capabilities(
+            r#"{"protocol":3,"observation_mode":2}"#,
+            &migrated.context
+        )
+        .is_ok());
     }
 }

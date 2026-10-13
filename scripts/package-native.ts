@@ -120,8 +120,8 @@ async function requireProtocolThree(binary: string, label: string): Promise<void
   if (typeof capabilities !== "object" || capabilities === null || !("protocol" in capabilities) || capabilities.protocol !== 3) {
     fail(`${label} does not support updater protocol 3`);
   }
-  if (!("observation_mode" in capabilities) || capabilities.observation_mode !== 1) {
-    fail(`${label} does not support observation-mode capability 1`);
+  if (!("observation_mode" in capabilities) || capabilities.observation_mode !== 2) {
+    fail(`${label} does not support observation-mode capability 2`);
   }
 }
 

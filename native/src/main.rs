@@ -102,7 +102,8 @@ const USAGE: &str = concat!(
     "    start               Start the daemon without changing lifecycle settings\n",
     "    stop                Stop the current daemon or pending startup\n",
     "    restart             Stop, then manually start without changing settings\n",
-    "    settings            Open lifecycle settings without starting the pet\n",
+    "    settings            Open unified Settings; manually start saved profile if offline\n",
+    "                        Keeps saved host/visibility; ignores --host and host env overrides\n",
     "    settings get        Show lifecycle settings as JSON\n",
     "    settings set auto_start on|off\n",
     "    settings set exit_with_herdr on|off\n",
@@ -133,7 +134,8 @@ const USAGE: &str = concat!(
     "    preferences set      Set --language system|ko|en|zh-Hans|ja, --theme warm_ivory|dusty_rose|moonlit_ink|custom,\n",
     "                         --surface/--text/--muted/--border/--accent #RRGGBB (partial palette preserves saved colors),\n",
     "                         --status-indicators on|off, --menu-bar always|recovery_only,\n",
-    "                         --observation-local/--observation-remote on|off, --machine ID (repeatable) or --clear-machines\n",
+    "                         --observation-host auto|herdr|tern, --observation-local/--observation-remote on|off,\n",
+    "                         --machine ID (repeatable) or --clear-machines\n",
     "                         [--expected-revision N] [--operation-id ID] [--wait SECONDS|--no-wait]\n",
     "    preferences status   --instance ID --operation-id ID (preference operations only)\n",
     "    sessions list        --instance ID [--filter all|idle|working|waiting|completed|unknown|offline] [--limit 1..128]\n",
@@ -178,9 +180,9 @@ const USAGE: &str = concat!(
     "    An ACK confirms only acceptance, not native application or persistence.\n",
     "    On uncertain transmission use presentation status OPID --instance ID.\n\n",
     "Options:\n",
-    "    --host herdr|tern|both  Observation host (default: owned env, then herdr)\n",
+    "    --host auto|herdr|tern  Startup host (explicit > owned env > saved; new profile: auto)\n",
     "    --socket PATH       Herdr Unix socket path\n",
-    "    --assets PATH       Renderer assets directory (not for pack/settings/presentation/preferences/sessions/dialogue/worktree)\n",
+    "    --assets PATH       Renderer assets directory (settings: offline launch only; not for pack/settings get|set/presentation/preferences/sessions/dialogue/worktree)\n",
     "    --config-dir PATH   Lifecycle and preference directory\n",
     "    --state-dir PATH    Runtime state directory\n",
     "    -h, --help          Show this help\n",
@@ -383,14 +385,13 @@ fn run() -> Result<(), String> {
     }
     if cli.command == Some(CommandKind::UpdateCapabilities) {
         return print_json(
-            &serde_json::json!({"protocol": UPDATER_PROTOCOL, "observation_mode": 1}),
+            &serde_json::json!({"protocol": UPDATER_PROTOCOL, "observation_mode": 2}),
         );
     }
     let command = cli.command.unwrap_or(CommandKind::Ensure);
     if matches!(
         command,
         CommandKind::Pack
-            | CommandKind::Settings
             | CommandKind::SettingsGet
             | CommandKind::SettingsSet
             | CommandKind::Presentation
@@ -421,8 +422,44 @@ fn run() -> Result<(), String> {
     if command == CommandKind::TernExchange {
         return tern_exchange(&paths);
     }
-    let observation_mode = resolve_observation_mode(cli.host)?;
-    let herdr_socket = cli.socket.unwrap_or_else(default_herdr_socket);
+    let current = if command != CommandKind::Daemon
+        && control::control_socket_is_live(&paths.control_socket, CONTROL_TIMEOUT)
+    {
+        Some(send_command(
+            &paths.control_socket,
+            "status",
+            None,
+            CONTROL_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    if command == CommandKind::Settings && current.is_some() {
+        return open_settings(&paths);
+    }
+    let startup = matches!(
+        command,
+        CommandKind::Ensure | CommandKind::Start | CommandKind::Restart | CommandKind::Daemon
+    );
+    let override_mode = if startup {
+        resolve_observation_override(cli.host, env::var(OBSERVATION_MODE_ENV))?
+    } else {
+        None
+    };
+    let observation_mode = select_observation_mode(override_mode, current.as_ref(), || {
+        if startup || matches!(command, CommandKind::Status | CommandKind::Settings) {
+            preferences::Preferences::load(&paths.config_dir).map(|saved| saved.observation_host())
+        } else {
+            Ok(ObservationMode::default())
+        }
+    })?;
+    let herdr_socket = cli.socket.unwrap_or_else(|| {
+        current
+            .as_ref()
+            .map_or_else(default_herdr_socket, |response| {
+                PathBuf::from(&response.herdr_socket)
+            })
+    });
     if herdr_socket.is_relative() || herdr_socket.as_os_str().is_empty() {
         return Err("Herdr socket path must be a non-empty absolute path".to_owned());
     }
@@ -465,24 +502,53 @@ fn run() -> Result<(), String> {
     )
 }
 
-fn resolve_observation_mode(explicit: Option<ObservationMode>) -> Result<ObservationMode, String> {
+fn resolve_observation_override(
+    explicit: Option<ObservationMode>,
+    owned_environment: Result<String, env::VarError>,
+) -> Result<Option<ObservationMode>, String> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    match owned_environment {
+        Ok(value) => value.parse().map(Some),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!(
+            "{OBSERVATION_MODE_ENV} must be auto, herdr, or tern"
+        )),
+    }
+}
+
+fn select_observation_mode(
+    explicit: Option<ObservationMode>,
+    running: Option<&ControlResponse>,
+    saved: impl FnOnce() -> Result<ObservationMode, String>,
+) -> Result<ObservationMode, String> {
     if let Some(mode) = explicit {
         return Ok(mode);
     }
-    match env::var(OBSERVATION_MODE_ENV) {
-        Ok(value) => value.parse(),
-        Err(env::VarError::NotPresent) => Ok(ObservationMode::Herdr),
-        Err(env::VarError::NotUnicode(_)) => Err(format!(
-            "{OBSERVATION_MODE_ENV} must be herdr, tern, or both"
-        )),
+    match running {
+        Some(response) => response.observation_mode.parse(),
+        None => saved(),
     }
+}
+
+fn persist_observation_mode(directory: &Path, mode: ObservationMode) -> Result<(), String> {
+    let mut preferences = preferences::Preferences::load(directory)?;
+    preferences.apply_patch(
+        preferences::PreferencePatch {
+            observation_host: Some(mode),
+            ..Default::default()
+        },
+        directory,
+    )?;
+    Ok(())
 }
 
 fn require_observation_mode(
     response: &ControlResponse,
     requested: ObservationMode,
 ) -> Result<(), String> {
-    if response.observation_mode == requested.as_str() {
+    if response.observation_mode.parse::<ObservationMode>()? == requested {
         Ok(())
     } else {
         Err(format!(
@@ -527,28 +593,13 @@ fn execute_command(
     presentation: Option<automation_cli::PresentationCommand>,
     automation: Option<automation_cli::DomainCommand>,
 ) -> Result<(), String> {
-    if matches!(
-        command,
-        CommandKind::SettingsGet
-            | CommandKind::SettingsSet
-            | CommandKind::Presentation
-            | CommandKind::Preferences
-            | CommandKind::Sessions
-            | CommandKind::Dialogue
-            | CommandKind::Worktree
-            | CommandKind::Pack
-    ) && control::control_socket_is_live(&paths.control_socket, CONTROL_TIMEOUT)
-    {
-        let current = send_command(&paths.control_socket, "status", None, CONTROL_TIMEOUT)?;
-        require_observation_mode(&current, observation_mode)?;
-    }
     match command {
         CommandKind::Ensure => ensure(
             paths,
             herdr_socket,
             assets,
             assets_override,
-            true,
+            CommandKind::Ensure,
             host_plugin_config_dir,
             observation_mode,
         ),
@@ -557,7 +608,7 @@ fn execute_command(
             herdr_socket,
             assets,
             assets_override,
-            false,
+            CommandKind::Start,
             host_plugin_config_dir,
             observation_mode,
         ),
@@ -572,7 +623,15 @@ fn execute_command(
         ),
         CommandKind::UpdateCapabilities | CommandKind::UpdateStatus => unreachable!(),
         CommandKind::Status => status(paths, herdr_socket, observation_mode),
-        CommandKind::Settings => lifecycle_settings_ui::run(paths),
+        CommandKind::Settings => ensure(
+            paths,
+            herdr_socket,
+            assets,
+            assets_override,
+            CommandKind::Settings,
+            host_plugin_config_dir,
+            observation_mode,
+        ),
         CommandKind::SettingsGet | CommandKind::SettingsSet => {
             let settings = match settings.ok_or_else(|| "settings operation missing".to_owned())? {
                 SettingsCommand::Get => control::get_lifecycle_settings(&paths)?,
@@ -596,7 +655,7 @@ fn execute_command(
         | CommandKind::BubbleAuto
         | CommandKind::Reset
         | CommandKind::Bigger
-        | CommandKind::Smaller => control_action(command, paths, herdr_socket, observation_mode),
+        | CommandKind::Smaller => control_action(command, paths, herdr_socket),
         CommandKind::Pack => execute_pack(
             pack.ok_or_else(|| "pack requires an operation".to_owned())?,
             paths,
@@ -1023,10 +1082,15 @@ fn ensure(
     herdr_socket: PathBuf,
     assets: Option<PathBuf>,
     assets_override: bool,
-    automatic_start: bool,
+    command: CommandKind,
     host_plugin_config_dir: Option<PathBuf>,
     observation_mode: ObservationMode,
 ) -> Result<(), String> {
+    let automatic_start = command == CommandKind::Ensure;
+    let settings_request = command == CommandKind::Settings;
+    if settings_request && control::control_socket_is_live(&paths.control_socket, CONTROL_TIMEOUT) {
+        return open_settings(&paths);
+    }
     let (expected_generation, updater_token) = updater_start_authorization()?;
     admit_startup(
         &paths,
@@ -1048,7 +1112,10 @@ fn ensure(
             observation_mode,
         )?;
         if control::control_socket_is_live(&paths.control_socket, Duration::from_millis(150)) {
-            match wait_for_ready(&paths, &herdr_socket, deadline, observation_mode) {
+            if settings_request {
+                return open_settings(&paths);
+            }
+            match wait_for_ready(&paths, &herdr_socket, deadline, Some(observation_mode)) {
                 Ok(response) => {
                     admit_startup(
                         &paths,
@@ -1135,6 +1202,9 @@ fn ensure(
             updater_token.as_deref(),
             observation_mode,
         )?;
+        if !settings_request {
+            persist_observation_mode(&paths.config_dir, observation_mode)?;
+        }
         let lease = match lifecycle::begin_startup(&paths.config_dir)? {
             Some(lease) => lease,
             None => {
@@ -1172,8 +1242,16 @@ fn ensure(
         };
         lifecycle::set_startup_child(&paths.config_dir, &lease.token, child_pid)?;
         drop(lock);
-        match wait_for_ready(&paths, &herdr_socket, deadline, observation_mode) {
+        match wait_for_ready(
+            &paths,
+            &herdr_socket,
+            deadline,
+            (!settings_request).then_some(observation_mode),
+        ) {
             Ok(response) => {
+                if settings_request {
+                    return open_settings(&paths);
+                }
                 if let Err(error) = admit_startup(
                     &paths,
                     &herdr_socket,
@@ -1196,7 +1274,9 @@ fn ensure(
                     ) {
                         match send_command(&paths.control_socket, "status", None, CONTROL_TIMEOUT) {
                             Ok(response) if !response.shutdown => {
-                                require_observation_mode(&response, observation_mode)?;
+                                if !settings_request {
+                                    require_observation_mode(&response, observation_mode)?;
+                                }
                                 return Err(error.clone());
                             }
                             Err(error)
@@ -1279,7 +1359,7 @@ fn restart(
         herdr_socket,
         assets,
         assets_override,
-        false,
+        CommandKind::Start,
         host_plugin_config_dir,
         observation_mode,
     )
@@ -1404,6 +1484,7 @@ fn status(
             data_connected: false,
             connected_sources: 0,
             disconnected_sources: 0,
+            host_connections: Default::default(),
             sessions: 0,
             working: 0,
             blocked: 0,
@@ -1431,14 +1512,9 @@ fn status(
     print_response(&response)
 }
 
-fn control_action(
-    command: CommandKind,
-    paths: Paths,
-    herdr_socket: PathBuf,
-    observation_mode: ObservationMode,
-) -> Result<(), String> {
+fn control_action(command: CommandKind, paths: Paths, herdr_socket: PathBuf) -> Result<(), String> {
     let current = send_command(&paths.control_socket, "status", None, CONTROL_TIMEOUT)?;
-    require_observation_mode(&current, observation_mode)?;
+    let observation_mode = current.observation_mode.parse::<ObservationMode>()?;
     if observation_mode.supports_herdr() {
         let registration = send_command(
             &paths.control_socket,
@@ -1460,11 +1536,20 @@ fn control_action(
             .then_some(herdr_socket.as_path()),
         CONTROL_TIMEOUT,
     )?;
-    require_observation_mode(&response, observation_mode)?;
     if !response.ok {
         return Err(response
             .error
             .unwrap_or_else(|| "control action failed".to_owned()));
+    }
+    print_response(&response)
+}
+
+fn open_settings(paths: &Paths) -> Result<(), String> {
+    let response = send_command(&paths.control_socket, "settings", None, CONTROL_TIMEOUT)?;
+    if !response.ok {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "cannot open settings".to_owned()));
     }
     print_response(&response)
 }
@@ -1494,10 +1579,10 @@ fn wait_for_ready(
     paths: &Paths,
     herdr_socket: &Path,
     deadline: Instant,
-    observation_mode: ObservationMode,
+    observation_mode: Option<ObservationMode>,
 ) -> Result<ControlResponse, ReadyFailure> {
     let herdr_socket = observation_mode
-        .supports_herdr()
+        .is_some_and(ObservationMode::supports_herdr)
         .then(|| socket::canonical_endpoint(herdr_socket))
         .transpose()
         .map_err(ReadyFailure::TimedOut)?;
@@ -1509,7 +1594,7 @@ fn wait_for_ready(
         // A newly spawned daemon already owns this endpoint. Read readiness
         // first; re-register only when the requested endpoint is not accepted.
         // This also avoids a forbidden mutation during an updater reservation.
-        let (command, endpoint) = if observation_mode.supports_herdr() {
+        let (command, endpoint) = if observation_mode.is_some_and(ObservationMode::supports_herdr) {
             let endpoint = herdr_socket.as_deref();
             if register_next && !registered {
                 ("register", endpoint)
@@ -1532,14 +1617,19 @@ fn wait_for_ready(
                         .unwrap_or_else(|| "desktop pet is shutting down".to_owned()),
                 ));
             }
-            Ok(response) if response.observation_mode != observation_mode.as_str() => {
+            Ok(response)
+                if observation_mode
+                    .is_some_and(|mode| response.observation_mode != mode.as_str()) =>
+            {
                 return Err(ReadyFailure::ModeMismatch(format!(
                     "desktop-pet is already running with host {}; requested {}",
                     response.observation_mode,
-                    observation_mode.as_str()
+                    observation_mode
+                        .expect("host mismatch requires a requested host")
+                        .as_str()
                 )));
             }
-            Ok(response) if !observation_mode.supports_herdr() => {
+            Ok(response) if !observation_mode.is_some_and(ObservationMode::supports_herdr) => {
                 answered = true;
                 if response.ok && response.ready && response.control_ready {
                     return Ok(response);
@@ -1749,6 +1839,7 @@ where
                     | "--accent"
                     | "--status-indicators"
                     | "--menu-bar"
+                    | "--observation-host"
                     | "--observation-local"
                     | "--observation-remote"
                     | "--machine"
@@ -1866,6 +1957,13 @@ fn parse_settings_tokens(tokens: &[String]) -> Result<SettingsCommand, String> {
     }
 }
 
+fn parse_host_option(value: &str) -> Result<ObservationMode, String> {
+    match value {
+        "auto" | "herdr" | "tern" => value.parse(),
+        _ => Err("--host must be auto, herdr, or tern".to_owned()),
+    }
+}
+
 fn parse_global_option<I>(argument: &str, arguments: &mut I, cli: &mut Cli) -> Result<bool, String>
 where
     I: Iterator<Item = String>,
@@ -1888,12 +1986,8 @@ where
         "--host" => {
             let value = arguments
                 .next()
-                .ok_or_else(|| "--host requires herdr, tern, or both".to_owned())?;
-            if cli
-                .host
-                .replace(value.parse::<ObservationMode>()?)
-                .is_some()
-            {
+                .ok_or_else(|| "--host requires auto, herdr, or tern".to_owned())?;
+            if cli.host.replace(parse_host_option(&value)?).is_some() {
                 return Err("duplicate --host".to_owned());
             }
             Ok(true)
@@ -1901,7 +1995,7 @@ where
         value if value.starts_with("--host=") => {
             if cli
                 .host
-                .replace(value["--host=".len()..].parse::<ObservationMode>()?)
+                .replace(parse_host_option(&value["--host=".len()..])?)
                 .is_some()
             {
                 return Err("duplicate --host".to_owned());
@@ -2001,6 +2095,7 @@ where
         | "--accent"
         | "--status-indicators"
         | "--menu-bar"
+        | "--observation-host"
         | "--observation-local"
         | "--observation-remote"
         | "--machine"
@@ -2048,6 +2143,7 @@ where
                     "--accent=",
                     "--status-indicators=",
                     "--menu-bar=",
+                    "--observation-host=",
                     "--observation-local=",
                     "--observation-remote=",
                     "--machine=",
@@ -2626,6 +2722,40 @@ fn validate_assets_path(path: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     #[test]
+    fn tern_helper_decoder_reads_v2_host_inventory_and_preserves_host_order() {
+        let wire = br#"{"version":2,"kind":"tern","window":"helper","epoch":1,"sequence":1,"instance_id":null,"hosts":[{"host":"9","label":"Remote","is_local":false,"observation_generation":3,"status":"available","agents":[]},{"host":"0","label":"Local","is_local":true,"observation_generation":1,"status":"available","agents":[]}],"results":[]}"#;
+        for ending in [b"".as_slice(), b"\n".as_slice(), b"\r\n".as_slice()] {
+            let mut frame = wire.to_vec();
+            frame.extend_from_slice(ending);
+            let request = read_tern_exchange_request(frame.as_slice()).unwrap();
+            assert_eq!(request.version, 2);
+            assert_eq!(request.hosts[0].host, "9");
+            assert_eq!(request.hosts[0].observation_generation, 3);
+            assert!(!request.hosts[0].is_local);
+            assert_eq!(request.hosts[1].host, "0");
+            assert!(request.hosts[1].is_local);
+            let normalized = request.normalize().unwrap();
+            assert_eq!(normalized.len(), 2);
+            assert!(normalized
+                .iter()
+                .all(|(records, counts)| records.is_empty() && counts.sessions == 0));
+        }
+    }
+
+    #[test]
+    fn tern_helper_decoder_rejects_flat_v1_and_duplicate_nested_keys() {
+        let old = br#"{"version":1,"kind":"tern","window":"helper","epoch":1,"sequence":1,"instance_id":null,"agents":[],"results":[]}"#;
+        assert!(read_tern_exchange_request(old.as_slice()).is_err());
+        for wire in [
+            r#"{"version":2,"kind":"tern","window":"helper","epoch":1,"sequence":1,"instance_id":null,"hosts":[{"host":"0","host":"1","label":"Local","is_local":true,"observation_generation":1,"status":"available","agents":[]}],"results":[]}"#,
+            r#"{"version":2,"kind":"tern","window":"helper","epoch":1,"sequence":1,"instance_id":null,"hosts":[{"host":"0","label":"Local","is_local":true,"observation_generation":1,"status":"available","agents":[{"pane":"p","pane":"other","title":"","cwd":"","state":"idle"}]}],"results":[]}"#,
+            r#"{"version":2,"kind":"tern","window":"helper","epoch":1,"sequence":1,"instance_id":null,"hosts":[{"host":"0","label":"Local","is_local":true,"observation_generation":1,"status":"available","agents":[]}],"results":[{"operation_id":"o","pane":"p","status":"accepted","status":"failed","error":null}]}"#,
+        ] {
+            assert!(read_tern_exchange_request(wire.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
     fn startup_capture_omits_default_mode_even_with_inherited_selection() {
         for inherited in [None, Some("herdr"), Some("tern"), Some("both")] {
             for mode in [
@@ -2748,10 +2878,12 @@ mod tests {
             Some(ObservationMode::Tern)
         );
         assert_eq!(
-            parse(&["--host", "both", "ensure"]).unwrap().host,
+            parse(&["--host", "auto", "ensure"]).unwrap().host,
             Some(ObservationMode::Both)
         );
         for args in [
+            vec!["start", "--host=both"],
+            vec!["start", "--host", "both"],
             vec!["start", "--host=TERn"],
             vec!["start", "--host="],
             vec!["start", "--host"],
@@ -2759,6 +2891,157 @@ mod tests {
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn preference_host_tokens_reach_the_domain_parser_without_becoming_startup_flags() {
+        for args in [
+            vec!["preferences", "set", "--observation-host", "auto"],
+            vec!["preferences", "set", "--observation-host=tern"],
+            vec![
+                "preferences",
+                "set",
+                "--host",
+                "herdr",
+                "--observation-host",
+                "tern",
+            ],
+        ] {
+            let cli = parse_cli(args.iter().map(|arg| (*arg).to_owned())).unwrap();
+            assert!(cli.automation.is_some());
+            assert_eq!(
+                cli.host,
+                args.contains(&"--host").then_some(ObservationMode::Herdr)
+            );
+        }
+        assert!(
+            parse_cli(["preferences", "set", "--observation-host", "both"].map(str::to_owned))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_host_precedence_is_explicit_then_owned_environment_then_saved() {
+        let resolve = |explicit, owned: Option<&str>, saved| {
+            let selected = resolve_observation_override(
+                explicit,
+                owned.map(str::to_owned).ok_or(env::VarError::NotPresent),
+            )?;
+            select_observation_mode(selected, None, || Ok(saved))
+        };
+        assert_eq!(
+            resolve(
+                Some(ObservationMode::Herdr),
+                Some("tern"),
+                ObservationMode::Both
+            )
+            .unwrap(),
+            ObservationMode::Herdr
+        );
+        assert_eq!(
+            resolve(None, Some("tern"), ObservationMode::Herdr).unwrap(),
+            ObservationMode::Tern
+        );
+        assert_eq!(
+            resolve(None, None, ObservationMode::Tern).unwrap(),
+            ObservationMode::Tern
+        );
+        assert_eq!(
+            resolve(
+                None,
+                None,
+                preferences::Preferences::default().observation_host()
+            )
+            .unwrap(),
+            ObservationMode::Both
+        );
+        assert_eq!(
+            resolve(None, Some("both"), ObservationMode::Herdr).unwrap(),
+            ObservationMode::Both
+        );
+        assert!(resolve(None, Some("unknown"), ObservationMode::Both).is_err());
+        assert_eq!(
+            resolve(
+                Some(ObservationMode::Tern),
+                Some("unknown"),
+                ObservationMode::Herdr
+            )
+            .unwrap(),
+            ObservationMode::Tern
+        );
+    }
+
+    #[test]
+    fn restart_and_unqualified_queries_preserve_live_mode_not_saved_or_inherited_defaults() {
+        for mode in [
+            ObservationMode::Herdr,
+            ObservationMode::Tern,
+            ObservationMode::Both,
+        ] {
+            let mut response = control_reply(true, false, false);
+            response.observation_mode = mode.as_str().into();
+            assert_eq!(
+                select_observation_mode(None, Some(&response), || Err(
+                    "must not load saved mode".into()
+                ))
+                .unwrap(),
+                mode
+            );
+            assert_eq!(
+                select_observation_mode(Some(ObservationMode::Tern), Some(&response), || {
+                    Err("explicit selection must not load saved mode".into())
+                })
+                .unwrap(),
+                ObservationMode::Tern
+            );
+        }
+        assert_eq!(
+            select_observation_mode(None, None, || Ok(ObservationMode::Herdr)).unwrap(),
+            ObservationMode::Herdr
+        );
+    }
+
+    #[test]
+    fn startup_saves_canonical_host_and_preserves_legacy_profile_preferences() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = env::temp_dir().join(format!(
+            "herdr-cli-host-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        lifecycle::validate_directory(&root, true).unwrap();
+        let path = root.join("preferences.json");
+        let old = serde_json::json!({
+            "visible": false, "passthrough": true, "scale": 0.875, "position": null,
+            "observation": {"local": false, "remote": true, "machines": []},
+            "future_setting": {"kept": true}
+        });
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        let saved = preferences::Preferences::load(&root).unwrap();
+        assert_eq!(saved.observation_host(), ObservationMode::Herdr);
+        assert_eq!(
+            select_observation_mode(None, None, || Ok(saved.observation_host())).unwrap(),
+            ObservationMode::Herdr
+        );
+        persist_observation_mode(&root, ObservationMode::Both).unwrap();
+        let disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk["observation"]["host"], "auto");
+        for key in [
+            "visible",
+            "passthrough",
+            "scale",
+            "position",
+            "future_setting",
+        ] {
+            assert_eq!(disk[key], old[key], "{key}");
+        }
+        assert_eq!(disk["observation"]["local"], false);
+        assert_eq!(disk["observation"]["remote"], true);
+        fs::write(&path, b"invalid existing preferences").unwrap();
+        assert!(persist_observation_mode(&root, ObservationMode::Tern).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"invalid existing preferences");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3200,6 +3483,7 @@ mod tests {
             data_connected: false,
             connected_sources: 0,
             disconnected_sources: 0,
+            host_connections: Default::default(),
             sessions: 0,
             working: 0,
             blocked: 0,
@@ -3285,7 +3569,7 @@ mod tests {
             &paths,
             Path::new("/tmp/herdr.sock"),
             Instant::now() + STARTUP_TIMEOUT,
-            ObservationMode::Herdr,
+            Some(ObservationMode::Herdr),
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(paths.control_socket.parent().unwrap());
@@ -3304,7 +3588,7 @@ mod tests {
             &paths,
             Path::new("/tmp/herdr.sock"),
             Instant::now() + STARTUP_TIMEOUT,
-            ObservationMode::Herdr,
+            Some(ObservationMode::Herdr),
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(paths.control_socket.parent().unwrap());
@@ -3331,7 +3615,7 @@ mod tests {
             &paths,
             &alias,
             Instant::now() + Duration::from_secs(2),
-            ObservationMode::Herdr,
+            Some(ObservationMode::Herdr),
         )
         .unwrap();
         server.join().unwrap();
@@ -3350,7 +3634,7 @@ mod tests {
             &paths,
             Path::new("/tmp/herdr-not-running.sock"),
             Instant::now() + Duration::from_secs(2),
-            ObservationMode::Tern,
+            Some(ObservationMode::Tern),
         )
         .unwrap();
         server.join().unwrap();
@@ -3366,7 +3650,7 @@ mod tests {
             &paths,
             Path::new("/tmp/herdr-not-running.sock"),
             Instant::now() + Duration::from_secs(2),
-            ObservationMode::Tern,
+            Some(ObservationMode::Tern),
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(paths.control_socket.parent().unwrap());
@@ -3374,5 +3658,161 @@ mod tests {
             matches!(result, Err(ReadyFailure::ModeMismatch(_))),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn settings_readiness_requires_only_ui_not_host_or_registration() {
+        let mut reply = control_reply(true, false, false);
+        reply.observation_mode = "tern".into();
+        reply.ready = true;
+        reply.ui_ready = true;
+        let (paths, server) = serve_one_reply(reply, false, None);
+        let result = wait_for_ready(
+            &paths,
+            Path::new("unused-relative-herdr.sock"),
+            Instant::now() + Duration::from_secs(2),
+            None,
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(paths.control_socket.parent().unwrap());
+        let response = result.unwrap();
+        assert_eq!(response.observation_mode, "tern");
+        assert!(response.ready && !response.registration_accepted);
+    }
+
+    #[test]
+    fn settings_reuses_daemon_without_assets_profile_or_host_registration() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = PathBuf::from("/tmp").join(format!(
+            "herdr-live-settings-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        lifecycle::validate_directory(&root, true).unwrap();
+        let paths = Paths {
+            config_dir: root.join("absent-config"),
+            state_dir: root.join("absent-state"),
+            control_socket: root.join("control.sock"),
+            log_file: root.join("daemon.log"),
+        };
+        let listener = UnixListener::bind(&paths.control_socket).unwrap();
+        fs::set_permissions(&paths.control_socket, Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            for expected_command in ["ping", "settings"] {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(POLL_INTERVAL)
+                        }
+                        Err(error) => panic!("missing {expected_command} request: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(
+                        deadline
+                            .checked_duration_since(Instant::now())
+                            .expect("settings fixture request deadline expired"),
+                    ))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["command"], expected_command);
+                assert!(request["endpoint"].is_null());
+                let mut reply = control_reply(true, false, false);
+                reply.observation_mode = "tern".into();
+                reply.command = expected_command.into();
+                reply.ready = true;
+                reply.ui_ready = true;
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        let result = ensure(
+            paths.clone(),
+            root.join("absent-herdr.sock"),
+            Some(root.join("absent-assets")),
+            true,
+            CommandKind::Settings,
+            None,
+            ObservationMode::Herdr,
+        );
+        server.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!paths.config_dir.exists());
+        assert!(!paths.state_dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_queries_the_running_host_and_tern_never_registers_herdr() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = PathBuf::from("/tmp").join(format!(
+            "herdr-live-mode-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        lifecycle::validate_directory(&root, true).unwrap();
+        let paths = Paths {
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+            control_socket: root.join("control.sock"),
+            log_file: root.join("daemon.log"),
+        };
+        let listener = UnixListener::bind(&paths.control_socket).unwrap();
+        fs::set_permissions(&paths.control_socket, Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            for expected_command in ["status", "hide"] {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(POLL_INTERVAL)
+                        }
+                        Err(error) => panic!("missing {expected_command} request: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(
+                        deadline
+                            .checked_duration_since(Instant::now())
+                            .expect("host control fixture request deadline expired"),
+                    ))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["command"], expected_command);
+                assert!(request["endpoint"].is_null());
+                let mut reply = control_reply(true, false, false);
+                reply.observation_mode = "tern".into();
+                reply.command = expected_command.into();
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        let result = control_action(CommandKind::Hide, paths, root.join("absent/herdr.sock"));
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.is_ok(), "{result:?}");
     }
 }

@@ -17,6 +17,7 @@ use crate::preferences::{
     BubbleAppearance, BubbleColor, BubbleTheme, MenuBarMode, PreferencePatch,
 };
 use crate::session_view::{SessionFilter, SessionPageCursor, SessionPageRequest};
+use herdr_update_coordinator::ObservationMode;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
@@ -627,6 +628,7 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                     | "--accent"
                     | "--status-indicators"
                     | "--menu-bar"
+                    | "--observation-host"
                     | "--observation-local"
                     | "--observation-remote"
                     | "--machine"
@@ -780,6 +782,14 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                             .map_err(|_| "unknown menu-bar mode")
                     })
                     .transpose()?;
+                patch.observation_host = take("--observation-host")
+                    .map(|value| match value {
+                        "auto" => Ok(ObservationMode::Both),
+                        "herdr" => Ok(ObservationMode::Herdr),
+                        "tern" => Ok(ObservationMode::Tern),
+                        _ => Err("--observation-host requires auto|herdr|tern"),
+                    })
+                    .transpose()?;
                 patch.observation_local = take("--observation-local")
                     .map(|v| on_off(v, "--observation-local"))
                     .transpose()?;
@@ -799,6 +809,7 @@ pub(crate) fn parse_domain(preferences: bool, tokens: &[String]) -> Result<Domai
                     && patch.language.is_none()
                     && patch.show_status_indicators.is_none()
                     && patch.menu_bar_mode.is_none()
+                    && patch.observation_host.is_none()
                     && patch.observation_local.is_none()
                     && patch.observation_remote.is_none()
                     && patch.observation_machines.is_none()
@@ -1981,6 +1992,87 @@ mod domain_tests {
                 assert!(parse_domain(true, &args).is_err(), "{args:?}");
             }
         }
+    }
+
+    #[test]
+    fn preference_host_tokens_are_strict_and_preserve_other_patch_options() {
+        for (token, expected) in [
+            ("auto", ObservationMode::Both),
+            ("herdr", ObservationMode::Herdr),
+            ("tern", ObservationMode::Tern),
+        ] {
+            for args in [
+                vec![
+                    "set".to_owned(),
+                    "--observation-host".to_owned(),
+                    token.to_owned(),
+                ],
+                vec!["set".to_owned(), format!("--observation-host={token}")],
+            ] {
+                assert!(matches!(
+                    parse_domain(true, &args).unwrap(),
+                    DomainCommand::PreferencesSet {
+                        patch: PreferencePatch { observation_host: Some(mode), .. },
+                        ..
+                    } if mode == expected
+                ));
+            }
+        }
+        for token in [
+            "both", "AUTO", "Herdr", "TERN", "", " auto", "tern ", "herdr\n",
+        ] {
+            for args in [
+                vec![
+                    "set".to_owned(),
+                    "--observation-host".to_owned(),
+                    token.to_owned(),
+                ],
+                vec!["set".to_owned(), format!("--observation-host={token}")],
+            ] {
+                assert!(parse_domain(true, &args).is_err(), "{args:?}");
+            }
+        }
+        assert!(matches!(
+            parse(
+                true,
+                &[
+                    "set",
+                    "--language",
+                    "ko",
+                    "--observation-host",
+                    "tern",
+                    "--observation-local",
+                    "off",
+                    "--expected-revision",
+                    "7",
+                    "--no-wait",
+                ]
+            )
+            .unwrap(),
+            DomainCommand::PreferencesSet {
+                patch: PreferencePatch {
+                    observation_host: Some(ObservationMode::Tern),
+                    language: Some(LanguagePreference::Ko),
+                    observation_local: Some(false),
+                    ..
+                },
+                revision: Some(7),
+                wait: None,
+                ..
+            }
+        ));
+        assert!(parse(
+            true,
+            &[
+                "set",
+                "--observation-host",
+                "tern",
+                "--observation-host=auto"
+            ]
+        )
+        .is_err());
+        assert!(parse(true, &["set", "--observation-host"]).is_err());
+        assert!(parse(true, &["get", "--observation-host", "auto"]).is_err());
     }
 
     #[test]

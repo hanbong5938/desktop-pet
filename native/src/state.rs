@@ -10,12 +10,13 @@ use crate::session_view::{
     SessionView, SourceAdmission, WorktreeRemoveTarget, WorktreeRemoveTargetError,
 };
 use crate::sources::{
-    remote_machine_id, remote_source, ObservationPreferences, SourceCatalog, SourceRoute,
+    remote_machine_id, remote_source, HostConnections, ObservationPreferences, SourceCatalog,
+    SourceRoute,
 };
 use crate::tern::{
     TernExchangeErrorCode, TernExchangeReply, TernExchangeRequest, TernRegistry, Window,
 };
-use herdr_update_coordinator::{ObservationMode, UpdateContext};
+use herdr_update_coordinator::{ObservationMode, UpdateContext, OBSERVATION_MODE_ENV};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -212,6 +213,7 @@ struct SourceState {
     generation: u64,
     connected: bool,
     coherent: bool,
+    offline_since: Option<Instant>,
     counts: SourceCounts,
     snapshot_revision: Option<u64>,
     // Populated only by a complete, accepted snapshot for this generation.
@@ -243,7 +245,7 @@ pub struct AppState {
     tern: TernRegistry,
     observation_catalog: SourceCatalog,
     observation_epoch: u64,
-    retired_remote_generations: HashMap<String, u64>,
+    retired_generations: HashMap<String, u64>,
     session_store: SessionStore,
     completions: VecDeque<CompletionObservation>,
     outcomes: VecDeque<OutcomeObservation>,
@@ -255,6 +257,7 @@ pub struct AppState {
     unknown: usize,
     connected_sources: usize,
     disconnected_sources: usize,
+    host_connections: HostConnections,
 }
 
 impl AppState {
@@ -281,11 +284,11 @@ impl AppState {
             ui_ready: false,
             sources: HashMap::new(),
             observation: ObservationPreferences::default(),
-            observation_mode: ObservationMode::Herdr,
+            observation_mode: ObservationMode::Both,
             tern: TernRegistry::default(),
             observation_catalog: SourceCatalog::default(),
             observation_epoch: 0,
-            retired_remote_generations: HashMap::new(),
+            retired_generations: HashMap::new(),
             session_store: SessionStore::new(),
             completions: VecDeque::new(),
             outcomes: VecDeque::new(),
@@ -297,18 +300,45 @@ impl AppState {
             unknown: 0,
             connected_sources: 0,
             disconnected_sources: 0,
+            host_connections: HostConnections::default(),
         }
     }
+    #[cfg(test)]
     pub(crate) fn set_observation_mode(&mut self, mode: ObservationMode) {
-        self.observation_mode = mode;
+        if self.observation_mode == mode || self.update_mutation_allowed().is_err() {
+            return;
+        }
+        let Some(epoch) = self.observation_epoch.checked_add(1) else {
+            return;
+        };
+        self.observation.host = mode;
+        self.finish_observation_change(epoch);
     }
 
     pub(crate) fn observation_mode(&self) -> ObservationMode {
         self.observation_mode
     }
 
-    pub(crate) fn set_update_context(&mut self, context: UpdateContext) {
+    pub(crate) fn set_update_context(&mut self, mut context: UpdateContext) {
+        if self.update_mutation_allowed().is_err() {
+            return;
+        }
+        Self::set_context_host(&mut context, self.observation_mode);
         self.update_context = Some(context);
+    }
+
+    fn set_context_host(context: &mut UpdateContext, mode: ObservationMode) {
+        if mode == ObservationMode::Herdr {
+            context.environment.remove(OBSERVATION_MODE_ENV);
+        } else if context
+            .environment
+            .get(OBSERVATION_MODE_ENV)
+            .is_none_or(|value| value != mode.as_str())
+        {
+            context
+                .environment
+                .insert(OBSERVATION_MODE_ENV.to_owned(), mode.as_str().to_owned());
+        }
     }
 
     pub(crate) fn update_context(&self) -> Option<&UpdateContext> {
@@ -482,6 +512,8 @@ impl AppState {
         }
         self.pending_update = None;
         self.updater_stopping = true;
+        self.tern
+            .reject_all_pending(crate::herdr::PromptError::Offline);
         self.shutdown = true;
         Ok(())
     }
@@ -533,8 +565,25 @@ impl AppState {
         self.observation_epoch
     }
 
+    pub(crate) fn host_connections(&self) -> HostConnections {
+        self.host_connections
+    }
+
     pub(crate) fn observation_catalog(&self) -> &SourceCatalog {
         &self.observation_catalog
+    }
+
+    fn supports_source(&self, source: &str) -> bool {
+        if source.starts_with("tern:") {
+            self.observation_mode.supports_tern()
+        } else {
+            self.observation_mode.supports_herdr()
+        }
+    }
+
+    fn accepts_source(&self, source: &str) -> bool {
+        self.supports_source(source)
+            && (remote_machine_id(source).is_none() || self.includes_source(source))
     }
 
     fn includes_source(&self, source: &str) -> bool {
@@ -550,20 +599,21 @@ impl AppState {
     }
 
     fn reconcile_observation(&mut self) {
-        let excluded_remotes: Vec<(String, u64)> = self
+        let retired_sources: Vec<(String, u64)> = self
             .sources
             .iter()
-            .filter(|(source, _)| {
-                remote_machine_id(source).is_some() && !self.includes_source(source)
-            })
+            .filter(|(source, _)| !self.accepts_source(source))
             .map(|(source, state)| (source.clone(), state.generation))
             .collect();
-        for (source, generation) in excluded_remotes {
+        for (source, generation) in retired_sources {
             let _ = self.remove_source(&source, generation);
         }
         for source in self.sources.keys() {
             let included = self.includes_source(source);
             self.session_store.set_visibility(source, included);
+        }
+        if !self.observation_mode.supports_tern() {
+            self.tern.retire_all();
         }
         self.completions.retain(|observation| {
             self.observation.includes(&observation.source)
@@ -591,11 +641,22 @@ impl AppState {
         mut preferences: ObservationPreferences,
     ) {
         preferences.sanitize();
-        if self.observation == preferences {
+        if self.observation == preferences || self.update_mutation_allowed().is_err() {
             return;
         }
+        let Some(epoch) = self.observation_epoch.checked_add(1) else {
+            return;
+        };
         self.observation = preferences;
-        self.observation_epoch = self.observation_epoch.saturating_add(1);
+        self.finish_observation_change(epoch);
+    }
+
+    fn finish_observation_change(&mut self, epoch: u64) {
+        self.observation_mode = self.observation.host;
+        if let Some(context) = self.update_context.as_mut() {
+            Self::set_context_host(context, self.observation_mode);
+        }
+        self.observation_epoch = epoch;
         self.reconcile_observation();
         self.session_store.invalidate();
     }
@@ -1137,19 +1198,55 @@ impl AppState {
             }
         }
         self.updater_stopping = false;
+        self.tern
+            .reject_all_pending(crate::herdr::PromptError::Offline);
         self.shutdown = true;
     }
-    /// Age complete window inventories from the control loop's monotonic tick.
+    /// Freshness and pending delivery finalization, without retention pruning.
     pub(crate) fn expire_tern(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        for (source, generation) in self.tern.expire(now) {
-            if self
-                .sources
-                .get(&source)
-                .is_some_and(|entry| entry.connected)
-            {
-                changed |= self.update_source(&source, generation, false, SourceCounts::default());
-            }
+        for (source, generation, since) in self.tern.expire(now) {
+            changed |= self.mark_source_offline_at(&source, generation, since);
+        }
+        changed
+    }
+
+    /// The control tick owns time-based retirement; exchanges only age freshness.
+    pub(crate) fn maintain_tern(&mut self, now: Instant) -> bool {
+        let mut changed = self.expire_tern(now);
+        let candidates: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|(source, entry)| {
+                source.starts_with("tern:")
+                    && !entry.connected
+                    && entry.offline_since.is_some_and(|since| {
+                        now.saturating_duration_since(since) >= crate::tern::OFFLINE_GRACE
+                    })
+                    && self
+                        .session_store
+                        .is_offline_generation(source, entry.generation)
+                    && self.tern.allows_offline_removal(source, entry.generation)
+            })
+            .map(|(source, entry)| (source.clone(), entry.generation))
+            .collect();
+        for (source, generation) in candidates {
+            changed |= self.remove_source(&source, generation);
+        }
+        let parents: Vec<_> = self
+            .tern
+            .expired_registrations(now)
+            .filter(|(_, window)| {
+                window.hosts.is_empty()
+                    && window.offline_since.is_some_and(|since| {
+                        now.saturating_duration_since(since) >= crate::tern::OFFLINE_GRACE
+                    })
+            })
+            .map(|(id, _)| id.to_owned())
+            .collect();
+        for parent in parents {
+            self.tern.retire_window(&parent);
+            changed = true;
         }
         changed
     }
@@ -1158,6 +1255,8 @@ impl AppState {
         key: SessionKey,
         window: &str,
         epoch: u64,
+        host: &str,
+        observation_generation: u64,
         pane: &str,
         text: &str,
     ) -> Result<
@@ -1171,8 +1270,8 @@ impl AppState {
             .map_err(crate::herdr::PromptError::Other)?;
         let (target, route) = self.prompt_route(&key)?;
         if target.pane_id != pane
-            || !matches!(&route, SourceRoute::TernWindow { window: current, epoch: current_epoch }
-            if current.as_str() == window && *current_epoch == epoch)
+            || !matches!(&route, SourceRoute::TernWindow { window: current, epoch: current_epoch, host: current_host, observation_generation: current_observation }
+            if current.as_str() == window && *current_epoch == epoch && current_host == host && *current_observation == observation_generation)
         {
             return Err(crate::herdr::PromptError::StaleTarget);
         }
@@ -1181,7 +1280,16 @@ impl AppState {
             .as_ref()
             .map(|context| context.instance_id.as_str())
             .ok_or(crate::herdr::PromptError::NotReady)?;
-        self.tern.queue(window, epoch, key, pane, text, instance_id)
+        self.tern.queue(
+            window,
+            epoch,
+            host,
+            observation_generation,
+            key,
+            pane,
+            text,
+            instance_id,
+        )
     }
 
     pub(crate) fn cancel_tern_prompt(&mut self, window: &str, operation_id: &str) {
@@ -1189,6 +1297,15 @@ impl AppState {
     }
 
     pub(crate) fn tern_exchange(&mut self, request: TernExchangeRequest) -> TernExchangeReply {
+        self.tern_exchange_at(request, Instant::now())
+    }
+
+    fn tern_exchange_at(
+        &mut self,
+        request: TernExchangeRequest,
+        now: Instant,
+    ) -> TernExchangeReply {
+        use crate::tern::{Host, Observation, TernHostReply, TernHostStatus, MAX_SAFE_INTEGER};
         let instance_id = self
             .update_context
             .as_ref()
@@ -1196,29 +1313,34 @@ impl AppState {
             .unwrap_or_default();
         let error =
             |code, message: String| TernExchangeReply::error(instance_id.clone(), code, message);
-        if !self.observation_mode.supports_tern() || self.shutdown {
+        if !self.observation_mode.supports_tern() || self.shutdown || instance_id.is_empty() {
             return error(
                 TernExchangeErrorCode::Rejected,
                 "Tern observation is unavailable".into(),
             );
         }
-        if instance_id.is_empty() {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "daemon instance is not ready".into(),
-            );
-        }
-        let (records, counts) = match request.normalize() {
-            Ok(snapshot) => snapshot,
+        let snapshots = match request.normalize() {
+            Ok(snapshots) => snapshots,
             Err(detail) => return error(TernExchangeErrorCode::Rejected, detail),
         };
-        if self.tern.get(&request.window).is_none() && request.instance_id.is_some() {
+        if self
+            .tern
+            .retired_epoch(&request.window)
+            .is_some_and(|epoch| request.epoch <= epoch)
+        {
             return error(
                 TernExchangeErrorCode::SourceRetired,
-                "Tern source is retired".into(),
+                "stale retired Tern window epoch".into(),
             );
         }
-        if self.tern.get(&request.window).is_some() && request.instance_id.is_none() {
+        let previous = self.tern.get(&request.window);
+        if previous.is_none() && request.instance_id.is_some() {
+            return error(
+                TernExchangeErrorCode::SourceRetired,
+                "Tern window is retired".into(),
+            );
+        }
+        if previous.is_some() && request.instance_id.is_none() {
             return error(
                 TernExchangeErrorCode::BindingRequired,
                 "missing bound daemon instance".into(),
@@ -1234,130 +1356,259 @@ impl AppState {
                 "daemon instance changed".into(),
             );
         }
-        let now = Instant::now();
-        let (generation, new_epoch) = match self.tern.get(&request.window) {
-            Some(previous) if request.epoch < previous.epoch => {
+        let new_epoch = previous.is_none_or(|previous| request.epoch > previous.epoch);
+        if let Some(previous) = previous {
+            if request.epoch < previous.epoch
+                || (request.epoch == previous.epoch && request.sequence <= previous.sequence)
+            {
                 return error(
                     TernExchangeErrorCode::Rejected,
-                    "stale Tern window epoch".into(),
+                    "stale Tern window epoch or sequence".into(),
                 );
             }
-            Some(previous) if request.epoch == previous.epoch => {
-                if request.sequence <= previous.sequence {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "stale Tern window sequence".into(),
-                    );
-                }
-                if let Err(detail) = self.tern.validate_result(&request) {
-                    return error(TernExchangeErrorCode::ReceiptRejected, detail);
-                }
-                (previous.generation, false)
+        }
+        // A receipt cannot establish a new parent epoch. Reject the envelope before
+        // receipt matching so the captured current binding and pending remain intact.
+        if new_epoch && !request.results.is_empty() {
+            return error(
+                TernExchangeErrorCode::Rejected,
+                "Tern results require the currently bound window epoch".into(),
+            );
+        }
+        if !new_epoch {
+            if let Err(detail) = self.tern.validate_result(&request) {
+                return error(TernExchangeErrorCode::ReceiptRejected, detail);
             }
-            Some(previous) => {
-                if !request.results.is_empty() {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "results from a retired Tern window".into(),
-                    );
-                }
-                let Some(generation) = previous
-                    .generation
-                    .checked_add(1)
-                    .filter(|generation| *generation <= crate::tern::MAX_SAFE_INTEGER)
-                else {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "Tern source generation exhausted".into(),
-                    );
-                };
-                (generation, true)
-            }
-            None => {
-                if !request.results.is_empty() {
-                    return error(
-                        TernExchangeErrorCode::Rejected,
-                        "unrecognized Tern command result".into(),
-                    );
-                }
-                (1, true)
-            }
-        };
-        if self.coherent_snapshot_revision.checked_add(1).is_none() {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "snapshot revision exhausted".into(),
-            );
         }
-        let source = crate::tern::source_id(&request.window);
-        if new_epoch
-            && self
-                .sources
-                .get(&source)
-                .is_some_and(|entry| generation <= entry.generation)
-        {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "stale Tern source generation".into(),
-            );
-        }
-        let needs_registry_slot = self.tern.get(&request.window).is_none();
-        if new_epoch
-            && (!self.ensure_source_capacity(&source, generation, needs_registry_slot, now)
-                || !self.begin_source(source.clone(), generation))
-        {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "cannot register Tern window".into(),
-            );
-        }
-        let pane_ids: Arc<[String]> = records
-            .iter()
-            .map(|record| record.pane_id.clone())
-            .collect();
-        if !self.publish_source_snapshot(
-            &source,
-            generation,
-            records.iter(),
-            counts,
-            pane_ids,
-            &[],
-            now,
-        ) {
-            return error(
-                TernExchangeErrorCode::Rejected,
-                "cannot publish Tern window snapshot".into(),
-            );
-        }
+        // All structural, binding and receipt checks precede lifecycle mutation.
+        self.expire_tern(now);
         if new_epoch {
+            if self.tern.get(&request.window).is_none() && !self.ensure_tern_parent_capacity(now) {
+                return error(
+                    TernExchangeErrorCode::Rejected,
+                    "Tern window registry is full".into(),
+                );
+            }
+            let old: Vec<_> = self
+                .tern
+                .get(&request.window)
+                .into_iter()
+                .flat_map(|window| window.hosts.values())
+                .map(|host| (host.source.clone(), host.generation))
+                .collect();
+            for (source, generation) in old {
+                self.mark_source_offline_at(&source, generation, now);
+            }
             self.tern
                 .reject_pending(&request.window, crate::herdr::PromptError::StaleTarget);
-            self.tern.insert(
-                request.window.clone(),
-                Window::new(&request.window, request.epoch, generation, now),
-            );
-            self.session_store.set_label(&source, "Tern");
+            let mut next = Window::new(request.epoch, now);
+            if let Some(previous) = self.tern.get_mut(&request.window) {
+                next.hosts = std::mem::take(&mut previous.hosts);
+                for host in next.hosts.values_mut() {
+                    host.offline = true;
+                }
+            }
+            self.tern.insert(request.window.clone(), next);
         }
-        let window = self
+        // Complete host-list omission is an observed loss, independent of other hosts' freshness.
+        let omitted: Vec<_> = self
             .tern
-            .get_mut(&request.window)
-            .expect("registered window");
+            .get(&request.window)
+            .unwrap()
+            .observations
+            .keys()
+            .filter(|id| !request.hosts.iter().any(|host| &host.host == *id))
+            .cloned()
+            .collect();
+        for id in omitted {
+            self.lose_tern_host(&request.window, &id, now);
+        }
+        // Existing children first; new local before numeric remote IDs. Replies retain request order.
+        let mut order: Vec<_> = request
+            .hosts
+            .iter()
+            .enumerate()
+            .map(|(index, host)| {
+                (
+                    !self
+                        .tern
+                        .get(&request.window)
+                        .unwrap()
+                        .hosts
+                        .contains_key(&host.host),
+                    !host.is_local,
+                    host.host.parse::<u64>().expect("validated host ID"),
+                    index,
+                )
+            })
+            .collect();
+        order.sort_unstable();
+        let mut hosts: Vec<_> = request
+            .hosts
+            .iter()
+            .map(|inventory| {
+                let generation = self
+                    .tern
+                    .get(&request.window)
+                    .unwrap()
+                    .hosts
+                    .get(&inventory.host)
+                    .map_or(0, |host| host.generation);
+                TernHostReply::new(inventory, generation, None)
+            })
+            .collect();
+        for (_, _, _, index) in order {
+            let inventory = &request.hosts[index];
+            let (records, counts) = &snapshots[index];
+            let window = self.tern.get(&request.window).unwrap();
+            let child = window.hosts.get(&inventory.host);
+            let current_generation = child.map_or(0, |host| host.generation);
+            let watermark = window.observations.get(&inventory.host);
+            let invalid = watermark.is_some_and(|observed| {
+                inventory.observation_generation < observed.generation
+                    || (inventory.observation_generation == observed.generation
+                        && (inventory.is_local != observed.is_local
+                            || (observed.requires_new
+                                && inventory.status == TernHostStatus::Available)))
+            });
+            if invalid {
+                hosts[index].reject("stale Tern host observation or locality".into());
+                continue;
+            }
+            if inventory.status != TernHostStatus::Available {
+                self.tern
+                    .get_mut(&request.window)
+                    .unwrap()
+                    .observations
+                    .insert(
+                        inventory.host.clone(),
+                        Observation {
+                            generation: inventory.observation_generation,
+                            is_local: inventory.is_local,
+                            requires_new: true,
+                        },
+                    );
+                self.lose_tern_host(&request.window, &inventory.host, now);
+                continue;
+            }
+            let replacement = child.is_none_or(|host| {
+                host.offline || host.observation_generation != inventory.observation_generation
+            });
+            let source = crate::tern::source_id(&request.window, &inventory.host);
+            let generation = if replacement {
+                self.source_generation(&source)
+                    .into_iter()
+                    .chain(self.retired_source_generation(&source))
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .filter(|generation| *generation <= MAX_SAFE_INTEGER)
+            } else {
+                Some(current_generation)
+            };
+            let Some(generation) = generation else {
+                hosts[index].reject("Tern source generation exhausted".into());
+                continue;
+            };
+            if self.coherent_snapshot_revision.checked_add(1).is_none()
+                || (replacement && !self.begin_source(source.clone(), generation))
+            {
+                hosts[index].reject("cannot register or publish Tern host".into());
+                continue;
+            }
+            if replacement {
+                self.tern
+                    .get_mut(&request.window)
+                    .unwrap()
+                    .reject_host_pending(&inventory.host, crate::herdr::PromptError::StaleTarget);
+            }
+            if !self.session_store.set_locality(&source, inventory.is_local) {
+                hosts[index].reject("Tern host locality changed without a new observation".into());
+                continue;
+            }
+            let pane_ids: Arc<[String]> = records
+                .iter()
+                .map(|record| record.pane_id.clone())
+                .collect();
+            if !self.publish_source_snapshot(
+                &source,
+                generation,
+                records.iter(),
+                *counts,
+                pane_ids,
+                &[],
+                now,
+            ) {
+                hosts[index].reject("cannot publish Tern host snapshot".into());
+                continue;
+            }
+            self.session_store.set_label(
+                &source,
+                if inventory.label.trim().is_empty() {
+                    &inventory.host
+                } else {
+                    &inventory.label
+                },
+            );
+            let window = self.tern.get_mut(&request.window).unwrap();
+            window.observations.insert(
+                inventory.host.clone(),
+                Observation {
+                    generation: inventory.observation_generation,
+                    is_local: inventory.is_local,
+                    requires_new: false,
+                },
+            );
+            window.hosts.insert(
+                inventory.host.clone(),
+                Host {
+                    source,
+                    generation,
+                    observation_generation: inventory.observation_generation,
+                    is_local: inventory.is_local,
+                    last_seen: now,
+                    offline: false,
+                },
+            );
+            hosts[index].generation = generation;
+        }
+        let host_bytes = match crate::tern::host_reply_bytes(&hosts) {
+            Ok(bytes) => bytes,
+            Err(detail) => return error(TernExchangeErrorCode::Rejected, format!("{detail:?}")),
+        };
+        let window = self.tern.get_mut(&request.window).unwrap();
         window.sequence = request.sequence;
         window.last_seen = now;
         window.offline = false;
+        window.offline_since = None;
+        window.last_host_reply_bytes = host_bytes;
+        window.bound = true;
         self.tern.settle(&request.window, request.results.first());
-        // The initial unbound snapshot establishes identity only. Commands are
-        // offered on a later exchange carrying that exact daemon binding.
         let command = request.instance_id.as_ref().and_then(|_| {
             self.tern
                 .pending_target(&request.window)
                 .and_then(|(key, pane)| match self.prompt_route(&key) {
-                    Ok((target, SourceRoute::TernWindow { window, epoch }))
-                        if window == request.window
-                            && epoch == request.epoch
-                            && target.pane_id == pane
-                            && target.source == source
-                            && self.update_mutation_allowed().is_ok() =>
+                    Ok((
+                        target,
+                        SourceRoute::TernWindow {
+                            window,
+                            epoch,
+                            host,
+                            observation_generation,
+                        },
+                    )) if window == request.window
+                        && epoch == request.epoch
+                        && target.pane_id == pane
+                        && request.hosts.iter().any(|inventory| {
+                            inventory.host == host
+                                && inventory.is_local
+                                && inventory.status == TernHostStatus::Available
+                                && inventory.observation_generation == observation_generation
+                        })
+                        && hosts
+                            .iter()
+                            .any(|reply| reply.host == host && reply.error.is_none())
+                        && self.update_mutation_allowed().is_ok() =>
                     {
                         self.tern.offer(&request.window, &instance_id)
                     }
@@ -1373,50 +1624,94 @@ impl AppState {
         TernExchangeReply {
             ok: true,
             instance_id,
-            generation,
+            hosts,
             command,
             error: None,
             error_code: None,
         }
     }
 
-    /// Reclaim only registrations whose registry, aggregate and retained rows
-    /// all agree on an expired offline generation. Pending work is finalized
-    /// by expiry before any source identity is removed.
-    fn ensure_source_capacity(
-        &mut self,
-        source: &str,
-        generation: u64,
-        needs_registry_slot: bool,
-        now: Instant,
-    ) -> bool {
+    fn lose_tern_host(&mut self, window: &str, id: &str, now: Instant) {
+        let entry = self.tern.get_mut(window).expect("registered parent");
+        if let Some(observed) = entry.observations.get_mut(id) {
+            observed.requires_new = true;
+        }
+        entry.reject_host_pending(id, crate::herdr::PromptError::Offline);
+        let source = entry.hosts.get_mut(id).map(|host| {
+            host.offline = true;
+            (host.source.clone(), host.generation)
+        });
+        if let Some((source, generation)) = source {
+            self.mark_source_offline_at(&source, generation, now);
+        }
+    }
+
+    fn ensure_tern_parent_capacity(&mut self, now: Instant) -> bool {
+        while self.tern.len() >= crate::tern::MAX_WINDOWS {
+            let candidate = self
+                .tern
+                .expired_registrations(now)
+                .filter(|(_, window)| {
+                    window.hosts.values().all(|host| {
+                        host.offline
+                            && self.sources.get(&host.source).is_some_and(|source| {
+                                !source.connected && source.generation == host.generation
+                            })
+                            && self
+                                .session_store
+                                .is_offline_generation(&host.source, host.generation)
+                    })
+                })
+                .min_by_key(|(_, window)| window.last_seen)
+                .map(|(id, window)| {
+                    (
+                        id.to_owned(),
+                        window
+                            .hosts
+                            .values()
+                            .map(|host| (host.source.clone(), host.generation))
+                            .collect::<Vec<_>>(),
+                    )
+                });
+            let Some((id, children)) = candidate else {
+                return false;
+            };
+            for (source, generation) in children {
+                if !self.remove_source(&source, generation) {
+                    return false;
+                }
+            }
+            self.tern.retire_window(&id);
+        }
+        true
+    }
+
+    /// Reclaim only children whose registry, aggregate and retained rows agree
+    /// on the expired offline generation. Never retire their parent binding.
+    fn ensure_source_capacity(&mut self, source: &str, generation: u64, now: Instant) -> bool {
         if self.session_store.source_admission(source, generation) == SourceAdmission::Rejected {
             return false;
         }
-        if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed
-            && (!needs_registry_slot || self.tern.len() < crate::tern::MAX_WINDOWS)
-        {
+        if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed {
             return true;
         }
         self.expire_tern(now);
         loop {
-            if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed
-                && (!needs_registry_slot || self.tern.len() < crate::tern::MAX_WINDOWS)
-            {
+            if self.session_store.source_admission(source, generation) == SourceAdmission::Allowed {
                 return true;
             }
             let retired = self
                 .tern
-                .expired_registrations(now)
-                .filter(|(_, entry)| {
-                    self.sources.get(&entry.source).is_some_and(|current| {
-                        current.generation == entry.generation && !current.connected
+                .expired_hosts(now)
+                .filter(|host| {
+                    self.sources.get(&host.source).is_some_and(|current| {
+                        current.generation == host.generation && !current.connected
                     }) && self
                         .session_store
-                        .is_offline_generation(&entry.source, entry.generation)
+                        .is_offline_generation(&host.source, host.generation)
                 })
-                .min_by_key(|(_, entry)| entry.last_seen)
-                .map(|(_, entry)| (entry.source.clone(), entry.generation));
+                .min_by_key(|host| host.last_seen)
+                .map(|host| (host.source.clone(), host.generation));
             let Some((retired_source, retired_generation)) = retired else {
                 return false;
             };
@@ -1431,16 +1726,19 @@ impl AppState {
         self.sources.get(source).map(|state| state.generation)
     }
 
+    pub(crate) fn retired_source_generation(&self, source: &str) -> Option<u64> {
+        self.retired_generations.get(source).copied()
+    }
+
     /// Begin a new connection generation for a canonical endpoint.  Any
     /// previous live counts become unknown until the new generation provides a
     /// coherent snapshot.
     pub(crate) fn begin_source(&mut self, source: String, generation: u64) -> bool {
-        if remote_machine_id(&source).is_some() && !self.includes_source(&source)
-            || remote_machine_id(&source).is_some_and(|_| {
-                self.retired_remote_generations
-                    .get(&source)
-                    .is_some_and(|retired| generation <= *retired)
-            })
+        if !self.accepts_source(&source)
+            || self
+                .retired_generations
+                .get(&source)
+                .is_some_and(|retired| generation <= *retired)
         {
             return false;
         }
@@ -1452,7 +1750,7 @@ impl AppState {
                 return false;
             }
         }
-        if !self.ensure_source_capacity(&source, generation, false, Instant::now()) {
+        if !self.ensure_source_capacity(&source, generation, Instant::now()) {
             return false;
         }
         if !self.session_store.begin_source(&source, generation) {
@@ -1484,6 +1782,7 @@ impl AppState {
                 generation,
                 connected: false,
                 coherent: false,
+                offline_since: None,
                 counts,
                 pane_ids: None,
                 snapshot_revision: None,
@@ -1504,7 +1803,7 @@ impl AppState {
         connected: bool,
         counts: SourceCounts,
     ) -> bool {
-        if remote_machine_id(source).is_some() && !self.includes_source(source) {
+        if !self.accepts_source(source) {
             return false;
         }
         {
@@ -1513,6 +1812,9 @@ impl AppState {
             };
             if existing.generation != generation {
                 return false;
+            }
+            if !connected && existing.connected && existing.offline_since.is_none() {
+                existing.offline_since = Some(Instant::now());
             }
             existing.connected = connected;
             existing.coherent = if connected { existing.coherent } else { false };
@@ -1533,6 +1835,33 @@ impl AppState {
         }
         self.recompute_aggregate();
         true
+    }
+
+    pub(crate) fn mark_source_offline(&mut self, source: &str, generation: u64) -> bool {
+        self.mark_source_offline_at(source, generation, Instant::now())
+    }
+
+    fn mark_source_offline_at(&mut self, source: &str, generation: u64, since: Instant) -> bool {
+        if !self.accepts_source(source) {
+            return false;
+        }
+        let Some(existing) = self.sources.get_mut(source) else {
+            return false;
+        };
+        if existing.generation != generation {
+            return false;
+        }
+        let deadline_changed = existing.offline_since.is_none_or(|before| since < before);
+        existing.offline_since = Some(
+            existing
+                .offline_since
+                .map_or(since, |before| before.min(since)),
+        );
+        if !existing.connected && !deadline_changed {
+            return false;
+        }
+        let counts = existing.counts;
+        self.update_source(source, generation, false, counts)
     }
 
     /// Revoke only the current source generation's matching card result;
@@ -1563,7 +1892,7 @@ impl AppState {
     where
         I: IntoIterator<Item = &'a AgentRecord>,
     {
-        if remote_machine_id(source).is_some() && !self.includes_source(source) {
+        if !self.accepts_source(source) {
             return false;
         }
         let Some(existing) = self.sources.get(source) else {
@@ -1585,6 +1914,7 @@ impl AppState {
         if let Some(existing) = self.sources.get_mut(source) {
             existing.connected = true;
             existing.coherent = true;
+            existing.offline_since = None;
             existing.snapshot_revision = Some(next_revision);
             if existing
                 .pane_ids
@@ -1622,7 +1952,7 @@ impl AppState {
             completion,
             observed_at,
         } = update;
-        if remote_machine_id(source).is_some() && !self.includes_source(source) {
+        if !self.accepts_source(source) {
             return false;
         }
         let Some(existing) = self.sources.get(source) else {
@@ -1676,12 +2006,10 @@ impl AppState {
         purge_completions_for_source(&mut self.completions, source);
         self.outcomes
             .retain(|observation| observation.source != source);
-        if remote_machine_id(source).is_some() {
-            self.retired_remote_generations
-                .entry(source.to_owned())
-                .and_modify(|retired| *retired = (*retired).max(generation))
-                .or_insert(generation);
-        }
+        self.retired_generations
+            .entry(source.to_owned())
+            .and_modify(|retired| *retired = (*retired).max(generation))
+            .or_insert(generation);
         self.sources.remove(source);
         self.recompute_aggregate();
         true
@@ -1691,7 +2019,15 @@ impl AppState {
         let mut aggregate = SourceCounts::default();
         let mut connected_sources = 0usize;
         let mut disconnected_sources = 0usize;
+        let mut host_connections = HostConnections::default();
         for (source_id, source) in &self.sources {
+            if source.connected && source.coherent && self.supports_source(source_id) {
+                if source_id.starts_with("tern:") {
+                    host_connections.tern = host_connections.tern.saturating_add(1);
+                } else {
+                    host_connections.herdr = host_connections.herdr.saturating_add(1);
+                }
+            }
             if !self.includes_source(source_id) {
                 continue;
             }
@@ -1728,6 +2064,7 @@ impl AppState {
         self.unknown = aggregate.unknown;
         self.connected_sources = connected_sources;
         self.disconnected_sources = disconnected_sources;
+        self.host_connections = host_connections;
         self.phase = if connected_sources == 0 {
             Phase::Unknown
         } else if aggregate.blocked > 0 {
@@ -1840,6 +2177,7 @@ pub(crate) mod tests {
             locale: "en".into(),
         };
         let mut state = AppState::new();
+        state.set_observation_mode(ObservationMode::Herdr);
         state.set_ui_ready();
         state.set_update_context(context.clone());
         let (sender, receiver) = mpsc::channel();
@@ -1932,6 +2270,7 @@ pub(crate) mod tests {
 
     fn policy(local: bool, remote: bool, ids: &[&str]) -> ObservationPreferences {
         ObservationPreferences {
+            host: herdr_update_coordinator::ObservationMode::Herdr,
             local,
             remote,
             machines: ids.iter().map(|id| (*id).to_owned()).collect(),
@@ -3348,24 +3687,31 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn tern_test_request(window: &str) -> TernExchangeRequest {
-        use crate::tern::{TernAgent, TernAgentState};
+        use crate::tern::{TernAgent, TernAgentState, TernHostInventory, TernHostStatus};
         TernExchangeRequest {
-            version: 1,
+            version: 2,
             kind: "tern".into(),
             window: window.into(),
             epoch: 1,
             sequence: 1,
             instance_id: None,
-            agents: vec![TernAgent {
-                pane: "pane-a".into(),
-                title: window.into(),
-                cwd: "/isolated/repo".into(),
-                session_id: Some("session-a".into()),
-                session_label: Some("Session".into()),
-                tab_id: None,
-                tab_label: None,
-                state: TernAgentState::Working,
-                delivery_error: None,
+            hosts: vec![TernHostInventory {
+                host: "0".into(),
+                label: "Tern".into(),
+                is_local: true,
+                observation_generation: 1,
+                status: TernHostStatus::Available,
+                agents: vec![TernAgent {
+                    pane: "pane-a".into(),
+                    title: window.into(),
+                    cwd: "/isolated/repo".into(),
+                    session_id: Some("session-a".into()),
+                    session_label: Some("Session".into()),
+                    tab_id: None,
+                    tab_label: None,
+                    state: TernAgentState::Working,
+                    delivery_error: None,
+                }],
             }],
             results: vec![],
         }
@@ -3374,6 +3720,31 @@ pub(crate) mod tests {
     pub(crate) fn age_tern_test_source(state: &mut AppState, window: &str) {
         state.tern.get_mut(window).unwrap().last_seen =
             Instant::now() - crate::tern::FRESHNESS - Duration::from_millis(1);
+    }
+
+    pub(crate) fn set_tern_test_last_seen(
+        state: &mut AppState,
+        window: &str,
+        host: Option<&str>,
+        now: Instant,
+    ) {
+        let entry = state.tern.get_mut(window).unwrap();
+        if let Some(host) = host {
+            entry.hosts.get_mut(host).unwrap().last_seen = now;
+        } else {
+            entry.last_seen = now;
+            for host in entry.hosts.values_mut() {
+                host.last_seen = now;
+            }
+        }
+    }
+
+    pub(crate) fn tern_test_exchange_at(
+        state: &mut AppState,
+        request: TernExchangeRequest,
+        now: Instant,
+    ) -> TernExchangeReply {
+        state.tern_exchange_at(request, now)
     }
 
     fn tern_test_key(state: &AppState, window: &str) -> SessionKey {
@@ -3387,6 +3758,355 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn auto_observes_both_providers_without_conflating_matching_sessions() {
+        let mut state = tern_test_state(ObservationMode::Both);
+        assert_eq!(AppState::new().observation_mode(), ObservationMode::Both);
+        assert_eq!(state.observation_preferences().host, ObservationMode::Both);
+        let local = "/isolated/herdr.sock";
+        let request = tern_test_request("shared-window");
+        let (records, counts) = request.normalize().unwrap().remove(0);
+        connect(&mut state, local, 1);
+        assert!(state.update_source(local, 1, true, counts));
+        assert_eq!(state.host_connections(), HostConnections::default());
+        assert!(state.publish_source_snapshot(
+            local,
+            1,
+            records.iter(),
+            counts,
+            Arc::from(vec!["pane-a".to_owned()]),
+            &[],
+            Instant::now(),
+        ));
+        assert!(state.tern_exchange(request).ok);
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 1, tern: 1 }
+        );
+        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
+        assert_eq!(snapshot.total, 2);
+        assert_eq!(state.scene().sessions, 2);
+        assert_eq!(snapshot.rows[0].metadata, snapshot.rows[1].metadata);
+        assert_eq!(
+            snapshot.rows[0].key.terminal_id,
+            snapshot.rows[1].key.terminal_id
+        );
+        assert_ne!(
+            snapshot.rows[0].key.source_id,
+            snapshot.rows[1].key.source_id
+        );
+        assert!(matches!(
+            state.prompt_route(&snapshot.rows[0].key).unwrap().1,
+            SourceRoute::HerdrLocal(_)
+        ));
+        assert!(matches!(
+            state.prompt_route(&snapshot.rows[1].key).unwrap().1,
+            SourceRoute::TernWindow { .. }
+        ));
+        let epoch = state.observation_epoch();
+        state.set_observation_mode(ObservationMode::Herdr);
+        assert_eq!(state.observation_epoch(), epoch + 1);
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 1, tern: 0 }
+        );
+        assert_eq!(state.scene().sessions, 1);
+        assert!(state.session_view_for_key(&snapshot.rows[1].key).is_none());
+        assert!(state.prompt_route(&snapshot.rows[0].key).is_ok());
+        assert!(!state.scene().shutdown);
+        assert!(!state.mark_source_offline(local, 2));
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 1, tern: 0 }
+        );
+        assert!(state.mark_source_offline(local, 1));
+        assert_eq!(state.host_connections(), HostConnections::default());
+        assert_eq!(state.scene().sessions, 1);
+        assert_eq!(state.scene().unknown, 1);
+        assert_eq!(
+            state
+                .session_view_for_key(&snapshot.rows[0].key)
+                .unwrap()
+                .availability,
+            crate::session_view::Availability::Offline
+        );
+        assert_eq!(
+            state.prompt_route(&snapshot.rows[0].key),
+            Err(crate::herdr::PromptError::Offline)
+        );
+    }
+
+    #[test]
+    fn rapid_host_transitions_fence_local_generations_and_tern_incarnations() {
+        use crate::herdr::PromptError;
+        let mut state = tern_test_state(ObservationMode::Both);
+        let local = "/isolated/herdr.sock";
+        connect(&mut state, local, 41);
+        publish(&mut state, local, 41, AgentStatus::Working);
+        let mut request = tern_test_request("window-a");
+        assert!(state.tern_exchange(request.clone()).ok);
+        let key = tern_test_key(&state, "window-a");
+        state.set_observation_mode(ObservationMode::Tern);
+        assert_eq!(state.source_generation(local), None);
+        assert_eq!(state.retired_source_generation(local), Some(41));
+        assert_eq!(state.scene().sessions, 1);
+        assert!(!state.begin_source(local.to_owned(), 42));
+        assert!(!state.publish_source_snapshot(
+            local,
+            41,
+            std::iter::empty::<&AgentRecord>(),
+            SourceCounts::default(),
+            Arc::from(Vec::<String>::new()),
+            &[],
+            Instant::now(),
+        ));
+        state.set_observation_mode(ObservationMode::Herdr);
+        assert_eq!(state.host_connections(), HostConnections::default());
+        assert_eq!(state.scene().sessions, 0);
+        assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
+        state.set_observation_mode(ObservationMode::Both);
+        assert!(!state.begin_source(local.to_owned(), 41));
+        connect(&mut state, local, 42);
+        publish(&mut state, local, 42, AgentStatus::Working);
+        assert!(!state.update_source(local, 41, true, SourceCounts::default()));
+        assert!(!state.remove_source(local, 41));
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        assert_eq!(
+            state.tern_exchange(request.clone()).error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        request.instance_id = None;
+        assert_eq!(
+            state.tern_exchange(request.clone()).error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        request.epoch = 2;
+        request.sequence = 1;
+        let fresh = state.tern_exchange(request.clone());
+        assert!(fresh.ok && fresh.command.is_none());
+        assert_eq!(fresh.hosts[0].generation, 2);
+        let fresh_key = tern_test_key(&state, "window-a");
+        assert_ne!(fresh_key.source_id, key.source_id);
+        assert!(matches!(
+            state.queue_tern_prompt(key, "window-a", 2, "0", 1, "pane-a", "stale ask"),
+            Err(PromptError::StaleTarget)
+        ));
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 1, tern: 1 }
+        );
+        assert_eq!(state.scene().sessions, 2);
+    }
+
+    #[test]
+    fn host_disable_finalizes_pending_tern_truthfully_without_reoffer_or_replay() {
+        use crate::herdr::PromptError;
+        for offered in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Both);
+            let mut request = tern_test_request("window-a");
+            assert!(state.tern_exchange(request.clone()).ok);
+            let key = tern_test_key(&state, "window-a");
+            let (_, receipt) = state
+                .queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", "one ask")
+                .unwrap();
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            if offered {
+                assert!(state.tern_exchange(request.clone()).command.is_some());
+            }
+            state.set_observation_mode(ObservationMode::Herdr);
+            assert_eq!(
+                receipt.try_recv(),
+                Ok(Err(if offered {
+                    PromptError::UnknownDelivery
+                } else {
+                    PromptError::StaleTarget
+                }))
+            );
+            state.set_observation_mode(ObservationMode::Both);
+            assert_eq!(
+                state.tern_exchange(request.clone()).error_code,
+                Some(TernExchangeErrorCode::SourceRetired)
+            );
+            request.instance_id = None;
+            request.epoch = 2;
+            request.sequence = 1;
+            assert!(state.tern_exchange(request.clone()).command.is_none());
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            let poll = state.tern_exchange(request);
+            assert!(poll.ok && poll.command.is_none());
+            assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
+            assert!(receipt.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn scope_pause_and_shutdown_preserve_honest_tern_prompt_outcomes() {
+        use crate::herdr::PromptError;
+        for offered in [false, true] {
+            for shutdown in [false, true] {
+                let mut state = tern_test_state(ObservationMode::Both);
+                let mut poll = tern_test_request("window-a");
+                assert!(state.tern_exchange(poll.clone()).ok);
+                let key = tern_test_key(&state, "window-a");
+                let (_, receipt) = state
+                    .queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", "one ask")
+                    .unwrap();
+                poll.instance_id = Some("daemon-a".into());
+                poll.sequence = 2;
+                if offered {
+                    assert!(state.tern_exchange(poll.clone()).command.is_some());
+                }
+                if shutdown {
+                    state.request_shutdown();
+                } else {
+                    let mut preferences = state.observation_preferences().clone();
+                    preferences.local = false;
+                    state.apply_observation_preferences(preferences.clone());
+                    assert!(receipt.try_recv().is_err());
+                    poll.sequence += 1;
+                    if offered {
+                        let command = state.tern.get("window-a").unwrap();
+                        assert!(!command.offline);
+                        // Missing ACK remains uncertain, but scope changes never revoke it.
+                        let reply = state.tern_exchange(poll);
+                        assert!(reply.ok && reply.command.is_none());
+                        assert_eq!(receipt.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
+                    } else {
+                        let reply = state.tern_exchange(poll);
+                        assert!(reply.ok && reply.command.is_some());
+                        assert!(receipt.try_recv().is_err());
+                    }
+                    assert_eq!(state.prompt_available(&key), Ok(()));
+                    continue;
+                }
+                assert_eq!(
+                    receipt.try_recv(),
+                    Ok(Err(if offered {
+                        PromptError::UnknownDelivery
+                    } else {
+                        PromptError::Offline
+                    }))
+                );
+                assert!(receipt.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn host_and_scope_apply_once_preserving_choices_and_actual_connection_evidence() {
+        let mut state = tern_test_state(ObservationMode::Both);
+        state.set_observation_catalog(catalog(&[("east", "East", true)]));
+        let mut preferences = ObservationPreferences {
+            remote: true,
+            machines: vec!["east".into()],
+            ..ObservationPreferences::default()
+        };
+        state.apply_observation_preferences(preferences.clone());
+        let remote = remote_source("east");
+        connect(&mut state, &remote, 1);
+        assert!(state.publish_source_snapshot(
+            &remote,
+            1,
+            std::iter::empty::<&AgentRecord>(),
+            SourceCounts::default(),
+            Arc::from(Vec::<String>::new()),
+            &[],
+            Instant::now(),
+        ));
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 1, tern: 0 }
+        );
+        assert!(state.tern_exchange(tern_test_request("window-a")).ok);
+        let epoch = state.observation_epoch();
+        preferences.host = ObservationMode::Tern;
+        preferences.local = false;
+        state.apply_observation_preferences(preferences.clone());
+        assert_eq!(state.observation_epoch(), epoch + 1);
+        assert_eq!(state.observation_mode(), ObservationMode::Tern);
+        assert_eq!(state.observation_preferences(), &preferences);
+        assert_eq!(state.scene().sessions, 1);
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 0, tern: 1 }
+        );
+        assert_eq!(state.source_generation(&remote), None);
+        state.set_observation_mode(ObservationMode::Both);
+        assert!(!state.observation_preferences().local);
+        assert!(state.observation_preferences().remote);
+        assert_eq!(
+            state.observation_preferences().machines,
+            vec!["east".to_owned()]
+        );
+        assert!(!state.begin_source(remote.clone(), 1));
+        connect(&mut state, &remote, 2);
+        preferences.host = ObservationMode::Both;
+        preferences.local = true;
+        state.apply_observation_preferences(preferences);
+        assert_eq!(state.scene().sessions, 1);
+        assert_eq!(
+            state.host_connections(),
+            HostConnections { herdr: 0, tern: 1 }
+        );
+    }
+
+    #[test]
+    fn observation_transition_updates_canonical_restart_context_only_after_mutation_admission() {
+        let mut state = tern_test_state(ObservationMode::Both);
+        for mode in [
+            ObservationMode::Tern,
+            ObservationMode::Herdr,
+            ObservationMode::Both,
+        ] {
+            state.set_observation_mode(mode);
+            let context = state.update_context().unwrap();
+            assert_eq!(context.observation_mode().unwrap(), mode);
+            assert_eq!(
+                context
+                    .environment
+                    .get(OBSERVATION_MODE_ENV)
+                    .map(String::as_str),
+                (mode != ObservationMode::Herdr).then_some(mode.as_str())
+            );
+        }
+        state.set_ui_ready();
+        let context = state.update_context().unwrap().clone();
+        let preferences = state.observation_preferences().clone();
+        let epoch = state.observation_epoch();
+        let (sender, receiver) = mpsc::channel();
+        state
+            .queue_update_prepare("operation".into(), "secret".into(), sender)
+            .unwrap();
+        state.set_observation_mode(ObservationMode::Tern);
+        let mut changed = preferences.clone();
+        changed.host = ObservationMode::Herdr;
+        changed.local = false;
+        state.apply_observation_preferences(changed.clone());
+        let mut changed_context = context.clone();
+        changed_context.instance_id = "different".into();
+        state.set_update_context(changed_context);
+        assert_eq!(state.observation_mode(), ObservationMode::Both);
+        assert_eq!(state.observation_preferences(), &preferences);
+        assert_eq!(state.observation_epoch(), epoch);
+        assert_eq!(state.update_context(), Some(&context));
+        state.take_update_prepare().unwrap();
+        assert!(state.finish_update_prepare("operation", "secret", Ok(())));
+        receiver.recv().unwrap().unwrap();
+        state.apply_observation_preferences(changed.clone());
+        assert_eq!(state.update_context(), Some(&context));
+        state.cancel_update_prepare("operation", "secret");
+        state.apply_observation_preferences(changed);
+        assert_eq!(state.observation_mode(), ObservationMode::Herdr);
+        assert_eq!(state.observation_epoch(), epoch + 1);
+        assert_eq!(
+            state.update_context().unwrap().observation_mode().unwrap(),
+            ObservationMode::Herdr
+        );
+    }
+
+    #[test]
     fn tern_inventory_receipts_epochs_and_expiry_are_scoped() {
         use crate::herdr::{PromptError, PromptReceipt};
         use crate::tern::{TernResult, TernResultStatus};
@@ -3394,7 +4114,7 @@ pub(crate) mod tests {
         let mut request = tern_test_request("window-a");
         let first = state.tern_exchange(request.clone());
         assert!(first.ok);
-        assert_eq!(first.generation, 1);
+        assert_eq!(first.hosts[0].generation, 1);
         assert!(first.command.is_none());
         let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
         assert_eq!(snapshot.rows.len(), 1);
@@ -3404,16 +4124,17 @@ pub(crate) mod tests {
 
         request.instance_id = Some("daemon-a".into());
         request.sequence = 2;
-        request.agents.push(request.agents[0].clone());
+        let duplicate = request.hosts[0].agents[0].clone();
+        request.hosts[0].agents.push(duplicate);
         let revision = state.session_revision();
         assert!(!state.tern_exchange(request.clone()).ok);
         assert_eq!(state.session_revision(), revision);
-        request.agents.pop();
+        request.hosts[0].agents.pop();
         let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "question")
+            .queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", "question")
             .unwrap();
         assert!(matches!(
-            state.queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", "another"),
+            state.queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", "another"),
             Err(PromptError::Busy)
         ));
         let offered = state.tern_exchange(request.clone());
@@ -3440,7 +4161,7 @@ pub(crate) mod tests {
         request.sequence = 1;
         let renewed = state.tern_exchange(request.clone());
         assert!(renewed.ok);
-        assert_eq!(renewed.generation, 2);
+        assert_eq!(renewed.hosts[0].generation, 2);
         assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
         let current_key = state
             .session_snapshot(&SessionListOptions::default(), None)
@@ -3448,7 +4169,7 @@ pub(crate) mod tests {
             .key
             .clone();
         let (lost_operation, lost_receipt) = state
-            .queue_tern_prompt(current_key, "window-a", 2, "pane-a", "second")
+            .queue_tern_prompt(current_key, "window-a", 2, "0", 1, "pane-a", "second")
             .unwrap();
         request.sequence = 2;
         assert!(state.tern_exchange(request.clone()).command.is_some());
@@ -3492,7 +4213,7 @@ pub(crate) mod tests {
         assert!(first.error_code.is_none());
         let key = tern_test_key(&state, &request.window);
         let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), &request.window, 1, "pane-a", "one ask")
+            .queue_tern_prompt(key.clone(), &request.window, 1, "0", 1, "pane-a", "one ask")
             .unwrap();
         let revision = state.session_revision();
         let last_seen = state.tern.get(&request.window).unwrap().last_seen;
@@ -3502,7 +4223,7 @@ pub(crate) mod tests {
             lost.error_code,
             Some(TernExchangeErrorCode::BindingRequired)
         );
-        assert_eq!(lost.generation, 0);
+        assert!(lost.hosts.is_empty());
         assert!(lost.command.is_none());
         assert_eq!(state.session_revision(), revision);
         assert_eq!(
@@ -3552,6 +4273,13 @@ pub(crate) mod tests {
             state.tern_exchange(request.clone()).error_code,
             Some(TernExchangeErrorCode::Rejected)
         );
+        assert_eq!(state.session_revision(), revision);
+        let binding = state.tern.get(&request.window).unwrap();
+        assert_eq!(binding.epoch, 1);
+        assert_eq!(binding.sequence, 2);
+        assert_eq!(binding.last_seen, last_seen);
+        assert_eq!(tern_test_key(&state, &request.window), key);
+        assert!(receipt.try_recv().is_err());
         request.epoch = 1;
         request.sequence = 2;
         assert_eq!(
@@ -3561,9 +4289,12 @@ pub(crate) mod tests {
         request.sequence = 3;
         assert!(state.tern_exchange(request.clone()).ok);
         assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
-        assert!(!state.remove_source(&crate::tern::source_id(&request.window), 2));
+        assert!(!state.remove_source(&crate::tern::source_id(&request.window, "0"), 2));
         assert!(state.tern.get(&request.window).is_some());
-        assert!(state.remove_source(&crate::tern::source_id(&request.window), 1));
+        assert!(state.remove_source(&crate::tern::source_id(&request.window, "0"), 1));
+        assert!(state.tern.get(&request.window).is_some());
+        state.set_observation_mode(ObservationMode::Herdr);
+        state.set_observation_mode(ObservationMode::Tern);
         assert!(state.tern.get(&request.window).is_none());
         request.sequence = 4;
         let revision = state.session_revision();
@@ -3611,12 +4342,21 @@ pub(crate) mod tests {
         let retired_key = tern_test_key(&state, "window-0");
         let live_key = tern_test_key(&state, "window-1");
         let (_, pending) = state
-            .queue_tern_prompt(live_key.clone(), "window-1", 1, "pane-a", "keep pending")
+            .queue_tern_prompt(
+                live_key.clone(),
+                "window-1",
+                1,
+                "0",
+                1,
+                "pane-a",
+                "keep pending",
+            )
             .unwrap();
         let now = Instant::now();
         state.tern.get_mut("window-0").unwrap().last_seen = now - crate::tern::FRESHNESS;
         let mut malformed = tern_test_request("malformed");
-        malformed.agents.push(malformed.agents[0].clone());
+        let duplicate = malformed.hosts[0].agents[0].clone();
+        malformed.hosts[0].agents.push(duplicate);
         let revision = state.session_revision();
         assert!(!state.tern_exchange(malformed).ok);
         assert_eq!(state.session_revision(), revision);
@@ -3628,8 +4368,8 @@ pub(crate) mod tests {
         assert!(!state.tern_exchange(stale).ok);
         assert!(state.tern.get("window-0").is_some());
         assert!(state.tern_exchange(tern_test_request("replacement")).ok);
-        assert!(state.tern.get("window-0").is_none());
-        assert_eq!(state.tern.len(), 63);
+        assert!(state.tern.get("window-0").unwrap().hosts.is_empty());
+        assert_eq!(state.tern.len(), 64);
         assert_eq!(
             state.prompt_available(&retired_key),
             Err(PromptError::StaleTarget)
@@ -3641,7 +4381,12 @@ pub(crate) mod tests {
             tern_test_key(&state, "replacement").source_id,
             retired_key.source_id
         );
-        assert!(!state.tern_exchange(tern_test_request("all-live-full")).ok);
+        let denied = state.tern_exchange(tern_test_request("all-live-full"));
+        assert!(denied.ok);
+        assert_eq!(
+            denied.hosts[0].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
         assert!(state.tern.get("window-1").is_some());
         let mut retired = tern_test_request("window-0");
         retired.instance_id = Some("daemon-a".into());
@@ -3664,7 +4409,7 @@ pub(crate) mod tests {
                         .ok
                 );
             }
-            let source = crate::tern::source_id("window-0");
+            let source = crate::tern::source_id("window-0", "0");
             state.tern.get_mut("window-0").unwrap().last_seen =
                 Instant::now() - crate::tern::FRESHNESS;
             if newer_store {
@@ -3683,28 +4428,39 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exhausted_tern_generation_rejects_before_capacity_expiry() {
+    fn exhausted_tern_generation_rejects_only_its_host_without_refreshing_snapshot() {
         let mut state = tern_test_state(ObservationMode::Tern);
-        for index in 0..crate::tern::MAX_WINDOWS {
-            assert!(
-                state
-                    .tern_exchange(tern_test_request(&format!("window-{index}")))
-                    .ok
-            );
-        }
-        state.tern.get_mut("window-0").unwrap().last_seen = Instant::now() - crate::tern::FRESHNESS;
-        state.tern.get_mut("window-1").unwrap().generation = crate::tern::MAX_SAFE_INTEGER;
-        let mut exhausted = tern_test_request("window-1");
-        exhausted.instance_id = Some("daemon-a".into());
-        exhausted.epoch = 2;
-        let revision = state.session_revision();
+        let mut request = tern_test_request("window-a");
+        assert!(state.tern_exchange(request.clone()).ok);
+        let source = crate::tern::source_id("window-a", "0");
+        state.sources.get_mut(&source).unwrap().generation = crate::tern::MAX_SAFE_INTEGER;
+        state
+            .tern
+            .get_mut("window-a")
+            .unwrap()
+            .hosts
+            .get_mut("0")
+            .unwrap()
+            .generation = crate::tern::MAX_SAFE_INTEGER;
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        request.hosts[0].observation_generation = 2;
+        let snapshot = state.session_snapshot(&SessionListOptions::default(), None);
+        let last_seen = state.tern.get("window-a").unwrap().hosts["0"].last_seen;
+        let reply = state.tern_exchange(request);
+        assert!(reply.ok);
         assert_eq!(
-            state.tern_exchange(exhausted).error_code,
+            reply.hosts[0].error_code,
             Some(TernExchangeErrorCode::Rejected)
         );
-        assert_eq!(state.session_revision(), revision);
-        assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS);
-        assert!(!state.tern.get("window-0").unwrap().offline);
+        assert_eq!(
+            state.session_snapshot(&SessionListOptions::default(), None),
+            snapshot
+        );
+        assert_eq!(
+            state.tern.get("window-a").unwrap().hosts["0"].last_seen,
+            last_seen
+        );
     }
 
     #[test]
@@ -3720,11 +4476,11 @@ pub(crate) mod tests {
         }
         let key = tern_test_key(&state, "window-0");
         let (_, unoffered) = state
-            .queue_tern_prompt(key, "window-0", 1, "pane-a", "not offered")
+            .queue_tern_prompt(key, "window-0", 1, "0", 1, "pane-a", "not offered")
             .unwrap();
         let key = tern_test_key(&state, "window-1");
         let (_, offered) = state
-            .queue_tern_prompt(key, "window-1", 1, "pane-a", "offered once")
+            .queue_tern_prompt(key, "window-1", 1, "0", 1, "pane-a", "offered once")
             .unwrap();
         let mut poll = tern_test_request("window-1");
         poll.instance_id = Some("daemon-a".into());
@@ -3737,9 +4493,9 @@ pub(crate) mod tests {
         assert!(state.begin_source("/isolated/new-herdr.sock".into(), 1));
         assert_eq!(unoffered.try_recv(), Ok(Err(PromptError::Offline)));
         assert_eq!(offered.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
-        assert!(state.tern.get("window-0").is_none());
+        assert!(state.tern.get("window-0").unwrap().hosts.is_empty());
         assert!(state.tern.get("window-1").unwrap().offline);
-        assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS - 1);
+        assert_eq!(state.tern.len(), crate::tern::MAX_WINDOWS);
         assert!(state.tern.get("window-2").is_some());
         assert!(!state.begin_source("/isolated/new-herdr.sock".into(), 1));
         assert!(state.tern.get("window-1").is_some());
@@ -3755,7 +4511,7 @@ pub(crate) mod tests {
         state.tern.get_mut("window-a").unwrap().last_seen = now - crate::tern::FRESHNESS;
         assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
         assert!(matches!(
-            state.queue_tern_prompt(key, "window-a", 1, "pane-a", "stale"),
+            state.queue_tern_prompt(key, "window-a", 1, "0", 1, "pane-a", "stale"),
             Err(PromptError::StaleTarget)
         ));
         assert!(state.expire_tern(now));
@@ -3777,12 +4533,12 @@ pub(crate) mod tests {
         let key = tern_test_key(&state, "window-a");
         let oversized = "\"\\\n한🪶".repeat(50_000);
         assert!(matches!(
-            state.queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", &oversized,),
+            state.queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", &oversized,),
             Err(PromptError::TooLarge)
         ));
         let ascii = "a".repeat(300 * 1024);
         let (operation_id, receipt) = state
-            .queue_tern_prompt(key.clone(), "window-a", 1, "pane-a", &ascii)
+            .queue_tern_prompt(key.clone(), "window-a", 1, "0", 1, "pane-a", &ascii)
             .unwrap();
         poll.instance_id = Some("daemon-a".into());
         poll.sequence = 2;
@@ -3796,13 +4552,476 @@ pub(crate) mod tests {
         assert_eq!(receipt.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
         let utf8 = "\"\\\n한🪶".repeat(10_000);
         state
-            .queue_tern_prompt(key, "window-a", 1, "pane-a", &utf8)
+            .queue_tern_prompt(key, "window-a", 1, "0", 1, "pane-a", &utf8)
             .unwrap();
         poll.sequence = 4;
         let reply = state.tern_exchange(poll);
         let encoded = crate::tern::serialize_response(&reply).unwrap();
         assert_eq!(reply.command.unwrap().text, utf8);
         assert!(encoded.len() <= crate::tern::MAX_RESPONSE_BYTES);
+    }
+
+    fn tern_multi_request(window: &str) -> TernExchangeRequest {
+        let mut request = tern_test_request(window);
+        request.hosts[0].label = "host-0".into();
+        for id in ["1", "2"] {
+            let mut host = request.hosts[0].clone();
+            host.host = id.into();
+            host.label = format!("host-{id}");
+            host.is_local = false;
+            request.hosts.push(host);
+        }
+        request
+    }
+
+    fn tern_host_key(state: &AppState, id: &str) -> SessionKey {
+        state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows
+            .into_iter()
+            .find(|row| row.source_label == format!("host-{id}"))
+            .unwrap()
+            .key
+    }
+
+    #[test]
+    fn tern_remote_loss_matrix_preserves_other_keys_and_local_receipts() {
+        use crate::herdr::{PromptError, PromptReceipt};
+        use crate::session_view::Availability;
+        use crate::tern::{TernHostStatus, TernResult, TernResultStatus};
+        for loss in [
+            Some(TernHostStatus::Disconnected),
+            Some(TernHostStatus::Unavailable),
+            None,
+        ] {
+            let mut state = tern_test_state(ObservationMode::Both);
+            let mut preferences = state.observation_preferences().clone();
+            preferences.local = false;
+            preferences.remote = false;
+            preferences.machines.clear();
+            state.apply_observation_preferences(preferences);
+            let mut request = tern_multi_request("window-a");
+            assert!(state.tern_exchange(request.clone()).ok);
+            assert_eq!(state.host_connections().tern, 3);
+            assert_eq!(state.scene().sessions, 3);
+            let local = tern_host_key(&state, "0");
+            let remote = tern_host_key(&state, "1");
+            let other = tern_host_key(&state, "2");
+            assert_ne!(local, remote);
+            assert_ne!(remote, other);
+            assert!(state.session_view_for_key(&local).unwrap().is_local);
+            assert!(!state.session_view_for_key(&remote).unwrap().is_local);
+            assert_eq!(state.prompt_available(&remote), Err(PromptError::ReadOnly));
+            assert!(matches!(
+                state.queue_tern_prompt(
+                    remote.clone(),
+                    "window-a",
+                    1,
+                    "1",
+                    1,
+                    "pane-a",
+                    "forbidden"
+                ),
+                Err(PromptError::ReadOnly)
+            ));
+            let (operation, receipt) = state
+                .queue_tern_prompt(
+                    local.clone(),
+                    "window-a",
+                    1,
+                    "0",
+                    1,
+                    "pane-a",
+                    "one local ask",
+                )
+                .unwrap();
+            let saved = request.hosts[1].clone();
+            match loss {
+                Some(status) => {
+                    request.hosts[1].status = status;
+                    request.hosts[1].agents.clear();
+                }
+                None => {
+                    request.hosts.remove(1);
+                }
+            }
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            let reply = state.tern_exchange(request.clone());
+            assert!(reply.ok);
+            assert_eq!(reply.command.unwrap().operation_id, operation);
+            assert!(receipt.try_recv().is_err());
+            assert_eq!(
+                state.session_view_for_key(&remote).unwrap().availability,
+                Availability::Offline
+            );
+            for key in [&local, &other] {
+                assert_eq!(
+                    state.session_view_for_key(key).unwrap().availability,
+                    Availability::Live
+                );
+            }
+            if loss.is_none() {
+                request.hosts.insert(1, saved.clone());
+            } else {
+                request.hosts[1] = saved.clone();
+            }
+            request.sequence = 3;
+            request.results.push(TernResult {
+                operation_id: operation,
+                pane: "pane-a".into(),
+                status: TernResultStatus::Accepted,
+                error: None,
+            });
+            let reply = state.tern_exchange(request.clone());
+            assert!(reply.ok && reply.command.is_none());
+            assert_eq!(
+                reply.hosts[1].error_code,
+                Some(TernExchangeErrorCode::Rejected)
+            );
+            assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
+            assert_eq!(
+                state.session_view_for_key(&remote).unwrap().availability,
+                Availability::Offline
+            );
+            assert_eq!(tern_host_key(&state, "0"), local);
+            assert_eq!(tern_host_key(&state, "2"), other);
+            request.results.clear();
+            request.sequence = 4;
+            request.hosts[1].observation_generation = 2;
+            let reply = state.tern_exchange(request.clone());
+            assert!(reply.ok && reply.hosts[1].error.is_none());
+            let recovered = tern_host_key(&state, "1");
+            assert!(recovered.generation > remote.generation);
+            assert_eq!(
+                state.prompt_available(&remote),
+                Err(PromptError::StaleTarget)
+            );
+            assert!(state.take_completions().is_empty());
+            request.sequence = 5;
+            request.hosts[1].agents.clear();
+            assert!(state.tern_exchange(request).ok);
+            assert_eq!(state.host_connections().tern, 3);
+            assert_eq!(state.scene().sessions, 2);
+            assert!(state.session_view_for_key(&recovered).is_none());
+        }
+    }
+
+    #[test]
+    fn tern_native_only_child_expiry_allows_same_observation_but_not_old_key() {
+        use crate::session_view::Availability;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let mut request = tern_multi_request("window-a");
+        assert!(state.tern_exchange(request.clone()).ok);
+        let local = tern_host_key(&state, "0");
+        let remote = tern_host_key(&state, "1");
+        let other = tern_host_key(&state, "2");
+        let (_, receipt) = state
+            .queue_tern_prompt(local.clone(), "window-a", 1, "0", 1, "pane-a", "pending")
+            .unwrap();
+        let now = Instant::now();
+        state
+            .tern
+            .get_mut("window-a")
+            .unwrap()
+            .hosts
+            .get_mut("1")
+            .unwrap()
+            .last_seen = now - crate::tern::FRESHNESS;
+        assert!(state.expire_tern(now));
+        assert!(receipt.try_recv().is_err());
+        assert_eq!(
+            state.session_view_for_key(&remote).unwrap().availability,
+            Availability::Offline
+        );
+        assert_eq!(
+            state.session_view_for_key(&local).unwrap().availability,
+            Availability::Live
+        );
+        assert_eq!(
+            state.session_view_for_key(&other).unwrap().availability,
+            Availability::Live
+        );
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        let reply = state.tern_exchange(request.clone());
+        assert!(reply.command.is_some());
+        assert!(reply.hosts[1].generation > remote.generation);
+        assert_eq!(request.hosts[1].observation_generation, 1);
+        assert_eq!(tern_host_key(&state, "0"), local);
+        assert_eq!(tern_host_key(&state, "2"), other);
+        assert!(state.session_view_for_key(&remote).is_none());
+        assert!(state.take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_locality_is_sealed_per_observation_and_rename_keeps_identity() {
+        use crate::herdr::PromptError;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let mut request = tern_multi_request("window-a");
+        assert!(state.tern_exchange(request.clone()).ok);
+        let local = tern_host_key(&state, "0");
+        let remote = tern_host_key(&state, "1");
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        request.hosts[0].is_local = false;
+        request.hosts[1].is_local = true;
+        let reply = state.tern_exchange(request.clone());
+        assert!(reply.ok);
+        assert!(reply.hosts[0].error.is_some() && reply.hosts[1].error.is_some());
+        assert!(state.session_view_for_key(&local).unwrap().is_local);
+        assert!(!state.session_view_for_key(&remote).unwrap().is_local);
+        assert_eq!(state.prompt_available(&remote), Err(PromptError::ReadOnly));
+        request.sequence = 3;
+        request.hosts[0].observation_generation = 2;
+        request.hosts[1].observation_generation = 2;
+        let reply = state.tern_exchange(request.clone());
+        assert!(reply.hosts.iter().all(|host| host.error.is_none()));
+        let next_local = tern_host_key(&state, "1");
+        let next_remote = tern_host_key(&state, "0");
+        assert_eq!(state.prompt_available(&next_local), Ok(()));
+        assert_eq!(
+            state.prompt_available(&next_remote),
+            Err(PromptError::ReadOnly)
+        );
+        assert!(state.session_view_for_key(&local).is_none());
+        assert!(state.session_view_for_key(&remote).is_none());
+        request.sequence = 4;
+        request.hosts[1].label = "Renamed".into();
+        assert!(state.tern_exchange(request).ok);
+        let renamed = state.session_view_for_key(&next_local).unwrap();
+        assert_eq!(renamed.key, next_local);
+        assert_eq!(renamed.source_label, "Renamed");
+    }
+
+    #[test]
+    fn tern_parent_capacity_and_disable_retire_empty_bindings_independently() {
+        use crate::tern::TernHostStatus;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        for index in 0..crate::tern::MAX_WINDOWS {
+            let mut request = tern_test_request(&format!("empty-{index}"));
+            request.hosts[0].status = TernHostStatus::Unavailable;
+            request.hosts[0].agents.clear();
+            let reply = state.tern_exchange(request);
+            assert!(reply.ok && reply.hosts[0].generation == 0);
+        }
+        assert_eq!(state.host_connections().tern, 0);
+        assert!(!state.tern_exchange(tern_test_request("overflow")).ok);
+        assert_eq!(state.scene().sessions, 0);
+        state.tern.get_mut("empty-0").unwrap().last_seen = Instant::now() - crate::tern::FRESHNESS;
+        assert!(state.tern_exchange(tern_test_request("replacement")).ok);
+        assert!(state.tern.get("empty-0").is_none());
+        let mut stale = tern_test_request("empty-0");
+        assert_eq!(
+            state.tern_exchange(stale.clone()).error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        state.set_observation_mode(ObservationMode::Herdr);
+        assert_eq!(state.tern.len(), 0);
+        state.set_observation_mode(ObservationMode::Tern);
+        stale.window = "empty-1".into();
+        assert_eq!(
+            state.tern_exchange(stale.clone()).error_code,
+            Some(TernExchangeErrorCode::SourceRetired)
+        );
+        stale.epoch = 2;
+        assert!(state.tern_exchange(stale).ok);
+    }
+
+    #[test]
+    fn tern_new_host_admission_is_local_then_numeric_and_existing_receipts_survive_full_capacity() {
+        use crate::herdr::PromptReceipt;
+        use crate::tern::{TernResult, TernResultStatus};
+        let mut state = tern_test_state(ObservationMode::Both);
+        for index in 0..62 {
+            connect(&mut state, &format!("/isolated/herdr-{index}.sock"), 1);
+        }
+        let mut request = tern_multi_request("window-a");
+        request.hosts[1].host = "10".into();
+        request.hosts[1].label = "host-10".into();
+        request.hosts.swap(0, 2);
+        let reply = state.tern_exchange(request.clone());
+        assert!(reply.ok);
+        assert_eq!(
+            reply
+                .hosts
+                .iter()
+                .map(|host| host.host.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2", "10", "0"]
+        );
+        assert!(reply.hosts[0].error.is_none() && reply.hosts[2].error.is_none());
+        assert_eq!(reply.hosts[1].generation, 0);
+        assert_eq!(
+            reply.hosts[1].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
+        let local = tern_host_key(&state, "0");
+        let other = tern_host_key(&state, "2");
+        let (operation_id, receipt) = state
+            .queue_tern_prompt(local.clone(), "window-a", 1, "0", 1, "pane-a", "ask once")
+            .unwrap();
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        assert!(state.tern_exchange(request.clone()).command.is_some());
+        request.sequence = 3;
+        request.results.push(TernResult {
+            operation_id,
+            pane: "pane-a".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        });
+        let reply = state.tern_exchange(request);
+        assert!(reply.ok && reply.command.is_none() && reply.hosts[1].error.is_some());
+        assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
+        assert_eq!(tern_host_key(&state, "0"), local);
+        assert_eq!(tern_host_key(&state, "2"), other);
+    }
+
+    #[test]
+    fn tern_structural_failures_do_not_expire_or_mutate_any_existing_host() {
+        use crate::tern::TernHostStatus;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        assert!(state.tern_exchange(tern_multi_request("window-a")).ok);
+        let before = state.session_snapshot(&SessionListOptions::default(), None);
+        let mut base = tern_multi_request("window-a");
+        base.instance_id = Some("daemon-a".into());
+        base.sequence = 2;
+        let mut invalid = Vec::new();
+        let mut request = base.clone();
+        request.version = 1;
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].host = "01".into();
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].host = "0".into();
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].is_local = true;
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[0].is_local = false;
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].status = TernHostStatus::Unavailable;
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].observation_generation = 0;
+        invalid.push(request);
+        let mut request = base.clone();
+        request.hosts[1].label = "x".repeat(4097);
+        invalid.push(request);
+        let mut request = base.clone();
+        for index in 1..129 {
+            let mut agent = request.hosts[1].agents[0].clone();
+            agent.pane = index.to_string();
+            request.hosts[1].agents.push(agent);
+        }
+        invalid.push(request);
+        for request in invalid {
+            let reply = state.tern_exchange(request);
+            assert!(!reply.ok && reply.hosts.is_empty() && reply.command.is_none());
+            assert_eq!(
+                state.session_snapshot(&SessionListOptions::default(), None),
+                before
+            );
+            assert_eq!(state.tern.get("window-a").unwrap().sequence, 1);
+        }
+    }
+
+    #[test]
+    fn tern_reclaimed_child_keeps_parent_binding_and_observation_high_water() {
+        let mut state = tern_test_state(ObservationMode::Both);
+        for index in 0..61 {
+            connect(&mut state, &format!("/isolated/herdr-{index}.sock"), 1);
+        }
+        let mut request = tern_multi_request("window-a");
+        assert!(state.tern_exchange(request.clone()).ok);
+        let old = tern_host_key(&state, "1");
+        let local = tern_host_key(&state, "0");
+        let saved = request.hosts.remove(1);
+        let mut newcomer = saved.clone();
+        newcomer.host = "3".into();
+        newcomer.label = "host-3".into();
+        request.hosts.push(newcomer);
+        state
+            .tern
+            .get_mut("window-a")
+            .unwrap()
+            .hosts
+            .get_mut("1")
+            .unwrap()
+            .last_seen = Instant::now() - crate::tern::FRESHNESS;
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        let reply = state.tern_exchange(request.clone());
+        assert!(reply.ok && reply.hosts.iter().all(|host| host.error.is_none()));
+        assert!(state.tern.get("window-a").unwrap().hosts.get("1").is_none());
+        assert_eq!(state.tern.get("window-a").unwrap().epoch, 1);
+        assert!(state.tern.retired_epoch("window-a").is_none());
+        assert!(state.session_view_for_key(&old).is_none());
+        assert_eq!(tern_host_key(&state, "0"), local);
+        request.hosts.push(saved);
+        request.sequence = 3;
+        let reply = state.tern_exchange(request.clone());
+        assert_eq!(
+            reply.hosts[3].error_code,
+            Some(TernExchangeErrorCode::Rejected)
+        );
+        assert_eq!(reply.hosts[3].generation, 0);
+        state
+            .tern
+            .get_mut("window-a")
+            .unwrap()
+            .hosts
+            .get_mut("3")
+            .unwrap()
+            .last_seen = Instant::now() - crate::tern::FRESHNESS;
+        request.hosts.remove(2);
+        request.hosts[2].observation_generation = 2;
+        request.sequence = 4;
+        let reply = state.tern_exchange(request);
+        assert!(reply.ok && reply.hosts[2].error.is_none());
+        assert!(reply.hosts[2].generation > old.generation);
+        assert_eq!(tern_host_key(&state, "0"), local);
+        assert!(state.take_completions().is_empty());
+    }
+
+    #[test]
+    fn tern_parent_epoch_replaces_all_children_and_finalizes_only_its_pending() {
+        use crate::herdr::PromptError;
+        for offered in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let mut request = tern_multi_request("window-a");
+            assert!(state.tern_exchange(request.clone()).ok);
+            let local = tern_host_key(&state, "0");
+            let remote = tern_host_key(&state, "1");
+            let (_, receipt) = state
+                .queue_tern_prompt(local.clone(), "window-a", 1, "0", 1, "pane-a", "one ask")
+                .unwrap();
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            if offered {
+                assert!(state.tern_exchange(request.clone()).command.is_some());
+            }
+            request.epoch = 2;
+            request.sequence = 1;
+            let reply = state.tern_exchange(request);
+            assert!(reply.ok && reply.command.is_none());
+            assert!(reply.hosts.iter().all(|host| host.generation == 2));
+            assert_eq!(
+                receipt.try_recv(),
+                Ok(Err(if offered {
+                    PromptError::UnknownDelivery
+                } else {
+                    PromptError::StaleTarget
+                }))
+            );
+            assert!(state.session_view_for_key(&local).is_none());
+            assert!(state.session_view_for_key(&remote).is_none());
+            assert!(state.take_completions().is_empty());
+        }
     }
 
     #[test]
@@ -3844,6 +5063,575 @@ pub(crate) mod tests {
         });
         let settled = state.tern_exchange(poll);
         assert!(settled.ok && settled.command.is_none());
+    }
+
+    #[test]
+    fn tern_offline_deadlines_use_freshness_not_the_first_late_tick() {
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        for late_first_tick in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            let request = tern_test_request("deadline");
+            assert!(tern_test_exchange_at(&mut state, request, base).ok);
+            let source = crate::tern::source_id("deadline", "0");
+            let key = tern_test_key(&state, "deadline");
+            assert!(!state.maintain_tern(base + FRESHNESS - Duration::from_nanos(1)));
+            assert_eq!(state.sources[&source].offline_since, None);
+            if !late_first_tick {
+                assert!(state.expire_tern(base + FRESHNESS));
+                assert_eq!(state.sources[&source].offline_since, Some(base + FRESHNESS));
+                assert_eq!(
+                    state.tern.get("deadline").unwrap().offline_since,
+                    Some(base + FRESHNESS)
+                );
+                assert!(!state
+                    .maintain_tern(base + FRESHNESS + OFFLINE_GRACE - Duration::from_nanos(1)));
+                // Freshness-only expiry never performs TTL cleanup, even when overdue.
+                assert!(!state.expire_tern(base + FRESHNESS + OFFLINE_GRACE));
+                assert!(state.session_view_for_key(&key).is_some());
+            }
+            let deadline = base + FRESHNESS + OFFLINE_GRACE;
+            assert!(state.maintain_tern(deadline));
+            assert!(!state.sources.contains_key(&source));
+            assert!(state.session_view_for_key(&key).is_none());
+            assert_eq!(state.scene().sessions, 0);
+            assert_eq!(state.scene().unknown, 0);
+            assert_eq!(state.scene().disconnected_sources, 0);
+            assert!(state.tern.get("deadline").is_none());
+            assert_eq!(state.retired_source_generation(&source), Some(1));
+            assert_eq!(state.tern.retired_epoch("deadline"), Some(1));
+            assert!(!state.maintain_tern(deadline + OFFLINE_GRACE));
+        }
+    }
+
+    #[test]
+    fn tern_explicit_loss_repeats_do_not_extend_and_recovery_starts_a_new_episode() {
+        use crate::tern::{TernHostStatus, OFFLINE_GRACE};
+        for loss in [
+            Some(TernHostStatus::Disconnected),
+            Some(TernHostStatus::Unavailable),
+            None,
+        ] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            let mut request = tern_multi_request("episodes");
+            assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+            let saved = request.hosts[1].clone();
+            let remote = crate::tern::source_id("episodes", "1");
+            let local = tern_host_key(&state, "0");
+            let old_key = tern_host_key(&state, "1");
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            match loss {
+                Some(status) => {
+                    request.hosts[1].status = status;
+                    request.hosts[1].agents.clear();
+                }
+                None => {
+                    request.hosts.remove(1);
+                }
+            }
+            let first_loss = base + Duration::from_secs(1);
+            assert!(tern_test_exchange_at(&mut state, request.clone(), first_loss).ok);
+            assert_eq!(state.sources[&remote].offline_since, Some(first_loss));
+            request.sequence = 3;
+            let repeated_loss = base + Duration::from_secs(25);
+            set_tern_test_last_seen(&mut state, "episodes", None, repeated_loss);
+            assert!(tern_test_exchange_at(&mut state, request.clone(), repeated_loss).ok);
+            assert_eq!(state.sources[&remote].offline_since, Some(first_loss));
+
+            // Earlier valid loss evidence wins; a stale native generation cannot alter it.
+            let earlier_loss = base + Duration::from_millis(500);
+            assert!(state.mark_source_offline_at(&remote, 1, earlier_loss));
+            assert!(!state.mark_source_offline_at(&remote, 2, base));
+            assert_eq!(state.sources[&remote].offline_since, Some(earlier_loss));
+            let mut recovered = saved;
+            recovered.observation_generation = 2;
+            if loss.is_none() {
+                request.hosts.insert(1, recovered);
+            } else {
+                request.hosts[1] = recovered;
+            }
+            request.sequence = 4;
+            let recovery = base + Duration::from_secs(29);
+            assert!(tern_test_exchange_at(&mut state, request.clone(), recovery).ok);
+            assert_eq!(state.sources[&remote].offline_since, None);
+            assert_eq!(state.sources[&remote].generation, 2);
+            assert!(state.session_view_for_key(&old_key).is_none());
+            assert_eq!(tern_host_key(&state, "0"), local);
+            request.sequence = 5;
+            request.hosts[1].status = TernHostStatus::Disconnected;
+            request.hosts[1].agents.clear();
+            let second_loss = base + Duration::from_secs(30);
+            assert!(tern_test_exchange_at(&mut state, request, second_loss).ok);
+            assert_eq!(state.sources[&remote].offline_since, Some(second_loss));
+            assert!(!state.maintain_tern(first_loss + OFFLINE_GRACE));
+            let second_deadline = second_loss + OFFLINE_GRACE;
+            set_tern_test_last_seen(&mut state, "episodes", None, second_deadline);
+            assert!(state.maintain_tern(second_deadline));
+            assert!(!state.sources.contains_key(&remote));
+            let parent = state.tern.get("episodes").unwrap();
+            assert!(parent.bound && !parent.offline);
+            assert!(parent.observations["1"].requires_new);
+            assert!(!parent.hosts.contains_key("1"));
+            assert_eq!(tern_host_key(&state, "0"), local);
+        }
+    }
+
+    #[test]
+    fn tern_disconnected_initialization_has_no_loss_clock_and_generation_resets_it() {
+        use crate::tern::OFFLINE_GRACE;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let source = crate::tern::source_id("unregistered", "0");
+        let base = Instant::now();
+        assert!(state.begin_source(source.clone(), 1));
+        assert!(state.update_source(&source, 1, false, SourceCounts::default()));
+        assert_eq!(state.sources[&source].offline_since, None);
+        assert!(!state.maintain_tern(base + OFFLINE_GRACE));
+        assert!(state.mark_source_offline_at(&source, 1, base));
+        assert_eq!(state.sources[&source].offline_since, Some(base));
+        assert!(state.begin_source(source.clone(), 2));
+        assert_eq!(state.sources[&source].offline_since, None);
+        assert!(!state.mark_source_offline_at(&source, 1, base));
+        assert!(!state.update_source(&source, 1, false, SourceCounts::default()));
+        assert!(!state.publish_source_snapshot(
+            &source,
+            1,
+            std::iter::empty::<&AgentRecord>(),
+            SourceCounts::default(),
+            Arc::from(Vec::<String>::new()),
+            &[],
+            base,
+        ));
+        assert_eq!(state.sources[&source].offline_since, None);
+        assert!(!state.maintain_tern(base + OFFLINE_GRACE));
+        assert!(state.mark_source_offline_at(&source, 2, base));
+        assert!(state.maintain_tern(base + OFFLINE_GRACE));
+        assert_eq!(state.source_generation(&source), None);
+        assert_eq!(state.retired_source_generation(&source), Some(2));
+        assert!(!state.begin_source(source, 2));
+    }
+
+    #[test]
+    fn tern_epoch_omissions_keep_prior_deadlines_and_age_newly_lost_hosts() {
+        use crate::tern::OFFLINE_GRACE;
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let base = Instant::now();
+        let mut request = tern_multi_request("epoch-omission");
+        assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+        let first = crate::tern::source_id("epoch-omission", "1");
+        let second = crate::tern::source_id("epoch-omission", "2");
+        request.hosts.remove(1);
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        let first_loss = base + Duration::from_secs(1);
+        assert!(tern_test_exchange_at(&mut state, request.clone(), first_loss).ok);
+        request.hosts.truncate(1);
+        request.epoch = 2;
+        request.sequence = 1;
+        let epoch_loss = base + Duration::from_secs(2);
+        assert!(tern_test_exchange_at(&mut state, request, epoch_loss).ok);
+        assert_eq!(state.sources[&first].offline_since, Some(first_loss));
+        assert_eq!(state.sources[&second].offline_since, Some(epoch_loss));
+        assert!(state.tern.get("epoch-omission").unwrap().hosts["1"].offline);
+        assert!(state.tern.get("epoch-omission").unwrap().hosts["2"].offline);
+        let deadline = first_loss + OFFLINE_GRACE;
+        set_tern_test_last_seen(&mut state, "epoch-omission", None, deadline);
+        assert!(state.maintain_tern(deadline));
+        assert!(!state.sources.contains_key(&first));
+        assert!(state.sources.contains_key(&second));
+        assert!(state.maintain_tern(epoch_loss + OFFLINE_GRACE));
+        assert!(!state.sources.contains_key(&second));
+        let parent = state.tern.get("epoch-omission").unwrap();
+        assert_eq!(parent.epoch, 2);
+        assert!(!parent.offline);
+        assert_eq!(parent.hosts.len(), 1);
+        assert_eq!(parent.hosts["0"].generation, 2);
+        assert_eq!(state.tern.retired_epoch("epoch-omission"), None);
+    }
+
+    #[test]
+    fn tern_maintenance_skips_mismatched_sources_but_removes_other_and_orphan_sources() {
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        for mismatch in ["aggregate", "store", "registry", "live-registry"] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            assert!(tern_test_exchange_at(&mut state, tern_multi_request("mismatch"), base,).ok);
+            assert!(state.expire_tern(base + FRESHNESS));
+            let matching = crate::tern::source_id("mismatch", "0");
+            let blocked = crate::tern::source_id("mismatch", "1");
+            let orphan = crate::tern::source_id("mismatch", "2");
+            state.tern.get_mut("mismatch").unwrap().hosts.remove("2");
+            let deadline = base + FRESHNESS + OFFLINE_GRACE;
+            match mismatch {
+                "aggregate" => state.sources.get_mut(&blocked).unwrap().generation = 2,
+                "store" => assert!(state.session_store.begin_source(&blocked, 2)),
+                "registry" => {
+                    state
+                        .tern
+                        .get_mut("mismatch")
+                        .unwrap()
+                        .hosts
+                        .get_mut("1")
+                        .unwrap()
+                        .generation = 2;
+                }
+                "live-registry" => {
+                    let parent = state.tern.get_mut("mismatch").unwrap();
+                    parent.offline = false;
+                    parent.offline_since = None;
+                    parent.last_seen = deadline;
+                    let host = parent.hosts.get_mut("1").unwrap();
+                    host.offline = false;
+                    host.last_seen = deadline;
+                }
+                _ => unreachable!(),
+            }
+            assert!(state.maintain_tern(deadline));
+            assert_eq!(state.source_generation(&matching), None);
+            assert_eq!(state.source_generation(&orphan), None);
+            assert!(state.source_generation(&blocked).is_some());
+            assert_eq!(state.retired_source_generation(&matching), Some(1));
+            assert_eq!(state.retired_source_generation(&orphan), Some(1));
+            assert_eq!(state.retired_source_generation(&blocked), None);
+            let parent = state.tern.get("mismatch").unwrap();
+            assert_eq!(parent.hosts.len(), 1);
+            assert!(parent.hosts.contains_key("1"));
+            assert_eq!(state.tern.retired_epoch("mismatch"), None);
+            assert!(!state.maintain_tern(deadline));
+        }
+    }
+
+    #[test]
+    fn tern_remote_ttl_cleanup_keeps_live_parent_local_pending_and_receipt() {
+        use crate::herdr::PromptReceipt;
+        use crate::tern::{TernResult, TernResultStatus, OFFLINE_GRACE};
+        for offered in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            let mut request = tern_multi_request("local-pending");
+            assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+            let local = tern_host_key(&state, "0");
+            let remote = tern_host_key(&state, "1");
+            let other = tern_host_key(&state, "2");
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            request.hosts.remove(1);
+            let loss = base + Duration::from_secs(1);
+            assert!(tern_test_exchange_at(&mut state, request.clone(), loss).ok);
+            let (operation_id, receipt) = state
+                .queue_tern_prompt(
+                    local.clone(),
+                    "local-pending",
+                    1,
+                    "0",
+                    1,
+                    "pane-a",
+                    "ask once",
+                )
+                .unwrap();
+            if offered {
+                let command = state.tern.offer("local-pending", "daemon-a").unwrap();
+                assert_eq!(command.operation_id, operation_id);
+            }
+            let deadline = loss + OFFLINE_GRACE;
+            set_tern_test_last_seen(&mut state, "local-pending", None, deadline);
+            assert!(state.maintain_tern(deadline));
+            assert!(state.session_view_for_key(&remote).is_none());
+            assert_eq!(tern_host_key(&state, "0"), local);
+            assert_eq!(tern_host_key(&state, "2"), other);
+            assert_eq!(state.scene().sessions, 2);
+            assert_eq!(state.scene().unknown, 0);
+            assert!(receipt.try_recv().is_err());
+            assert!(state.tern.get("local-pending").unwrap().observations["1"].requires_new);
+            request.sequence = 3;
+            if !offered {
+                let poll = tern_test_exchange_at(&mut state, request.clone(), deadline);
+                assert_eq!(poll.command.unwrap().operation_id, operation_id);
+                request.sequence += 1;
+            }
+            request.results.push(TernResult {
+                operation_id,
+                pane: "pane-a".into(),
+                status: TernResultStatus::Accepted,
+                error: None,
+            });
+            let acknowledged = tern_test_exchange_at(&mut state, request.clone(), deadline);
+            assert!(acknowledged.ok && acknowledged.command.is_none());
+            assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
+            request.sequence += 1;
+            request.results.clear();
+            let next = tern_test_exchange_at(&mut state, request, deadline);
+            assert!(next.ok && next.command.is_none());
+            assert!(receipt.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn tern_explicit_local_loss_finalizes_pending_without_replaying_after_cleanup() {
+        use crate::herdr::PromptError;
+        use crate::tern::{TernHostStatus, OFFLINE_GRACE};
+        for offered in [false, true] {
+            for loss in [TernHostStatus::Disconnected, TernHostStatus::Unavailable] {
+                let mut state = tern_test_state(ObservationMode::Tern);
+                let base = Instant::now();
+                let mut request = tern_test_request("explicit-pending");
+                assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+                let key = tern_test_key(&state, "explicit-pending");
+                let (_, receipt) = state
+                    .queue_tern_prompt(key, "explicit-pending", 1, "0", 1, "pane-a", "one ask")
+                    .unwrap();
+                if offered {
+                    assert!(state.tern.offer("explicit-pending", "daemon-a").is_some());
+                }
+                request.instance_id = Some("daemon-a".into());
+                request.sequence = 2;
+                request.hosts[0].status = loss;
+                request.hosts[0].agents.clear();
+                let lost = base + Duration::from_secs(1);
+                let reply = tern_test_exchange_at(&mut state, request.clone(), lost);
+                assert!(reply.ok && reply.command.is_none());
+                assert_eq!(
+                    receipt.try_recv(),
+                    Ok(Err(if offered {
+                        PromptError::UnknownDelivery
+                    } else {
+                        PromptError::Offline
+                    }))
+                );
+                let deadline = lost + OFFLINE_GRACE;
+                set_tern_test_last_seen(&mut state, "explicit-pending", None, deadline);
+                assert!(state.maintain_tern(deadline));
+                request.sequence = 3;
+                request.hosts[0].status = TernHostStatus::Available;
+                request.hosts[0].observation_generation = 2;
+                let recovered = tern_test_exchange_at(&mut state, request, deadline);
+                assert!(recovered.ok && recovered.command.is_none());
+                assert_eq!(recovered.hosts[0].generation, 2);
+                assert!(receipt.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn tern_ttl_cleanup_does_not_change_offline_herdr_rows_or_counts() {
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        let mut state = tern_test_state(ObservationMode::Both);
+        let local = "/isolated/retained-herdr.sock";
+        connect(&mut state, local, 1);
+        publish(&mut state, local, 1, AgentStatus::Working);
+        let key = state
+            .session_snapshot(&SessionListOptions::default(), None)
+            .rows[0]
+            .key
+            .clone();
+        let base = Instant::now();
+        assert!(state.mark_source_offline_at(local, 1, base));
+        let retained = state.session_view_for_key(&key).unwrap();
+        assert!(tern_test_exchange_at(&mut state, tern_test_request("gone-tern"), base).ok);
+        assert!(state.maintain_tern(base + FRESHNESS + OFFLINE_GRACE));
+        assert_eq!(state.source_generation(local), Some(1));
+        assert_eq!(state.retired_source_generation(local), None);
+        assert_eq!(state.session_view_for_key(&key).unwrap(), retained);
+        assert_eq!(state.scene().sessions, 1);
+        assert_eq!(state.scene().unknown, 1);
+        assert_eq!(state.scene().disconnected_sources, 1);
+        assert_eq!(
+            state
+                .session_snapshot(&SessionListOptions::default(), None)
+                .total,
+            1
+        );
+    }
+
+    #[test]
+    fn tern_maintenance_finalizes_queued_and_offered_once_and_never_replays_late_ack() {
+        use crate::herdr::PromptError;
+        use crate::tern::{TernResult, TernResultStatus, FRESHNESS, OFFLINE_GRACE};
+        for offered in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            let mut request = tern_test_request("pending-retirement");
+            assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+            let key = tern_test_key(&state, "pending-retirement");
+            let (operation_id, receipt) = state
+                .queue_tern_prompt(
+                    key.clone(),
+                    "pending-retirement",
+                    1,
+                    "0",
+                    1,
+                    "pane-a",
+                    "one ask",
+                )
+                .unwrap();
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            if offered {
+                assert!(tern_test_exchange_at(&mut state, request.clone(), base)
+                    .command
+                    .is_some());
+                request.sequence = 3;
+            }
+            assert!(state.maintain_tern(base + FRESHNESS));
+            assert_eq!(
+                receipt.try_recv(),
+                Ok(Err(if offered {
+                    PromptError::UnknownDelivery
+                } else {
+                    PromptError::Offline
+                }))
+            );
+            let source = crate::tern::source_id("pending-retirement", "0");
+            let since = state.sources[&source].offline_since;
+            request.results.push(TernResult {
+                operation_id,
+                pane: "pane-a".into(),
+                status: TernResultStatus::Accepted,
+                error: None,
+            });
+            assert_eq!(
+                tern_test_exchange_at(&mut state, request.clone(), base + FRESHNESS).error_code,
+                Some(TernExchangeErrorCode::ReceiptRejected)
+            );
+            assert_eq!(state.sources[&source].offline_since, since);
+            let deadline = base + FRESHNESS + OFFLINE_GRACE;
+            assert!(state.maintain_tern(deadline));
+            assert_eq!(state.prompt_available(&key), Err(PromptError::StaleTarget));
+            assert_eq!(
+                tern_test_exchange_at(&mut state, request.clone(), deadline).error_code,
+                Some(TernExchangeErrorCode::SourceRetired)
+            );
+            request.results.clear();
+            request.epoch = 2;
+            request.sequence = 1;
+            request.instance_id = None;
+            let rebound = tern_test_exchange_at(&mut state, request.clone(), deadline);
+            assert!(rebound.ok && rebound.command.is_none());
+            assert_eq!(rebound.hosts[0].generation, 2);
+            request.sequence = 2;
+            request.instance_id = Some("daemon-a".into());
+            let poll = tern_test_exchange_at(&mut state, request, deadline);
+            assert!(poll.ok && poll.command.is_none());
+            assert!(receipt.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn tern_grace_lock_order_allows_coherent_recovery_only_before_pruning() {
+        use crate::tern::{FRESHNESS, OFFLINE_GRACE};
+        for prune_first in [false, true] {
+            let mut state = tern_test_state(ObservationMode::Tern);
+            let base = Instant::now();
+            let mut request = tern_test_request("lock-order");
+            assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+            assert!(state.expire_tern(base + FRESHNESS));
+            request.instance_id = Some("daemon-a".into());
+            request.sequence = 2;
+            let now = base + FRESHNESS + OFFLINE_GRACE + Duration::from_secs(1);
+            if prune_first {
+                assert!(state.maintain_tern(now));
+                let revision = state.session_revision();
+                assert_eq!(
+                    tern_test_exchange_at(&mut state, request, now).error_code,
+                    Some(TernExchangeErrorCode::SourceRetired)
+                );
+                assert_eq!(state.session_revision(), revision);
+                assert_eq!(state.scene().sessions, 0);
+            } else {
+                let recovered = tern_test_exchange_at(&mut state, request, now);
+                assert!(recovered.ok && recovered.command.is_none());
+                assert_eq!(recovered.hosts[0].generation, 2);
+                let source = crate::tern::source_id("lock-order", "0");
+                assert_eq!(state.sources[&source].offline_since, None);
+                assert_eq!(state.tern.get("lock-order").unwrap().offline_since, None);
+                assert!(!state.maintain_tern(now));
+                assert_eq!(state.scene().sessions, 1);
+                assert_eq!(state.host_connections().tern, 1);
+                assert_eq!(state.tern.retired_epoch("lock-order"), None);
+            }
+        }
+    }
+
+    #[test]
+    fn tern_empty_live_sources_survive_and_offline_empty_sources_and_parents_retire() {
+        use crate::tern::{TernHostStatus, FRESHNESS, OFFLINE_GRACE};
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let base = Instant::now();
+        let mut live = tern_test_request("empty-live");
+        live.hosts[0].agents.clear();
+        assert!(tern_test_exchange_at(&mut state, live.clone(), base).ok);
+        let live_source = crate::tern::source_id("empty-live", "0");
+        assert_eq!(state.host_connections().tern, 1);
+        let mut empty_parent = tern_test_request("empty-parent");
+        empty_parent.hosts[0].status = TernHostStatus::Unavailable;
+        empty_parent.hosts[0].agents.clear();
+        assert!(tern_test_exchange_at(&mut state, empty_parent, base).ok);
+        assert!(state.tern.get("empty-parent").unwrap().hosts.is_empty());
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        set_tern_test_last_seen(&mut state, "empty-live", None, deadline);
+        assert!(state.maintain_tern(deadline));
+        assert!(state.sources[&live_source].connected);
+        assert_eq!(state.host_connections().tern, 1);
+        assert!(state.tern.get("empty-live").is_some());
+        assert!(state.tern.get("empty-parent").is_none());
+        assert_eq!(state.tern.retired_epoch("empty-parent"), Some(1));
+        live.instance_id = Some("daemon-a".into());
+        live.sequence = 2;
+        live.hosts[0].status = TernHostStatus::Disconnected;
+        assert!(tern_test_exchange_at(&mut state, live, deadline).ok);
+        set_tern_test_last_seen(&mut state, "empty-live", None, deadline + OFFLINE_GRACE);
+        assert!(state.maintain_tern(deadline + OFFLINE_GRACE));
+        assert!(!state.sources.contains_key(&live_source));
+        assert!(state.tern.get("empty-live").is_some());
+        assert_eq!(state.scene().sessions, 0);
+        assert_eq!(state.scene().disconnected_sources, 0);
+        assert_eq!(state.host_connections().tern, 0);
+    }
+
+    #[test]
+    fn tern_invalid_envelopes_cannot_refresh_offline_clocks_or_run_pruning() {
+        use crate::tern::{TernResult, TernResultStatus, FRESHNESS, OFFLINE_GRACE};
+        let mut state = tern_test_state(ObservationMode::Tern);
+        let base = Instant::now();
+        let mut request = tern_test_request("fail-closed-clocks");
+        assert!(tern_test_exchange_at(&mut state, request.clone(), base).ok);
+        assert!(state.expire_tern(base + FRESHNESS));
+        let source = crate::tern::source_id("fail-closed-clocks", "0");
+        request.instance_id = Some("daemon-a".into());
+        request.sequence = 2;
+        let mut invalid = Vec::new();
+        let mut malformed = request.clone();
+        malformed.version = 1;
+        invalid.push(malformed);
+        let mut wrong_instance = request.clone();
+        wrong_instance.instance_id = Some("other-daemon".into());
+        invalid.push(wrong_instance);
+        let mut stale_sequence = request.clone();
+        stale_sequence.sequence = 1;
+        invalid.push(stale_sequence);
+        let mut bad_receipt = request;
+        bad_receipt.results.push(TernResult {
+            operation_id: "not-offered".into(),
+            pane: "pane-a".into(),
+            status: TernResultStatus::Accepted,
+            error: None,
+        });
+        invalid.push(bad_receipt);
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        let revision = state.session_revision();
+        for request in invalid {
+            let reply = tern_test_exchange_at(&mut state, request, deadline);
+            assert!(!reply.ok && reply.command.is_none());
+            assert_eq!(state.session_revision(), revision);
+            assert_eq!(state.sources[&source].offline_since, Some(base + FRESHNESS));
+            let parent = state.tern.get("fail-closed-clocks").unwrap();
+            assert_eq!(parent.offline_since, Some(base + FRESHNESS));
+            assert_eq!(parent.last_seen, base);
+            assert_eq!(parent.hosts["0"].last_seen, base);
+        }
+        assert!(state.maintain_tern(deadline));
+        assert_eq!(state.source_generation(&source), None);
     }
 
     #[test]
