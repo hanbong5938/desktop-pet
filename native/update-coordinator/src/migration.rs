@@ -3700,12 +3700,7 @@ mod tests {
         fs::set_permissions(&ctx.executable, fs::Permissions::from_mode(0o755)).unwrap();
         ctx.running = executable_identity(&ctx.executable).unwrap();
         readonly_eligibility(&ctx).unwrap();
-        for version in [
-            "0.3.6",
-            "0.3.7",
-            "0.3.8",
-            crate::identity::neutral::VERSION,
-        ] {
+        for version in ["0.3.6", "0.3.7", "0.3.8", crate::identity::neutral::VERSION] {
             ctx.version = version.into();
             assert!(readonly_eligibility(&ctx).is_err());
         }
@@ -3912,12 +3907,7 @@ mod tests {
         let live: LiveStatus = serde_json::from_value(value.clone()).unwrap();
         assert!(source_requires_tern(&live).unwrap());
         value["observation_mode"] = serde_json::json!("both");
-        for version in [
-            "0.3.6",
-            "0.3.7",
-            "0.3.8",
-            crate::identity::neutral::VERSION,
-        ] {
+        for version in ["0.3.6", "0.3.7", "0.3.8", crate::identity::neutral::VERSION] {
             value["app_version"] = serde_json::json!(version);
             let live: LiveStatus = serde_json::from_value(value.clone()).unwrap();
             assert!(live_observation(&live).is_err());
