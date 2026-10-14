@@ -150,6 +150,8 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::SourceLocal => "ローカル",
         Message::SourceRemote => "リモート",
         Message::MigrationTitle => "Desktop Petへ移行",
+        Message::MigrationNextStep => "次のステップ: Desktop Pet に更新",
+        Message::MigrationNextStepHelp => "互換性更新が完了しました。既存の設定とキャラクターを保持して Desktop Pet に進みます。インストールの変更内容を確認し、承認してから移行を開始します。",
         Message::MigrationResume => "旧インストールの整理を再開",
         Message::MigrationPreparing => "Desktop Petへ移行中",
         Message::MigrationNativeReady => "新しいアプリは起動済み・旧インストールの整理は未完了",

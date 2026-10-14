@@ -150,6 +150,8 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::SourceLocal => "本地",
         Message::SourceRemote => "远程",
         Message::MigrationTitle => "迁移到 Desktop Pet",
+        Message::MigrationNextStep => "下一步：更新到 Desktop Pet",
+        Message::MigrationNextStepHelp => "兼容性更新已完成。保留现有设置和角色，继续迁移到 Desktop Pet。确认安装变更后才会开始迁移。",
         Message::MigrationResume => "继续清理旧安装",
         Message::MigrationPreparing => "正在迁移到 Desktop Pet",
         Message::MigrationNativeReady => "新应用已就绪；旧安装尚未清理完成",

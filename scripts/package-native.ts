@@ -7,10 +7,10 @@ import { validateProductMetadata } from "./release-docs";
 
 const root = join(import.meta.dir, "..");
 const distribution = process.env.DESKTOP_PET_DISTRIBUTION ?? "neutral";
-if (distribution !== "neutral" && distribution !== "legacy-0.3.10") {
-  fail("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.10");
+if (distribution !== "neutral" && distribution !== "legacy-0.3.11") {
+  fail("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.11");
 }
-const legacy = distribution === "legacy-0.3.10";
+const legacy = distribution === "legacy-0.3.11";
 const cargoTarget = process.env.DESKTOP_PET_CARGO_TARGET?.trim() ?? "";
 if (cargoTarget && !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(cargoTarget)) {
   fail(`invalid DESKTOP_PET_CARGO_TARGET: ${cargoTarget}`);
@@ -39,8 +39,8 @@ const packageVersion = typeof packageJson.version === "string"
 if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(packageVersion)) {
   fail("package version must be a stable semantic version");
 }
-if (legacy && packageVersion !== "0.4.5") {
-  fail("the authorized legacy-0.3.10 envelope must use the same approved 0.4.5 core revision");
+if (packageVersion !== "0.4.6") {
+  fail("the authorized neutral and legacy-0.3.11 distributions must use the same approved 0.4.6 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");
@@ -62,7 +62,7 @@ const expectedIdentity: Omit<BuildIdentity, "core_revision" | "herdr_migration_r
   helper: legacy ? "herdr-update-coordinator" : "desktop-pet-update-coordinator",
   display_name: legacy ? "Herdr Desktop Pet" : "Desktop Pet",
   bundle_id: legacy ? "dev.herdr.desktop-pet" : "io.github.hanbong5938.desktop-pet",
-  app_version: legacy ? "0.3.10" : packageVersion,
+  app_version: legacy ? "0.3.11" : packageVersion,
   protocol: legacy ? 3 : 4, observation_mode: legacy ? 1 : 2, integration_api: 1,
 };
 for (const key of Object.keys(expectedIdentity) as (keyof typeof expectedIdentity)[]) {
@@ -79,7 +79,7 @@ if (!/^[a-f0-9]{40}$/.test(buildIdentity.core_revision) ||
 }
 if (legacy) {
   if (typeof buildIdentity.herdr_migration_revision !== "string" ||
-      !/^[a-f0-9]{40}$/.test(buildIdentity.herdr_migration_revision) ||
+      buildIdentity.herdr_migration_revision !== "6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8" ||
       appIdentity.herdr_migration_revision !== buildIdentity.herdr_migration_revision ||
       process.env.DESKTOP_PET_HERDR_MIGRATION_REV !== buildIdentity.herdr_migration_revision) {
     fail("bridge app/helper must carry the exact authenticated integration-only managed-retirement revision");

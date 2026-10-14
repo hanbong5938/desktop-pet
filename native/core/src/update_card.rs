@@ -51,6 +51,12 @@ impl CardView {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCardPrimaryAction {
+    Update,
+    Migrate,
+}
+
 #[derive(Clone)]
 pub(crate) struct UpdateCardModel {
     pub(crate) auto_check: bool,
@@ -67,6 +73,7 @@ pub(crate) struct UpdateCardModel {
     pub(crate) diagnostics: String,
     pub(crate) last_checked: Option<u64>,
     pub(crate) action: Option<UpdateAction>,
+    pub(crate) primary_action: Option<UpdateCardPrimaryAction>,
     pub(crate) release: Option<ReleaseCandidate>,
     pub(crate) download_url: Option<String>,
     pub(crate) migration_available: bool,
@@ -328,6 +335,19 @@ impl AppUpdateCard {
             model.action.as_ref(),
             model.release.as_ref(),
         );
+        // Always reset the selector: this card is reused across discovery and recovery.
+        unsafe {
+            self.apply.setAction(Some(match model.primary_action {
+                Some(UpdateCardPrimaryAction::Migrate) => sel!(migrateLegacyInstallation:),
+                Some(UpdateCardPrimaryAction::Update) | None => sel!(applyAppUpdate:),
+            }));
+        }
+        self.apply.setHidden(model.primary_action.is_none());
+        if model.primary_action == Some(UpdateCardPrimaryAction::Migrate) {
+            self.apply
+                .setTitle(&NSString::from_str(&model.migration_title));
+            accessibility(&self.apply, &model.migration_title);
+        }
         set_text(&self.history, &model.history);
         self.history.setHidden(model.history.is_empty());
         accessibility(&self.history, &model.history);
@@ -344,13 +364,24 @@ impl AppUpdateCard {
         self.diagnostics
             .setHidden(model.diagnostics.is_empty() || !self.diagnostics_expanded);
         self.localize_diagnostics_toggle();
-        self.apply.setEnabled(!busy && model.action.is_some());
+        self.apply.setEnabled(
+            !busy
+                && !model.settings_locked
+                && match model.primary_action {
+                    Some(UpdateCardPrimaryAction::Update) => model.action.is_some(),
+                    Some(UpdateCardPrimaryAction::Migrate) => model.migration_available,
+                    None => false,
+                },
+        );
         self.download.setHidden(model.download_url.is_none());
         self.download
             .setEnabled(!busy && !model.settings_locked && model.download_url.is_some());
         self.migration
             .setTitle(&NSString::from_str(&model.migration_title));
-        self.migration.setHidden(!model.migration_visible);
+        self.migration.setHidden(
+            !model.migration_visible
+                || model.primary_action == Some(UpdateCardPrimaryAction::Migrate),
+        );
         self.migration
             .setEnabled(!busy && model.migration_available);
         self.model = Some(model.clone());

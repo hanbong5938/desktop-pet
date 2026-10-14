@@ -1,7 +1,9 @@
 //! App-side, read-only update discovery and explicit helper handoff.
 //! AppKit never waits for a manager, hash, source probe, or helper stdout.
+//! A settled, verified legacy bridge offers migration as the next UI action;
+//! the ordinary update plan and independent migration consent remain separate.
 use crate::i18n::{text, Message, UiLocale};
-use crate::update_card::UpdateCardModel;
+use crate::update_card::{UpdateCardModel, UpdateCardPrimaryAction};
 use desktop_pet_update_coordinator::protocol::{
     latest_operation, lock_operation, private_updates, start_allowed, ExecutionFence,
     OperationPhase, OperationRecord, UPDATER_PROTOCOL,
@@ -994,7 +996,7 @@ impl AppUpdateService {
                 text(locale, outcome_message(record))
             )
         });
-        let (status, status_message, detail_message) = if self.journal_error.is_some() {
+        let (mut status, mut status_message, mut detail_message) = if self.journal_error.is_some() {
             (
                 CheckStatus::Failed,
                 Message::AppUpdateOutcomeUnknown,
@@ -1055,6 +1057,33 @@ impl AppUpdateService {
                 check_detail_message(status)
             };
             (status, check_status_message(status), detail)
+        };
+        let plan = self.plan();
+        let migration_available = desktop_pet_update_coordinator::identity::LEGACY
+            && self.context.is_some()
+            && self.migration_available
+            && self.migration_history_verified
+            && self.migration_problem.is_none()
+            && self.settings_admitted();
+        let primary_action = if plan.is_some() {
+            Some(UpdateCardPrimaryAction::Update)
+        } else if migration_available
+            && self.problem.is_none()
+            && self.journal_error.is_none()
+            && self.pending_request.is_none()
+            && self.operation.is_none()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.policy == self.policy && snapshot.plan.is_none())
+            && matches!(status, CheckStatus::Current | CheckStatus::Applied)
+        {
+            status = CheckStatus::Available;
+            status_message = Message::MigrationNextStep;
+            detail_message = Message::MigrationNextStepHelp;
+            Some(UpdateCardPrimaryAction::Migrate)
+        } else {
+            None
         };
         let mut diagnostics = String::new();
         if let Some(context) = self.context.as_ref() {
@@ -1149,11 +1178,10 @@ impl AppUpdateService {
             history,
             diagnostics,
             last_checked: self.last_checked,
-            action: self.plan().map(|plan| plan.action.clone()),
+            action: plan.map(|plan| plan.action.clone()),
+            primary_action,
             migration_visible: desktop_pet_update_coordinator::identity::LEGACY,
-            migration_available: self.migration_available
-                && self.migration_history_verified
-                && self.settings_admitted(),
+            migration_available,
             migration_title: text(locale, Message::MigrationTitle).to_owned(),
             download_url: self.download_url().map(str::to_owned),
             release: self
@@ -1509,6 +1537,180 @@ mod tests {
         plan.running = context.running.clone();
         plan.context = context;
         snapshot
+    }
+    fn eligible_settled_bridge(status: CheckStatus) -> AppUpdateService {
+        let mut snapshot = local_check();
+        let mut context = snapshot.plan.take().unwrap().context;
+        context.version = "0.3.11".into();
+        snapshot.installed_version = Some(context.version.clone());
+        snapshot.status = status;
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        service.context = Some(context.clone());
+        let mut completed = failed_record('a');
+        completed.phase = OperationPhase::Completed;
+        completed.execution_fence = ExecutionFence::ManagerExited;
+        completed.installed = true;
+        completed.applied = true;
+        service.latest_journal(Ok(Some(completed.clone())));
+        service.checked(Ok(snapshot), Some(SettledOperationProof(completed)));
+        service.migration_eligibility(context.clone(), Ok(()));
+        service.migration_history_checked(&context, true);
+        service
+    }
+
+    #[test]
+    fn terminal_journal_requires_check_settlement_before_migration_promotion() {
+        let mut service = eligible_settled_bridge(CheckStatus::Current);
+        let mut completed = failed_record('b');
+        completed.phase = OperationPhase::Completed;
+        completed.execution_fence = ExecutionFence::ManagerExited;
+        completed.installed = true;
+        completed.applied = true;
+        service.latest_journal(Ok(Some(completed.clone())));
+        let snapshot = service.snapshot.clone().unwrap();
+        service.checked(Ok(snapshot.clone()), None);
+        assert!(!service.settings_admitted());
+        assert_eq!(service.model(UiLocale::En).primary_action, None);
+        service.checked(Ok(snapshot), Some(SettledOperationProof(completed)));
+        assert!(service.settings_admitted());
+        assert_eq!(
+            service.model(UiLocale::En).primary_action,
+            desktop_pet_update_coordinator::identity::LEGACY
+                .then_some(UpdateCardPrimaryAction::Migrate),
+        );
+    }
+
+    #[test]
+    fn settled_eligible_bridge_promotes_only_legacy_current_or_applied() {
+        for status in [CheckStatus::Current, CheckStatus::Applied] {
+            let service = eligible_settled_bridge(status);
+            assert!(service.settings_admitted());
+            assert!(service.previous_outcome.is_some());
+            let model = service.model(UiLocale::En);
+            assert!(model.action.is_none());
+            if desktop_pet_update_coordinator::identity::LEGACY {
+                assert_eq!(model.primary_action, Some(UpdateCardPrimaryAction::Migrate));
+                assert_eq!(model.status, CheckStatus::Available);
+                assert!(model.migration_available);
+            } else {
+                assert_eq!(model.primary_action, None);
+                assert_eq!(model.status, status);
+                assert!(!model.migration_available);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_newer_update_takes_priority_over_migration() {
+        let mut service = eligible_settled_bridge(CheckStatus::Current);
+        let mut snapshot = local_check_for_context(service.context.clone().unwrap());
+        snapshot.status = CheckStatus::Available;
+        snapshot.plan.as_mut().unwrap().action = UpdateAction::HomebrewUpgrade;
+        service.checked(Ok(snapshot), None);
+        let model = service.model(UiLocale::En);
+        assert_eq!(model.primary_action, Some(UpdateCardPrimaryAction::Update));
+        assert_eq!(model.action, Some(UpdateAction::HomebrewUpgrade));
+        assert_eq!(model.status, CheckStatus::Available);
+    }
+
+    #[test]
+    fn migration_primary_is_blocked_by_unverified_or_unsettled_state() {
+        let blockers: &[(&str, fn(&mut AppUpdateService))] = &[
+            ("eligibility pending", |s| s.migration_available = false),
+            ("eligibility failure", |s| {
+                s.migration_problem = Some("ineligible".into())
+            }),
+            ("history pending or failed", |s| {
+                s.migration_history_verified = false
+            }),
+            ("missing context", |s| s.context = None),
+            ("checking", |s| s.check_busy = true),
+            ("pending request", |s| s.pending_request = Some(9)),
+            ("launch pending", |s| s.launching = Some("a".repeat(32))),
+            ("reserved launch", |s| s.launch_plan = local_check().plan),
+            ("prepared", |s| s.prepared_plan = local_check().plan),
+            ("unsettled observation", |s| {
+                s.observed_operation_id = Some("a".repeat(32))
+            }),
+            ("problem", |s| s.problem = Some("check failed".into())),
+            ("journal error", |s| {
+                s.journal_error = Some("unreadable".into())
+            }),
+            ("stale policy", |s| {
+                s.snapshot.as_mut().unwrap().policy = UpdatePolicy::StableAndBeta
+            }),
+            ("unusable ordinary plan", |s| {
+                s.snapshot.as_mut().unwrap().plan = local_check().plan
+            }),
+        ];
+        for (name, block) in blockers {
+            let mut service = eligible_settled_bridge(CheckStatus::Current);
+            block(&mut service);
+            assert_ne!(
+                service.model(UiLocale::En).primary_action,
+                Some(UpdateCardPrimaryAction::Migrate),
+                "{name}",
+            );
+        }
+        for phase in [
+            OperationPhase::Starting,
+            OperationPhase::Installing,
+            OperationPhase::Unknown,
+            OperationPhase::Failed,
+            OperationPhase::UserStopped,
+            OperationPhase::Completed,
+        ] {
+            let mut service = eligible_settled_bridge(CheckStatus::Current);
+            let mut record = failed_record('b');
+            record.phase = phase;
+            service.operation = Some(record);
+            let model = service.model(UiLocale::En);
+            assert_eq!(model.primary_action, None, "{phase:?}");
+            if matches!(
+                phase,
+                OperationPhase::Unknown | OperationPhase::Failed | OperationPhase::UserStopped
+            ) {
+                assert_eq!(model.status, CheckStatus::Failed);
+            }
+        }
+        for status in [
+            CheckStatus::NotChecked,
+            CheckStatus::Checking,
+            CheckStatus::Available,
+            CheckStatus::Local,
+            CheckStatus::Installed,
+            CheckStatus::Failed,
+            CheckStatus::Unsupported,
+        ] {
+            let service = eligible_settled_bridge(status);
+            assert_eq!(
+                service.model(UiLocale::En).primary_action,
+                None,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_results_for_stale_context_cannot_promote() {
+        let mut service = eligible_settled_bridge(CheckStatus::Current);
+        service.migration_available = false;
+        service.migration_history_verified = false;
+        let context = service.context.clone().unwrap();
+        let mut stale = context.clone();
+        stale.instance_id = "previous-instance".into();
+        service.migration_eligibility(stale.clone(), Ok(()));
+        service.migration_history_checked(&stale, true);
+        assert_eq!(service.model(UiLocale::En).primary_action, None);
+        service.migration_eligibility(context.clone(), Ok(()));
+        service.migration_history_checked(&context, false);
+        assert_eq!(service.model(UiLocale::En).primary_action, None);
+        service.migration_history_checked(&context, true);
+        assert_eq!(
+            service.model(UiLocale::En).primary_action,
+            desktop_pet_update_coordinator::identity::LEGACY
+                .then_some(UpdateCardPrimaryAction::Migrate),
+        );
     }
 
     #[test]

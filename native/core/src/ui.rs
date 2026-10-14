@@ -8469,12 +8469,20 @@ impl Ui {
             );
         }
         let mut model = self.app_update.model(self.locale);
+        let migration_was_primary =
+            model.primary_action == Some(crate::update_card::UpdateCardPrimaryAction::Migrate);
         if let Some(plan) = &self.migration_plan {
+            model.primary_action = None;
             if self.migration_record.as_ref().is_some_and(|record| {
                 record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
             }) {
                 model.migration_visible = false;
                 model.migration_available = false;
+                if migration_was_primary {
+                    model.status = desktop_pet_update_coordinator::CheckStatus::Applied;
+                    model.status_text = text(self.locale, Message::MigrationRetired).to_owned();
+                    model.detail = model.status_text.clone();
+                }
                 model.history.push_str(&format!(
                     "\n{} · {}",
                     plan.operation_id,
@@ -8570,6 +8578,7 @@ impl Ui {
             }
         }
         if let Some(error) = &self.migration_launch_error {
+            model.primary_action = None;
             model.busy = false;
             model.status = desktop_pet_update_coordinator::CheckStatus::Failed;
             model.status_text = text(self.locale, Message::AppUpdateOutcomeUnknown).to_owned();
@@ -8578,7 +8587,11 @@ impl Ui {
         }
         if self.migration_busy {
             model.busy = true;
+            model.primary_action = None;
             model.migration_available = false;
+        }
+        if self.update_frozen.is_some() {
+            model.primary_action = None;
         }
         if let Some((operation_id, alert)) = &self.update_consent {
             if self

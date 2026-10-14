@@ -7,8 +7,8 @@ fn main() {
     let distribution = env::var("DESKTOP_PET_DISTRIBUTION").unwrap_or_else(|_| "neutral".into());
     match distribution.as_str() {
         "neutral" => {}
-        "legacy-0.3.10" => println!("cargo:rustc-cfg=desktop_pet_legacy"),
-        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.10"),
+        "legacy-0.3.11" => println!("cargo:rustc-cfg=desktop_pet_legacy"),
+        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.11"),
     }
     if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
         return;
