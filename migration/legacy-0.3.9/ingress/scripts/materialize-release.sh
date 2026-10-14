@@ -11,9 +11,9 @@ output="$4"
 for input in "$archive" "$provenance" "$record"; do
   [[ -f "$input" && ! -L "$input" ]] || fail "missing real packaging input: $input"
 done
-[[ "${archive##*/}" == HerdrDesktopPet-v0.3.8-macos-arm64.tar.gz ]] || fail 'wrong bridge archive name'
-require_value "$record" distribution legacy-0.3.8
-require_value "$record" app_version 0.3.8
+[[ "${archive##*/}" == HerdrDesktopPet-v0.3.9-macos-arm64.tar.gz ]] || fail 'wrong bridge archive name'
+require_value "$record" distribution legacy-0.3.9
+require_value "$record" app_version 0.3.9
 require_value "$record" protocol 3
 require_value "$record" observation_mode 1
 revision="$(json_value "$record" source_core_revision)"
@@ -23,8 +23,8 @@ migration_revision="$(json_value "$record" herdr_migration_revision)"
 require_value "$provenance" distribution_identity.herdr_migration_revision "$migration_revision"
 require_value "$provenance" version 1
 require_value "$provenance" core_revision "$revision"
-require_value "$provenance" distribution_identity.distribution legacy-0.3.8
-require_value "$provenance" distribution_identity.app_version 0.3.8
+require_value "$provenance" distribution_identity.distribution legacy-0.3.9
+require_value "$provenance" distribution_identity.app_version 0.3.9
 require_value "$provenance" distribution_identity.app_name HerdrDesktopPet.app
 require_value "$provenance" distribution_identity.executable herdr-desktop-pet
 require_value "$provenance" distribution_identity.helper herdr-update-coordinator
@@ -42,11 +42,12 @@ stage="$(mktemp -d "$parent/.bridge-ingress-materialize.XXXXXX")" || fail 'canno
 trap '[[ -z "$stage" ]] || rm -rf "$stage"' EXIT
 mkdir "$stage/scripts"
 cp "$ROOT_DIR/herdr-plugin.toml" "$stage/herdr-plugin.toml"
+cp "$ROOT_DIR/.gitignore" "$stage/.gitignore"
 for script in install.sh run-native.sh validate.sh install-0.3.6.sh; do
   cp "$ROOT_DIR/scripts/$script" "$stage/scripts/$script"
   chmod 755 "$stage/scripts/$script"
 done
-printf '{\n  "version": 1,\n  "repository": "hanbong5938/herdr-desktop-pet",\n  "source_core_repository": "hanbong5938/desktop-pet",\n  "source_core_revision": "%s",\n  "distribution": "legacy-0.3.8",\n  "app_version": "0.3.8",\n  "protocol": 3,\n  "observation_mode": 1,\n  "integration_api": 1,\n  "archive_url": "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.8/HerdrDesktopPet-v0.3.8-macos-arm64.tar.gz",\n  "checksum_url": "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.8/HerdrDesktopPet-v0.3.8-macos-arm64.tar.gz.sha256",\n  "archive_sha256": "%s",\n  "provenance_sha256": "%s"\n}\n' "$revision" "$digest" "$provenance_digest" > "$stage/release.json"
+printf '{\n  "version": 1,\n  "repository": "hanbong5938/herdr-desktop-pet",\n  "source_core_repository": "hanbong5938/desktop-pet",\n  "source_core_revision": "%s",\n  "distribution": "legacy-0.3.9",\n  "app_version": "0.3.9",\n  "protocol": 3,\n  "observation_mode": 1,\n  "integration_api": 1,\n  "archive_url": "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.9/HerdrDesktopPet-v0.3.9-macos-arm64.tar.gz",\n  "checksum_url": "https://github.com/hanbong5938/herdr-desktop-pet/releases/download/v0.3.9/HerdrDesktopPet-v0.3.9-macos-arm64.tar.gz.sha256",\n  "archive_sha256": "%s",\n  "provenance_sha256": "%s"\n}\n' "$revision" "$digest" "$provenance_digest" > "$stage/release.json"
 plutil -insert herdr_migration_revision -string "$migration_revision" "$stage/release.json" || fail 'cannot preserve the authenticated Herdr retirement revision'
 plutil -convert json "$stage/release.json" || fail 'cannot encode materialized release metadata as JSON'
 cp "$record" "$stage/packaging-release.json"

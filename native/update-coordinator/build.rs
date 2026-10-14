@@ -3,7 +3,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(desktop_pet_legacy)");
     match std::env::var("DESKTOP_PET_DISTRIBUTION").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("neutral") => {}
-        Ok("legacy-0.3.8") => {
+        Ok("legacy-0.3.9") => {
             println!("cargo:rustc-cfg=desktop_pet_legacy");
             println!("cargo:rerun-if-env-changed=DESKTOP_PET_HERDR_MIGRATION_REV");
             let revision = std::env::var("DESKTOP_PET_HERDR_MIGRATION_REV")
@@ -14,7 +14,7 @@ fn main() {
             );
             println!("cargo:rustc-env=DESKTOP_PET_COMPILED_HERDR_MIGRATION_REVISION={revision}");
         }
-        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.8"),
+        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.9"),
     }
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("../..")

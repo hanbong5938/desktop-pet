@@ -7,5 +7,5 @@ source "$ROOT_DIR/scripts/validate.sh"
 # Preserve all inherited host/profile/socket environment and native arguments.
 binary="$ROOT_DIR/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
 [[ -x "$binary" && -f "$binary" && ! -L "$binary" ]] || fail "missing genuine legacy daemon: $binary"
-[[ "$("$binary" --version 2>/dev/null)" == 'herdr-desktop-pet 0.3.8' ]] || fail "this bridge wrapper requires the installed 0.3.8 image"
+[[ "$("$binary" --version 2>/dev/null)" == 'herdr-desktop-pet 0.3.9' ]] || fail "this bridge wrapper requires the installed 0.3.9 image"
 exec "$binary" "$@"
