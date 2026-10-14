@@ -376,6 +376,17 @@ pub fn read_plan(path: &Path) -> Result<MigrationPlan, String> {
     Ok(plan)
 }
 pub fn validate_plan(plan: &MigrationPlan) -> Result<(), String> {
+    if plan.target.release.version != crate::identity::neutral::VERSION
+        || plan.target.release.channel != crate::ReleaseChannel::Stable
+    {
+        return Err(format!(
+            "migration requires approved neutral stable {} release",
+            crate::identity::neutral::VERSION
+        ));
+    }
+    validate_plan_structure(plan)
+}
+fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
     protocol::validate_operation_id(&plan.operation_id)?;
     if plan.version != 1
         || plan.kind != "legacy_to_desktop_pet"
@@ -432,13 +443,8 @@ pub fn validate_plan(plan: &MigrationPlan) -> Result<(), String> {
         }
     }
     plan.target.release.validate_neutral()?;
-    if plan.target.release.version != crate::identity::neutral::VERSION
-        || plan.target.release.channel != crate::ReleaseChannel::Stable
-    {
-        return Err(format!(
-            "migration requires approved neutral stable {} release",
-            crate::identity::neutral::VERSION
-        ));
+    if plan.target.release.channel != crate::ReleaseChannel::Stable {
+        return Err("migration evidence requires an approved neutral stable release".into());
     }
     crate::ensure_absolute(&plan.target.staged_bundle)?;
     if let Some(manager) = &plan.target_manager_program {
@@ -782,7 +788,7 @@ fn status_at(socket: &Path) -> Result<LiveStatus, String> {
     .map_err(|e| e.to_string())
 }
 fn live_observation(live: &LiveStatus) -> Result<ObservationSelection, String> {
-    if live.app_version == "0.3.9" {
+    if live.app_version == "0.3.10" {
         ObservationSelection::migrate_legacy_input(Some(&live.observation_mode))
     } else {
         live.observation_mode.parse()
@@ -832,7 +838,7 @@ fn verify_status(
             != if target {
                 crate::identity::neutral::VERSION
             } else {
-                "0.3.9"
+                "0.3.10"
             }
         || live.updater_protocol != if target { 4 } else { 3 }
         || live.observation_capability != if target { 2 } else { 1 }
@@ -938,7 +944,7 @@ fn verify_source(plan: &MigrationPlan) -> Result<(), String> {
         return Err("bridge image changed".into());
     }
     let version = command_output(&plan.source_image.path, &["--version".into()])?;
-    if version.trim() != "herdr-desktop-pet 0.3.9" {
+    if version.trim() != "herdr-desktop-pet 0.3.10" {
         return Err("Operation A must finish with the genuine bridge image".into());
     }
     let caps: serde_json::Value = serde_json::from_str(&command_output(
@@ -1150,7 +1156,7 @@ pub fn startup_authorization(
         }
         if record.phase != MigrationPhase::RollingBack
             || record.manager.is_some()
-            || context.version != "0.3.9"
+            || context.version != "0.3.10"
         {
             return Err("bridge restart lacks valid rollback authorization".into());
         }
@@ -2467,9 +2473,9 @@ pub fn source_origin_from_context(
 /// Availability never stages, writes a plan, acquires reservations or starts a
 /// manager. The worker repeats durable admission before a consent can execute.
 pub fn readonly_eligibility(context: &UpdateContext) -> Result<(), String> {
-    if context.version != "0.3.9" || executable_identity(&context.running.path)? != context.running
+    if context.version != "0.3.10" || executable_identity(&context.running.path)? != context.running
     {
-        return Err("finish Operation A with genuine bridge0.3.9 before migrating".into());
+        return Err("finish Operation A with genuine bridge0.3.10 before migrating".into());
     }
     let updates = context.state_dir.join("updates");
     if fs::symlink_metadata(updates.join("profile.reservation.json")).is_ok() {
@@ -3466,6 +3472,15 @@ mod tests {
         };
         (temp, plan)
     }
+    fn retained_042_fixture() -> (tempfile::TempDir, MigrationPlan) {
+        let (temp, mut plan) = fixture();
+        plan.target.release.version = "0.4.2".into();
+        plan.target.release.tag = "v0.4.2".into();
+        plan.target.release.asset_name = "DesktopPet-v0.4.2-macos-arm64.tar.gz".into();
+        plan.target.release.archive_url = "https://github.com/hanbong5938/desktop-pet/releases/download/v0.4.2/DesktopPet-v0.4.2-macos-arm64.tar.gz".into();
+        plan.target.release.checksum_url = format!("{}.sha256", plan.target.release.archive_url);
+        (temp, plan)
+    }
     fn persist_fixture(plan: &MigrationPlan) -> MigrationRecord {
         let bytes = serde_json::to_vec(plan).unwrap();
         protocol::write_private_new(&evidence_path(plan), &bytes, 0o600).unwrap();
@@ -3477,7 +3492,7 @@ mod tests {
         let profile = &plan.profiles[0];
         UpdateContext {
             executable: plan.source_image.path.clone(),
-            version: "0.3.9".into(),
+            version: "0.3.10".into(),
             instance_id: profile.instance_id.clone(),
             config_dir: profile.config_dir.clone(),
             state_dir: profile.state_dir.clone(),
@@ -3675,11 +3690,7 @@ mod tests {
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
-        assert_eq!(
-            plan.target.release.version,
-            crate::identity::neutral::VERSION
-        );
-        for version in ["0.4.1", "0.4.2", "0.4.3"] {
+        for version in ["0.4.1", "0.4.2", "0.4.3", "0.4.4"] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();
             assert!(validate_plan(&obsolete).is_err());
@@ -3700,11 +3711,17 @@ mod tests {
         fs::set_permissions(&ctx.executable, fs::Permissions::from_mode(0o755)).unwrap();
         ctx.running = executable_identity(&ctx.executable).unwrap();
         readonly_eligibility(&ctx).unwrap();
-        for version in ["0.3.6", "0.3.7", "0.3.8", crate::identity::neutral::VERSION] {
+        for version in [
+            "0.3.6",
+            "0.3.7",
+            "0.3.8",
+            "0.3.9",
+            crate::identity::neutral::VERSION,
+        ] {
             ctx.version = version.into();
             assert!(readonly_eligibility(&ctx).is_err());
         }
-        ctx.version = "0.3.9".into();
+        ctx.version = "0.3.10".into();
         ctx.running.sha256 = "f".repeat(64);
         assert!(readonly_eligibility(&ctx).is_err());
     }
@@ -3891,7 +3908,7 @@ mod tests {
         let (_temp, plan) = fixture();
         let mut value = serde_json::json!({
             "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
-            "app_version":"0.3.9","updater_protocol":3,"observation_capability":1,"integration_api":1,
+            "app_version":"0.3.10","updater_protocol":3,"observation_capability":1,"integration_api":1,
             "instance_id":"source-instance","running_sha256":plan.source_image.sha256,"pid":1000,
             "executable_path":plan.source_image.path,"config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir,
             "observation_mode":"both","host_connections":{"herdr":1,"tern":0}
@@ -3930,6 +3947,41 @@ mod tests {
         wrong = ctx;
         wrong.config_dir = wrong.config_dir.join("other");
         assert!(latest_for_context(&wrong).unwrap().is_none());
+    }
+    #[test]
+    fn retained_older_completed_migration_does_not_block_a_newer_native_image() {
+        let (_temp, plan) = retained_042_fixture();
+        let mut record = persist_fixture(&plan);
+        record.phase = MigrationPhase::Complete;
+        save(&plan, &record).unwrap();
+        let evidence_before = fs::read(evidence_path(&plan)).unwrap();
+        let journal_before = fs::read(journal_path(&plan)).unwrap();
+        let mut ctx = context(&plan);
+        ctx.executable = plan.target.image.path.clone();
+        ctx.version = crate::identity::neutral::VERSION.into();
+        ctx.running = plan.target.image.clone();
+        ctx.running.sha256 = "f".repeat(64);
+        ctx.running_origin = Some(Box::new(plan.target.origin.clone()));
+        assert!(latest_for_context(&ctx).unwrap().is_none());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), evidence_before);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), journal_before);
+    }
+    #[test]
+    fn retained_older_unknown_history_is_read_only_and_keeps_its_evidence_binding() {
+        let (_temp, plan) = retained_042_fixture();
+        let mut record = persist_fixture(&plan);
+        record.phase = MigrationPhase::ManagerUnknown;
+        save(&plan, &record).unwrap();
+        let ctx = context(&plan);
+        let (retained, observed) = latest_for_context(&ctx).unwrap().unwrap();
+        assert_eq!(retained, plan);
+        assert_eq!(observed.phase, MigrationPhase::ManagerUnknown);
+        assert!(validate_plan(&retained).is_err());
+        assert!(read_plan(&evidence_path(&retained)).is_err());
+        assert!(write_new_plan(&retained).is_err());
+        record.plan_sha256 = "0".repeat(64);
+        save(&plan, &record).unwrap();
+        assert!(latest_for_context(&ctx).is_err());
     }
     #[test]
     fn false_final_visible_ack_and_wrong_plan_digest_are_rejected() {
@@ -4268,7 +4320,12 @@ pub fn latest_for_context(
         if count > 1024 {
             return Err("migration history exceeds bound".into());
         }
-        let plan = read_plan(&entry.path())?;
+        // History keeps its originally approved release; current-version binding
+        // still applies to every new plan, execution, startup and resume.
+        let plan: MigrationPlan =
+            serde_json::from_slice(&owned_private_file(&entry.path(), MAX_PLAN)?)
+                .map_err(|e| e.to_string())?;
+        validate_plan_structure(&plan)?;
         if entry.path() != evidence_path(&plan) {
             return Err("migration evidence name does not match operation/profile".into());
         }

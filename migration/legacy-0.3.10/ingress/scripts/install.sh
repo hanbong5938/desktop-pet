@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "$ROOT_DIR/scripts/validate.sh"
-version=0.3.9
+version=0.3.10
 manual_stopped=0
 while (($#)); do
   case "$1" in
@@ -51,8 +51,8 @@ else
   [[ -f "$metadata" && ! -L "$metadata" ]] || fail "release.json must be materialized from the actual packaged bridge before installing or tagging"
   require_value "$metadata" version 1
   require_value "$metadata" repository "$repository"
-  require_value "$metadata" distribution legacy-0.3.9
-  require_value "$metadata" app_version 0.3.9
+  require_value "$metadata" distribution legacy-0.3.10
+  require_value "$metadata" app_version 0.3.10
   require_value "$metadata" protocol 3
   require_value "$metadata" observation_mode 1
   require_value "$metadata" archive_url "$url"
@@ -93,7 +93,7 @@ cleanup() {
   rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
-if [[ "$version" == 0.3.9 && -e "$APP_ROOT" ]]; then
+if [[ "$version" == 0.3.10 && -e "$APP_ROOT" ]]; then
   installed_binary="$APP_ROOT/Contents/MacOS/herdr-desktop-pet"
   [[ -f "$installed_binary" && -x "$installed_binary" && ! -L "$installed_binary" ]] || fail "invalid existing legacy image"
   codesign --verify --deep --strict "$APP_ROOT" >/dev/null 2>&1 || fail "existing legacy image signature is invalid; no replacement authorized"
@@ -105,7 +105,7 @@ archive="$temp/$asset"
 curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 --silent --show-error "$url" --output "$archive" || fail "cannot download pinned legacy archive"
 [[ "$(sha256_file "$archive")" == "$expected" ]] || fail "downloaded bytes do not match the approved archive SHA256"
 # Respect the helper checksum selection as well as its approved SHA proof.
-if [[ "${HERDR_PET_SHA256+x}" != x && "$version" == 0.3.9 ]]; then
+if [[ "${HERDR_PET_SHA256+x}" != x && "$version" == 0.3.10 ]]; then
   curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 --silent --show-error "$checksum_url" --output "$temp/checksum" || fail "cannot download pinned checksum"
   found=0
   while IFS= read -r line || [[ -n "$line" ]]; do
