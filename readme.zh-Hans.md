@@ -2,9 +2,9 @@
 
 独立的原生 macOS 桌面伙伴。露贝莉娅回应触摸，显示 Herdr、Tern 等已注册提供商的会话，并在来源允许时发送回复。无需宿主也能运行。
 
-[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**发布边界：**独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）与 `hanbong5938/tap/desktop-pet` 配方已公开。已验证六个匿名下载、压缩包校验和／签名／68 个部署文件 closure，并在一次性 Mac 上确认实际 Brew 安装和原生 UI/control 就绪。当前源码为 v0.4.1，尚无该版公开资产。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 集成标签尚未发布。双宿主真实账户／提供方运行验证仍受阻，最终验收矩阵未完成。旧版 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 是 protocol 3 / capability 1 的历史公开版本。冻结标签、正文、资产及历史证据保持不变。
+**发布边界：**独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) 与 [v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1) 已公开（protocol 4 / capability 2 / integration API 1）。已验证 v0.4.1 六项匿名下载、校验和、签名及 68 个部署文件 closure。公开 tap main `47df565` 提供中立 v0.4.1 配方；自有一次性 Mac 上的实际 `brew upgrade`、原配置档保留、receipt／物理 root／derivation、`brew test`、签名，以及同配置档公开 wrapper 的原生 UI/control ready 与 Auto 4/2/1 均已验证。同 config／不同 state 的启动在写入 preferences 前被拒绝，config digest 和主实例不变。全新 standalone 匿名安装器也已验证实际 OS 账户 home 的 `Applications/DesktopPet.app`、原生 UI/control ready 与 Herdr 0／Tern 0，但这不是 SDK 真实账户证明。[Herdr v0.4.0](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.0) 已发布，但源码误含 69 个生成应用文件和 6 个失败测试 profile／lock／symlink 文件，修正后的 guard 拒绝该不可变源码。[Tern v0.2.0](https://github.com/hanbong5938/tern-desktop-pet/releases/tag/v0.2.0) 已公开，保留的 Core v0.4.1 pin 仍兼容 4/2/1。获准修正采用新 **Core v0.4.2 + Herdr v0.4.1**；这两个标签及 bridge v0.3.7 尚未发布或验收（[修正台账](docs/releases/v0.4.2.md)）。Tern 的真实 private-window keychain／未登录与 OMP 18.10.3 的 NoModel／provider setup 仍阻碍双宿主真实账户／提供方验证，最终验收矩阵未完成。旧版 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 是 protocol 3 / capability 1 的历史公开版本。冻结标签、正文、资产及历史证据保持不变。
 
 <img src="assets/rubelia-thumbnail.png" alt="默认桌面伙伴露贝莉娅" width="220">
 
@@ -23,7 +23,7 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-已公开的中立 v0.4.0 可通过以下 Brew 命令安装：
+已公开的中立 v0.4.1 可通过以下 Brew 命令安装：
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,16 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# 使用已公开的不可变 v0.4.0 安装器及固定资产：
-git checkout --detach v0.4.0
+# 使用已公开的不可变 v0.4.1 安装器及固定资产：
+git checkout --detach v0.4.1
 bash scripts/install.sh --prebuilt
-# 当前 v0.4.1 源码替代方案在另一个当前检出中显式运行：
+# 当前 v0.4.2 源码开发在另一个当前检出中显式运行：
 # bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-不可变 v0.4.0 检出的默认／`--prebuilt` 使用已公开的固定资产；当前 v0.4.1 检出的预构建在该版资产发布前不可用。失败绝不暗中构建 source；只有显式 `--source` 构建当前已验证 core。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
+不可变 v0.4.0／v0.4.1 检出的默认／`--prebuilt` 使用各版本已公开的固定资产。当前 main 是 v0.4.2 修正源码，v0.4.2 预构建资产尚未发布。安装公开 v0.4.1 请显式 checkout 上述标签；当前 v0.4.2 源码开发在另一个检出中显式运行 `--source`。下载／验证失败绝不暗中构建 source。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
 
 仅安装需要的集成。Herdr 是轻量消费者；Tern 不下载、构建、安装或自动启动原生应用。插件更新与卸载只影响集成，不删除共享应用、配置档或角色。常规应用更新不重新安装 Herdr 插件。
 

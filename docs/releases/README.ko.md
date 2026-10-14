@@ -1,14 +1,16 @@
 # Desktop Pet 버전 안내
 
-**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)과 중립 Homebrew 포뮬러는 공개되었고 공개 자산 익명 검증과 disposable Mac 설치를 확인했습니다. 현재 소스의 승인된 별도 v0.4.1, bridge v0.3.7, 연동 태그는 아직 공개되지 않았고 최종 migration/두 호스트 수락 표는 미완료입니다. 공개 중립 버전과 과거 Herdr 태그·자산은 유지합니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)은 `2026-10-14T00:04:03Z`에 공개되었고 익명 자산 6개의 API 크기·digest·서명·protocol 4 / capability 2 / integration API 1을 검증했습니다. 불변 v0.4.0과 중립 포뮬러는 앞서 공개되었습니다. tap `47df565`는 v0.4.1을 게시하며 실제 일회용 Mac의 v0.4.0 → v0.4.1 Brew 업그레이드에서 원래 프로필을 보존하고 receipt/root/derivation·`brew test`·서명·같은 프로필의 네이티브 UI/control 준비를 확인했습니다. 같은 config/다른 state 실행은 preferences 쓰기 전에 거절되었습니다. 새 익명 standalone v0.4.1 설치·네이티브 준비도 확인했지만 SDK 계정 검증은 아닙니다. Herdr v0.4.0은 `f65f123e17822ad838dd40a565900aca6347cd97`에서 공개되었습니다(release `412221638`, 자산 없음). 다만 불변 소스의 생성 앱·실패 테스트 파일 때문에 수정 bridge guard가 거절합니다. Tern v0.2.0은 `8ec870dcecc14be4f549284fc7fe4b676a8ff5de`에서 공개되었습니다(release `412222664`, 자산 없음). 기존 Core v0.4.1 consumer pin은 호환됩니다. 승인된 Core v0.4.2와 수정 Herdr v0.4.1은 아직 미공개이며 bridge v0.3.7은 이 두 새 버전의 정확한 공개 소스와 수정 retirement ref를 사용해야 합니다. 최종 migration/두 호스트 수락은 미완료이고 실제 Tern keychain/provider 전제 조건은 차단되어 있습니다. 공개 중립 버전과 과거 태그·본문·자산은 보존합니다. Wiki/Pages 게시 완료는 바이너리 공개에서 추론하지 않습니다.
 
-[Desktop Pet v0.4.0 게시 및 검증 기록](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
+[Desktop Pet v0.4.1 게시 및 검증 기록](v0.4.1.md) · [과거 v0.4.0 게시 및 검증 기록](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
+
+**새 불변 수정 게시 대기:** [Core v0.4.2 수정 기록](v0.4.2.md)은 승인된 새 core와 수정 Herdr v0.4.1 연동을 추적합니다. 게시 완료 증거가 아니며 미래 소스 해시·digest·release ID를 주장하지 않습니다. 공개 설치는 불변 Core v0.4.1을 사용하고 v0.4.2는 자산이 실제 게시될 때까지 명시적 source 후보 개발로 분리합니다.
 
 [English](README.md) · **한국어**
 
 이 저장소에서 검토한 Markdown이 버전 문서의 원본입니다. GitHub Wiki는 원본에서 생성한 읽기용 화면이며 따로 편집하는 원본이 아닙니다. 개요·설치는 [한국어 루트 안내](../../readme.ko.md), 현행 조작·운영은 [사용 안내](../usage.ko.md), 소스·웹사이트 개발은 [개발 안내](../development.ko.md), Herdr 호스트 연동은 [연동 안내(영어)](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)를 기준으로 합니다.
 
-현재 앱 문서·설치: [English](../../README.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). 현재 앱 사용법: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). 4개 언어 앱 사이트와 생성된 앱 Wiki는 core 소유이며 이전 Herdr 사이트·문서는 연동·이전 입구입니다. 실제 공개 여부는 별도로 확인합니다.
+현재 앱 문서·설치: [English](../../readme.md) · [한국어](../../readme.ko.md) · [日本語](../../readme.ja.md) · [简体中文](../../readme.zh-Hans.md). 현재 앱 사용법: [English](../usage.md) · [한국어](../usage.ko.md) · [日本語](../usage.ja.md) · [简体中文](../usage.zh-Hans.md). 4개 언어 앱 사이트와 생성된 앱 Wiki는 core 소유이며 이전 Herdr 사이트·문서는 연동·이전 입구입니다. 실제 공개 여부는 별도로 확인합니다.
 
 ## 목적에 맞는 문서 선택
 

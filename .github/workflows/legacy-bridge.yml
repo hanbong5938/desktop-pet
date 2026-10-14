@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       core_revision:
-        description: "Exact approved published v0.4.1 core commit (40 lowercase hex characters)"
+        description: "Exact approved published v0.4.2 core commit (40 lowercase hex characters)"
         required: true
         type: string
       herdr_migration_revision:
-        description: "Exact published integration-only Herdr v0.4.0 commit for approved managed retirement (40 lowercase hex)"
+        description: "Exact published integration-only Herdr v0.4.1 commit for approved managed retirement (40 lowercase hex)"
         required: true
         type: string
       authorize_legacy_0_3_7:
@@ -49,9 +49,9 @@ jobs:
           set -euo pipefail
           [[ "$REQUESTED_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$REQUESTED_CORE_REVISION" ]]
-          [[ "$(git rev-parse 'refs/tags/v0.4.1^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(git rev-parse 'refs/tags/v0.4.2^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
           [[ "$(plutil -extract name raw -o - package.json)" == desktop-pet ]]
-          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.1 ]]
+          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.2 ]]
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -73,23 +73,44 @@ jobs:
           set -euo pipefail
           ref="$DESKTOP_PET_HERDR_MIGRATION_REV"
           [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
-          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.1 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.1" and (.assets as $assets | ["DesktopPet-v0.4.1-macos-arm64.tar.gz","DesktopPet-v0.4.1-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.1-rig-native.json","desktop-pet-install-v0.4.1.sh","desktop-pet-install-v0.4.1.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
+          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.2 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.2" and (.assets as $assets | ["DesktopPet-v0.4.2-macos-arm64.tar.gz","DesktopPet-v0.4.2-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.2-rig-native.json","desktop-pet-install-v0.4.2.sh","desktop-pet-install-v0.4.2.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
           repository=hanbong5938/herdr-desktop-pet
-          gh api "repos/$repository/releases/tags/v0.4.0" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.0"' >/dev/null
-          [[ "$(gh api "repos/$repository/commits/$ref" --jq '.sha')" == "$ref" ]]
-          object="$(gh api "repos/$repository/git/ref/tags/v0.4.0" --jq '.object')"
-          for depth in 1 2 3 4 5 6 7 8; do
-            type="$(printf '%s' "$object" | jq -r '.type')"
-            sha="$(printf '%s' "$object" | jq -r '.sha')"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-            if [[ "$type" == commit ]]; then break; fi
-            [[ "$type" == tag ]]
-            object="$(gh api "repos/$repository/git/tags/$sha" --jq '.object')"
+          gh api "repos/$repository/releases/tags/v0.4.1" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.1" and (.assets | length == 0)' >/dev/null
+          for authority in "hanbong5938/desktop-pet v0.4.2 $REQUESTED_CORE_REVISION" "$repository v0.4.1 $ref"; do
+            read -r repo tag expected <<< "$authority"
+            [[ "$(gh api "repos/$repo/commits/$expected" --jq '.sha')" == "$expected" ]]
+            object="$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object')"
+            for depth in 1 2 3 4 5 6 7 8; do
+              type="$(printf '%s' "$object" | jq -r '.type')"
+              sha="$(printf '%s' "$object" | jq -r '.sha')"
+              [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+              if [[ "$type" == commit ]]; then break; fi
+              [[ "$type" == tag ]]
+              object="$(gh api "repos/$repo/git/tags/$sha" --jq '.object')"
+            done
+            [[ "$type" == commit && "$sha" == "$expected" ]]
           done
-          [[ "$type" == commit && "$sha" == "$ref" ]]
-          gh api "repos/$repository/git/trees/$ref?recursive=1" | jq -e '.truncated == false and (.tree | type == "array") and all(.tree[]; (.path | test("^(native|assets|dist|web/rig)(/|$)|^scripts/(package-native\\.ts|build-rig-native\\.mjs)$")) | not)' >/dev/null
+          tree="$(gh api "repos/$repository/git/commits/$ref" --jq '.tree.sha')"
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$repository/git/trees/$tree?recursive=1" | jq --arg tree "$tree" -e '
+            .sha == $tree and .truncated == false and (.tree | type == "array") and (.tree | length <= 10000)
+            and all(.tree[];
+              ((.type == "tree" and .mode == "040000") or (.type == "blob" and (.mode == "100644" or .mode == "100755")))
+              and (.path | type == "string")
+              and ((.path | test("^(native|assets|dist|web|tools)(/|$)|^\\.agents/skills/(character-creator|create-pet-character)(/|$)|^scripts/(package-native\\.ts|build-rig-native\\.mjs|release-docs(\\.test)?\\.ts|wiki-docs(\\.test)?\\.ts|publish-wiki\\.sh)$|^\\.github/workflows/wiki\\.yml$|(^|/)(dist|target|node_modules|Contents|_CodeSignature|rig|rig-native|creator)(/|$)|(^|/)(Info\\.plist|RigLimits\\.(rs|swift)|desktop-pet|desktop-pet-update-coordinator|herdr-desktop-pet|herdr-update-coordinator|rig-decode-worker)$|(^|/)libherdr_rig|\\.(app|framework|bundle)(/|$)|\\.(tar(\\.(gz|bz2|xz|zst))?|tgz|tbz2?|txz|zip|gz|bz2|xz|zst|7z|rar|dmg|pkg|o|a|so|dylib|dll|exe|wasm|bin|herdrchar)(\\.(sha256|sha512))?$|(^|/)rig\\.json$|rig-native\\.json(\\.(sha256|sha512))?$"; "i")) | not)
+            )' >/dev/null
           gh api "repos/$repository/contents/herdr-plugin.toml?ref=$ref" > "$RUNNER_TEMP/herdr-retirement-manifest.json"
-          bun -e 'const r=await Bun.file(process.env.RUNNER_TEMP+"/herdr-retirement-manifest.json").json(); if(r.encoding!=="base64"||typeof r.content!=="string")throw Error("invalid immutable manifest response"); const m=Bun.TOML.parse(Buffer.from(r.content,"base64").toString("utf8")); if(m.version!=="0.4.0")throw Error("retirement target is not the published integration0.4.0 manifest");'
+          bun -e '
+            const r=await Bun.file(process.env.RUNNER_TEMP+"/herdr-retirement-manifest.json").json();
+            if(r.encoding!=="base64"||typeof r.content!=="string")throw Error("invalid immutable manifest response");
+            const m=Bun.TOML.parse(Buffer.from(r.content,"base64").toString("utf8"));
+            if(m.id!=="desktop-pet"||m.version!=="0.4.1"||m.min_herdr_version!=="0.9.3")throw Error("retirement target is not the published Herdr integration0.4.1 manifest");
+            const hooks={build:[["bash","scripts/install.sh"]],startup:[["bash","scripts/run-native.sh","ensure"]],events:[["bash","scripts/run-native.sh","ensure"]]};
+            for(const [kind,expected] of Object.entries(hooks))if(JSON.stringify(m[kind]?.map(h=>h.command))!==JSON.stringify(expected))throw Error("retirement manifest has non-consumer hooks");
+            if(m.events[0].on!=="client.attached")throw Error("retirement event differs");
+            const actions=["settings","start","ensure","stop","status","toggle","show","hide","passthrough","alpha_passthrough","show_bubble","hide_bubble","bubble_above","bubble_below","bubble_left","bubble_right","bubble_auto","reset","bigger","smaller","restart"];
+            if(JSON.stringify(m.actions?.map(a=>a.id))!==JSON.stringify(actions)||m.actions.some(a=>JSON.stringify(a.command)!==JSON.stringify(["bash","scripts/run-native.sh",a.id])))throw Error("retirement actions are not exact consumer calls");
+          '
 
       - name: Install pinned JavaScript dependencies
         run: bun install --frozen-lockfile && npm ci --prefix web/rig

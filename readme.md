@@ -8,7 +8,7 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 [Browse the optional character and outfit gallery](https://hanbong5938.github.io/herdr-characters/) (opens in English; choose KO for Korean) · [Character pack source and licenses](https://github.com/hanbong5938/herdr-characters). **Only Rubelia (`default@0`) is bundled.**
 
-**Publication boundary:** independent [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) and `hanbong5938/tap/desktop-pet` are published and were installed from public assets in a disposable Mac. Current source targets separately approved **v0.4.1**, whose fixed prebuilt assets are not yet published; use the immutable v0.4.0 checkout for its installer. Bridge v0.3.7 and integration tags remain unpublished, and the final acceptance matrix remains incomplete. Legacy Herdr v0.3.6 and published neutral v0.4.0 tags/assets remain immutable.
+**Publication boundary:** independent [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1) is published from immutable source `9a63751b4de1b9a2f6fc7a7570a906b59568bafc`; all six public assets, signatures, 4/2/1 capability pair and 68-file deployed closure were verified. The neutral formula is published at v0.4.1 and its real disposable-Mac upgrade succeeded; native readiness and a fresh standalone anonymous installation were verified separately. Herdr v0.4.0 is also public, but its immutable source accidentally includes generated app/test files and is rejected by the corrected bridge guard. Tern v0.2.0 is public and its retained Core v0.4.1 consumer pin remains compatible. The approved [Core v0.4.2 repair candidate](docs/releases/v0.4.2.md) and corrected Herdr v0.4.1 integration are not yet published; bridge v0.3.7 must use those exact new published revisions before migration acceptance. Historical tags, bodies and assets remain immutable. The final migration/two-host matrix remains incomplete: actual Tern keychain/provider prerequisites are blocked, and native readiness is not SDK account proof. Wiki/Pages publication is not established by a binary release.
 
 ## Features
 
@@ -43,13 +43,20 @@ For prebuilt or source installation use the **core** checkout, not a Herdr integ
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Requires this checkout's exact published core assets (current 0.4.1 is not yet published):
+# Fixed published v0.4.1 prebuilt; unavailable/invalid downloads never build source:
+git checkout --detach v0.4.1
 bash scripts/install.sh --prebuilt
-# Explicit source alternative for the current core checkout:
-bash scripts/install.sh --source
 ```
 
 Default installation is **prebuilt-only**: unavailable downloads or validation failure never silently compile source. A non-Brew prebuilt belongs at the OS account home's `Applications/DesktopPet.app`; explicit source installation uses the core checkout's `dist/DesktopPet.app`. Installation admission may reuse a verified healthy installation rather than take over another owner. Read the reported executable/shared locator instead of assuming the source path is the selected installation. Reservations or live profiles prevent unsafe replacement. See [installation discovery](docs/development.md#profiles-and-installation-discovery).
+
+For explicit **v0.4.2 candidate development**, use a separate current-source checkout; its prebuilt assets are not yet public:
+
+```sh
+git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
+cd desktop-pet-source
+bash scripts/install.sh --source
+```
 
 Install only the separate integrations you want:
 
@@ -58,7 +65,7 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
-These commands describe the integration cutover; integration tags are not yet published. Plugin updates/removal affect only integrations, never the shared app, profile or characters. Herdr is a thin consumer; Tern never downloads, builds, installs or auto-starts the native app. Native app updates do not reinstall host plugins. Source/link instructions belong to each integration repository; do not link the core as a Herdr plugin.
+Tern v0.2.0 is published. Herdr v0.4.0 is published but has a faulty source tree; the corrected integration-only v0.4.1 release is pending, so do not treat installation of the current public Herdr release as proof of the corrected cutover. Plugin updates/removal affect only integrations, never the shared app, profile or characters. Herdr is a thin consumer; Tern never downloads, builds, installs or auto-starts the native app. Native app updates do not reinstall host plugins. Source/link instructions belong to each integration repository; do not link the core as a Herdr plugin.
 
 ## Profiles, connection and migration
 

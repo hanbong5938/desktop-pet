@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "desktop-pet-core",
  "desktop-pet-herdr",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "block2",
  "desktop-pet-contracts",
@@ -118,7 +118,7 @@ dependencies = [
 [[package]]
 name = "desktop-pet-herdr"
 version = "0.1.0"
-source = "git+https://github.com/hanbong5938/herdr-desktop-pet?rev=fb28be4477b9a529e046a0f033ad9e2cd888abea#fb28be4477b9a529e046a0f033ad9e2cd888abea"
+source = "git+https://github.com/hanbong5938/herdr-desktop-pet?rev=2a1dae743c2a67659e8a6782eff9a11714a31837#2a1dae743c2a67659e8a6782eff9a11714a31837"
 dependencies = [
  "desktop-pet-contracts",
  "dispatch2",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-update-coordinator"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "desktop-pet-contracts",
  "libc",

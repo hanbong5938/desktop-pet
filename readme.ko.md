@@ -2,9 +2,9 @@
 
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
-[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**게시 경계:** 독립 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)(protocol 4 / capability 2 / integration API 1)과 `hanbong5938/tap/desktop-pet` 포뮬러는 공개되었습니다. 익명 다운로드 6개, 압축 파일 체크섬·서명·68개 배포 파일 closure를 검증했고, 일회용 Mac에서 실제 Brew 설치와 네이티브 UI/control 준비를 확인했습니다. 현재 소스는 v0.4.1이며 해당 공개 자산은 아직 없습니다. bridge v0.3.7 및 Herdr v0.4.0/Tern v0.2.0 연동 태그는 미공개입니다. 두 호스트의 실제 계정/제공자 런타임은 여전히 차단되어 최종 수락 표는 미완료입니다. 기존 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 protocol 3 / capability 1의 과거 공개판입니다. 동결된 태그·본문·자산과 과거 증거는 변경하지 않습니다.
+**게시 경계:** 독립 [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)은 불변 소스 `9a63751b4de1b9a2f6fc7a7570a906b59568bafc`에서 공개되었습니다. 익명 자산 6개·서명·protocol 4 / capability 2 / integration API 1·68개 배포 파일 closure를 검증했습니다. 공개 tap `47df565`의 v0.4.1 포뮬러, 실제 일회용 Mac의 v0.4.0 → v0.4.1 Brew 업그레이드·프로필 보존·receipt·물리 root·derivation·`brew test`·서명·네이티브 UI/control 준비를 확인했습니다. 같은 config/다른 state 시도는 preferences 쓰기 전에 거절되었습니다. 새 익명 standalone 설치의 네이티브 준비도 별도로 확인했지만 SDK 계정 검증은 아닙니다. Herdr v0.4.0도 공개되었으나 불변 소스에 생성 앱·실패 테스트 파일이 포함되어 수정 bridge guard가 거절합니다. Tern v0.2.0은 공개되었고 기존 Core v0.4.1 consumer pin은 호환됩니다. 승인된 [Core v0.4.2 수정 후보](docs/releases/v0.4.2.md)와 수정 Herdr v0.4.1 연동은 아직 미공개입니다. bridge v0.3.7은 이 새 두 버전의 정확한 공개 소스를 사용해야 하며 bridge 게시·migration/두 호스트 수락은 미완료입니다. 실제 Tern keychain/provider 전제 조건은 차단되어 있습니다. 과거 Herdr v0.3.6(3/1), 중립 v0.4.0·v0.4.1과 모든 공개 태그·본문·자산은 보존합니다. Wiki/Pages 게시 완료는 바이너리 공개에서 추론하지 않습니다.
 
 <img src="assets/rubelia-thumbnail.png" alt="기본 데스크톱 캐릭터 루벨리아" width="220">
 
@@ -23,7 +23,7 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-공개된 중립 v0.4.0은 다음 Brew 명령으로 설치할 수 있습니다:
+공개된 중립 v0.4.1은 다음 Brew 명령으로 설치할 수 있습니다:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,16 +37,23 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# 공개된 불변 v0.4.0 설치기와 고정 자산 사용:
-git checkout --detach v0.4.0
+# 공개된 불변 v0.4.1 설치기와 고정 자산 사용:
+git checkout --detach v0.4.1
 bash scripts/install.sh --prebuilt
-# 현재 v0.4.1 소스 대안은 별도 현재 체크아웃에서 명시적으로 실행:
-# bash scripts/install.sh --source
+# v0.4.2 후보 소스 개발은 아래의 별도 체크아웃에서 실행합니다.
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-불변 v0.4.0 체크아웃의 기본/`--prebuilt` 설치는 공개된 고정 자산을 사용합니다. 현재 v0.4.1 체크아웃의 prebuilt는 해당 자산이 게시될 때까지 사용할 수 없습니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+**v0.4.2 후보 개발**은 별도 현재 소스 체크아웃에서 명시적으로 실행합니다. 이 후보의 사전 빌드 자산은 아직 공개되지 않았습니다:
+
+```sh
+git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
+cd desktop-pet-source
+bash scripts/install.sh --source
+```
+
+불변 v0.4.0·v0.4.1 체크아웃의 기본/`--prebuilt`는 각 버전의 공개 고정 자산을 사용합니다. 현재 v0.4.2 후보 자산은 아직 미공개이므로 공개 설치는 v0.4.1 체크아웃을 사용합니다. 실패 시 source fallback은 없고 명시적 `--source`만 현재 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
 
 필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 

@@ -2,9 +2,9 @@
 
 独立的原生 macOS 桌面伙伴。露贝莉娅回应触摸，显示 Herdr、Tern 等已注册提供商的会话，并在来源允许时发送回复。无需宿主也能运行。
 
-[English](../README.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
+[English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**发布边界：**独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）与 `hanbong5938/tap/desktop-pet` 配方已公开。已验证六个匿名下载、压缩包校验和／签名／68 个部署文件 closure，并在一次性 Mac 上确认实际 Brew 安装和原生 UI/control 就绪。当前源码为 v0.4.1，尚无该版公开资产。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 集成标签尚未发布。双宿主真实账户／提供方运行验证仍受阻，最终验收矩阵未完成。旧版 [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) 是 protocol 3 / capability 1 的历史公开版本。冻结标签、正文、资产及历史证据保持不变。
+**发布边界：**独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) 与 [v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)、中立 Homebrew 配方已公开（protocol 4 / capability 2 / integration API 1）。已验证 v0.4.1 六项匿名下载、校验和、签名及 68 个部署文件 closure，公开 tap main `47df565` 的实际 Brew 升级与配置档保留、receipt／物理 root／derivation、`brew test`，以及同配置档公开 wrapper 的原生 UI/control ready 与 Auto 4/2/1。同 config／不同 state 的启动在写入 preferences 前被拒绝，config digest 和主实例不变。全新 standalone 匿名安装器也已验证实际 OS 账户 home 的 `Applications/DesktopPet.app`、UI/control ready 与 Herdr 0／Tern 0，但这不是 SDK 真实账户证明。[Herdr v0.4.0](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.0) 已发布，但源码误含 69 个生成应用文件和 6 个失败测试 profile／lock／symlink 文件，修正后的 guard 拒绝该不可变源码。[Tern v0.2.0](https://github.com/hanbong5938/tern-desktop-pet/releases/tag/v0.2.0) 已公开，保留的 Core v0.4.1 pin 仍兼容 4/2/1。获准修正采用新 **Core v0.4.2 + Herdr v0.4.1**；这两个标签及 bridge v0.3.7 尚未发布或验收（[修正台账](releases/v0.4.2.md)）。Tern 的真实 private-window keychain／未登录与 OMP 18.10.3 的 NoModel／provider setup 仍阻碍双宿主真实账户／提供方验证，最终验收矩阵未完成。历史 Herdr v0.3.6 采用 protocol 3 / capability 1。冻结标签、正文、资产及历史证据保持不变。
 
 ## 系统要求
 
@@ -12,7 +12,7 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-已公开的中立 v0.4.0 可通过以下 Brew 命令安装：
+已公开的中立 v0.4.1 可通过以下 Brew 命令安装：
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -26,16 +26,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Published immutable v0.4.0 installer and pinned assets:
-git checkout --detach v0.4.0
+# Published immutable v0.4.1 installer and pinned assets:
+git checkout --detach v0.4.1
 bash scripts/install.sh --prebuilt
-# Explicit current v0.4.1 source alternative in a separate current checkout:
+# 当前 v0.4.2 源码开发在另一个当前检出中显式运行：
 # bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-不可变 v0.4.0 检出的默认／`--prebuilt` 使用已公开的固定资产；当前 v0.4.1 检出的预构建在该版资产发布前不可用。失败绝不暗中构建 source；只有显式 `--source` 构建当前已验证 core。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
+不可变 v0.4.0／v0.4.1 检出的默认／`--prebuilt` 使用各版本已公开的固定资产。当前 main 是 v0.4.2 修正源码，v0.4.2 预构建资产尚未发布。安装公开 v0.4.1 请显式 checkout 上述标签；当前 v0.4.2 源码开发在另一个检出中显式运行 `--source`。下载／验证失败绝不暗中构建 source。standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
 
 仅安装需要的集成。Herdr 是轻量消费者；Tern 不下载、构建、安装或自动启动原生应用。插件更新与卸载只影响集成，不删除共享应用、配置档或角色。常规应用更新不重新安装 Herdr 插件。
 
@@ -195,5 +195,5 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 - 窗口隐藏或全窗口穿透不等于启动失败，可用上文菜单栏恢复。`plugin link` 后没运行时检查 `client.attached` 警告，手动 `start`，查看守护进程 `status`/日志；`auto_start` 关闭本来就跳过自动启动。链接运行中的宿主不会单独启动宠物。客户端 attach 宿主补丁的隔离部署与钩子确认见[宿主集成（英文）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。
 - 遇到 `Herdr watchers are shutting down`，检查继承的 `HERDR_SOCKET_PATH` / `HERDR_CLIENT_SOCKET_PATH`、`PATH` 中真实 CLI 可执行文件/版本及拥有套接字的服务器。对**另一服务器**执行 `herdr plugin list` 无法诊断守护进程端点。要针对相同 CLI/套接字/会话；远程错误还需检查保存机器转发/版本/所选配置。补丁宿主提供自动启动，不会在每台服务器安装插件。
 - 远程错误参阅[观察来源](#观察来源)：配置状态、交互认证/重连及兼容转发 CLI。GUI 应在本地 Mac 启动，而非 SSH 到远程期待本地窗口。`agent.prompt` 限制和远程只读行为见[上文](#内联回复与消息传递)。
-- 默认及显式 `--prebuilt` 都仅用预构建，下载／验证失败绝不回退 source。构建当前已验证 core checkout 需显式 `--source`，并查看 admission 报告的实际所选安装。中立 v0.4.0／formula 已公开；当前 v0.4.1 资产及集成标签尚未发布。ad-hoc 签名验证不代表 Developer ID／公证（[安装](../readme.zh-Hans.md)）。
+- 默认及显式 `--prebuilt` 都仅用预构建，下载／验证失败绝不回退 source。公开 v0.4.1 使用不可变标签检出；当前 v0.4.2 源码开发在另一个检出中显式运行 `--source`，并查看 admission 报告的实际安装选择。v0.4.1 资产与配方、实际 Brew 升级、同配置档公开 wrapper 及全新 standalone 的 UI/control ready 已验证。Herdr v0.4.0 是含错误源码 closure 的公开版，Tern v0.2.0 是兼容的公开版。修正 Core v0.4.2／Herdr v0.4.1 与 bridge v0.3.7 尚未发布或验收（[修正台账](releases/v0.4.2.md)）。Tern private-window keychain／未登录与 OMP 18.10.3 NoModel／provider setup 阻碍真实账户验证，最终双宿主矩阵未完成。ad-hoc 签名验证不代表 Developer ID／公证（[安装](../readme.zh-Hans.md)）。
 - 提供方集成由 Herdr 上游负责；安装上游生命周期钩子后重启/重新加载现有提供方会话。宠物仅展示观察到的状态，不推断提供方结果。各版本行为见[发行历史（英文）](releases/README.md)，宿主细节见[宿主集成（英文）](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)。

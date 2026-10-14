@@ -2,9 +2,9 @@
 
 独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
-[English](README.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
+[English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**公開状態:** 独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0)（protocol 4 / capability 2 / integration API 1）と `hanbong5938/tap/desktop-pet` formula は公開済みです。匿名ダウンロード6件、アーカイブのチェックサム・署名・配備68ファイルの closure を検証し、使い捨て Mac で実際の Brew 導入とネイティブ UI/control の準備完了を確認しました。現在のソースは v0.4.1 で、その公開アセットはまだありません。bridge v0.3.7、Herdr v0.4.0/Tern v0.2.0 連携タグは未公開です。2ホストの実アカウント／プロバイダー実行検証は依然ブロックされ、最終受入表は未完了です。既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / capability 1 の過去の公開版です。凍結タグ・本文・アセットと過去の証拠は変更しません。
+**公開状態:** 独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) と [v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1) は公開済みです（protocol 4 / capability 2 / integration API 1）。v0.4.1 の匿名ダウンロード6件、チェックサム・署名・配備68ファイルの closure を検証しました。公開 tap main `47df565` は中立 v0.4.1 formula を配布し、所有する使い捨て Mac で実際の `brew upgrade`、元のプロファイル保持、receipt・物理 root・derivation、`brew test`、署名、同一プロファイルの公開 wrapper によるネイティブ UI/control ready と Auto 4/2/1 を確認しました。同じ config／異なる state の起動は preferences 書込み前に拒否され、config digest と主インスタンスは不変でした。新規 standalone 匿名インストーラーでも実 OS アカウント home の `Applications/DesktopPet.app` とネイティブ UI/control ready、Herdr 0／Tern 0 を確認しましたが、SDK の実アカウント検証ではありません。[Herdr v0.4.0](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.0) も公開済みですが、ソースに生成アプリ69ファイルと失敗テストのプロファイル・lock・symlink 6ファイルが混入し、修正済み guard はその不変ソースを拒否します。[Tern v0.2.0](https://github.com/hanbong5938/tern-desktop-pet/releases/tag/v0.2.0) は公開済みで、保持する Core v0.4.1 pin は 4/2/1 と互換です。承認された修正は新規 **Core v0.4.2 + Herdr v0.4.1** であり、両タグと bridge v0.3.7 はまだ未公開・未受入です（[修正台帳](docs/releases/v0.4.2.md)）。Tern の実際の private-window keychain／未サインイン、OMP 18.10.3 の NoModel／provider setup により、2ホストの実アカウント／プロバイダー検証と最終受入表は未完了です。既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / capability 1 の過去の公開版です。凍結タグ・本文・アセットと過去の証拠は変更しません。
 
 <img src="assets/rubelia-thumbnail.png" alt="標準デスクトップコンパニオンのルベリア" width="220">
 
@@ -23,7 +23,7 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-公開済みの中立 v0.4.0 は次の Brew コマンドで導入できます:
+公開済みの中立 v0.4.1 は次の Brew コマンドで導入できます:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,16 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# 公開済みの不変 v0.4.0 インストーラーと固定アセットを使用:
-git checkout --detach v0.4.0
+# 公開済みの不変 v0.4.1 インストーラーと固定アセットを使用:
+git checkout --detach v0.4.1
 bash scripts/install.sh --prebuilt
-# 現在の v0.4.1 ソース代替は別の現在のチェックアウトで明示実行:
+# 現在の v0.4.2 ソース開発は別の現在のチェックアウトで明示実行:
 # bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-不変の v0.4.0 チェックアウトの既定／`--prebuilt` は公開済み固定アセットを使用します。現在の v0.4.1 チェックアウトの prebuilt は、そのアセット公開まで利用できません。失敗をソース構築で隠さず、明示 `--source` だけが現在の検証済み core を構築します。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
+不変の v0.4.0／v0.4.1 チェックアウトの既定／`--prebuilt` は各版の公開済み固定アセットを使用します。現在の main は v0.4.2 修正ソースで、v0.4.2 プリビルドはまだ公開されていません。公開 v0.4.1 導入には上記の明示的なタグ checkout を使い、現在の v0.4.2 ソース開発は別のチェックアウトで明示 `--source` を実行します。取得／検証失敗をソース構築で隠しません。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
 
 必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 

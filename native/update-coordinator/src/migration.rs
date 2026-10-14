@@ -2273,11 +2273,12 @@ fn retire(
         }
     }
     if let LegacyOrigin::HerdrManaged { .. } = &plan.source_origin {
-        verify_managed_retirement(plan)?;
+        verify_managed_identity(plan)?;
         let bundle = source_bundle(plan)?;
         if bundle.exists() {
             retire_exact_bundle(plan, &bundle, "managed-retired-bridge")?;
         }
+        remove_empty_generated_dist(&bundle)?;
     }
     verify_managed_retirement(plan)?;
     retire_aliases(plan)?;
@@ -2451,7 +2452,7 @@ pub fn source_origin_from_context(
                     .ok_or("managed source lacks immutable installed revision")?,
                 integration_commit: _integration_commit
                     .filter(|value| hex(value, 40))
-                    .ok_or("managed migration lacks pinned integration-only0.4.0 commit")?
+                    .ok_or("managed migration lacks pinned integration-only0.4.1 commit")?
                     .into(),
             }
         }
@@ -2708,11 +2709,75 @@ pub fn decode_neutral_origin(value: serde_json::Value) -> Result<InstallOrigin, 
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
+fn remove_empty_generated_dist(bundle: &Path) -> Result<(), String> {
+    let dist = bundle.parent().ok_or("managed bundle parent missing")?;
+    match fs::symlink_metadata(dist) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err("managed generated dist is not a real directory".into());
+        }
+        Ok(_) => {}
+    }
+    // Never remove unexpected contents. The final closure gate rejects them.
+    let mut entries = fs::read_dir(dist).map_err(|e| e.to_string())?;
+    if entries.next().transpose().map_err(|e| e.to_string())?.is_none() {
+        fs::remove_dir(dist).map_err(|e| e.to_string())?;
+        File::open(dist.parent().ok_or("managed dist parent missing")?)
+            .and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn integration_github_json(path: &str) -> Result<serde_json::Value, String> {
+    let text = command_output(
+        Path::new("/usr/bin/curl"),
+        &[
+            "--disable".into(), "--fail".into(), "--proto".into(), "=https".into(),
+            "--connect-timeout".into(), "10".into(), "--max-time".into(), "20".into(),
+            "--silent".into(),
+            format!("https://api.github.com/repos/hanbong5938/herdr-desktop-pet/{path}"),
+        ],
+    )?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
 fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
     if let LegacyOrigin::HerdrManaged {
         integration_commit, ..
     } = &plan.source_origin
     {
+        let release = integration_github_json("releases/tags/v0.4.1")?;
+        if release.get("tag_name").and_then(serde_json::Value::as_str) != Some("v0.4.1")
+            || release.get("draft").and_then(serde_json::Value::as_bool) != Some(false)
+            || release.get("prerelease").and_then(serde_json::Value::as_bool) != Some(false)
+            || release.get("published_at").and_then(serde_json::Value::as_str).is_none()
+            || !release.get("assets").and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            return Err("Herdr integration0.4.1 is not a published assetless release".into());
+        }
+        let reference = integration_github_json("git/ref/tags/v0.4.1")?;
+        let mut object = reference.get("object").cloned().ok_or("published integration tag object absent")?;
+        let mut resolved = false;
+        for _ in 0..8 {
+            let sha = object.get("sha").and_then(serde_json::Value::as_str)
+                .filter(|sha| hex(sha, 40)).ok_or("invalid published integration tag SHA")?;
+            match object.get("type").and_then(serde_json::Value::as_str) {
+                Some("commit") if sha == integration_commit => {
+                    resolved = true;
+                    break;
+                }
+                Some("tag") => {
+                    object = integration_github_json(&format!("git/tags/{sha}"))?
+                        .get("object").cloned().ok_or("annotated integration tag object absent")?;
+                }
+                _ => return Err("published Herdr integration tag differs from consent".into()),
+            }
+        }
+        if !resolved {
+            return Err("published Herdr integration tag could not be resolved".into());
+        }
         let url=format!("https://raw.githubusercontent.com/hanbong5938/herdr-desktop-pet/{integration_commit}/herdr-plugin.toml");
         let manifest = command_output(
             Path::new("/usr/bin/curl"),
@@ -2732,11 +2797,7 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
         let document: toml::Value = manifest
             .parse()
             .map_err(|e| format!("immutable integration manifest: {e}"))?;
-        if document.get("id").and_then(toml::Value::as_str) != Some("desktop-pet")
-            || document.get("version").and_then(toml::Value::as_str) != Some("0.4.0")
-        {
-            return Err("consented immutable ref is not Herdr integration0.4.0".into());
-        }
+        validate_integration_manifest(&document)?;
         let url=format!("https://api.github.com/repos/hanbong5938/herdr-desktop-pet/git/commits/{integration_commit}");
         let text = command_output(
             Path::new("/usr/bin/curl"),
@@ -2794,11 +2855,13 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
                 entry
                     .get("path")
                     .and_then(serde_json::Value::as_str)
-                    .is_none_or(|path| {
-                        path == "native"
-                            || path.starts_with("native/")
-                            || path.starts_with("dist/HerdrDesktopPet")
-                    })
+                    .is_none_or(integration_owns_product)
+                    || !matches!(
+                        (entry.get("type").and_then(serde_json::Value::as_str),
+                         entry.get("mode").and_then(serde_json::Value::as_str)),
+                        (Some("tree"), Some("040000"))
+                            | (Some("blob"), Some("100644" | "100755"))
+                    )
             })
         {
             return Err(
@@ -2808,7 +2871,7 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
     }
     Ok(())
 }
-fn verify_managed_retirement(plan: &MigrationPlan) -> Result<(), String> {
+fn verify_managed_identity(plan: &MigrationPlan) -> Result<(), String> {
     if let LegacyOrigin::HerdrManaged {
         host_config_dir,
         checkout_root,
@@ -2865,10 +2928,135 @@ fn verify_managed_retirement(plan: &MigrationPlan) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .parse()
             .map_err(|e| format!("integration manifest: {e}"))?;
-        if manifest.get("version").and_then(toml::Value::as_str) != Some("0.4.0")
-            || plugin_root.join("native").exists()
+        validate_integration_manifest(&manifest)?;
+    }
+    Ok(())
+}
+fn verify_managed_retirement(plan: &MigrationPlan) -> Result<(), String> {
+    verify_managed_identity(plan)?;
+    if let LegacyOrigin::HerdrManaged { plugin_root, .. } = &plan.source_origin {
+        verify_integration_directory(plugin_root)?;
+    }
+    Ok(())
+}
+
+fn validate_integration_manifest(manifest: &toml::Value) -> Result<(), String> {
+    if manifest.get("id").and_then(toml::Value::as_str) != Some("desktop-pet")
+        || manifest.get("version").and_then(toml::Value::as_str) != Some("0.4.1")
+        || manifest.get("min_herdr_version").and_then(toml::Value::as_str) != Some("0.9.3")
+    {
+        return Err("consented immutable ref is not Herdr integration0.4.1".into());
+    }
+    let command_matches = |entry: &toml::Value, expected: &[&str]| {
+        entry.get("command").and_then(toml::Value::as_array).is_some_and(|command| {
+            command.len() == expected.len()
+                && command.iter().zip(expected).all(|(value, expected)| value.as_str() == Some(*expected))
+        })
+    };
+    for (kind, command) in [
+        ("build", &["bash", "scripts/install.sh"][..]),
+        ("startup", &["bash", "scripts/run-native.sh", "ensure"][..]),
+        ("events", &["bash", "scripts/run-native.sh", "ensure"][..]),
+    ] {
+        let hooks = manifest.get(kind).and_then(toml::Value::as_array)
+            .ok_or("integration manifest lacks consumer hooks")?;
+        if hooks.len() != 1 || !command_matches(&hooks[0], command)
+            || kind == "events" && hooks[0].get("on").and_then(toml::Value::as_str) != Some("client.attached")
         {
-            return Err("Herdr migration did not install integration-only code".into());
+            return Err("integration manifest has non-consumer hooks".into());
+        }
+    }
+    let expected_actions = [
+        "settings", "start", "ensure", "stop", "status", "toggle", "show", "hide",
+        "passthrough", "alpha_passthrough", "show_bubble", "hide_bubble",
+        "bubble_above", "bubble_below", "bubble_left", "bubble_right", "bubble_auto",
+        "reset", "bigger", "smaller", "restart",
+    ];
+    let actions = manifest.get("actions").and_then(toml::Value::as_array)
+        .ok_or("integration manifest lacks retained actions")?;
+    if actions.len() != expected_actions.len()
+        || actions.iter().zip(expected_actions).any(|(action, id)| {
+            action.get("id").and_then(toml::Value::as_str) != Some(id)
+                || !command_matches(action, &["bash", "scripts/run-native.sh", id])
+        })
+    {
+        return Err("integration manifest actions are not exact consumer calls".into());
+    }
+    Ok(())
+}
+
+fn integration_owns_product(path: &str) -> bool {
+    const OBSOLETE: &[&str] = &[
+        "native", "dist", "web", "assets", "tools",
+        ".agents/skills/character-creator", ".agents/skills/create-pet-character",
+        "scripts/package-native.ts", "scripts/build-rig-native.mjs",
+        "scripts/release-docs.ts", "scripts/release-docs.test.ts",
+        "scripts/wiki-docs.ts", "scripts/wiki-docs.test.ts", "scripts/publish-wiki.sh",
+        ".github/workflows/wiki.yml",
+    ];
+    if path.starts_with('/') || OBSOLETE.iter().any(|root| {
+        path.get(..root.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
+            && (path.len() == root.len() || path.get(root.len()..).is_some_and(|rest| rest.starts_with('/')))
+    }) {
+        return true;
+    }
+    path.split('/').any(|component| {
+        if component.is_empty() || component == "." || component == ".."
+            || [
+                "dist", "target", "node_modules", "Contents", "_CodeSignature",
+                "rig", "rig-native", "creator", "rig.json", "rig-native.json",
+                "Info.plist", "RigLimits.rs", "RigLimits.swift", "desktop-pet",
+                "desktop-pet-update-coordinator", "herdr-desktop-pet",
+                "herdr-update-coordinator", "rig-decode-worker",
+            ].iter()
+                .any(|name| component.eq_ignore_ascii_case(name))
+        {
+            return true;
+        }
+        if component.get(.."libherdr_rig".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("libherdr_rig"))
+        {
+            return true;
+        }
+        let filename = [".sha256", ".sha512"].iter().find_map(|suffix| {
+            let split = component.len().checked_sub(suffix.len())?;
+            component.get(split..).filter(|ending| ending.eq_ignore_ascii_case(suffix))?;
+            component.get(..split)
+        }).unwrap_or(component);
+        [
+            ".app", ".framework", ".bundle", ".tar", ".gz", ".tgz", ".bz2",
+            ".tbz", ".tbz2", ".xz", ".txz", ".zst", ".zip", ".7z", ".rar",
+            ".dmg", ".pkg", ".o", ".a", ".so", ".dylib", ".dll", ".exe",
+            ".wasm", ".bin", ".herdrchar", "rig-native.json",
+        ].iter().any(|suffix| {
+            filename.get(filename.len().saturating_sub(suffix.len())..)
+                .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
+        })
+    })
+}
+
+/// Inspect the installed closure without deleting unexpected files or following links.
+fn verify_integration_directory(root: &Path) -> Result<(), String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut count = 0;
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
+            if relative == Path::new(".git") {
+                continue;
+            }
+            count += 1;
+            if count > 10000 || relative.to_str().is_none_or(integration_owns_product) {
+                return Err("managed Herdr integration still owns product artifacts".into());
+            }
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_dir() {
+                directories.push(path);
+            } else if !kind.is_file() {
+                return Err("managed Herdr integration contains a linked/nonregular source".into());
+            }
         }
     }
     Ok(())
@@ -3196,9 +3384,113 @@ mod tests {
         }
     }
     #[test]
+    fn integration_closure_rejects_product_roots_bundles_and_archives() {
+        for path in [
+            "dist", "dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet",
+            "native/core/Cargo.toml", "assets/rubelia-default/rig.json", "web/rig/package.json",
+            "copies/DesktopPet.app", "copies/Renderer.framework/renderer",
+            "copies/character.bundle", "DesktopPet.tar.gz", "DesktopPet.zip.sha256",
+            "backup/renderer.dylib", "native-adapter/target/release/libadapter.a",
+            "somewhere/node_modules/tool/index.js", "somewhere/rig-native.json",
+        ] {
+            assert!(integration_owns_product(path), "{path}");
+        }
+        for path in [
+            "native-adapter/src/lib.rs", "native-adapter/Cargo.toml",
+            "herdr-plugin.toml", "scripts/consumer.sh", "site/index.html",
+            "integrations/herdr/client-attached.patch", "integrations/omp/herdr-pet-outcomes.ts",
+            "release-evidence/desktop-pet-install-v0.4.2.sh.sha256", "release-evidence/release.json",
+        ] {
+            assert!(!integration_owns_product(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn installed_closure_rejects_untracked_products_without_touching_sources_or_profiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("integration");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("herdr-plugin.toml"), b"reviewed source").unwrap();
+        fs::write(temp.path().join("usercfg"), b"user config").unwrap();
+        fs::write(temp.path().join("state"), b"user state").unwrap();
+        verify_integration_directory(&root).unwrap();
+        fs::write(root.join("unexpected.zip"), b"unexpected archive").unwrap();
+        assert!(verify_integration_directory(&root).is_err());
+        assert_eq!(fs::read(root.join("unexpected.zip")).unwrap(), b"unexpected archive");
+        assert_eq!(fs::read(root.join("herdr-plugin.toml")).unwrap(), b"reviewed source");
+        assert_eq!(fs::read(temp.path().join("usercfg")).unwrap(), b"user config");
+        assert_eq!(fs::read(temp.path().join("state")).unwrap(), b"user state");
+    }
+
+    #[test]
+    fn generated_dist_cleanup_removes_only_empty_real_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let dist = temp.path().join("dist");
+        let bundle = dist.join("HerdrDesktopPet.app");
+        remove_empty_generated_dist(&bundle).unwrap();
+        fs::create_dir(&dist).unwrap();
+        fs::write(dist.join("unexpected.txt"), b"keep").unwrap();
+        remove_empty_generated_dist(&bundle).unwrap();
+        assert_eq!(fs::read(dist.join("unexpected.txt")).unwrap(), b"keep");
+        fs::remove_file(dist.join("unexpected.txt")).unwrap();
+        remove_empty_generated_dist(&bundle).unwrap();
+        assert!(!dist.exists());
+        let linked = temp.path().join("source");
+        fs::create_dir(&linked).unwrap();
+        fs::write(linked.join("source.txt"), b"linked source").unwrap();
+        symlink(&linked, &dist).unwrap();
+        assert!(remove_empty_generated_dist(&bundle).is_err());
+        assert_eq!(fs::read(linked.join("source.txt")).unwrap(), b"linked source");
+    }
+
+    #[test]
+    fn managed_integration_manifest_requires_corrected_version_and_consumer_commands() {
+        let mut table = toml::map::Map::new();
+        table.insert("id".into(), toml::Value::String("desktop-pet".into()));
+        table.insert("version".into(), toml::Value::String("0.4.1".into()));
+        table.insert("min_herdr_version".into(), toml::Value::String("0.9.3".into()));
+        let command = |args: &[&str]| toml::Value::Array(args.iter()
+            .map(|arg| toml::Value::String((*arg).into())).collect());
+        for (kind, args) in [
+            ("build", &["bash", "scripts/install.sh"][..]),
+            ("startup", &["bash", "scripts/run-native.sh", "ensure"][..]),
+            ("events", &["bash", "scripts/run-native.sh", "ensure"][..]),
+        ] {
+            let mut hook = toml::map::Map::new();
+            hook.insert("command".into(), command(args));
+            if kind == "events" {
+                hook.insert("on".into(), toml::Value::String("client.attached".into()));
+            }
+            table.insert(kind.into(), toml::Value::Array(vec![toml::Value::Table(hook)]));
+        }
+        table.insert("actions".into(), toml::Value::Array([
+            "settings", "start", "ensure", "stop", "status", "toggle", "show", "hide",
+            "passthrough", "alpha_passthrough", "show_bubble", "hide_bubble",
+            "bubble_above", "bubble_below", "bubble_left", "bubble_right", "bubble_auto",
+            "reset", "bigger", "smaller", "restart",
+        ].iter().map(|id| {
+            let mut action = toml::map::Map::new();
+            action.insert("id".into(), toml::Value::String((*id).into()));
+            action.insert("command".into(), command(&["bash", "scripts/run-native.sh", id]));
+            toml::Value::Table(action)
+        }).collect()));
+        let mut manifest = toml::Value::Table(table);
+        validate_integration_manifest(&manifest).unwrap();
+        manifest["version"] = toml::Value::String("0.4.0".into());
+        assert!(validate_integration_manifest(&manifest).is_err());
+        manifest["version"] = toml::Value::String("0.4.1".into());
+        manifest["build"][0]["command"] = command(&["bun", "run", "build:native"]);
+        assert!(validate_integration_manifest(&manifest).is_err());
+    }
+
+    #[test]
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
+        assert_eq!(plan.target.release.version, crate::identity::neutral::VERSION);
+        let mut obsolete = plan.clone();
+        obsolete.target.release.version = "0.4.1".into();
+        assert!(validate_plan(&obsolete).is_err());
         plan.target.release.archive_url = plan
             .target
             .release
