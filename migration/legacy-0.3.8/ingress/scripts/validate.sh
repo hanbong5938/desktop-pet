@@ -24,11 +24,11 @@ validate_app() {
     caps="$("$executable" update-capabilities 2>/dev/null)" || fail "cannot read updater capabilities"
     [[ "$(plutil -extract protocol raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 3 ]] || fail "protocol-3 matched pair required; protocol-2 cannot directly update to this bridge"
     [[ "$(plutil -extract observation_mode raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 1 ]] || fail "observation capability 1 required"
-    if [[ "$version" == 0.3.7 ]]; then
+    if [[ "$version" == 0.3.8 ]]; then
       [[ "$(plutil -extract integration_api raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 1 ]] || fail "bridge integration API 1 required"
       caps="$("$executable" distribution-identity 2>/dev/null)" || fail "missing compiled bridge identity"
-      [[ "$(plutil -extract distribution raw -o - - <<< "$caps" 2>/dev/null)" == legacy-0.3.7 ]] || fail "not a genuine compiled bridge envelope"
-      [[ "$(plutil -extract app_version raw -o - - <<< "$caps" 2>/dev/null)" == 0.3.7 ]] || fail "wrong bridge build identity"
+      [[ "$(plutil -extract distribution raw -o - - <<< "$caps" 2>/dev/null)" == legacy-0.3.8 ]] || fail "not a genuine compiled bridge envelope"
+      [[ "$(plutil -extract app_version raw -o - - <<< "$caps" 2>/dev/null)" == 0.3.8 ]] || fail "wrong bridge build identity"
       [[ "$(plutil -extract herdr_migration_revision raw -o - - <<< "$caps" 2>/dev/null)" == "$migration_revision" ]] || fail "compiled bridge retirement revision disagrees with actual release metadata"
     fi
   done
@@ -51,7 +51,7 @@ validate_app() {
   codesign --verify --strict "$app/Contents/Frameworks/libherdr_rig.dylib" >/dev/null 2>&1 || fail "invalid native rig signature"
   codesign --verify --strict "$app/Contents/MacOS/rig-decode-worker" >/dev/null 2>&1 || fail "invalid worker signature"
   [[ -f "$app/Contents/Resources/rig/decoder.js" ]] || fail "missing bundled rig decoder"
-  scratch="$(mktemp -d "${TMPDIR:-/tmp}/legacy-pack-validation.XXXXXX")" || fail "cannot create pack validation profile"
+  scratch="$(/usr/bin/mktemp -d /private/tmp/legacy-pack-validation.XXXXXX)" || fail "cannot create pack validation profile"
   if ! output="$("$binary" pack validate --path "$app/Contents/Resources/default" --config-dir "$scratch/config" --state-dir "$scratch/state" 2>&1)"; then
     rm -rf "$scratch"
     printf '%s\n' "$output" >&2

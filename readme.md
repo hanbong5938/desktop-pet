@@ -8,7 +8,7 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 [Browse the optional character and outfit gallery](https://hanbong5938.github.io/herdr-characters/) (opens in English; choose KO for Korean) · [Character pack source and licenses](https://github.com/hanbong5938/herdr-characters). **Only Rubelia (`default@0`) is bundled.**
 
-**Publication boundary:** independent [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1) is published from immutable source `9a63751b4de1b9a2f6fc7a7570a906b59568bafc`; all six public assets, signatures, 4/2/1 capability pair and 68-file deployed closure were verified. The neutral formula is published at v0.4.1 and its real disposable-Mac upgrade succeeded; native readiness and a fresh standalone anonymous installation were verified separately. Herdr v0.4.0 is also public, but its immutable source accidentally includes generated app/test files and is rejected by the corrected bridge guard. Tern v0.2.0 is public and its retained Core v0.4.1 consumer pin remains compatible. The approved [Core v0.4.2 repair candidate](docs/releases/v0.4.2.md) and corrected Herdr v0.4.1 integration are not yet published; bridge v0.3.7 must use those exact new published revisions before migration acceptance. Historical tags, bodies and assets remain immutable. The final migration/two-host matrix remains incomplete: actual Tern keychain/provider prerequisites are blocked, and native readiness is not SDK account proof. Wiki/Pages publication is not established by a binary release.
+**Publication boundary:** [Desktop Pet v0.4.2](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2) is public (release `412241744`, `2026-10-14T01:09:50Z`, immutable source `cb10ce2c3cc65402cbb914d60301f7627d5546d5`). Six anonymous assets, strict/deep signatures, matched protocol 4 / observation capability 2 / integration API 1 and all 68 deployed resource hashes/exact closure were verified. The neutral formula at tap `32919c745864b54a2e716fcc5a3714d0d38d3e84` and actual public v0.4.1 → v0.4.2 Brew upgrade passed receipt/derivation, five signatures, `brew test` and native UI/control readiness in Auto (Herdr 0 / Tern 0). A fresh public standalone v0.4.1 install and two concurrent installers reused the live owner; native Check offered actual public v0.4.2 and consent completed `standalone_replace`, `manager_exited`, `installed:true`, `applied:true`, with the same config/state and exact public v0.4.2 image ready. Check preserved the locator/profile/lifecycle/locks/PID but changed the `preferences.json` check cache; not all config bytes were unchanged. [Corrected integration-only Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1) is public (release `412252863`, immutable ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`): two published wrappers reused the same Brew v0.4.2 PID/instance/image without revealing a hidden app; explicit config/state plus a genuine private patched Herdr 0.9.3 socket reached Auto Herdr 1 / Tern 0. Two concurrent fresh published bootstrap scripts installed/reused one OS-home v0.4.2 app without integration-local native files or starting a daemon. This script evidence is not a public Herdr-manager installation receipt. Original Herdr v0.4.0 retains its faulty generated-app/test-scaffold-symlink source tree; it was not integration-only. [Bridge v0.3.7](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.7) is public (release `412267469`, immutable tag `987a4b859f95e922c1c5443ead372d10d0dddb24`), built from exact Core `cb10ce2` and corrected Herdr `6d2ac04`; five anonymous assets, signatures and 68-file closure passed. Only the old stable formula moved to v0.3.7 at tap `657f32cc4cc563ae40ae0432ac5123dcb3f58426`; beta stayed unchanged. Its manual-origin private real-host runtime reached Herdr 1 / Tern 0, not managed A→B acceptance. The actual frozen public Brew v0.3.6 → v0.3.7 A `6a10663c2d2f0177990623a969238af4` and separately consented Core v0.4.2 B `c66961f9e5a91c0023545065ae61385b` completed, including real Brew retirement (exit 0, quiescent); all config-file hashes and 87 old A-evidence files stayed unchanged across B. Actual Core v0.4.2 UI showed Desktop Pet / Herdr Waiting 0 / Tern Disabled 0. In contrast, real managed v0.3.7 A `a1aec5902020de7bcaaf583b1a5f50a5` failed native `/tmp` profile validation: manager exit 1 occurred before checkout replacement/registry registration, and the frozen helper retained Unknown / `manager_exited`, installed/applied false. That VM and its journals/reservation remain preserved without recovery or replay. The full matrix is not complete: explicit definite-failed-retirement resume, real-SDK both-order same-instance/reconnect and account acceptance remain unproved. Core v0.4.3 + bridge v0.3.8 are approved corrective versions, pending real publication and managed acceptance, not public replacements for v0.4.2/v0.3.7. [Core v0.4.3 / bridge v0.3.8](https://github.com/hanbong5938/desktop-pet/blob/main/docs/releases/v0.4.3.md). Tern v0.2.0 and its compatible Core v0.4.1 pin are unchanged; actual Tern keychain/provider sign-in and OMP providerSignIn/NoModel remain prerequisites. Historical tags, bodies, assets and sources are preserved. Core Pages `cb10ce2` deployed successfully with EN/KO browser evidence; JA/ZH visual checks and final current-docs deployment remain pending. Linux Wiki catalog rendering passed, but publication requires dedicated `WIKI_PUBLISH_TOKEN` and owner initialization of Wiki Home. A Wiki link does not prove publication; the successful binary release job is separate from the later Wiki failure.
 
 ## Features
 
@@ -17,7 +17,7 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 - One-line replies to selected **local** agent sessions, with IME-aware input and native status feedback.
 - Customizable character, bubble, dialogue, and visibility settings; optional verified character packs and an official catalog browser.
 - Integration-owned lifecycle actions, capability-guarded linked-worktree removal, and explicit installation-aware app updates.
-- **Current candidate:** a unified Connection setting selects Auto or an opaque registered provider, shows actual provider status, and saves live changes in one shared profile. Published legacy v0.3.6 does not include this capability-2 UI.
+- **Published core:** a unified Connection setting selects Auto or an opaque registered provider, shows actual provider status, and saves live changes in one shared profile. Published legacy v0.3.6 does not include this capability-2 UI.
 
 ## Requirements
 
@@ -43,18 +43,19 @@ For prebuilt or source installation use the **core** checkout, not a Herdr integ
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Fixed published v0.4.1 prebuilt; unavailable/invalid downloads never build source:
-git checkout --detach v0.4.1
+# Fixed published v0.4.2 prebuilt; unavailable/invalid downloads never build source:
+git checkout --detach v0.4.2
 bash scripts/install.sh --prebuilt
 ```
 
 Default installation is **prebuilt-only**: unavailable downloads or validation failure never silently compile source. A non-Brew prebuilt belongs at the OS account home's `Applications/DesktopPet.app`; explicit source installation uses the core checkout's `dist/DesktopPet.app`. Installation admission may reuse a verified healthy installation rather than take over another owner. Read the reported executable/shared locator instead of assuming the source path is the selected installation. Reservations or live profiles prevent unsafe replacement. See [installation discovery](docs/development.md#profiles-and-installation-discovery).
 
-For explicit **v0.4.2 candidate development**, use a separate current-source checkout; its prebuilt assets are not yet public:
+For explicit **v0.4.2 source installation**, use a separate checkout pinned to the actual public tag:
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
 cd desktop-pet-source
+git checkout --detach v0.4.2
 bash scripts/install.sh --source
 ```
 
@@ -65,7 +66,7 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
-Tern v0.2.0 is published. Herdr v0.4.0 is published but has a faulty source tree; the corrected integration-only v0.4.1 release is pending, so do not treat installation of the current public Herdr release as proof of the corrected cutover. Plugin updates/removal affect only integrations, never the shared app, profile or characters. Herdr is a thin consumer; Tern never downloads, builds, installs or auto-starts the native app. Native app updates do not reinstall host plugins. Source/link instructions belong to each integration repository; do not link the core as a Herdr plugin.
+Tern v0.2.0 is published. Original Herdr v0.4.0 retains its faulty source tree; corrected integration-only [Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1) is published at immutable `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`. Published wrapper/bootstrap reuse of Core v0.4.2 is verified, not managed migration/retirement acceptance. Plugin updates/removal affect only integrations, never the shared app, profile or characters. Herdr is a thin consumer; Tern never downloads, builds, installs or auto-starts the native app. Native app updates do not reinstall host plugins. Source/link instructions belong to each integration repository; do not link the core as a Herdr plugin.
 
 ## Profiles, connection and migration
 
@@ -96,7 +97,7 @@ Legacy v0.3.6 is not converted by a rename, alias or formula swap. Follow the ex
 
 ## In-app updates
 
-**Settings → App updates** separates automatic checking (default on), beta opt-in (default off), **Check now**, running version/origin, policy-specific check times and explicit installation-aware actions. Checks are read-only: they never install, restart, refresh Brew metadata or alter Git. Stable-only checks select official stable releases; beta opt-in selects the highest eligible stable/beta SemVer, with a final release ahead of its same-base beta and no downgrade on opt-out.
+**Settings → App updates** separates automatic checking (default on), beta opt-in (default off), **Check now**, running version/origin, policy-specific check times and explicit installation-aware actions. Checks never install, restart, refresh Brew metadata or alter Git. Checks do not change lifecycle, installation, running image or selected profile, but successful checks may write the policy-specific timestamp cache (`last_update_check` / `last_beta_update_check`) in `preferences.json`; they are not byte-for-byte read-only. Stable-only checks select official stable releases; beta opt-in selects the highest eligible stable/beta SemVer, with a final release ahead of its same-base beta and no downgrade on opt-out.
 
 Standalone, Homebrew and core-source owners remain distinct; normal native updates do not use a Herdr plugin manager. Source rebuilds use current disk contents without Git pull/reset/ref change. A verified installed candidate can be applied without reinstalling, but **installed is not applied or running**, and source-current/pinned results are not proof of a public release.
 
@@ -125,7 +126,7 @@ The [character gallery](https://hanbong5938.github.io/herdr-characters/) preview
 - Replies require the selected source's **local prompt capability**. Herdr uses `agent.prompt`; Tern uses one-shot `agents:ask`, never SSH, a shell or raw pane input. Remote cards cannot send. Acceptance is **not agent completion**. Handle approval/questions in the actual terminal and inspect uncertain delivery before any manual resend. Herdr's submission API has a current-occupant race, not an atomic session guarantee. [Delivery details](docs/usage.md#inline-replies-and-message-delivery).
 - **Remove Worktree…** is irreversible: confirm the **exact checkout path** and the **entire workspace's** tabs/panes before proceeding. It terminates their processes/agents and removes the linked checkout **including ignored files**; no Trash/undo. It does not delete the main repository or branch. [Removal safeguards](docs/usage.md#worktree-removal).
 - Remote observation requires selected saved-machine profiles and a compatible remote Herdr server, **not** a remote pet installation. The local app polls remote state and cannot recover missed brief transitions or send remote prompts. [Observation guide](docs/usage.md#observation-sources).
-- Automatic app-update checks are read-only; installing or applying an update requires explicit consent. An updater ownership ACK is **not completion**. For an unknown result, check [in-app update recovery](docs/usage.md#in-app-updates) and [CLI update status and recovery](docs/cli.md#app-update-status-and-recovery) before retrying.
+- Automatic app-update checks preserve lifecycle/installation/image/profile but may write the successful-check timestamp cache in `preferences.json`; installing or applying an update requires explicit consent. An updater ownership ACK is **not completion**. For an unknown result, check [in-app update recovery](docs/usage.md#in-app-updates) and [CLI update status and recovery](docs/cli.md#app-update-status-and-recovery) before retrying.
 
 ## Configuration and troubleshooting
 

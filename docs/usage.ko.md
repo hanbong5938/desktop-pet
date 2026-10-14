@@ -4,7 +4,7 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
-**게시 경계:** 독립 [Core v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)과 공개 tap `47df565`의 v0.4.1 포뮬러는 공개되었습니다. 익명 자산 6개·서명·4/2/1 capability·68개 배포 파일 closure를 검증했습니다. 실제 일회용 Mac의 v0.4.0 설치와 v0.4.0 → v0.4.1 Brew 업그레이드는 프로필을 보존했고 receipt·물리 root·derivation·`brew test`·서명·같은 프로필의 네이티브 UI/control 준비를 확인했습니다. 같은 config/다른 state 실행은 preferences 쓰기 전에 거절되었습니다. 새 익명 standalone v0.4.1 설치·네이티브 준비도 확인했지만 SDK 계정 검증은 아닙니다. Herdr v0.4.0은 공개되었으나 불변 소스의 생성 앱·실패 테스트 파일 때문에 수정 bridge guard가 거절합니다. Tern v0.2.0은 공개되었고 기존 Core v0.4.1 pin은 호환됩니다. 승인된 [Core v0.4.2 수정 후보](releases/v0.4.2.md)와 수정 Herdr v0.4.1 연동은 아직 미공개입니다. bridge v0.3.7은 이 두 새 버전의 정확한 공개 소스를 사용해야 하며 게시와 migration/두 호스트 수락은 미완료입니다. 실제 Tern keychain/provider 전제 조건은 차단되어 있습니다. 공개 중립 버전과 과거 태그·본문·자산은 보존합니다.
+**게시 경계:** [Desktop Pet v0.4.2](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2)은 공개되었습니다(release `412241744`, `2026-10-14T01:09:50Z`, 불변 소스 `cb10ce2c3cc65402cbb914d60301f7627d5546d5`). 익명 자산 6개, strict/deep 서명, protocol 4 / capability 2 / integration API 1, 68개 배포 리소스 해시·정확한 closure를 검증했습니다. tap `32919c745864b54a2e716fcc5a3714d0d38d3e84`의 중립 포뮬러와 실제 공개 v0.4.1 → v0.4.2 Brew 업그레이드는 receipt/derivation·서명 5개·`brew test`·Auto 네이티브 UI/control ready(Herdr 0 / Tern 0)를 입증했습니다. 새 공개 standalone v0.4.1 설치 및 동시 설치기 2개의 실행 중 소유자 재사용을 확인했으며, 네이티브 Check가 실제 공개 v0.4.2를 제시하고 동의 후 `standalone_replace`·`manager_exited`·`installed:true`·`applied:true`, 같은 config/state·정확한 공개 v0.4.2 이미지의 준비 완료를 확인했습니다. Check는 locator/profile/lifecycle/locks/PID를 유지했지만 `preferences.json` 확인 캐시는 바꿨으므로 모든 설정 바이트 불변은 아닙니다. [수정 integration-only Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1)도 공개되었습니다(release `412252863`, 불변 ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`). 공개 wrapper 2개가 숨김을 유지하며 같은 Brew v0.4.2 PID/instance/image를 재사용했고, 명시적 config/state와 실제 private patched Herdr 0.9.3 socket으로 Auto Herdr 1 / Tern 0에 도달했습니다. 새 환경의 공개 bootstrap 2개는 OS-home 앱 하나를 설치/재사용했으며 연동-local native 파일이나 데몬 시작은 없었습니다. 이는 공개 Herdr manager 설치 receipt 증거가 아닙니다. 원래 Herdr v0.4.0의 생성 앱·실패 테스트 scaffold symlink 소스 결함은 보존하며 integration-only였다고 주장하지 않습니다. [Bridge v0.3.7](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.7)도 공개되었습니다(release `412267469`, 불변 tag `987a4b859f95e922c1c5443ead372d10d0dddb24`). 정확한 Core `cb10ce2`·수정 Herdr `6d2ac04`에서 빌드했고 익명 자산 5개·서명·68개 파일 closure를 검증했습니다. tap `657f32cc4cc563ae40ae0432ac5123dcb3f58426`에서 old stable 포뮬러만 v0.3.7로 변경했으며 beta는 그대로입니다. manual-origin private 실제 호스트 실행은 Herdr 1 / Tern 0 ready를 입증했지만 managed A→B 증거는 아닙니다. 실제 동결 공개 Brew v0.3.6 → v0.3.7 A `6a10663c2d2f0177990623a969238af4`와 별도 동의 Core v0.4.2 B `c66961f9e5a91c0023545065ae61385b`는 실제 Brew retirement(exit 0, quiescent)까지 완료했습니다. B 전후 모든 설정 파일 해시와 이전 A 증거 87개 파일은 불변이며 실제 Core v0.4.2 UI는 Desktop Pet / Herdr Waiting 0 / Tern Disabled 0입니다. 반면 실제 managed v0.3.7 A `a1aec5902020de7bcaaf583b1a5f50a5`는 native `/tmp` 프로필 검증에 실패했습니다. checkout 교체·registry 등록 전 manager exit 1이 발생했고 동결 helper는 Unknown / `manager_exited`, installed/applied false를 보존합니다. VM·journal·reservation은 recovery/replay 없이 유지합니다. 전체 matrix 완료는 아닙니다. 명시적 definite-failed-retirement resume·실제 SDK 양쪽 시작 순서의 같은 인스턴스/재연결·계정 수락은 미입증입니다. Core v0.4.3 + bridge v0.3.8은 승인된 수정 버전이지만 실제 게시·managed 수락 대기 중이며 공개 v0.4.2/v0.3.7의 대체물이 아닙니다. [Core v0.4.3 / bridge v0.3.8](https://github.com/hanbong5938/desktop-pet/blob/main/docs/releases/v0.4.3.md). Tern v0.2.0·호환 Core v0.4.1 pin은 그대로이며 실제 Tern keychain/provider 로그인과 OMP providerSignIn/NoModel 해결이 필요합니다. 과거 태그·본문·자산·소스는 보존합니다. Core Pages `cb10ce2` 배포와 EN/KO 브라우저 확인은 성공했지만 JA/ZH 시각 확인·최종 현재 문서 배포는 대기 중입니다. Linux Wiki catalog 렌더는 통과했지만 전용 `WIKI_PUBLISH_TOKEN`·소유자의 Wiki Home 초기화가 필요합니다. Wiki 링크는 공개 증거가 아니며 바이너리 release job 성공과 뒤이은 Wiki 실패는 별개입니다.
 
 ## 요구 사항
 
@@ -12,7 +12,7 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-공개 Homebrew 포뮬러는 이제 v0.4.1을 설치하며 실제 업그레이드와 같은 프로필의 공개 wrapper 준비를 검증했습니다:
+공개 Homebrew 포뮬러는 v0.4.2를 설치하며 포뮬러 게시와 실제 v0.4.2 업그레이드/실행 증거는 별개입니다:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -26,23 +26,24 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-git checkout --detach v0.4.1
-# 이 불변 태그의 고정된 공개 v0.4.1 자산을 사용합니다:
+git checkout --detach v0.4.2
+# 이 불변 태그의 고정된 공개 v0.4.2 자산을 사용합니다:
 bash scripts/install.sh --prebuilt
-# v0.4.2 후보 소스 개발은 아래의 별도 체크아웃에서 실행합니다.
+# Explicit source installation uses a separate checkout pinned to public v0.4.2.
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-**v0.4.2 후보 개발**은 별도 현재 소스 체크아웃에서 명시적으로 실행합니다. 이 후보의 사전 빌드 자산은 아직 공개되지 않았습니다:
+**v0.4.2 소스 설치**는 실제 공개 태그에 고정한 별도 체크아웃에서 명시적으로 실행합니다:
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
 cd desktop-pet-source
+git checkout --detach v0.4.2
 bash scripts/install.sh --source
 ```
 
-기본/`--prebuilt`는 해당 체크아웃의 고정된 중립 공개 자산을 요구하며 공개 설치기는 불변 v0.4.1 체크아웃을 사용합니다. 실패를 소스 빌드로 숨기지 않고 명시적 `--source`만 현재 검증된 core를 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+불변 v0.4.2의 기본/`--prebuilt`는 정확한 공개 고정 자산을 사용합니다(과거 v0.4.0/v0.4.1 체크아웃은 각 pin 유지). 실패 시 source fallback은 없고 명시적 `--source`는 실제 공개 v0.4.2 태그를 포함해 선택한 core 체크아웃을 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 추정 dist 경로가 아닌 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
 
 필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 
@@ -182,7 +183,7 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 ## 앱 내 업데이트
 
-**설정 → 앱 업데이트**에는 독립적인 자동 확인(기본 켜짐)·**베타 업데이트 받기**(기본 꺼짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인과 명시적 버튼이 있습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다.
+**설정 → 앱 업데이트**에는 독립적인 자동 확인(기본 켜짐)·**베타 업데이트 받기**(기본 꺼짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인과 명시적 버튼이 있습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다. 확인은 lifecycle·설치·실행 이미지·선택 프로필을 바꾸지 않지만 성공 확인은 `preferences.json`의 정책별 timestamp 캐시(`last_update_check` / `last_beta_update_check`)를 쓸 수 있으므로 바이트 단위 읽기 전용은 아닙니다.
 
 - **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 update는 Herdr plugin manager를 호출하지 않으며 레거시 Herdr 관리는 별도 동의한 [A→B 이전](migrations/desktop-pet.md)에만 속합니다.
 - **Homebrew:** 캡처한 manager·prefix를 유지하고 대상 포뮬러·버전을 명시합니다. 실제 교체 경계는 prefix 전체가 아닌 **그 포뮬러의 모든 keg를 포괄하는 Cellar 하위 트리**입니다. 승인된 적격 안정판 ↔ 베타 이전은 양쪽 물리 설치 루트를 예약하고 대상 메타데이터를 재검증해 대상 포뮬러를 설치·업그레이드하며 원본 포뮬러를 몰래 제거하지 않습니다. 확인은 캐시 메타데이터만 읽습니다.
@@ -202,5 +203,5 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 - 창 숨김이나 전체 클릭 통과는 시작 실패가 아닙니다. 위의 메뉴 막대 복구를 사용하세요. `plugin link` 후 실행되지 않았다면 `client.attached` 경고를 확인하고 수동 `start`, 데몬 `status`·로그를 확인하세요. 꺼진 `auto_start`는 의도적인 자동 시작 건너뜀이고 실행 중 호스트에 연결만 해서는 바로 실행되지 않습니다. 패치 호스트 격리 설치와 훅 확인은 [호스트 안내](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)에 있습니다.
 - `Herdr watchers are shutting down`이 나오면 상속된 `HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`, `PATH`의 실제 Herdr CLI 실행 파일/버전, 그 소켓을 소유한 서버를 확인하세요. **다른 서버**의 `herdr plugin list`로 데몬의 endpoint를 판정할 수 없습니다. 같은 CLI·소켓·세션을 대상으로 조사하고 원격이면 저장 머신 전달 지원 버전/선택 프로필도 검사하세요. 패치 호스트는 자동 실행 훅을 제공할 뿐 모든 서버에 플러그인을 설치하지 않습니다.
 - 원격 오류는 [관찰 대상 설정](#관찰-대상-설정)의 프로필 상태·대화형 재인증·API 전달 CLI를 확인하세요. 로컬 화면을 원하면 원격 호스트에서 SSH로 GUI를 실행하지 마세요. `agent.prompt` 제한과 원격 읽기 전용은 [메시지 전달](#인라인-답장과-메시지-전달)을 참고하세요.
-- 기본 및 명시적 `--prebuilt`는 prebuilt-only이며 다운로드/검증 실패 때 source fallback하지 않습니다. 공개 설치는 불변 v0.4.1 체크아웃 또는 공개 v0.4.1 포뮬러를 사용합니다. 명시적 `--source`는 v0.4.2 후보를 빌드하며 후보 사전 빌드 자산은 아직 미공개입니다. admission이 선택한 실제 설치를 확인하세요. Herdr v0.4.0과 Tern v0.2.0은 공개되었지만 결함 있는 Herdr 소스는 미공개 v0.4.1 수정이 필요합니다. Core v0.4.2 및 bridge v0.3.7 게시·migration 수락은 미완료입니다([수정 기록](releases/v0.4.2.md)). ad-hoc 서명 검증은 Developer ID/공증이 아닙니다([설치](../readme.ko.md)).
+- 불변 v0.4.2의 기본/`--prebuilt`는 정확한 공개 고정 자산을 사용합니다(과거 v0.4.0/v0.4.1 체크아웃은 각 pin 유지). 실패 시 source fallback은 없고 명시적 `--source`는 실제 공개 v0.4.2 태그를 포함해 선택한 core 체크아웃을 빌드합니다. **게시 경계:** [Desktop Pet v0.4.2](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2)은 공개되었습니다(release `412241744`, `2026-10-14T01:09:50Z`, 불변 소스 `cb10ce2c3cc65402cbb914d60301f7627d5546d5`). 익명 자산 6개, strict/deep 서명, protocol 4 / capability 2 / integration API 1, 68개 배포 리소스 해시·정확한 closure를 검증했습니다. tap `32919c745864b54a2e716fcc5a3714d0d38d3e84`의 중립 포뮬러와 실제 공개 v0.4.1 → v0.4.2 Brew 업그레이드는 receipt/derivation·서명 5개·`brew test`·Auto 네이티브 UI/control ready(Herdr 0 / Tern 0)를 입증했습니다. 새 공개 standalone v0.4.1 설치 및 동시 설치기 2개의 실행 중 소유자 재사용을 확인했으며, 네이티브 Check가 실제 공개 v0.4.2를 제시하고 동의 후 `standalone_replace`·`manager_exited`·`installed:true`·`applied:true`, 같은 config/state·정확한 공개 v0.4.2 이미지의 준비 완료를 확인했습니다. Check는 locator/profile/lifecycle/locks/PID를 유지했지만 `preferences.json` 확인 캐시는 바꿨으므로 모든 설정 바이트 불변은 아닙니다. [수정 integration-only Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1)도 공개되었습니다(release `412252863`, 불변 ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`). 공개 wrapper 2개가 숨김을 유지하며 같은 Brew v0.4.2 PID/instance/image를 재사용했고, 명시적 config/state와 실제 private patched Herdr 0.9.3 socket으로 Auto Herdr 1 / Tern 0에 도달했습니다. 새 환경의 공개 bootstrap 2개는 OS-home 앱 하나를 설치/재사용했으며 연동-local native 파일이나 데몬 시작은 없었습니다. 이는 공개 Herdr manager 설치 receipt 증거가 아닙니다. 원래 Herdr v0.4.0의 생성 앱·실패 테스트 scaffold symlink 소스 결함은 보존하며 integration-only였다고 주장하지 않습니다. [Bridge v0.3.7](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.7)도 공개되었습니다(release `412267469`, 불변 tag `987a4b859f95e922c1c5443ead372d10d0dddb24`). 정확한 Core `cb10ce2`·수정 Herdr `6d2ac04`에서 빌드했고 익명 자산 5개·서명·68개 파일 closure를 검증했습니다. tap `657f32cc4cc563ae40ae0432ac5123dcb3f58426`에서 old stable 포뮬러만 v0.3.7로 변경했으며 beta는 그대로입니다. manual-origin private 실제 호스트 실행은 Herdr 1 / Tern 0 ready를 입증했지만 managed A→B 증거는 아닙니다. 실제 동결 공개 Brew v0.3.6 → v0.3.7 A `6a10663c2d2f0177990623a969238af4`와 별도 동의 Core v0.4.2 B `c66961f9e5a91c0023545065ae61385b`는 실제 Brew retirement(exit 0, quiescent)까지 완료했습니다. B 전후 모든 설정 파일 해시와 이전 A 증거 87개 파일은 불변이며 실제 Core v0.4.2 UI는 Desktop Pet / Herdr Waiting 0 / Tern Disabled 0입니다. 반면 실제 managed v0.3.7 A `a1aec5902020de7bcaaf583b1a5f50a5`는 native `/tmp` 프로필 검증에 실패했습니다. checkout 교체·registry 등록 전 manager exit 1이 발생했고 동결 helper는 Unknown / `manager_exited`, installed/applied false를 보존합니다. VM·journal·reservation은 recovery/replay 없이 유지합니다. 전체 matrix 완료는 아닙니다. 명시적 definite-failed-retirement resume·실제 SDK 양쪽 시작 순서의 같은 인스턴스/재연결·계정 수락은 미입증입니다. Core v0.4.3 + bridge v0.3.8은 승인된 수정 버전이지만 실제 게시·managed 수락 대기 중이며 공개 v0.4.2/v0.3.7의 대체물이 아닙니다. [Core v0.4.3 / bridge v0.3.8](https://github.com/hanbong5938/desktop-pet/blob/main/docs/releases/v0.4.3.md). Tern v0.2.0·호환 Core v0.4.1 pin은 그대로이며 실제 Tern keychain/provider 로그인과 OMP providerSignIn/NoModel 해결이 필요합니다. 과거 태그·본문·자산·소스는 보존합니다. Core Pages `cb10ce2` 배포와 EN/KO 브라우저 확인은 성공했지만 JA/ZH 시각 확인·최종 현재 문서 배포는 대기 중입니다. Linux Wiki catalog 렌더는 통과했지만 전용 `WIKI_PUBLISH_TOKEN`·소유자의 Wiki Home 초기화가 필요합니다. Wiki 링크는 공개 증거가 아니며 바이너리 release job 성공과 뒤이은 Wiki 실패는 별개입니다.
 - 제공자 연동은 Herdr 업스트림 기능을 사용하며 해당 수명주기 훅 설치 뒤 기존 제공자 세션을 재시작/다시 로드하세요. 앱은 관측 상태만 표시하고 제공자 결과를 추측하지 않습니다. 버전별 동작은 [릴리스 기록](releases/README.ko.md), 호스트 세부 사항은 [호스트 통합](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)을 참고하세요.

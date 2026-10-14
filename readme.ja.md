@@ -4,7 +4,7 @@
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**公開状態:** 独立 [Desktop Pet v0.4.0](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.0) と [v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1) は公開済みです（protocol 4 / capability 2 / integration API 1）。v0.4.1 の匿名ダウンロード6件、チェックサム・署名・配備68ファイルの closure を検証しました。公開 tap main `47df565` は中立 v0.4.1 formula を配布し、所有する使い捨て Mac で実際の `brew upgrade`、元のプロファイル保持、receipt・物理 root・derivation、`brew test`、署名、同一プロファイルの公開 wrapper によるネイティブ UI/control ready と Auto 4/2/1 を確認しました。同じ config／異なる state の起動は preferences 書込み前に拒否され、config digest と主インスタンスは不変でした。新規 standalone 匿名インストーラーでも実 OS アカウント home の `Applications/DesktopPet.app` とネイティブ UI/control ready、Herdr 0／Tern 0 を確認しましたが、SDK の実アカウント検証ではありません。[Herdr v0.4.0](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.0) も公開済みですが、ソースに生成アプリ69ファイルと失敗テストのプロファイル・lock・symlink 6ファイルが混入し、修正済み guard はその不変ソースを拒否します。[Tern v0.2.0](https://github.com/hanbong5938/tern-desktop-pet/releases/tag/v0.2.0) は公開済みで、保持する Core v0.4.1 pin は 4/2/1 と互換です。承認された修正は新規 **Core v0.4.2 + Herdr v0.4.1** であり、両タグと bridge v0.3.7 はまだ未公開・未受入です（[修正台帳](docs/releases/v0.4.2.md)）。Tern の実際の private-window keychain／未サインイン、OMP 18.10.3 の NoModel／provider setup により、2ホストの実アカウント／プロバイダー検証と最終受入表は未完了です。既存の [Herdr v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) は protocol 3 / capability 1 の過去の公開版です。凍結タグ・本文・アセットと過去の証拠は変更しません。
+**公開状態:** [Desktop Pet v0.4.2](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2) は公開済みです（release `412241744`、`2026-10-14T01:09:50Z`、不変ソース `cb10ce2c3cc65402cbb914d60301f7627d5546d5`）。匿名6アセット、strict/deep署名、protocol 4 / capability 2 / integration API 1、配備68リソースの全ハッシュと正確な closure を検証しました。tap `32919c745864b54a2e716fcc5a3714d0d38d3e84` の中立 formula と実際の公開 v0.4.1 → v0.4.2 Brew 更新で receipt/derivation、署名5個、`brew test`、Auto のネイティブ UI/control ready（Herdr 0 / Tern 0）を確認しました。新規公開 standalone v0.4.1 導入と同時インストーラー2個による稼働中所有者の再利用を確認し、ネイティブ Check が実際の公開 v0.4.2 を提示、同意後 `standalone_replace`、`manager_exited`、`installed:true`、`applied:true` に到達しました。同じ config/state と正確な公開 v0.4.2 image で準備完了です。Check は locator/profile/lifecycle/locks/PID を保持しましたが `preferences.json` の確認キャッシュは変化したため、全設定バイト不変ではありません。[修正 integration-only Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1) も公開済みです（release `412252863`、不変 ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`）。公開 wrapper 2個は非表示のまま同じ Brew v0.4.2 PID/instance/image を再利用し、明示 config/state と実際の private patched Herdr 0.9.3 socket で Auto Herdr 1 / Tern 0 に到達しました。新規環境の公開 bootstrap 2個は OS-home のアプリ1個を導入/再利用し、連携内 native ファイルやデーモン起動はありません。これは公開 Herdr manager 導入 receipt の証拠ではありません。元の Herdr v0.4.0 の生成アプリ/失敗テスト scaffold symlink ソース欠陥は保持し、integration-only だったとは主張しません。[Bridge v0.3.7](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.7) も公開済みです（release `412267469`、不変 tag `987a4b859f95e922c1c5443ead372d10d0dddb24`）。正確な Core `cb10ce2` と修正 Herdr `6d2ac04` から構築し、匿名5アセット・署名・68ファイル closure を検証しました。tap `657f32cc4cc563ae40ae0432ac5123dcb3f58426` で old stable formula のみ v0.3.7 に更新、beta は不変です。manual-origin の private 実ホスト実行は Herdr 1 / Tern 0 ready で、managed A→B の証拠ではありません。実際の凍結公開 Brew v0.3.6 → v0.3.7 A `6a10663c2d2f0177990623a969238af4` と別途同意した Core v0.4.2 B `c66961f9e5a91c0023545065ae61385b` は、実際の Brew retirement（exit 0、quiescent）まで完了しました。B 前後で全設定ファイルのハッシュと旧 A 証拠87ファイルは不変で、実際の Core v0.4.2 UI は Desktop Pet / Herdr Waiting 0 / Tern Disabled 0 です。一方、実際の managed v0.3.7 A `a1aec5902020de7bcaaf583b1a5f50a5` は native `/tmp` プロファイル検証に失敗しました。checkout 置換・registry 登録前に manager exit 1 となり、凍結 helper は Unknown / `manager_exited`、installed/applied false を保持しています。VM・journal・reservation は recovery/replay なしで保存されています。全 matrix 完了ではありません。明示 definite-failed-retirement resume、実 SDK の両起動順序での同一 instance/再接続、アカウント受入れは未証明です。Core v0.4.3 + bridge v0.3.8 は承認済み修正版ですが実公開・managed 受入れは保留中で、公開 v0.4.2/v0.3.7 の代替ではありません。 [Core v0.4.3 / bridge v0.3.8](https://github.com/hanbong5938/desktop-pet/blob/main/docs/releases/v0.4.3.md). Tern v0.2.0 と互換 Core v0.4.1 pin は不変で、実際の Tern keychain/provider ログインと OMP providerSignIn/NoModel の解決が必要です。過去のタグ・本文・アセット・ソースは保持します。Core Pages `cb10ce2` 配備と EN/KO ブラウザ確認は成功しましたが JA/ZH 視覚確認と最終現行文書の配備は保留中です。Linux Wiki catalog render は成功しましたが専用 `WIKI_PUBLISH_TOKEN` と所有者による Wiki Home 初期化が必要です。Wiki リンクは公開の証拠ではなく、バイナリ release job 成功と後続 Wiki 失敗は別です。
 
 <img src="assets/rubelia-thumbnail.png" alt="標準デスクトップコンパニオンのルベリア" width="220">
 
@@ -15,7 +15,7 @@
 - 選択した**ローカル**エージェントセッションへの一行返信。IME の変換中入力に配慮し、ネイティブの状態フィードバックを表示します。
 - キャラクター、バブル、セリフ、表示状態の設定。検証済み追加パックと公式カタログブラウザーに対応します。
 - Herdr のライフサイクル操作、保護付きの linked worktree 削除、インストール元を区別した明示的なアプリ更新。
-- **capability 2：**統合された接続設定で Auto または登録されたプロバイダー（Herdr／Tern など）を選び、実際の接続状態を確認し、共有プロファイルへ稼働中の変更を保存します。公開 Desktop Pet v0.4.0 はこの UI を含みますが、過去の Herdr v0.3.6 にはありません。2ホストの実アカウント／プロバイダー実行検証完了を意味しません。
+- **capability 2：**統合された接続設定で Auto または登録されたプロバイダー（Herdr／Tern など）を選び、実際の接続状態を確認し、共有プロファイルへ稼働中の変更を保存します。現在の公開 Desktop Pet v0.4.2 はこの UI を含みますが、過去の Herdr v0.3.6 にはありません。2ホストの実アカウント／プロバイダー実行検証完了を意味しません。
 
 ## 動作要件
 
@@ -23,7 +23,7 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-公開済みの中立 v0.4.1 は次の Brew コマンドで導入できます:
+公開済みの中立 v0.4.2 は次の Brew コマンドで導入できます:
 
 ```sh
 brew install hanbong5938/tap/desktop-pet
@@ -37,16 +37,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# 公開済みの不変 v0.4.1 インストーラーと固定アセットを使用:
-git checkout --detach v0.4.1
+# 公開済みの不変 v0.4.2 インストーラーと固定アセットを使用:
+git checkout --detach v0.4.2
 bash scripts/install.sh --prebuilt
-# 現在の v0.4.2 ソース開発は別の現在のチェックアウトで明示実行:
+# 同じ公開 v0.4.2 タグでソース導入を選ぶ場合:
 # bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-不変の v0.4.0／v0.4.1 チェックアウトの既定／`--prebuilt` は各版の公開済み固定アセットを使用します。現在の main は v0.4.2 修正ソースで、v0.4.2 プリビルドはまだ公開されていません。公開 v0.4.1 導入には上記の明示的なタグ checkout を使い、現在の v0.4.2 ソース開発は別のチェックアウトで明示 `--source` を実行します。取得／検証失敗をソース構築で隠しません。standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
+不変 v0.4.2 の既定／`--prebuilt` は正確な公開固定アセットを使用します（過去の v0.4.0／v0.4.1 は各 pin を保持）。取得／検証失敗をソース構築で隠しません。明示 `--source` は実際の公開 v0.4.2 タグを含む選択 core checkout を構築します。 standalone prebuilt は **実 OS アカウント home** の `Applications/DesktopPet.app`、承認された source は core の `dist/DesktopPet.app` を使います。admission は検証済み健全な既存所有者を再利用し得るため、推測した dist パスではなく導入器が示す実行ファイルを使います。共有 locator はアカウント home の `.local/share/desktop-pet/installation.json` に原子的に保存し、探索証拠であって権限ではありません。不正な明示パス／locator は fallback せず、実行ファイル、署名、capability、origin を再検証します。Brew は実際の formula／prefix を所有し、生存／予約中の導入を密かに引き継ぎません。
 
 必要な連携だけを導入します。Herdr は薄い consumer です。Tern はネイティブアプリを取得・構築・インストール・自動起動しません。プラグインの更新・削除は共有アプリ、プロファイル、キャラクターを削除しません。通常のアプリ更新で Herdr プラグインを再導入しません。
 
@@ -92,7 +92,7 @@ IME 変換中は**決して送信されません**。Escape はまず変換を�
 - 返信には選択元の**ローカル prompt capability**が必要です。Herdr は `agent.prompt`、Tern は１回限りの `agents:ask` を使い、遠隔、SSH、shell、PTY 入力に迂回しません。受付 ACK は**モデルの完了ではなく**、Tern は queued の場合があります。承認／質問は実際のターミナルで扱い、不確実な配送は確認なく再送しません。Herdr の提出 API には現在 occupant の競合があり、セッションの原子的固定を保証しません。[配送詳細](docs/usage.ja.md#インライン返信とメッセージ配送)。
 - **Worktree を削除…**は元に戻せません。続行前に**正確なチェックアウトパス**と**ワークスペース全体**のタブ／ペインを確認してください。そこにあるプロセス／エージェントを終了し、**無視されているファイルも含めて**リンク済みチェックアウトを削除します。ゴミ箱への移動や取り消しはできません。メインのリポジトリとブランチは削除しません。[削除時の安全策](docs/usage.ja.md#ワークツリーの削除)。
 - リモート観測には、選択済みの保存されたマシン設定と互換性のあるリモート Herdr サーバーが必要ですが、**リモート側へのキャラクターのインストールは不要**です。ローカルアプリはリモートの状態をポーリングするため、見逃した短い状態遷移を復元したり、リモートのプロンプトを送ったりはできません。[観測ガイド](docs/usage.ja.md#観測元)。
-- アプリ更新の自動確認は読み取り専用です。更新のインストール／適用には明示的な同意が必要です。更新機能の所有権 ACK は**完了を意味しません**。結果が不明な場合は再試行前に[アプリ内更新の復旧](docs/usage.ja.md#アプリ内更新)と [CLI 更新状態と復旧（英語）](docs/cli.md#app-update-status-and-recovery)を参照してください。
+- アプリ更新の自動確認は lifecycle・導入・image・選択 profile を保持しますが、`preferences.json` の成功確認 timestamp キャッシュを書き込めます。更新のインストール／適用には明示的な同意が必要です。更新機能の所有権 ACK は**完了を意味しません**。結果が不明な場合は再試行前に[アプリ内更新の復旧](docs/usage.ja.md#アプリ内更新)と [CLI 更新状態と復旧（英語）](docs/cli.md#app-update-status-and-recovery)を参照してください。
 
 ## 設定とトラブルシューティング
 
