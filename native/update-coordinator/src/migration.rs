@@ -2721,10 +2721,16 @@ fn remove_empty_generated_dist(bundle: &Path) -> Result<(), String> {
     }
     // Never remove unexpected contents. The final closure gate rejects them.
     let mut entries = fs::read_dir(dist).map_err(|e| e.to_string())?;
-    if entries.next().transpose().map_err(|e| e.to_string())?.is_none() {
+    if entries
+        .next()
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
         fs::remove_dir(dist).map_err(|e| e.to_string())?;
         File::open(dist.parent().ok_or("managed dist parent missing")?)
-            .and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2733,8 +2739,14 @@ fn integration_github_json(path: &str) -> Result<serde_json::Value, String> {
     let text = command_output(
         Path::new("/usr/bin/curl"),
         &[
-            "--disable".into(), "--fail".into(), "--proto".into(), "=https".into(),
-            "--connect-timeout".into(), "10".into(), "--max-time".into(), "20".into(),
+            "--disable".into(),
+            "--fail".into(),
+            "--proto".into(),
+            "=https".into(),
+            "--connect-timeout".into(),
+            "10".into(),
+            "--max-time".into(),
+            "20".into(),
             "--silent".into(),
             format!("https://api.github.com/repos/hanbong5938/herdr-desktop-pet/{path}"),
         ],
@@ -2750,19 +2762,33 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
         let release = integration_github_json("releases/tags/v0.4.1")?;
         if release.get("tag_name").and_then(serde_json::Value::as_str) != Some("v0.4.1")
             || release.get("draft").and_then(serde_json::Value::as_bool) != Some(false)
-            || release.get("prerelease").and_then(serde_json::Value::as_bool) != Some(false)
-            || release.get("published_at").and_then(serde_json::Value::as_str).is_none()
-            || !release.get("assets").and_then(serde_json::Value::as_array)
+            || release
+                .get("prerelease")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            || release
+                .get("published_at")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            || !release
+                .get("assets")
+                .and_then(serde_json::Value::as_array)
                 .is_some_and(Vec::is_empty)
         {
             return Err("Herdr integration0.4.1 is not a published assetless release".into());
         }
         let reference = integration_github_json("git/ref/tags/v0.4.1")?;
-        let mut object = reference.get("object").cloned().ok_or("published integration tag object absent")?;
+        let mut object = reference
+            .get("object")
+            .cloned()
+            .ok_or("published integration tag object absent")?;
         let mut resolved = false;
         for _ in 0..8 {
-            let sha = object.get("sha").and_then(serde_json::Value::as_str)
-                .filter(|sha| hex(sha, 40)).ok_or("invalid published integration tag SHA")?;
+            let sha = object
+                .get("sha")
+                .and_then(serde_json::Value::as_str)
+                .filter(|sha| hex(sha, 40))
+                .ok_or("invalid published integration tag SHA")?;
             match object.get("type").and_then(serde_json::Value::as_str) {
                 Some("commit") if sha == integration_commit => {
                     resolved = true;
@@ -2770,7 +2796,9 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
                 }
                 Some("tag") => {
                     object = integration_github_json(&format!("git/tags/{sha}"))?
-                        .get("object").cloned().ok_or("annotated integration tag object absent")?;
+                        .get("object")
+                        .cloned()
+                        .ok_or("annotated integration tag object absent")?;
                 }
                 _ => return Err("published Herdr integration tag differs from consent".into()),
             }
@@ -2857,10 +2885,11 @@ fn verify_integration_ref(plan: &MigrationPlan) -> Result<(), String> {
                     .and_then(serde_json::Value::as_str)
                     .is_none_or(integration_owns_product)
                     || !matches!(
-                        (entry.get("type").and_then(serde_json::Value::as_str),
-                         entry.get("mode").and_then(serde_json::Value::as_str)),
-                        (Some("tree"), Some("040000"))
-                            | (Some("blob"), Some("100644" | "100755"))
+                        (
+                            entry.get("type").and_then(serde_json::Value::as_str),
+                            entry.get("mode").and_then(serde_json::Value::as_str)
+                        ),
+                        (Some("tree"), Some("040000")) | (Some("blob"), Some("100644" | "100755"))
                     )
             })
         {
@@ -2943,36 +2972,68 @@ fn verify_managed_retirement(plan: &MigrationPlan) -> Result<(), String> {
 fn validate_integration_manifest(manifest: &toml::Value) -> Result<(), String> {
     if manifest.get("id").and_then(toml::Value::as_str) != Some("desktop-pet")
         || manifest.get("version").and_then(toml::Value::as_str) != Some("0.4.1")
-        || manifest.get("min_herdr_version").and_then(toml::Value::as_str) != Some("0.9.3")
+        || manifest
+            .get("min_herdr_version")
+            .and_then(toml::Value::as_str)
+            != Some("0.9.3")
     {
         return Err("consented immutable ref is not Herdr integration0.4.1".into());
     }
     let command_matches = |entry: &toml::Value, expected: &[&str]| {
-        entry.get("command").and_then(toml::Value::as_array).is_some_and(|command| {
-            command.len() == expected.len()
-                && command.iter().zip(expected).all(|(value, expected)| value.as_str() == Some(*expected))
-        })
+        entry
+            .get("command")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|command| {
+                command.len() == expected.len()
+                    && command
+                        .iter()
+                        .zip(expected)
+                        .all(|(value, expected)| value.as_str() == Some(*expected))
+            })
     };
     for (kind, command) in [
         ("build", &["bash", "scripts/install.sh"][..]),
         ("startup", &["bash", "scripts/run-native.sh", "ensure"][..]),
         ("events", &["bash", "scripts/run-native.sh", "ensure"][..]),
     ] {
-        let hooks = manifest.get(kind).and_then(toml::Value::as_array)
+        let hooks = manifest
+            .get(kind)
+            .and_then(toml::Value::as_array)
             .ok_or("integration manifest lacks consumer hooks")?;
-        if hooks.len() != 1 || !command_matches(&hooks[0], command)
-            || kind == "events" && hooks[0].get("on").and_then(toml::Value::as_str) != Some("client.attached")
+        if hooks.len() != 1
+            || !command_matches(&hooks[0], command)
+            || kind == "events"
+                && hooks[0].get("on").and_then(toml::Value::as_str) != Some("client.attached")
         {
             return Err("integration manifest has non-consumer hooks".into());
         }
     }
     let expected_actions = [
-        "settings", "start", "ensure", "stop", "status", "toggle", "show", "hide",
-        "passthrough", "alpha_passthrough", "show_bubble", "hide_bubble",
-        "bubble_above", "bubble_below", "bubble_left", "bubble_right", "bubble_auto",
-        "reset", "bigger", "smaller", "restart",
+        "settings",
+        "start",
+        "ensure",
+        "stop",
+        "status",
+        "toggle",
+        "show",
+        "hide",
+        "passthrough",
+        "alpha_passthrough",
+        "show_bubble",
+        "hide_bubble",
+        "bubble_above",
+        "bubble_below",
+        "bubble_left",
+        "bubble_right",
+        "bubble_auto",
+        "reset",
+        "bigger",
+        "smaller",
+        "restart",
     ];
-    let actions = manifest.get("actions").and_then(toml::Value::as_array)
+    let actions = manifest
+        .get("actions")
+        .and_then(toml::Value::as_array)
         .ok_or("integration manifest lacks retained actions")?;
     if actions.len() != expected_actions.len()
         || actions.iter().zip(expected_actions).any(|(action, id)| {
@@ -2987,49 +3048,112 @@ fn validate_integration_manifest(manifest: &toml::Value) -> Result<(), String> {
 
 fn integration_owns_product(path: &str) -> bool {
     const OBSOLETE: &[&str] = &[
-        "native", "dist", "web", "assets", "tools",
-        ".agents/skills/character-creator", ".agents/skills/create-pet-character",
-        "scripts/package-native.ts", "scripts/build-rig-native.mjs",
-        "scripts/release-docs.ts", "scripts/release-docs.test.ts",
-        "scripts/wiki-docs.ts", "scripts/wiki-docs.test.ts", "scripts/publish-wiki.sh",
+        "native",
+        "dist",
+        "web",
+        "assets",
+        "tools",
+        ".agents/skills/character-creator",
+        ".agents/skills/create-pet-character",
+        "scripts/package-native.ts",
+        "scripts/build-rig-native.mjs",
+        "scripts/release-docs.ts",
+        "scripts/release-docs.test.ts",
+        "scripts/wiki-docs.ts",
+        "scripts/wiki-docs.test.ts",
+        "scripts/publish-wiki.sh",
         ".github/workflows/wiki.yml",
     ];
-    if path.starts_with('/') || OBSOLETE.iter().any(|root| {
-        path.get(..root.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
-            && (path.len() == root.len() || path.get(root.len()..).is_some_and(|rest| rest.starts_with('/')))
-    }) {
+    if path.starts_with('/')
+        || OBSOLETE.iter().any(|root| {
+            path.get(..root.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(root))
+                && (path.len() == root.len()
+                    || path
+                        .get(root.len()..)
+                        .is_some_and(|rest| rest.starts_with('/')))
+        })
+    {
         return true;
     }
     path.split('/').any(|component| {
-        if component.is_empty() || component == "." || component == ".."
+        if component.is_empty()
+            || component == "."
+            || component == ".."
             || [
-                "dist", "target", "node_modules", "Contents", "_CodeSignature",
-                "rig", "rig-native", "creator", "rig.json", "rig-native.json",
-                "Info.plist", "RigLimits.rs", "RigLimits.swift", "desktop-pet",
-                "desktop-pet-update-coordinator", "herdr-desktop-pet",
-                "herdr-update-coordinator", "rig-decode-worker",
-            ].iter()
-                .any(|name| component.eq_ignore_ascii_case(name))
+                "dist",
+                "target",
+                "node_modules",
+                "Contents",
+                "_CodeSignature",
+                "rig",
+                "rig-native",
+                "creator",
+                "rig.json",
+                "rig-native.json",
+                "Info.plist",
+                "RigLimits.rs",
+                "RigLimits.swift",
+                "desktop-pet",
+                "desktop-pet-update-coordinator",
+                "herdr-desktop-pet",
+                "herdr-update-coordinator",
+                "rig-decode-worker",
+            ]
+            .iter()
+            .any(|name| component.eq_ignore_ascii_case(name))
         {
             return true;
         }
-        if component.get(.."libherdr_rig".len())
+        if component
+            .get(.."libherdr_rig".len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("libherdr_rig"))
         {
             return true;
         }
-        let filename = [".sha256", ".sha512"].iter().find_map(|suffix| {
-            let split = component.len().checked_sub(suffix.len())?;
-            component.get(split..).filter(|ending| ending.eq_ignore_ascii_case(suffix))?;
-            component.get(..split)
-        }).unwrap_or(component);
+        let filename = [".sha256", ".sha512"]
+            .iter()
+            .find_map(|suffix| {
+                let split = component.len().checked_sub(suffix.len())?;
+                component
+                    .get(split..)
+                    .filter(|ending| ending.eq_ignore_ascii_case(suffix))?;
+                component.get(..split)
+            })
+            .unwrap_or(component);
         [
-            ".app", ".framework", ".bundle", ".tar", ".gz", ".tgz", ".bz2",
-            ".tbz", ".tbz2", ".xz", ".txz", ".zst", ".zip", ".7z", ".rar",
-            ".dmg", ".pkg", ".o", ".a", ".so", ".dylib", ".dll", ".exe",
-            ".wasm", ".bin", ".herdrchar", "rig-native.json",
-        ].iter().any(|suffix| {
-            filename.get(filename.len().saturating_sub(suffix.len())..)
+            ".app",
+            ".framework",
+            ".bundle",
+            ".tar",
+            ".gz",
+            ".tgz",
+            ".bz2",
+            ".tbz",
+            ".tbz2",
+            ".xz",
+            ".txz",
+            ".zst",
+            ".zip",
+            ".7z",
+            ".rar",
+            ".dmg",
+            ".pkg",
+            ".o",
+            ".a",
+            ".so",
+            ".dylib",
+            ".dll",
+            ".exe",
+            ".wasm",
+            ".bin",
+            ".herdrchar",
+            "rig-native.json",
+        ]
+        .iter()
+        .any(|suffix| {
+            filename
+                .get(filename.len().saturating_sub(suffix.len())..)
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         })
     })
@@ -3386,20 +3510,33 @@ mod tests {
     #[test]
     fn integration_closure_rejects_product_roots_bundles_and_archives() {
         for path in [
-            "dist", "dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet",
-            "native/core/Cargo.toml", "assets/rubelia-default/rig.json", "web/rig/package.json",
-            "copies/DesktopPet.app", "copies/Renderer.framework/renderer",
-            "copies/character.bundle", "DesktopPet.tar.gz", "DesktopPet.zip.sha256",
-            "backup/renderer.dylib", "native-adapter/target/release/libadapter.a",
-            "somewhere/node_modules/tool/index.js", "somewhere/rig-native.json",
+            "dist",
+            "dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet",
+            "native/core/Cargo.toml",
+            "assets/rubelia-default/rig.json",
+            "web/rig/package.json",
+            "copies/DesktopPet.app",
+            "copies/Renderer.framework/renderer",
+            "copies/character.bundle",
+            "DesktopPet.tar.gz",
+            "DesktopPet.zip.sha256",
+            "backup/renderer.dylib",
+            "native-adapter/target/release/libadapter.a",
+            "somewhere/node_modules/tool/index.js",
+            "somewhere/rig-native.json",
         ] {
             assert!(integration_owns_product(path), "{path}");
         }
         for path in [
-            "native-adapter/src/lib.rs", "native-adapter/Cargo.toml",
-            "herdr-plugin.toml", "scripts/consumer.sh", "site/index.html",
-            "integrations/herdr/client-attached.patch", "integrations/omp/herdr-pet-outcomes.ts",
-            "release-evidence/desktop-pet-install-v0.4.2.sh.sha256", "release-evidence/release.json",
+            "native-adapter/src/lib.rs",
+            "native-adapter/Cargo.toml",
+            "herdr-plugin.toml",
+            "scripts/consumer.sh",
+            "site/index.html",
+            "integrations/herdr/client-attached.patch",
+            "integrations/omp/herdr-pet-outcomes.ts",
+            "release-evidence/desktop-pet-install-v0.4.2.sh.sha256",
+            "release-evidence/release.json",
         ] {
             assert!(!integration_owns_product(path), "{path}");
         }
@@ -3416,9 +3553,18 @@ mod tests {
         verify_integration_directory(&root).unwrap();
         fs::write(root.join("unexpected.zip"), b"unexpected archive").unwrap();
         assert!(verify_integration_directory(&root).is_err());
-        assert_eq!(fs::read(root.join("unexpected.zip")).unwrap(), b"unexpected archive");
-        assert_eq!(fs::read(root.join("herdr-plugin.toml")).unwrap(), b"reviewed source");
-        assert_eq!(fs::read(temp.path().join("usercfg")).unwrap(), b"user config");
+        assert_eq!(
+            fs::read(root.join("unexpected.zip")).unwrap(),
+            b"unexpected archive"
+        );
+        assert_eq!(
+            fs::read(root.join("herdr-plugin.toml")).unwrap(),
+            b"reviewed source"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("usercfg")).unwrap(),
+            b"user config"
+        );
         assert_eq!(fs::read(temp.path().join("state")).unwrap(), b"user state");
     }
 
@@ -3440,7 +3586,10 @@ mod tests {
         fs::write(linked.join("source.txt"), b"linked source").unwrap();
         symlink(&linked, &dist).unwrap();
         assert!(remove_empty_generated_dist(&bundle).is_err());
-        assert_eq!(fs::read(linked.join("source.txt")).unwrap(), b"linked source");
+        assert_eq!(
+            fs::read(linked.join("source.txt")).unwrap(),
+            b"linked source"
+        );
     }
 
     #[test]
@@ -3448,9 +3597,17 @@ mod tests {
         let mut table = toml::map::Map::new();
         table.insert("id".into(), toml::Value::String("desktop-pet".into()));
         table.insert("version".into(), toml::Value::String("0.4.1".into()));
-        table.insert("min_herdr_version".into(), toml::Value::String("0.9.3".into()));
-        let command = |args: &[&str]| toml::Value::Array(args.iter()
-            .map(|arg| toml::Value::String((*arg).into())).collect());
+        table.insert(
+            "min_herdr_version".into(),
+            toml::Value::String("0.9.3".into()),
+        );
+        let command = |args: &[&str]| {
+            toml::Value::Array(
+                args.iter()
+                    .map(|arg| toml::Value::String((*arg).into()))
+                    .collect(),
+            )
+        };
         for (kind, args) in [
             ("build", &["bash", "scripts/install.sh"][..]),
             ("startup", &["bash", "scripts/run-native.sh", "ensure"][..]),
@@ -3461,19 +3618,50 @@ mod tests {
             if kind == "events" {
                 hook.insert("on".into(), toml::Value::String("client.attached".into()));
             }
-            table.insert(kind.into(), toml::Value::Array(vec![toml::Value::Table(hook)]));
+            table.insert(
+                kind.into(),
+                toml::Value::Array(vec![toml::Value::Table(hook)]),
+            );
         }
-        table.insert("actions".into(), toml::Value::Array([
-            "settings", "start", "ensure", "stop", "status", "toggle", "show", "hide",
-            "passthrough", "alpha_passthrough", "show_bubble", "hide_bubble",
-            "bubble_above", "bubble_below", "bubble_left", "bubble_right", "bubble_auto",
-            "reset", "bigger", "smaller", "restart",
-        ].iter().map(|id| {
-            let mut action = toml::map::Map::new();
-            action.insert("id".into(), toml::Value::String((*id).into()));
-            action.insert("command".into(), command(&["bash", "scripts/run-native.sh", id]));
-            toml::Value::Table(action)
-        }).collect()));
+        table.insert(
+            "actions".into(),
+            toml::Value::Array(
+                [
+                    "settings",
+                    "start",
+                    "ensure",
+                    "stop",
+                    "status",
+                    "toggle",
+                    "show",
+                    "hide",
+                    "passthrough",
+                    "alpha_passthrough",
+                    "show_bubble",
+                    "hide_bubble",
+                    "bubble_above",
+                    "bubble_below",
+                    "bubble_left",
+                    "bubble_right",
+                    "bubble_auto",
+                    "reset",
+                    "bigger",
+                    "smaller",
+                    "restart",
+                ]
+                .iter()
+                .map(|id| {
+                    let mut action = toml::map::Map::new();
+                    action.insert("id".into(), toml::Value::String((*id).into()));
+                    action.insert(
+                        "command".into(),
+                        command(&["bash", "scripts/run-native.sh", id]),
+                    );
+                    toml::Value::Table(action)
+                })
+                .collect(),
+            ),
+        );
         let mut manifest = toml::Value::Table(table);
         validate_integration_manifest(&manifest).unwrap();
         manifest["version"] = toml::Value::String("0.4.0".into());
@@ -3487,7 +3675,10 @@ mod tests {
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
-        assert_eq!(plan.target.release.version, crate::identity::neutral::VERSION);
+        assert_eq!(
+            plan.target.release.version,
+            crate::identity::neutral::VERSION
+        );
         let mut obsolete = plan.clone();
         obsolete.target.release.version = "0.4.1".into();
         assert!(validate_plan(&obsolete).is_err());
