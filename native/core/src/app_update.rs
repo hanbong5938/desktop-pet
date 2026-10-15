@@ -5,8 +5,9 @@
 use crate::i18n::{text, Message, UiLocale};
 use crate::update_card::{UpdateCardModel, UpdateCardPrimaryAction};
 use desktop_pet_update_coordinator::protocol::{
-    latest_operation, lock_operation, private_updates, start_allowed, ExecutionFence,
-    OperationPhase, OperationRecord, UPDATER_PROTOCOL,
+    historical_operation_plan, latest_operation, lock_operation, private_updates,
+    read_operation_observation, start_allowed, ExecutionFence, OperationPhase, OperationRecord,
+    UPDATER_PROTOCOL,
 };
 use desktop_pet_update_coordinator::{
     check, read_operation, read_plan, recheck_plan, stage_helper, write_plan, CheckSnapshot,
@@ -799,7 +800,7 @@ impl AppUpdateService {
         let context = context.clone();
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = read_operation(&context.state_dir, &operation_id);
+            let result = read_operation_observation(&context.state_dir, &operation_id);
             let prepared_recovery = result
                 .as_ref()
                 .ok()
@@ -1253,12 +1254,18 @@ fn settlement_proof(
         return Err("fresh check source is not the captured running installation".into());
     }
     let _lease = lock_operation(&context.state_dir, operation_id)?;
-    let record = read_operation(&context.state_dir, operation_id)?
+    let record = read_operation_observation(&context.state_dir, operation_id)?
         .ok_or("previous operation journal is missing")?;
-    if !settled_terminal(&record) {
-        return Err("previous operation is not a reconciled terminal outcome".into());
-    }
-    let prior_plan = read_plan(&context.state_dir, operation_id)?;
+    let prior_plan = if record.version == UPDATER_PROTOCOL {
+        if !settled_terminal(&record) {
+            return Err("previous operation is not a reconciled terminal outcome".into());
+        }
+        read_plan(&context.state_dir, operation_id)?
+    } else {
+        // This only retires a read-only observation after a fresh check. It does
+        // not reconcile prepared work or grant the old plan execution authority.
+        historical_operation_plan(&context.state_dir, &record)?
+    };
     if prior_plan.context.config_dir != context.config_dir {
         return Err("previous operation belongs to a different configuration profile".into());
     }
@@ -1541,7 +1548,7 @@ mod tests {
     fn eligible_settled_bridge(status: CheckStatus) -> AppUpdateService {
         let mut snapshot = local_check();
         let mut context = snapshot.plan.take().unwrap().context;
-        context.version = "0.3.11".into();
+        context.version = "0.3.12".into();
         snapshot.installed_version = Some(context.version.clone());
         snapshot.status = status;
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
@@ -2031,6 +2038,230 @@ mod tests {
             service.plan().map(|plan| &plan.action),
             Some(&UpdateAction::SourceRebuild)
         );
+    }
+
+    #[cfg(desktop_pet_legacy)]
+    #[test]
+    fn historical_completed_journal_allows_fresh_check_without_recovery() {
+        use desktop_pet_update_coordinator::protocol::{
+            reserve_install, write_operation, write_private_bytes, write_private_new,
+        };
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path().join("state");
+        let root = temporary.path().join("source");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&root).unwrap();
+        let mut snapshot = local_check();
+        snapshot.origin = InstallOrigin::Homebrew {
+            brew: root.join("bin/brew"),
+            prefix: root.clone(),
+            cellar_formula_root: root.join("Cellar/herdr-desktop-pet"),
+            formula: "hanbong5938/tap/herdr-desktop-pet".into(),
+            locator: root.join("opt/herdr-desktop-pet/app"),
+        };
+        let mut current_plan = snapshot.plan.take().unwrap();
+        current_plan.origin = snapshot.origin.clone();
+        current_plan.action = UpdateAction::HomebrewUpgrade;
+        current_plan.context.state_dir = state.clone();
+        current_plan.context.version = "0.3.12".into();
+        current_plan.context.running_origin = Some(Box::new(snapshot.origin.clone()));
+        current_plan.running.path = root.join("current-app");
+        current_plan.running.sha256 = "c".repeat(64);
+        current_plan.context.running = current_plan.running.clone();
+        current_plan.context.executable = current_plan.running.path.clone();
+        let context = current_plan.context.clone();
+        snapshot.status = CheckStatus::Current;
+        snapshot.installed_version = Some(context.version.clone());
+
+        let mut historical = failed_record('a');
+        historical.version = 2;
+        historical.phase = OperationPhase::Completed;
+        historical.execution_fence = ExecutionFence::ManagerExited;
+        historical.installed = true;
+        historical.applied = true;
+        historical.candidate = Some(ExecutableIdentity {
+            path: root.join("removed-0.3.5-image"),
+            sha256: "b".repeat(64),
+        });
+        let mut historical_plan = current_plan.clone();
+        historical_plan.version = 2;
+        historical_plan.operation_id = historical.operation_id.clone();
+        historical_plan.context.version = "0.3.4".into();
+        historical_plan.context.instance_id = "original-historical-instance".into();
+        historical_plan.running.path = root.join("removed-0.3.4-image");
+        historical_plan.running.sha256 = "a".repeat(64);
+        historical_plan.context.executable = historical_plan.running.path.clone();
+        historical_plan.context.running = historical_plan.running.clone();
+        let updates = private_updates(&state).unwrap();
+        let plan_path = updates.join(format!("{}.plan.json", historical.operation_id));
+        let result_path = updates.join(format!("{}.result.json", historical.operation_id));
+        let latest_path = updates.join("latest-operation.json");
+        let plan_bytes = serde_json::to_vec_pretty(&historical_plan).unwrap();
+        let result_bytes = serde_json::to_vec_pretty(&historical).unwrap();
+        let latest_bytes = serde_json::to_vec(&historical.operation_id).unwrap();
+        write_private_new(&plan_path, &plan_bytes, 0o600).unwrap();
+        write_private_new(&result_path, &result_bytes, 0o600).unwrap();
+        write_private_new(&latest_path, &latest_bytes, 0o600).unwrap();
+        assert!(historical_plan.candidate.is_none());
+        assert!(!historical_plan.running.path.exists());
+        assert!(!historical.candidate.as_ref().unwrap().path.exists());
+
+        // Neither a terminal spelling nor an old version alone is admission.
+        for (key, value) in [
+            ("version", serde_json::json!(0)),
+            ("version", serde_json::json!(UPDATER_PROTOCOL + 1)),
+            ("operation_id", serde_json::json!("b".repeat(32))),
+            ("phase", serde_json::json!("preparing")),
+            ("phase", serde_json::json!("unknown")),
+            ("execution_fence", serde_json::json!("manager_intent")),
+            ("execution_fence", serde_json::json!("no_spawn")),
+            ("installed", serde_json::json!(false)),
+            ("applied", serde_json::json!(false)),
+            ("detail", serde_json::json!("x".repeat(8193))),
+            ("unrecognized", serde_json::json!(true)),
+            (
+                "candidate",
+                serde_json::json!({"path":"relative","sha256":"b".repeat(64)}),
+            ),
+            (
+                "candidate",
+                serde_json::json!({"path":"/old/image","sha256":"not-a-hash"}),
+            ),
+        ] {
+            let mut invalid = serde_json::to_value(&historical).unwrap();
+            invalid[key] = value;
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            write_private_bytes(&result_path, &bytes, 0o600).unwrap();
+            let mut blocked = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+            blocked.context = Some(context.clone());
+            blocked.latest_journal(latest_operation(&state));
+            assert!(blocked.begin_check().is_none(), "{key}: {invalid}");
+            assert!(!blocked.settings_admitted());
+            assert!(settlement_proof(&context, &snapshot, &historical.operation_id).is_err());
+            assert!(write_operation(&state, &failed_record('e')).is_err());
+            assert_eq!(fs::read(&latest_path).unwrap(), latest_bytes);
+            assert_eq!(fs::read(&result_path).unwrap(), bytes);
+        }
+        for bytes in [b"{".to_vec(), vec![b' '; 16385]] {
+            write_private_bytes(&result_path, &bytes, 0o600).unwrap();
+            assert!(latest_operation(&state).is_err());
+        }
+        write_private_bytes(&result_path, &result_bytes, 0o600).unwrap();
+        fs::set_permissions(&result_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(latest_operation(&state).is_err());
+        fs::set_permissions(&result_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        for field in [
+            "version",
+            "operation_id",
+            "state",
+            "running",
+            "config",
+            "unknown",
+        ] {
+            let mut invalid = serde_json::to_value(&historical_plan).unwrap();
+            match field {
+                "version" => invalid["version"] = serde_json::json!(1),
+                "operation_id" => invalid["operation_id"] = serde_json::json!("b".repeat(32)),
+                "state" => invalid["context"]["state_dir"] = serde_json::json!("/foreign/state"),
+                "running" => invalid["running"]["sha256"] = serde_json::json!("d".repeat(64)),
+                "config" => invalid["context"]["config_dir"] = serde_json::json!("/foreign/config"),
+                "unknown" => invalid["unrecognized"] = serde_json::json!(true),
+                _ => unreachable!(),
+            }
+            write_private_bytes(&plan_path, &serde_json::to_vec(&invalid).unwrap(), 0o600).unwrap();
+            assert!(
+                settlement_proof(&context, &snapshot, &historical.operation_id).is_err(),
+                "{field}"
+            );
+        }
+        write_private_bytes(&plan_path, &plan_bytes, 0o600).unwrap();
+
+        let lease = lock_operation(&state, &historical.operation_id).unwrap();
+        assert!(settlement_proof(&context, &snapshot, &historical.operation_id).is_err());
+        drop(lease);
+        let reserved =
+            reserve_install(&snapshot.origin, None, &state, &historical.operation_id).unwrap();
+        assert!(latest_operation(&state).is_err());
+        assert!(settlement_proof(&context, &snapshot, &historical.operation_id).is_err());
+        reserved.release().unwrap();
+
+        for phase in [OperationPhase::Failed, OperationPhase::UserStopped] {
+            let mut stopped = historical.clone();
+            stopped.phase = phase;
+            stopped.installed = false;
+            stopped.applied = false;
+            stopped.candidate = None;
+            write_private_bytes(&result_path, &serde_json::to_vec(&stopped).unwrap(), 0o600)
+                .unwrap();
+            assert_eq!(latest_operation(&state).unwrap(), Some(stopped.clone()));
+            assert!(read_operation(&state, &stopped.operation_id).is_err());
+            assert!(prepared_recovery_proof(&context, &stopped.operation_id, &stopped).is_err());
+            let mut blocked = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+            blocked.context = Some(context.clone());
+            blocked.latest_journal(latest_operation(&state));
+            blocked.checked(Ok(snapshot.clone()), None);
+            assert!(!blocked.settings_admitted());
+            assert!(blocked.plan().is_none());
+            assert!(!blocked.model(UiLocale::En).migration_available);
+        }
+        write_private_bytes(&result_path, &result_bytes, 0o600).unwrap();
+
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        service.context = Some(context.clone());
+        service.latest_journal(latest_operation(&state));
+        service.reload_journal(historical.operation_id.clone());
+        match service
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
+            Event::Journal {
+                operation_id,
+                result,
+                prepared_recovery,
+            } => {
+                assert!(prepared_recovery.is_none());
+                assert_eq!(result, Ok(Some(historical.clone())));
+                assert!(service
+                    .journal(&operation_id, result, prepared_recovery)
+                    .is_none());
+            }
+            _ => panic!("expected a journal observation"),
+        }
+        assert!(service.journal_error.is_none());
+        let check_request = service.begin_check();
+        assert!(check_request.is_some());
+        let (request_id, policy_generation, _) = check_request.unwrap();
+        assert!(!service.settings_admitted());
+        assert!(read_operation(&state, &historical.operation_id).is_err());
+        assert!(read_plan(&state, &historical.operation_id).is_err());
+        assert!(recheck_plan(&historical_plan).is_err());
+        assert!(prepared_recovery_proof(&context, &historical.operation_id, &historical).is_err());
+        let proof = settlement_proof(&context, &snapshot, &historical.operation_id).unwrap();
+        service.checked_event(request_id, policy_generation, Ok(snapshot), Some(proof));
+        assert!(service.settings_admitted());
+        assert_eq!(service.previous_outcome.as_ref(), Some(&historical));
+        service.migration_eligibility(context.clone(), Ok(()));
+        service.migration_history_checked(&context, true);
+        assert_eq!(
+            service.model(UiLocale::En).primary_action,
+            Some(UpdateCardPrimaryAction::Migrate)
+        );
+        assert_eq!(fs::read(&plan_path).unwrap(), plan_bytes);
+        assert_eq!(fs::read(&result_path).unwrap(), result_bytes);
+        assert_eq!(fs::read(&latest_path).unwrap(), latest_bytes);
+        assert!(write_operation(&state, &historical).is_err());
+        let mut fresh = failed_record('e');
+        fresh.phase = OperationPhase::Preparing;
+        write_operation(&state, &fresh).unwrap();
+        assert_eq!(latest_operation(&state).unwrap(), Some(fresh));
+        assert_eq!(fs::read(&plan_path).unwrap(), plan_bytes);
+        assert_eq!(fs::read(&result_path).unwrap(), result_bytes);
     }
 
     #[test]

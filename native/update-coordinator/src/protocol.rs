@@ -235,7 +235,7 @@ pub fn write_operation(state_dir: &Path, record: &OperationRecord) -> Result<Pat
     if !missing_file(&latest) {
         let old_id: String = serde_json::from_slice(&owned_private_file(&latest, 128)?)
             .map_err(|_| "existing latest-operation marker is unsupported")?;
-        read_operation(state_dir, &old_id)?
+        read_operation_observation(state_dir, &old_id)?
             .ok_or("existing latest-operation marker has no durable journal")?;
     }
     if record.version != UPDATER_PROTOCOL {
@@ -254,7 +254,22 @@ pub fn write_operation(state_dir: &Path, record: &OperationRecord) -> Result<Pat
     )?;
     Ok(path)
 }
+/// Executable authority: historical journals are never accepted by a current helper.
 pub fn read_operation(
+    state_dir: &Path,
+    operation_id: &str,
+) -> Result<Option<OperationRecord>, String> {
+    let record = read_profile_operation(state_dir, operation_id)?;
+    if record
+        .as_ref()
+        .is_some_and(|record| record.version != UPDATER_PROTOCOL)
+    {
+        return Err("unsupported operation journal protocol".into());
+    }
+    Ok(record)
+}
+
+fn read_profile_operation(
     state_dir: &Path,
     operation_id: &str,
 ) -> Result<Option<OperationRecord>, String> {
@@ -265,6 +280,14 @@ pub fn read_operation(
         return Ok(None);
     }
     check_dir(&updates, false)?;
+    read_operation_in(&updates, operation_id)
+}
+
+fn read_operation_in(
+    updates: &Path,
+    operation_id: &str,
+) -> Result<Option<OperationRecord>, String> {
+    validate_operation_id(operation_id)?;
     let path = updates.join(format!("{operation_id}.result.json"));
     let bytes = match owned_private_file(&path, 16384) {
         Ok(v) => v,
@@ -272,17 +295,117 @@ pub fn read_operation(
         Err(e) => return Err(e),
     };
     let record: OperationRecord = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if record.version != UPDATER_PROTOCOL {
-        return Err("unsupported operation journal protocol".into());
-    }
     if record.operation_id != operation_id {
         return Err("journal operation id mismatch".into());
+    }
+    if record.detail.len() > 8192 || record.applied && !record.installed {
+        return Err("invalid operation outcome".into());
     }
     Ok(Some(record))
 }
 
+fn historical_identity(identity: &crate::ExecutableIdentity) -> Result<(), String> {
+    ensure_absolute(&identity.path)?;
+    if identity.sha256.len() != 64
+        || !identity
+            .sha256
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err("invalid historical executable identity".into());
+    }
+    Ok(())
+}
+
+fn historical_terminal(record: &OperationRecord) -> Result<(), String> {
+    if !(1..UPDATER_PROTOCOL).contains(&record.version)
+        || record.version > 3
+        || record.detail.len() > 8192
+        || record.applied && !record.installed
+        || record.execution_fence == ExecutionFence::ManagerIntent
+        || record.installed && record.execution_fence != ExecutionFence::ManagerExited
+        || !match record.phase {
+            OperationPhase::Completed => record.installed && record.applied,
+            OperationPhase::Failed | OperationPhase::UserStopped => !record.applied,
+            _ => false,
+        }
+    {
+        return Err(
+            "historical operation is unresolved; retain its matching helper and evidence".into(),
+        );
+    }
+    if let Some(candidate) = record.candidate.as_ref() {
+        historical_identity(candidate)?;
+    }
+    Ok(())
+}
+
+/// Read-only historical scope, never a plan accepted by `read_plan` or a runner.
+/// No image is opened: an old keg/checkout may legitimately no longer exist.
+pub fn historical_operation_plan(
+    state_dir: &Path,
+    record: &OperationRecord,
+) -> Result<crate::UpdatePlan, String> {
+    historical_terminal(record)?;
+    validate_operation_id(&record.operation_id)?;
+    check_dir(state_dir, false)?;
+    let updates = state_dir.join(UPDATES_DIR);
+    check_dir(&updates, false)?;
+    let marker = updates.join("profile.reservation.json");
+    if !missing_file(&marker) {
+        owned_private_file(&marker, 16384)?;
+        return Err("historical operation still has a reservation; retain matching helper".into());
+    }
+    let data = owned_private_file(
+        &updates.join(format!("{}.plan.json", record.operation_id)),
+        65536,
+    )?;
+    let plan: crate::UpdatePlan = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    if plan.version != record.version
+        || plan.operation_id != record.operation_id
+        || plan.context.state_dir != state_dir
+        || plan.running != plan.context.running
+        || plan.context.instance_id.is_empty()
+        || plan.context.instance_id.len() > 128
+        || plan
+            .context
+            .running_origin
+            .as_deref()
+            .is_some_and(|origin| origin != &plan.origin)
+    {
+        return Err("historical plan scope or identity mismatch".into());
+    }
+    ensure_absolute(&plan.context.config_dir)?;
+    ensure_absolute(&plan.context.executable)?;
+    ensure_absolute(crate::physical_install_root(&plan.origin)?)?;
+    ensure_absolute(crate::physical_install_root(plan.target_origin())?)?;
+    historical_identity(&plan.running)?;
+    if let Some(candidate) = plan.candidate.as_ref() {
+        historical_identity(candidate)?;
+    }
+    plan.context.observation_mode()?;
+    Ok(plan)
+}
+
+/// Presentation/admission evidence only. The original version and bytes stay intact;
+/// callers needing execution or recovery authority must use `read_operation`.
+pub fn read_operation_observation(
+    state_dir: &Path,
+    operation_id: &str,
+) -> Result<Option<OperationRecord>, String> {
+    let record = read_profile_operation(state_dir, operation_id)?;
+    if let Some(record) = record
+        .as_ref()
+        .filter(|record| record.version != UPDATER_PROTOCOL)
+    {
+        historical_operation_plan(state_dir, record)?;
+    }
+    Ok(record)
+}
+
 /// A reserved operation takes precedence over the most recently persisted outcome.
 /// Read only: an untouched profile does not gain an update directory.
+/// Historical terminal records are observations only, never recovery authority.
 pub fn latest_operation(state_dir: &Path) -> Result<Option<OperationRecord>, String> {
     check_dir(state_dir, false)?;
     #[cfg(not(desktop_pet_legacy))]
@@ -310,7 +433,7 @@ pub fn latest_operation(state_dir: &Path) -> Result<Option<OperationRecord>, Str
     }
     let operation_id: String =
         serde_json::from_slice(&owned_private_file(&latest, 128)?).map_err(|e| e.to_string())?;
-    read_operation(state_dir, &operation_id)?
+    read_operation_observation(state_dir, &operation_id)?
         .map(Some)
         .ok_or_else(|| "latest update marker has no durable outcome".into())
 }
@@ -693,23 +816,9 @@ fn reject_profile_reservations(state: &Path, old_only: bool) -> Result<(), Strin
                 let id: String = serde_json::from_slice(&owned_private_file(&latest, 128)?)
                     .map_err(|_| "unsupported legacy journal locator; preserve original bytes")?;
                 validate_operation_id(&id)?;
-                let record: serde_json::Value = serde_json::from_slice(&owned_private_file(
-                    &updates.join(format!("{id}.result.json")),
-                    16384,
-                )?)
-                .map_err(|_| "unsupported legacy journal; preserve original bytes")?;
-                if !matches!(
-                    record.get("version").and_then(serde_json::Value::as_u64),
-                    Some(1..=3)
-                ) || !matches!(
-                    record.get("phase").and_then(serde_json::Value::as_str),
-                    Some("completed" | "failed" | "user_stopped")
-                ) {
-                    return Err(
-                        "legacy operation is unresolved; retain its matching helper and evidence"
-                            .into(),
-                    );
-                }
+                let record = read_operation_in(&updates, &id)?
+                    .ok_or("legacy journal locator has no durable outcome")?;
+                historical_terminal(&record)?;
             }
         }
     }
@@ -4122,6 +4231,63 @@ mod tests {
         assert!(read_operation(&state, id).is_err());
         assert!(write_operation(&state, &record).is_err());
         assert_eq!(fs::read(&journal).unwrap(), old_journal);
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn historical_profile_admission_requires_a_complete_settled_journal() {
+        let (_dir, global, state, origin) = fixture();
+        let updates = state.join("updates");
+        check_dir(&updates, true).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        let journal = updates.join(format!("{id}.result.json"));
+        let latest = updates.join("latest-operation.json");
+        let completed = OperationRecord {
+            version: 2,
+            operation_id: id.into(),
+            phase: OperationPhase::Completed,
+            execution_fence: ExecutionFence::ManagerExited,
+            detail: "retained historical installation".into(),
+            installed: true,
+            applied: true,
+            candidate: None,
+        };
+        let original = serde_json::to_vec_pretty(&completed).unwrap();
+        let pointer = serde_json::to_vec(id).unwrap();
+        write_private_new(&journal, &original, 0o600).unwrap();
+        write_private_new(&latest, &pointer, 0o600).unwrap();
+        assert!(latest_operation(&state).unwrap().is_none());
+        assert!(!state.join(UPDATES_DIR).exists());
+        start_allowed_at(&global, &origin, &state, None, None).unwrap();
+        assert_eq!(fs::read(&journal).unwrap(), original);
+        assert_eq!(fs::read(&latest).unwrap(), pointer);
+
+        for (key, value) in [
+            ("version", serde_json::json!(UPDATER_PROTOCOL)),
+            ("operation_id", serde_json::json!("b".repeat(32))),
+            ("phase", serde_json::json!("unknown")),
+            ("phase", serde_json::json!("installing")),
+            ("execution_fence", serde_json::json!("manager_intent")),
+            ("applied", serde_json::json!(false)),
+            ("installed", serde_json::json!(false)),
+            ("unrecognized", serde_json::json!(true)),
+        ] {
+            let mut invalid = serde_json::to_value(&completed).unwrap();
+            invalid[key] = value;
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            write_private_bytes(&journal, &bytes, 0o600).unwrap();
+            assert!(latest_operation(&state).is_err(), "{key}: {invalid}");
+            assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
+            assert_eq!(fs::read(&journal).unwrap(), bytes);
+            assert_eq!(fs::read(&latest).unwrap(), pointer);
+        }
+        write_private_bytes(&journal, &original, 0o600).unwrap();
+        let marker = updates.join("profile.reservation.json");
+        let reserved = br#"{"version":2}"#;
+        write_private_new(&marker, reserved, 0o600).unwrap();
+        assert!(latest_operation(&state).is_err());
+        assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), reserved);
     }
 
     #[cfg(not(desktop_pet_legacy))]
