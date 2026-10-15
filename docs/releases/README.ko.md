@@ -1,5 +1,21 @@
 # Desktop Pet 버전 안내
 
+## 현재 게시 및 수락의 정본
+
+[v0.4.7 정본 릴리스 노트·수락 원장](v0.4.7.md)이 현재 관측과 미완료 gate의 기준입니다. **현재 공개 Core:** [v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, 게시 `2026-10-15T08:39:17Z`, 정확한 소스 `52514da5115f09aac22de5429c08f7acdd993258`. [Release CI 38706583599](https://github.com/hanbong5938/desktop-pet/actions/runs/38706583599), job `116327375871`이 통과했습니다. 익명 자산 6개·strict/deep ad-hoc 서명·protocol 4 / observation 2 / API 1·정확한 68개 파일 리소스 closure를 검증했습니다. Archive SHA-256: `f89ea6c52197bd4c7fb70336846099f1e5eb553f2de9bb4cd43b14b1134da8fa`; installer: `f64a27593058a68c5a5e112f448be644c6abfbb760be109acf992e2f415f5829`.
+
+**현재 genuine 공개 bridge:** [v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, 게시 `2026-10-15T09:25:08Z`, metadata ingress commit `fa56caa32ea06d86932c5b4cc3eb230010c6dd9c`; 위 공개 Core의 정확한 소스로 빌드했습니다. [Bridge CI 38707461727](https://github.com/hanbong5938/desktop-pet/actions/runs/38707461727), job `116330312000`은 실제 logical `TMPDIR=/tmp` native 검증과 생성 앱 Git admission을 통과했습니다. 익명 자산 5개 모두 실제 CI bytes와 같으며 source closure 11개 파일·서명·배포 파일 68개·원래 legacy identity·protocol 3 / observation 1 / API 1을 검증했습니다. Archive SHA-256: `2075baefbf212f5cbfbdc0163ce0e6887fa6d05f20e2a24c47ae24012649ab60`. 공개 stable tap commit `6693cd9db26e6dba9a257bbe76acaf78cb502c2f`은 Core v0.4.7 / bridge v0.3.11을 제공하며 beta는 불변입니다. Catalog refresh는 앱을 업그레이드하지 않았습니다.
+
+**수정은 과거 수락을 소급 변경하지 않습니다:** [v0.4.6](v0.4.6.md)은 실제 게시됐지만 실제 final-helper Cancel이 source/data를 보존하면서 잘못된 Unknown을 만들었습니다(operation `4e7c08a92628b583616115c858e5f4a6`). 해당 release·자산·실패 VM·journal은 과거 증거로 보존합니다. v0.4.7은 바인딩된 typed Cancelled와 VisibleApproved를 구분하며 unexpected/invalid/foreign/EOF/nonzero/incoherent delivery는 여전히 Unknown입니다. 이를 취소로 이름 바꾸거나 clear·replay하지 않습니다. 새 수동 same-source v0.3.11 candidate(공개 CI byte identity 아님)에서 실제 source-review·final-native Cancel이 원래 source/config/state를 보존했습니다. 별도 승인한 수동 source B `233d3446fb5ca745bc8a5bd4c50e49bc`는 인증된 공개 v0.4.7 target에서 complete / native_ready=true / target_committed=true·같은 명시 profile·저장 Herdr H1/T0·UI/control ready에 도달했고 검토한 수동 bundle만 retirement했습니다. **공개 Brew 소유권·retirement 증거는 아닙니다.**
+
+**실제 공개 경로:** 공개 Brew v0.3.10 → 일반 v0.3.11 A′ → 원래 helper terminal/quiescent 정착 → 별도 source review·최종 native 동의 B → 공개 v0.4.7 readiness/Commit → 실제 소유 Brew retirement가 통과했습니다. 원래 프로필 바이트, 가져온 캐릭터·대사·이력과 무관 프로필을 보존하고 최종 native Check도 통과했습니다. 공개 source의 4개 언어 취소, ManagerUnknown 보존, late Stop, 확정 정리 실패·독립 동의 same-plan Resume도 통과했습니다. 실제 사용자 Mac 승인과 main/Pages 관측은 정본 원장에서 별도로 추적합니다. 동결 v0.3.6/beta 경로는 구분하며 실제 Tern provider/account/양쪽 순서 증거를 주장하지 않습니다.
+
+현재 Herdr scripts·evidence 8개는 공개 Core release `413584934` / source `52514da5115f09aac22de5429c08f7acdd993258`에서 materialize됐으며 새 연동 태그·native build는 없습니다. 실제 consumer install/status는 같은 이전 완료 공개 Core process/profile을 재사용했습니다. Herdr-managed retirement는 자산 없는 v0.4.1, Brew retirement는 승인한 실제 stable legacy formula만 사용합니다. Wiki job `116329481248`은 render 후 전용 `WIKI_PUBLISH_TOKEN` 부재로 실패했으며 broad-token fallback·binary 재실행은 없습니다. 별도 관측한 배포 상태는 정본 원장을 따릅니다.
+
+## 과거 게시 및 실행 스냅샷
+
+아래 v0.4.5 이하 증거는 과거 기록입니다. 이 스냅샷 안의 “현재”·“now”·명령 pin은 당시 릴리스 범위를 가리키며 오늘의 게시나 설치 사용자 수락을 뜻하지 않습니다. 현재 정본은 위 v0.4.7 원장입니다.
+
 **현재 공개 Core:** [Desktop Pet v0.4.5](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5), release `412667385`, `2026-10-14T12:01:32Z`, source `51dcf22415b1ff0faf07651cb83c1c696c980f43`. 익명 자산 6개·strict 서명·protocol 4 / capability 2 / API 1·정확한 68개 리소스 해시 closure가 통과했습니다. Archive SHA-256 `41024ed9d82e5be7169c166bcd6e443c319f6b8916cad63b8399cd4ad02bb45a`; installer SHA-256 `fdcd9d80f8672b54ceca967bfea6f72223d2e5caed97f845140a68b9e7414a16`; checksums SHA-256 `8c9c8ab020bc4561c4a2c17f4c6d20b3e8a18672b84f508426e68ed259598c5e`. [Release CI 38560075408](https://github.com/hanbong5938/desktop-pet/actions/runs/38560075408), job `115838673595`: PASSED. Exact-source gates: neutral **743** primary Rust / 1 ignored; genuine legacy **758** primary Rust / 1 ignored; 62 Bun / 746 assertions / TS / fmt / locked tree / full package / 68-resource closure; genuine native `TMPDIR=/tmp` and real Git admission/dirty-user guard. Neutral formula tap `d66411383141644f01f1ca839086b6d505a997ac`. Wiki job `115840956329`의 render는 성공했지만 게시가 실패했습니다. 소유자의 Wiki Home 초기화와 전용 `WIKI_PUBLISH_TOKEN`이 여전히 필요하며 broad token fallback·binary 재실행은 없습니다. Pages 배포·공개 네 언어 render는 별도 관측 검증이 필요하며 릴리스/native 수락은 배포 증거가 아닙니다.
 
 **실제 공개 Brew v0.4.4 → v0.4.5 일반 업데이트 완료:** operation `a6991e69233377c32b150186c62888fd`, `homebrew_upgrade` / `manager_exited`, installed/applied true. PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`, Brew 파생 image `a06f7e7045a1cfa83a3d7ed7d7a135eab4f8d911a3275647b89743fe5815c500`이 정확한 옛 private profile·저장된 Herdr(H1/T0)로 UI/control ready에 도달했습니다. 업데이트 후 native Check는 녹색 **No update from selected source / 0.4.5 / Homebrew**입니다. 적용 전 Check는 source preferences만 변경했고, 적용은 `source.log`와 새 operation 파일 외 모든 옛 config/evidence·무관한 기본 tree를 보존했습니다. 무관한 과거 hidden PID `2641`은 옛 A/B 증거를 봉인한 뒤에만 명시 Stop했습니다. Herdr 재설치는 없습니다. Actual manager `/opt/homebrew/bin/brew`: PID = PGID `9853`, exit 0, drained true; retained helper strict-signature result 0, stdout upgraded only desktop-pet v0.4.4 → v0.4.5.
@@ -31,7 +47,7 @@
 **과거 working-metadata·일반 업데이트 증거(최종 v0.3.9/v0.4.4 수락 아님):** 실제 managed B는 working metadata `f7edf5e0eba374248b9a5ee9d66d26109b39eca2`·불변 공개 v0.3.8 native·공개 Core v0.4.3으로 NativeReady/Commit 이후 definite retirement failure(manager exit 1, quiescent)에 도달했습니다. 도입한 소유 `uchg` flag만 제거하고 같은 plan SHA `3615fa140fd1b0d49910f5f2ef170b64122243c6c65d0098d4ecfd729e951f16`에 독립 명시 Resume 동의를 받아 attempt 2가 완료됐습니다(실제 CLI exit 0, quiescent). 옛 managed app/source를 retirement했고 Herdr v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`은 같은 v0.4.3 instance를 재사용했습니다. 옛 A 증거 87개·first-attempt/plan/consent 5개·옛 config·무관한 기본 프로필 해시는 불변입니다. 실제 공개 중립 v0.4.2 → v0.4.3 일반 업데이트도 완료됐습니다(`81c82d837b65fb03584bfb1e668119c3`, `standalone_replace`). 같은 프로필/Herdr 0 ready·루벨리아 UI를 확인했고 Herdr 재설치는 없었습니다. Check는 `last_update_check`만 바꿨고 Check 이후 모든 config bytes와 옛 A 증거 87개는 업데이트 전후 불변입니다. 이는 최종 공개 v0.3.9 A/B나 v0.4.4 업데이트 증거가 아닙니다.
 
 
-[실제 Desktop Pet v0.4.5 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5) · [v0.4.5 게시 기록](v0.4.5.md) · [과거 Desktop Pet v0.4.3 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.3) · [v0.4.3 게시 기록](v0.4.3.md) · [과거 Desktop Pet v0.4.2 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2) · [v0.4.2 게시 기록](v0.4.2.md) · [Desktop Pet v0.4.1 게시 및 검증 기록](v0.4.1.md) · [과거 v0.4.0 게시 및 검증 기록](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
+[현재 Desktop Pet v0.4.7 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7) · [v0.4.7 정본 노트·수락 원장](v0.4.7.md) · [과거 v0.4.6 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.6) · [v0.4.6 기록](v0.4.6.md) · [과거 Desktop Pet v0.4.5 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5) · [v0.4.5 게시 기록](v0.4.5.md) · [과거 Desktop Pet v0.4.3 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.3) · [v0.4.3 게시 기록](v0.4.3.md) · [과거 Desktop Pet v0.4.2 release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.2) · [v0.4.2 게시 기록](v0.4.2.md) · [Desktop Pet v0.4.1 게시 및 검증 기록](v0.4.1.md) · [과거 v0.4.0 게시 및 검증 기록](v0.4.0.md) · [A → B migration](../migrations/desktop-pet.md) · [Core release authority](https://github.com/hanbong5938/desktop-pet/releases)
 
 **과거 v0.4.2 / v0.3.7 수정 근거:** [Core v0.4.2 기록](v0.4.2.md)은 이전 공개 core와 포뮬러 근거입니다. 현재 불변 prebuilt/source 명령은 `v0.4.4`을 사용합니다. 수정 [Herdr v0.4.1](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.4.1)(`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`, release `412252863`)·[bridge v0.3.7](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.7)(`987a4b859f95e922c1c5443ead372d10d0dddb24`, release `412267469`)은 실제 게시되었습니다. 공개 standalone v0.4.1 → v0.4.2 네이티브 업데이트와 같은 프로필 준비는 완료했고, 실제 동결 공개 Brew v0.3.6 → v0.3.7 A `6a10663c2d2f0177990623a969238af4`와 별도 동의 Core v0.4.2 B `c66961f9e5a91c0023545065ae61385b`는 실제 Brew retirement(exit 0, quiescent)까지 완료했습니다. B 전후 모든 설정 파일 해시와 이전 A 증거 87개 파일은 불변이며 실제 Core v0.4.2 UI는 Desktop Pet / Herdr Waiting 0 / Tern Disabled 0입니다. 반면 실제 managed v0.3.7 A `a1aec5902020de7bcaaf583b1a5f50a5`는 native `/tmp` 프로필 검증에 실패했습니다. checkout 교체·registry 등록 전 manager exit 1이 발생했고 동결 helper는 Unknown / `manager_exited`, installed/applied false를 보존합니다. VM·journal·reservation은 recovery/replay 없이 유지합니다. 검증한 공개 SHA-256: archive `1693fcc5a5780fd08eab6f3b15c62f6a3be54a86574a557fd431ab48aa251427`, installer `a0ec644c3baecc7b81baddd29fbbbd3a8f25777e804a6d9940b78820bacc08ec`, rig `b5fa61ad316e52ed3b2024201b009b2dffd8fc1481530c5eb69549b329101284`.
 
@@ -45,6 +61,7 @@
 
 | 필요한 정보 | 문서 |
 | --- | --- |
+| 현재 불변 Core·genuine bridge 게시와 관측/미완료 수락 | [v0.4.7 정본 노트·원장](v0.4.7.md) · [공개 bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11) |
 | 현행 앱 조작·캐릭터·관찰·문제 해결 | [사용 안내](../usage.ko.md) · [CLI 계약](../cli.md#한국어) |
 | 소스 빌드·캐릭터 제작·홍보 웹사이트 개발 | [개발 안내](../development.ko.md) |
 | 공개 v0.3.6 안정판·Tern 연동·4개 언어·protocol-3 베타 명시적 동의 | [v0.3.6 정본 노트·업그레이드 안내](v0.3.6.md) · [0.3 게시 증거](0.3.md#v036-실제-게시-확인) |
@@ -63,7 +80,7 @@
 
 | 계열 | 범위 |
 | --- | --- |
-| [0.4 현재 v0.4.5](v0.4.5.md) | 실제 공개 중립 Core v0.4.5; [과거 v0.4.3](v0.4.3.md)·[v0.4.2](v0.4.2.md) 증거는 해당 버전의 범위를 유지합니다 |
+| [0.4 현재 v0.4.7](v0.4.7.md) | 공개 중립 Core v0.4.7·현재 수락 원장; [v0.4.6](v0.4.6.md)·[v0.4.5](v0.4.5.md)·[v0.4.3](v0.4.3.md)·[v0.4.2](v0.4.2.md) 증거는 과거 범위를 유지합니다 |
 | [0.3](0.3.md) | 공개 v0.3.6 안정판 [게시 증거](0.3.md#v036-실제-게시-확인)·동결 [정본 노트/업그레이드 안내](v0.3.6.md); 이전 v0.3.5와 별도 베타 증거는 과거 기록으로 보존 |
 | [0.2](0.2.md) | 이전 v0.2.1 안정판 호환성 패치 [정본 한영 노트](v0.2.1.md), v0.2.0 [안정판 노트](v0.2.0.md)·[한영 업그레이드 안내](../migrations/v0.1.11-to-v0.2.0.md) |
 | [0.1](0.1.md) | 과거 공개 v0.1.4 및 v0.1.6–v0.1.11, 태그만 있는 v0.1.5 |
@@ -77,5 +94,7 @@
 v0.1.4–v0.1.11 태그에는 이 문서 트리가 없었습니다. 따라서 과거 노트는 당시 근거를 바탕으로 현재 소스에서 재구성한 문서이며, 과거 태그의 원본과 실제 Release를 연결합니다. 과거 태그·배포 파일·Release 본문을 다시 쓰지 않습니다. 과거 검증 내용은 당시 보고된 근거이지 이 문서 작업에서 새로 실행한 검증이 아닙니다.
 
 ## 업그레이드 안전 요약
+
+현재 Core v0.4.7 / bridge v0.3.11 경로와 관측·미완료 수락은 [v0.4.7 정본 원장](v0.4.7.md)을 따릅니다. 아래 v0.3.6 요약은 동결 호환 경로이며 현재 공개 Brew v0.3.10의 일반 v0.3.11 A′와 별도 native B를 대신하지 않습니다.
 
 v0.3.6으로 옮길 때는 기존 데몬을 먼저 종료하고 [v0.3.6 정본 업그레이드 안내](v0.3.6.md)를 확인하세요. 공개 자산 4개와 stable 포뮬러의 정확한 태그 URL·검증된 SHA는 [현행 게시 기록](0.3.md#v036-실제-게시-확인)에 있습니다. 업그레이드 후 CLI 버전뿐 아니라 다시 시작한 앱의 `status` 버전·실행 경로도 확인하세요. Herdr/Tern 프로필은 설정과 상태를 모두 분리하며 이전 protocol-1/2 updater 기록·예약은 보존하고 해당 helper로 복구합니다. 이전 v0.3.5 게시와 업그레이드는 [0.3 과거 기록](0.3.md), v0.1.11 → v0.2.0 전환은 [과거 한영 안내](../migrations/v0.1.11-to-v0.2.0.md), Arin 수정은 [v0.2.1 패치](v0.2.1.md)를 참고하세요.

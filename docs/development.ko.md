@@ -4,6 +4,24 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## 현재 검증·게시 경계 — 2026-10-15
+
+현재 관측과 미실행 항목의 정본은 [Core v0.4.7 수락 기록](releases/v0.4.7.md)입니다. 불변 [Core v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7)은 release `413584934`, 게시 `2026-10-15T08:39:17Z`, 태그 역참조 소스 `52514da5115f09aac22de5429c08f7acdd993258`입니다. [Release CI 38706583599](https://github.com/hanbong5938/desktop-pet/actions/runs/38706583599) / job `116327375871` 통과. 익명 자산 6개·strict/deep ad-hoc 서명·일치 protocol 4 / observation 2 / API 1·정확한 68개 리소스 closure 통과. Archive SHA-256 `f89ea6c52197bd4c7fb70336846099f1e5eb553f2de9bb4cd43b14b1134da8fa`, installer `f64a27593058a68c5a5e112f448be644c6abfbb760be109acf992e2f415f5829`.
+
+Genuine [bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11)은 같은 정확한 Core 소스로 빌드한 원래 legacy 이름·protocol 3 / observation 1 / API 1 앱/도우미입니다. Release `413623057`, 게시 `2026-10-15T09:25:08Z`, annotated tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, 역참조 metadata-only ingress commit `fa56caa32ea06d86932c5b4cc3eb230010c6dd9c`. [Bridge CI 38707461727](https://github.com/hanbong5938/desktop-pet/actions/runs/38707461727) / job `116330312000`은 실제 논리 `TMPDIR=/tmp` native 검증·생성 앱 Git admission 통과. 공개 자산 5개는 CI 바이트와 일치하며 서명·11개 소스 파일 closure·배포 파일 68개 통과. Archive SHA-256 `2075baefbf212f5cbfbdc0163ce0e6887fa6d05f20e2a24c47ae24012649ab60`.
+
+공개 tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f`는 Core4.7/bridge3.11을 제공하며 beta는 불변입니다. 실제 공개 Brew3.10→일반3.11 A′는 원래 helper로 정착했고, 독립 동의 공개 B4.7은 native readiness/Commit·실제 소유 Brew retirement를 완료했습니다. 동결3.6 compatibility·beta2→일치3.6 경로는 별개입니다.
+
+정확한 태그52514da의 neutral768/1 ignored·genuine legacy788/1 ignored, 현재 Bun62/746 expectations·TypeScript/format/release-docs·consumer adapter104개가 통과했습니다. 실제 공개 B에서 원래 프로필 바이트·가져온 캐릭터·대사·이력·무관 프로필을 보존했습니다. 4개 언어 review/Cancel, rollback, early/late Stop, ManagerUnknown 보존, 확정 실패 후 독립 동의 same-plan Resume도 통과했습니다. 정확한 범위와 보존한 v0.4.6 false-Unknown 실패는 [정본 원장](releases/v0.4.7.md)을 따르며 Unknown을 clear/replay하지 않습니다.
+
+현재 Herdr scripts/evidence 8개는 공개 Core4.7에서 materialize했고 같은 이전 완료 공개 앱·프로필을 설치·시작·Herdr 재설치 없이 재사용했습니다. 자산 없는 Herdr4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`은 Herdr-managed retirement 전용이며 새 연동 태그·native build는 없습니다. 실제 Mac native 승인과 main/Pages 제공 관측은 원장에서 별도 기록합니다. H1/T0는 실제 Tern-account/양쪽 순서 증거가 아닙니다.
+
+Wiki job `116329481248`은 render 후 전용 `WIKI_PUBLISH_TOKEN` 부재로 실패했으며 broad credential 대체·binary 재실행은 없습니다. 소스·CI·게시·설치 인수·브라우저로 관측한 Pages 배포는 서로 다른 증거입니다.
+
+## v0.4.5 / bridge v0.3.10까지의 과거 검증 기록
+
+이 절의 “현재/실제/이제” 표현은 당시 버전·날짜에만 해당합니다. 옛 PID·digest·Unknown은 보존하며 v0.4.7 / v0.3.11 수락이나 오늘의 배포 pin으로 해석하지 않습니다.
+
 **현재 공개 Core:** [Desktop Pet v0.4.5](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5), release `412667385`, `2026-10-14T12:01:32Z`, source `51dcf22415b1ff0faf07651cb83c1c696c980f43`. 익명 자산 6개·strict 서명·protocol 4 / capability 2 / API 1·정확한 68개 리소스 해시 closure가 통과했습니다. Archive SHA-256 `41024ed9d82e5be7169c166bcd6e443c319f6b8916cad63b8399cd4ad02bb45a`; installer SHA-256 `fdcd9d80f8672b54ceca967bfea6f72223d2e5caed97f845140a68b9e7414a16`; checksums SHA-256 `8c9c8ab020bc4561c4a2c17f4c6d20b3e8a18672b84f508426e68ed259598c5e`. [Release CI 38560075408](https://github.com/hanbong5938/desktop-pet/actions/runs/38560075408), job `115838673595`: PASSED. Exact-source gates: neutral **743** primary Rust / 1 ignored; genuine legacy **758** primary Rust / 1 ignored; 62 Bun / 746 assertions / TS / fmt / locked tree / full package / 68-resource closure; genuine native `TMPDIR=/tmp` and real Git admission/dirty-user guard. Neutral formula tap `d66411383141644f01f1ca839086b6d505a997ac`. Wiki job `115840956329`의 render는 성공했지만 게시가 실패했습니다. 소유자의 Wiki Home 초기화와 전용 `WIKI_PUBLISH_TOKEN`이 여전히 필요하며 broad token fallback·binary 재실행은 없습니다. Pages 배포·공개 네 언어 render는 별도 관측 검증이 필요하며 릴리스/native 수락은 배포 증거가 아닙니다.
 
 **실제 공개 Brew v0.4.4 → v0.4.5 일반 업데이트 완료:** operation `a6991e69233377c32b150186c62888fd`, `homebrew_upgrade` / `manager_exited`, installed/applied true. PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`, Brew 파생 image `a06f7e7045a1cfa83a3d7ed7d7a135eab4f8d911a3275647b89743fe5815c500`이 정확한 옛 private profile·저장된 Herdr(H1/T0)로 UI/control ready에 도달했습니다. 업데이트 후 native Check는 녹색 **No update from selected source / 0.4.5 / Homebrew**입니다. 적용 전 Check는 source preferences만 변경했고, 적용은 `source.log`와 새 operation 파일 외 모든 옛 config/evidence·무관한 기본 tree를 보존했습니다. 무관한 과거 hidden PID `2641`은 옛 A/B 증거를 봉인한 뒤에만 명시 Stop했습니다. Herdr 재설치는 없습니다. Actual manager `/opt/homebrew/bin/brew`: PID = PGID `9853`, exit 0, drained true; retained helper strict-signature result 0, stdout upgraded only desktop-pet v0.4.4 → v0.4.5.
@@ -55,24 +73,24 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Published immutable v0.4.5 installer and pinned assets:
-git checkout --detach v0.4.5
+# Published immutable v0.4.7 installer and pinned assets:
+git checkout --detach v0.4.7
 bash scripts/install.sh --prebuilt
-# Explicit source installation uses a separate checkout pinned to public v0.4.5.
+# Explicit source installation uses a separate checkout pinned to public v0.4.7.
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-**v0.4.5 소스 설치**는 실제 공개 태그에 고정한 별도 체크아웃에서 명시적으로 실행합니다:
+**v0.4.7 소스 설치**는 실제 공개 태그에 고정한 별도 체크아웃에서 명시적으로 실행합니다:
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
 cd desktop-pet-source
-git checkout --detach v0.4.5
+git checkout --detach v0.4.7
 bash scripts/install.sh --source
 ```
 
-불변 v0.4.5의 기본/`--prebuilt`는 정확한 공개 고정 자산을 사용합니다(과거 v0.4.0/v0.4.1 체크아웃은 각 pin 유지). 실패 시 source fallback은 없고 명시적 `--source`는 실제 공개 v0.4.5 태그를 포함해 선택한 core 체크아웃을 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
+불변 v0.4.7의 기본/`--prebuilt`는 정확한 공개 고정 자산을 사용합니다(과거 체크아웃은 각 pin 유지). 실패 시 source fallback은 없고 명시적 `--source`는 실제 공개 v0.4.7 태그를 포함해 선택한 core 체크아웃을 빌드합니다. standalone prebuilt는 **실제 OS 계정 home**의 `Applications/DesktopPet.app`, 승인된 source는 core의 `dist/DesktopPet.app`을 사용합니다. admission은 검증된 정상 기존 소유자를 재사용할 수 있으므로 설치기가 보고한 실행 파일을 사용하세요. 공유 locator는 계정 home `.local/share/desktop-pet/installation.json`에 원자 저장하며 탐색 근거일 뿐 권한이 아닙니다. 잘못된 명시 경로/locator는 fallback하지 않고 실행 파일·서명·capability·origin을 다시 검증합니다. Brew는 실제 formula/prefix를 소유하고 live/예약된 설치를 몰래 인수하지 않습니다.
 
 필요한 연동만 설치하세요. Herdr는 얇은 consumer이며 Tern은 네이티브 앱을 다운로드·빌드·설치·자동 시작하지 않습니다. 플러그인 갱신·제거는 연동만 바꾸고 공용 앱·프로필·캐릭터는 남깁니다. 일반 앱 업데이트는 Herdr 플러그인을 재설치하지 않습니다.
 
@@ -132,7 +150,7 @@ debug·release 네이티브 빌드는 `codesign`을 필요로 하며 [`native/ri
 
 Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI 버전과 C 구조체 일곱 개의 크기를 확인합니다. 초기 motion은 네이티브 호스트가 복사하는 봉인된 바이트이며 옛 경로 조회 방식으로 돌아가지 않습니다. Metal은 같은 인코더의 색상 그리기 전에 실제 흰자 구멍을 L/R/무방향 stencil로 준비하고 CPU 의미론적 hit·참조 래스터도 같은 소유권 규칙을 적용합니다. 흰자가 없는 rig의 기존 홍채 표시 동작은 유지합니다. `RIG_PROBE_FAULTS` probe의 `--eye-stencil-checks --output ABS`는 실제 픽셀·의미론적 fixture를 저장하지만 과거 취소/연결 해제 상황의 시각 현상 원인을 입증하지 않습니다.
 
-`scripts/build-rig-native.mjs`는 범위 제한된 소스/컴파일러/출력 해시를 `native/target/rig-native/release/rig-native.json`에 기록합니다. 패키징은 소스·생성 출력의 해시를 확인하고 원본 기록을 `Contents/Resources/rig-native-build.json`에 포함하며 독립 업데이트 코디네이터와 protocol/서명 검사도 유지합니다. 앱 서명 **이후** 코디네이터를 포함한 `Contents`의 모든 배포 파일 해시를 외부 `dist/DesktopPet.app.rig-native.json`에 기록해 서명 번들 안의 자체 해시 순환을 피합니다. 릴리스 워크플로는 기존 앱 전용 압축 파일·체크섬 두 파일 외에 별도 `DesktopPet-v0.4.5-rig-native.json` 자산을 게시하도록 구성되어 있습니다. 실제 공개 게이트는 별도입니다. 설치기/업데이터의 아카이브 입력 형식은 바꾸지 않으며 실제 추출된 서명 후 파일과 사이드카의 해시를 비교해야 배포 바이트 출처를 주장할 수 있습니다.
+`scripts/build-rig-native.mjs`는 범위 제한된 소스/컴파일러/출력 해시를 `native/target/rig-native/release/rig-native.json`에 기록합니다. 패키징은 소스·생성 출력의 해시를 확인하고 원본 기록을 `Contents/Resources/rig-native-build.json`에 포함하며 독립 업데이트 코디네이터와 protocol/서명 검사도 유지합니다. 앱 서명 **이후** 코디네이터를 포함한 `Contents`의 모든 배포 파일 해시를 외부 `dist/DesktopPet.app.rig-native.json`에 기록해 서명 번들 안의 자체 해시 순환을 피합니다. 릴리스 워크플로는 기존 앱 전용 압축 파일·체크섬 두 파일 외에 별도 `DesktopPet-v0.4.7-rig-native.json`을 게시하고 versioned installer/checksum을 포함해 자산 6개를 제공합니다. 설치기/업데이터의 아카이브 입력 형식은 바꾸지 않으며 실제 추출된 서명 후 파일과 사이드카의 해시를 비교해야 배포 바이트 출처를 주장할 수 있습니다.
 
 ## 저장소 구조
 
@@ -163,6 +181,8 @@ Rust/Swift rig 경계는 타입 있는 asset/token을 넘기기 **전에** ABI �
 현재 사이트의 제품 시각 자료는 정적 이미지이며 로컬 Pages 작업에 동영상·MP4 자산이 필요하지 않습니다.
 
 캡처를 게시하기 전에 화면 내용을 직접 확인하세요. 격리된 시연 프로필에서 앱만 담고 실제 세션 내용·계정명·로컬 경로·호스트명·이메일·인증 정보를 포함하지 마세요. 공개 PNG에는 이미지·색상 청크만 허용하며 `check`와 `stage`는 EXIF·텍스트·프로필 등 메타데이터를 거부합니다. 이 검사는 화면에 보이는 글자를 판별하지 않으므로 개인정보 수동 검토도 반드시 필요합니다.
+
+현재 v0.4.7 / v0.3.11 Pages 배포는 아직 관측하지 않았습니다. 아래 `cb10ce2` 배포 성공·영어/한국어 화면 검사는 과거 기록이며 링크·staged source는 오늘 공개 사이트가 바뀌었다는 증거가 아닙니다.
 
 한국어 기본 홍보 웹사이트는 [`site/`](../site/)에 있습니다. 네이티브 macOS 앱을 설명하는 사이트이며 브라우저에서 앱을 실행하지 않습니다. Core Pages 주소(실제 `cb10ce2` 배포 성공, 영어/한국어 브라우저 화면 확인; 일본어/중국어 시각 검증 주장 없음): [한국어](https://hanbong5938.github.io/desktop-pet/) · [영어](https://hanbong5938.github.io/desktop-pet/en/) · [중국어 간체](https://hanbong5938.github.io/desktop-pet/zh-Hans/) · [일본어](https://hanbong5938.github.io/desktop-pet/ja/). 제품 문구를 바꿀 때 네 페이지의 번역과 언어 전환 링크를 함께 갱신하고 `ko`·`en`·`zh-Hans`·`ja`의 상호 `hreflang` 및 한국어 루트를 가리키는 `x-default`를 유지하세요. 각 페이지의 canonical URL과 Open Graph 언어도 해당 페이지에 맞춰야 합니다. 외부 [캐릭터 갤러리](https://github.com/hanbong5938/herdr-characters)는 별도로 유지되며 한국어·영어만 제공합니다. 과거 v0.3.2 스크린샷을 최신 화면이나 번역된 스크린샷처럼 소개하지 마세요. 영어 소셜 미리보기 이미지를 공유해도 페이지 언어는 바뀌지 않습니다. 제목은 화면 폭에 맞춘 간결한 크기와 좁은 주변 여백을 사용하며 본문·터미널 명령어·버튼 크기는 제목과 독립적으로 유지합니다. 저장소 루트에서 실행하세요.
 

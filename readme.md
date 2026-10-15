@@ -8,7 +8,15 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 [Browse the optional character and outfit gallery](https://hanbong5938.github.io/herdr-characters/) (opens in English; choose KO for Korean) · [Character pack source and licenses](https://github.com/hanbong5938/herdr-characters). **Only Rubelia (`default@0`) is bundled.**
 
-**Current public Core:** [Desktop Pet v0.4.5](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5), release `412667385`, `2026-10-14T12:01:32Z`, source `51dcf22415b1ff0faf07651cb83c1c696c980f43`. Six anonymous assets, strict signatures, protocol 4 / capability 2 / API 1 and exact 68-resource hash closure passed. Archive SHA-256 `41024ed9d82e5be7169c166bcd6e443c319f6b8916cad63b8399cd4ad02bb45a`; installer SHA-256 `fdcd9d80f8672b54ceca967bfea6f72223d2e5caed97f845140a68b9e7414a16`; checksums SHA-256 `8c9c8ab020bc4561c4a2c17f4c6d20b3e8a18672b84f508426e68ed259598c5e`. [Release CI 38560075408](https://github.com/hanbong5938/desktop-pet/actions/runs/38560075408), job `115838673595`: PASSED. Exact-source gates: neutral **743** primary Rust / 1 ignored; genuine legacy **758** primary Rust / 1 ignored; 62 Bun / 746 assertions / TS / fmt / locked tree / full package / 68-resource closure; genuine native `TMPDIR=/tmp` and real Git admission/dirty-user guard. Neutral formula tap `d66411383141644f01f1ca839086b6d505a997ac`. Wiki job `115840956329` rendered successfully but publishing failed: owner-initialized Wiki Home and dedicated `WIKI_PUBLISH_TOKEN` are still required; no broad-token fallback or binary rerun. Pages deployment and all four public locale renders require independent observed verification; release/native acceptance is not deployment proof.
+**Current public Core:** [Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, exact immutable source `52514da5115f09aac22de5429c08f7acdd993258`. Six anonymous assets, strict/deep signatures, protocol4/observation2/API1 and exact68-file resource closure passed; release CI38706583599 passed. Exact digests, genuine public bridge3.11 authority and independent main/Pages observations are in the [canonical ledger](docs/releases/v0.4.7.md). Wiki publication needs dedicated `WIKI_PUBLISH_TOKEN`; never substitute broad credentials or rerun published binaries.
+
+**Actual public route:** public Brew3.10→ordinary3.11 A′ settled through its **original signed helper**, followed by separately reviewed and independently approved native **B→Core4.7**. Native readiness/Commit and real owning-Brew retirement completed; original config/state bytes, imported character/dialogue/history and unrelated profiles survived, with final native Check green. Four-locale cancellation and rollback/Stop/Unknown/definitive-failure/native-Resume observations passed. Actual user-Mac approvals remain separate; frozen3.6/beta routes and all historical failures/Unknowns retain their own scope. Never clear or replay Unknown.
+
+**Current consumer:** Herdr integration remains assetless4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`, not a new integration tag/native build. Current scripts/eight evidence files were materialized from actual public Core4.7 and reused the same migrated Standalone app/profile without installation/startup/Herdr reinstallation. The canonical ledger separates source, deployment and actual user-Mac acceptance; H1/T0 is not genuine Tern-account/two-order proof.
+
+### Historical v0.4.5 and earlier runtime evidence
+
+The following PIDs, hashes, helper results and completed operations belong only to their named historical versions, not v0.4.7/v0.3.11 or currently running owners.
 
 **Actual public Brew v0.4.4 → v0.4.5 normal update completed:** operation `a6991e69233377c32b150186c62888fd`, `homebrew_upgrade` / `manager_exited`, installed/applied true. PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`, Brew-derived image `a06f7e7045a1cfa83a3d7ed7d7a135eab4f8d911a3275647b89743fe5815c500`, reached UI/control ready on the exact old private profile with saved Herdr (H1/T0). Native post-upgrade Check is green: **No update from selected source / 0.4.5 / Homebrew**. Check before apply changed only source preferences; apply preserved all old config/evidence and unrelated default trees except `source.log`, adding only the new operation files. The unrelated historical hidden PID `2641` was explicitly stopped only after old A/B proof was sealed. No Herdr reinstall. Actual manager `/opt/homebrew/bin/brew`: PID = PGID `9853`, exit 0, drained true; retained helper strict-signature result 0, stdout upgraded only desktop-pet v0.4.4 → v0.4.5.
 
@@ -24,7 +32,13 @@ The actual pinned beta route **PASSED through the public v0.3.9 entrypoint**, wi
 
 **Historical v0.4.4 fresh Brew proof:** The neutral v0.4.4 formula is public at tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`. A qualified fresh Brew v0.4.4 install passed (74 files / 44.3 MB and five inner/outer re-signatures); authenticated inspection verified the Homebrew-derived image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`. Install/inspection created no neutral config/state or standalone app and did not start a daemon. Only explicit manual **Start** produced actual v0.4.4 UI/control readiness, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`. Rubelia and actual Settings showed **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**; explicit Hidden afterward preserved that default instance. This is fresh-install proof, not a v0.4.4 normal-update or managed-migration result.
 
-**Current public bridge:** [Herdr bridge v0.3.10](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.10), release `412684474`, `2026-10-14T12:20:45Z`, source `67eb44b53bda6ba96eaf68671b67a94cab7b304d`, common Core `51dcf22415b1ff0faf07651cb83c1c696c980f43`. Genuine legacy protocol 3 / capability 1 / API 1, original bundle/executable/helper; five anonymous public assets, strict signatures and exact 68-resource closure: PASSED. Archive SHA-256 `a75f4219f1d8bc7ef8c3bee29c030b0cd6c06853bab4e193e40838ef5d49b927`; rig SHA-256 `b3a5cded2b80e5f773fbcd3aa49d1e7d8d0868b27e9a2e872d03f3752cadc5a7`; raw native SHA-256 `0b1c8e63c6cee6904208bc3d90f184806c8f1216b8114a2b30da009d92be65a6`. [Bridge CI 38561115955](https://github.com/hanbong5938/desktop-pet/actions/runs/38561115955), job `115842136732`: PASSED, native `/tmp` and real Git gates. Source-only publication gate: exactly 11 regular UTF-8 metadata files, nine exact materializer bytes plus LICENSE/readme, only `/dist/HerdrDesktopPet.app/` ignore; no native/common implementation. Old stable formula tap `7bf1fd7f1b89bd77e68179fcee95cacf044927dc`; beta unchanged. Herdr v0.4.1 retirement ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` unchanged.
+### Current public bridge authority
+
+**Current public bridge:** [Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, `2026-10-15T09:25:08Z`, metadata-only ingress `fa56caa32ea06d86932c5b4cc3eb230010c6dd9c`, annotated tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`; built from exact public Core source `52514da5115f09aac22de5429c08f7acdd993258`. All five anonymous assets equal actual CI bytes; genuine `HerdrDesktopPet.app` / `herdr-desktop-pet` / `herdr-update-coordinator` / `dev.herdr.desktop-pet`, protocol 3 / observation 1 / API 1, signatures, 68 deployed files and 11-file source closure passed. Archive SHA-256 `2075baefbf212f5cbfbdc0163ce0e6887fa6d05f20e2a24c47ae24012649ab60`; sidecar SHA-256 `147c1a4e5e3c74a7b6fb02ce7a244cf7f865f623e11ab07d8918cb1f9340bad2`; raw native SHA-256 `fff86370b9c58b2d410b373125d11dc02508172f9a35f56e9e086546a21c27a3` (Brew-installed digest can differ). [Bridge CI 38707461727](https://github.com/hanbong5938/desktop-pet/actions/runs/38707461727), job `116330312000`: PASSED, actual logical `TMPDIR=/tmp` native validation and real generated-app Git admission. Public tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves stable Core v0.4.7 / bridge v0.3.11; beta blob `4e532e52aa1e81071bdf2daff5b4de7fd0d6dd51` unchanged. Catalog refresh did not upgrade an app.
+
+### Additional historical integration and SDK evidence
+
+The consumer materialization, runtime and source-check results below describe the v0.4.5-era checkout only; the current v0.4.7 consumer boundary is stated above. Provider limits remain in force.
 
 **Historical v0.3.9/v0.4.4 managed A completed:** Frozen v0.3.6 Check selected public v0.3.9 and changed only `preferences/last_update_check` (`1791963743` → `1791965310`); all other four-tree bytes, source PID `2467` and unrelated default PID `2641` stayed unchanged during Check. Exact-source `0f33f28` native A consent completed operation `d5b2bf6f02e031eabb5a8c8fdd805cab` (`completed` / `manager_exited`, installed/applied true). Actual public v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`, image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce`, reached matched protocol 3 / capability 1 / API 1, UI/control ready, Herdr 1 / Tern 0 on the exact private old config/state. The actual managed source Git status was fully clean. The original retained v0.3.6 helper passed strict/deep signatures and its actual status confirmed completed. Baselines hash all 87 old A-evidence files and 91 total state files. 
 
@@ -72,19 +86,19 @@ For prebuilt or source installation use the **core** checkout, not a Herdr integ
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Fixed published v0.4.5 prebuilt; unavailable/invalid downloads never build source:
-git checkout --detach v0.4.5
+# Fixed published v0.4.7 prebuilt; unavailable/invalid downloads never build source:
+git checkout --detach v0.4.7
 bash scripts/install.sh --prebuilt
 ```
 
 Default installation is **prebuilt-only**: unavailable downloads or validation failure never silently compile source. A non-Brew prebuilt belongs at the OS account home's `Applications/DesktopPet.app`; explicit source installation uses the core checkout's `dist/DesktopPet.app`. Installation admission may reuse a verified healthy installation rather than take over another owner. Read the reported executable/shared locator instead of assuming the source path is the selected installation. Reservations or live profiles prevent unsafe replacement. See [installation discovery](docs/development.md#profiles-and-installation-discovery).
 
-For explicit **v0.4.5 source installation**, use a separate checkout pinned to the actual public tag:
+For explicit **v0.4.7 source installation**, use a separate checkout pinned to the actual public tag:
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
 cd desktop-pet-source
-git checkout --detach v0.4.5
+git checkout --detach v0.4.7
 bash scripts/install.sh --source
 ```
 

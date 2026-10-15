@@ -4,6 +4,24 @@ An independent native macOS desktop companion. Rubelia reacts to touch, displays
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## Current qualification and publication — 2026-10-15
+
+The [current Core v0.4.7 acceptance ledger](releases/v0.4.7.md) owns current observations and pending gates. Immutable [Core v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, published `2026-10-15T08:39:17Z`, dereferences to source `52514da5115f09aac22de5429c08f7acdd993258`. [Release CI 38706583599](https://github.com/hanbong5938/desktop-pet/actions/runs/38706583599), job `116327375871`, passed. Six anonymous assets, strict/deep ad-hoc signatures, matched protocol 4 / observation 2 / API 1 and exact 68-file resource closure passed. Archive SHA-256: `f89ea6c52197bd4c7fb70336846099f1e5eb553f2de9bb4cd43b14b1134da8fa`; installer: `f64a27593058a68c5a5e112f448be644c6abfbb760be109acf992e2f415f5829`.
+
+Genuine [bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, published `2026-10-15T09:25:08Z`, uses exact Core source above, not renamed neutral binaries. Its annotated tag object is `a907424e89c10d484f8646f41d5f020fa93ba8bc`, dereferenced metadata-only ingress commit `fa56caa32ea06d86932c5b4cc3eb230010c6dd9c`. [Bridge CI 38707461727](https://github.com/hanbong5938/desktop-pet/actions/runs/38707461727), job `116330312000`, passed actual logical `TMPDIR=/tmp` native validation and generated-app Git admission. Five public assets equal CI bytes; original legacy names, protocol 3 / observation 1 / API 1, signatures, 11-file source closure and 68 deployed files passed. Archive SHA-256: `2075baefbf212f5cbfbdc0163ce0e6887fa6d05f20e2a24c47ae24012649ab60`.
+
+Public tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves Core v0.4.7 / bridge v0.3.11 with beta unchanged. Authentic public Brew3.10→ordinary3.11 A′ settled through its original helper, then independently consented public B4.7 completed native readiness/Commit and real owning-Brew retirement. Frozen3.6 compatibility and beta2→matched3.6 remain distinct routes.
+
+Exact-tag source52514da passed neutral768/1 ignored and genuine legacy788/1 ignored; current Bun62/746 expectations, TypeScript/format/release-docs and consumer104 adapter tests passed. Original profile bytes, imported character/dialogue/history and unrelated profiles survived actual public B. Four-locale review/Cancel, rollback, early/late Stop, preserved ManagerUnknown and definitive failure followed by independently approved same-plan Resume passed. The [canonical ledger](releases/v0.4.7.md) records exact scopes and preserved failures, including immutable v0.4.6 false-Unknown cancellation; never clear or replay historical Unknown.
+
+Current Herdr scripts/eight evidence files were materialized from public Core4.7 and actually reused the same migrated public app/profile without installation/startup or Herdr reinstall. Assetless Herdr4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` remains Herdr-managed-only retirement authority. No new integration tag/native build. Actual user-Mac native approval and deployed main/Pages observations are separate ledger entries; H1/T0 is not genuine Tern-account/two-order proof.
+
+Wiki job `116329481248` rendered then failed for missing dedicated `WIKI_PUBLISH_TOKEN`; no broad credential fallback or binary rerun. Source, CI, publication, installed acceptance and browser-observed Pages deployment remain distinct evidence.
+
+## Historical qualification snapshots through v0.4.5 / bridge v0.3.10
+
+All “current”, “actual” and “now” claims in this section retain their original version/date scope, PIDs, digests and Unknowns. They are not v0.4.7 / v0.3.11 acceptance or today's distribution pins.
+
 **Current public Core:** [Desktop Pet v0.4.5](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5), release `412667385`, `2026-10-14T12:01:32Z`, source `51dcf22415b1ff0faf07651cb83c1c696c980f43`. Six anonymous assets, strict signatures, protocol 4 / capability 2 / API 1 and exact 68-resource hash closure passed. Archive SHA-256 `41024ed9d82e5be7169c166bcd6e443c319f6b8916cad63b8399cd4ad02bb45a`; installer SHA-256 `fdcd9d80f8672b54ceca967bfea6f72223d2e5caed97f845140a68b9e7414a16`; checksums SHA-256 `8c9c8ab020bc4561c4a2c17f4c6d20b3e8a18672b84f508426e68ed259598c5e`. [Release CI 38560075408](https://github.com/hanbong5938/desktop-pet/actions/runs/38560075408), job `115838673595`: PASSED. Exact-source gates: neutral **743** primary Rust / 1 ignored; genuine legacy **758** primary Rust / 1 ignored; 62 Bun / 746 assertions / TS / fmt / locked tree / full package / 68-resource closure; genuine native `TMPDIR=/tmp` and real Git admission/dirty-user guard. Neutral formula tap `d66411383141644f01f1ca839086b6d505a997ac`. Wiki job `115840956329` rendered successfully but publishing failed: owner-initialized Wiki Home and dedicated `WIKI_PUBLISH_TOKEN` are still required; no broad-token fallback or binary rerun. Pages deployment and all four public locale renders require independent observed verification; release/native acceptance is not deployment proof.
 
 **Actual public Brew v0.4.4 → v0.4.5 normal update completed:** operation `a6991e69233377c32b150186c62888fd`, `homebrew_upgrade` / `manager_exited`, installed/applied true. PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`, Brew-derived image `a06f7e7045a1cfa83a3d7ed7d7a135eab4f8d911a3275647b89743fe5815c500`, reached UI/control ready on the exact old private profile with saved Herdr (H1/T0). Native post-upgrade Check is green: **No update from selected source / 0.4.5 / Homebrew**. Check before apply changed only source preferences; apply preserved all old config/evidence and unrelated default trees except `source.log`, adding only the new operation files. The unrelated historical hidden PID `2641` was explicitly stopped only after old A/B proof was sealed. No Herdr reinstall. Actual manager `/opt/homebrew/bin/brew`: PID = PGID `9853`, exit 0, drained true; retained helper strict-signature result 0, stdout upgraded only desktop-pet v0.4.4 → v0.4.5.
@@ -55,24 +73,24 @@ For prebuilt or source installation, use the **core** checkout, not a Herdr inte
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# Published immutable v0.4.5 installer and pinned assets:
-git checkout --detach v0.4.5
+# Published immutable v0.4.7 installer and pinned assets:
+git checkout --detach v0.4.7
 bash scripts/install.sh --prebuilt
-# Explicit source installation uses a separate checkout pinned to public v0.4.5.
+# Explicit source installation uses a separate checkout pinned to public v0.4.7.
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-For explicit **v0.4.5 source installation**, use a separate checkout pinned to the actual public tag:
+For explicit **v0.4.7 source installation**, use a separate checkout pinned to the actual public tag:
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git desktop-pet-source
 cd desktop-pet-source
-git checkout --detach v0.4.5
+git checkout --detach v0.4.7
 bash scripts/install.sh --source
 ```
 
-Default and `--prebuilt` use the exact published pinned assets of immutable v0.4.5 (historical v0.4.0/v0.4.1 checkouts retain their own pins). Failure never silently builds source; explicit `--source` builds the selected core checkout, including the actual public v0.4.5 tag. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; admitted source uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy owner: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
+Default and `--prebuilt` use the exact published pinned assets of immutable v0.4.7 (historical checkouts retain their own pins). Failure never silently builds source; explicit `--source` builds the selected core checkout, including the actual public v0.4.7 tag. A standalone prebuilt installs to the **OS account home**’s `Applications/DesktopPet.app`; admitted source uses that core checkout’s `dist/DesktopPet.app`. Admission may reuse a verified healthy owner: use the installer-reported executable, not an assumed dist path. The private atomic shared locator is the account home’s `.local/share/desktop-pet/installation.json`; it is discovery evidence, not authority. Invalid explicit paths/locators fail closed, and executable/signature/capability/origin are reverified. Homebrew owns its actual formula/prefix; no installer or integration silently takes over a live/reserved installation.
 
 Install only the integrations you want. Herdr is a thin consumer; Tern does not download, build, install or auto-start the native app. Plugin updates/removal affect integrations only, never the shared app, profile or characters. Native updates do not reinstall Herdr plugins.
 
@@ -134,7 +152,7 @@ Debug and release native builds require `codesign`. They ad-hoc sign **only** `r
 
 The rig bridge checks version and seven C layout sizes **before** handing typed asset/token inputs across the Rust/Swift boundary; initial motion remains borrowed sealed bytes copied by the native host, never a path lookup. The Metal renderer prepasses actual eye-white apertures with independent L/R/unsided stencil bits before stable-ordered color drawing in the same encoder. The CPU semantic hit and raster reference use matching ownership; no-white rigs keep their legacy iris rendering. A `RIG_PROBE_FAULTS` probe can run `--eye-stencil-checks --output ABS` to save real-pixel and semantic fixtures; this does not establish the cause of earlier cancelled/disconnected visual observations.
 
-`scripts/build-rig-native.mjs` records bounded source/compiler/output hashes in `native/target/rig-native/release/rig-native.json`; packaging verifies source and output closure, embeds that build record at `Contents/Resources/rig-native-build.json`, preserves the independent update coordinator and checks its protocol/signature, then writes `dist/DesktopPet.app.rig-native.json` after signing with hashes of **all** deployed `Contents` files. The sidecar stays outside the signed app to avoid a self-hash cycle. The release workflow is configured to upload a separately named `DesktopPet-v0.4.5-rig-native.json` asset alongside the unchanged app-only archive and its two checksum files; neither updater nor installer needs a new archive layout. Compare sidecar hashes to actual unpacked, post-signing app files before asserting deployed-byte provenance.
+`scripts/build-rig-native.mjs` records bounded source/compiler/output hashes in `native/target/rig-native/release/rig-native.json`; packaging verifies source and output closure, embeds that build record at `Contents/Resources/rig-native-build.json`, preserves the independent update coordinator and checks its protocol/signature, then writes `dist/DesktopPet.app.rig-native.json` after signing with hashes of **all** deployed `Contents` files. The sidecar stays outside the signed app to avoid a self-hash cycle. The release workflow uploads the separate `DesktopPet-v0.4.7-rig-native.json` asset alongside the unchanged app-only archive and its two checksum files; the versioned installer/checksum completes the six-asset publication. Neither updater nor installer needs a new archive layout. Compare sidecar hashes to actual unpacked, post-signing app files before asserting deployed-byte provenance.
 
 ## Repository layout
 
@@ -165,6 +183,8 @@ Keep each imported pack's license, attribution and source-term files with it. Bu
 The website currently uses static images for its product visuals; no video or MP4 asset is required for this local Pages workflow.
 
 Before publishing captures, inspect the rendered pixels: use an isolated demo profile and include only the app, never real session content, account names, local paths, hostnames, email addresses or credentials. Public PNGs must contain only image/color chunks; `check` and `stage` reject EXIF, text, profiles and other metadata. This metadata gate does not inspect visible text, so manual privacy review remains required.
+
+Current v0.4.7 / v0.3.11 Pages deployment has not yet been observed. The successful `cb10ce2` deployment and English/Korean inspection described below are historical only; links and staged source do not prove that today's public site changed.
 
 The Korean-default promotional website is in [`site/`](../site/); it describes the native macOS app, not an app running in the browser. Core Pages URLs (actual `cb10ce2` deployment succeeded; English/Korean browser surfaces inspected, no Japanese/Chinese visual claim): [Korean](https://hanbong5938.github.io/desktop-pet/) · [English](https://hanbong5938.github.io/desktop-pet/en/) · [Simplified Chinese](https://hanbong5938.github.io/desktop-pet/zh-Hans/) · [Japanese](https://hanbong5938.github.io/desktop-pet/ja/). Keep all four page translations and navigation links aligned when editing product copy, with reciprocal `hreflang` links for `ko`, `en`, `zh-Hans`, `ja` and `x-default` pointing to the Korean root; each page also needs its own canonical URL and matching Open Graph locale. The external [character gallery](https://github.com/hanbong5938/herdr-characters) remains separate and Korean/English only. Historical v0.3.2 screenshots must not be presented as current or translated screenshots; sharing an English social preview image does not change the page's language. Headings use a compact responsive scale and tighter spacing; body text, terminal commands and control sizes remain independent of heading scale. From the repository root:
 

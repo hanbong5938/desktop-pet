@@ -193,7 +193,7 @@ pre { max-width: 100%; margin: 0; overflow-x: auto; padding: 19px; border: 1px s
   .feature-glyph { margin-top: 12px; }
   .feature h3 { margin: 0 0 10px; padding-top: 32px; }
   .install-grid { grid-template-columns: 1fr; }
-  .install-notes { grid-template-columns: 1fr; }
+  .install-notes { grid-template-columns: minmax(0, 1fr); }
   .characters-section, .faq-layout { grid-template-columns: 1fr; gap: 36px; }
   .characters-aside { max-width: 500px; width: 100%; }
   .footer-main { flex-direction: column; gap: 24px; }

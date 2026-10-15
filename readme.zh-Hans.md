@@ -4,7 +4,15 @@
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
 
-**当前公开 Core:** [Desktop Pet v0.4.5](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.5), release `412667385`, `2026-10-14T12:01:32Z`, source `51dcf22415b1ff0faf07651cb83c1c696c980f43`. 六项匿名资产、strict 签名、protocol 4 / capability 2 / API 1 与精确 68 项资源哈希 closure 均通过。 Archive SHA-256 `41024ed9d82e5be7169c166bcd6e443c319f6b8916cad63b8399cd4ad02bb45a`; installer SHA-256 `fdcd9d80f8672b54ceca967bfea6f72223d2e5caed97f845140a68b9e7414a16`; checksums SHA-256 `8c9c8ab020bc4561c4a2c17f4c6d20b3e8a18672b84f508426e68ed259598c5e`. [Release CI 38560075408](https://github.com/hanbong5938/desktop-pet/actions/runs/38560075408), job `115838673595`: PASSED. Exact-source gates: neutral **743** primary Rust / 1 ignored; genuine legacy **758** primary Rust / 1 ignored; 62 Bun / 746 assertions / TS / fmt / locked tree / full package / 68-resource closure; genuine native `TMPDIR=/tmp` and real Git admission/dirty-user guard. Neutral formula tap `d66411383141644f01f1ca839086b6d505a997ac`. Wiki job `115840956329` 渲染成功但发布失败；仍需所有者初始化 Wiki Home 与专用 `WIKI_PUBLISH_TOKEN`，不使用宽权限 token fallback 或重跑 binary。Pages 部署与四语言公开 render 需要独立观察验证，release/native 验收不是部署证明。
+**当前公开 Core：**[Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7)，release `413584934`，精确不可变 source `52514da5115f09aac22de5429c08f7acdd993258`。六项匿名资产、strict/deep 签名、protocol4/observation2/API1、精确68文件 closure 与 release CI38706583599 均通过。精确 digest、真正公开 bridge3.11 及 main/Pages 观测见[正本 ledger](docs/releases/v0.4.7.md)。Wiki 需要专用 `WIKI_PUBLISH_TOKEN`，不使用广泛 credential 或重新发布 binary 代替。
+
+**真实公开路径：**公开 Brew3.10→普通3.11 A′ 已由**原签名 helper**结清，再经单独 source review 与独立最终 native 同意 **B→Core4.7** 完成 readiness/Commit 和真实所属 Brew retirement。原 config/state 字节、导入角色与台词及历史、无关 profile 均保留，最终 native Check 已通过。4语言 Cancel 与 rollback/Stop/Unknown/确定失败/native Resume 也已实际验证。实际用户 Mac 批准、冻结3.6/beta 路线及历史失败/Unknown 分别记录，不 clear/replay。
+
+**当前 consumer：**Herdr 集成保持无资产4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`，没有新集成 tag/native build。当前 scripts/evidence8项已从实际公开 Core4.7 materialize，未安装、启动或重装 Herdr，复用同一迁移完成 Standalone app/profile。source、部署与实际用户 Mac 验收以正本 ledger 区分；H1/T0 不是真实 Tern-account/双顺序证明。
+
+### 历史 v0.4.5 及更早运行证据
+
+下列 PID、hash、helper 结果与完成 operation 仅属于所注明的历史版本，不代表 v0.4.7/v0.3.11 验收或当前运行 owner。
 
 **实际公开 Brew v0.4.4 → v0.4.5 常规更新完成：**operation `a6991e69233377c32b150186c62888fd`，`homebrew_upgrade` / `manager_exited`，installed/applied true。PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`、Brew 派生 image `a06f7e7045a1cfa83a3d7ed7d7a135eab4f8d911a3275647b89743fe5815c500` 在精确旧 private profile、已保存 Herdr(H1/T0)上达到 UI/control ready。更新后 native Check 为绿色 **No update from selected source / 0.4.5 / Homebrew**。应用前 Check 仅改变 source preferences；应用保留全部旧 config/evidence 与无关默认 tree，例外仅 `source.log` 和新 operation 文件。无关历史 hidden PID `2641` 只在封存旧 A/B 证明后显式 Stop。没有重装 Herdr。 Actual manager `/opt/homebrew/bin/brew`: PID = PGID `9853`, exit 0, drained true; retained helper strict-signature result 0, stdout upgraded only desktop-pet v0.4.4 → v0.4.5.
 
@@ -20,7 +28,13 @@
 
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。
 
-**当前公开 bridge:** [Herdr bridge v0.3.10](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.10), release `412684474`, `2026-10-14T12:20:45Z`, source `67eb44b53bda6ba96eaf68671b67a94cab7b304d`, common Core `51dcf22415b1ff0faf07651cb83c1c696c980f43`. Genuine legacy protocol 3 / capability 1 / API 1, original bundle/executable/helper; five anonymous public assets, strict signatures and exact 68-resource closure: PASSED. Archive SHA-256 `a75f4219f1d8bc7ef8c3bee29c030b0cd6c06853bab4e193e40838ef5d49b927`; rig SHA-256 `b3a5cded2b80e5f773fbcd3aa49d1e7d8d0868b27e9a2e872d03f3752cadc5a7`; raw native SHA-256 `0b1c8e63c6cee6904208bc3d90f184806c8f1216b8114a2b30da009d92be65a6`. [Bridge CI 38561115955](https://github.com/hanbong5938/desktop-pet/actions/runs/38561115955), job `115842136732`: PASSED, native `/tmp` and real Git gates. Source-only publication gate: exactly 11 regular UTF-8 metadata files, nine exact materializer bytes plus LICENSE/readme, only `/dist/HerdrDesktopPet.app/` ignore; no native/common implementation. Old stable formula tap `7bf1fd7f1b89bd77e68179fcee95cacf044927dc`; beta unchanged. Herdr v0.4.1 retirement ref `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` unchanged.
+### 当前公开 bridge 权威
+
+**当前公开 bridge：**[Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11)，release `413623057`，`2026-10-15T09:25:08Z`，metadata-only ingress `fa56caa32ea06d86932c5b4cc3eb230010c6dd9c`，annotated tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`；从精确公开 Core `52514da5115f09aac22de5429c08f7acdd993258` 构建。五项匿名资产等于实际 CI bytes；genuine `HerdrDesktopPet.app` / `herdr-desktop-pet` / `herdr-update-coordinator` / `dev.herdr.desktop-pet`、protocol 3 / observation 1 / API 1、签名、68项部署文件及11项 source closure 均通过。Archive SHA-256 `2075baefbf212f5cbfbdc0163ce0e6887fa6d05f20e2a24c47ae24012649ab60`；sidecar SHA-256 `147c1a4e5e3c74a7b6fb02ce7a244cf7f865f623e11ab07d8918cb1f9340bad2`；raw native SHA-256 `fff86370b9c58b2d410b373125d11dc02508172f9a35f56e9e086546a21c27a3`（Brew 安装 digest 可能不同）。[Bridge CI 38707461727](https://github.com/hanbong5938/desktop-pet/actions/runs/38707461727)，job `116330312000`：实际 logical `TMPDIR=/tmp` native 验证及真实生成 app Git admission 均通过。公开 tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` 提供 stable Core v0.4.7 / bridge v0.3.11；beta blob `4e532e52aa1e81071bdf2daff5b4de7fd0d6dd51` 不变。Catalog refresh 没有升级应用。
+
+### 其他历史 integration 与 SDK 证据
+
+以下 consumer materialization、运行及 source 检查结果是 v0.4.5 时期 checkout 的记录；当前 v0.4.7 边界见上方，provider 限制继续有效。
 
 **历史 v0.3.9/v0.4.4 managed A 完成:**冻结 v0.3.6 Check 选择公开 v0.3.9，仅改变 `preferences/last_update_check`（`1791963743` → `1791965310`）；Check 期间其余四棵 tree 字节、source PID `2467` 及无关默认 PID `2641` 不变。精确 source `0f33f28` native A 同意完成 operation `d5b2bf6f02e031eabb5a8c8fdd805cab`（`completed` / `manager_exited`，installed/applied true）。实际公开 v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`，image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce` 在精确旧 private config/state 上达到配对 protocol 3 / capability 1 / API 1、UI/control ready、Herdr 1 / Tern 0。实际 managed source Git status 完全 clean。保留的原始 v0.3.6 helper 通过 strict/deep 签名，实际 status 确认 completed。baseline 已保存全部87项旧 A 证据和91个 state 文件哈希。
 
@@ -44,7 +58,7 @@
 - 向选中的**本地**代理会话发送单行回复，支持输入法组合输入与原生状态反馈。
 - 可配置角色、气泡、对话和可见性；支持可选的已验证角色包与官方目录浏览器。
 - Herdr 生命周期操作、受保护的关联工作树移除，以及明确区分安装来源的应用更新。
-- **capability 2：**统一的连接设置可选择 Auto 或已注册提供商（如 Herdr／Tern），显示实际提供商状态，并将运行中的切换保存到共享配置档；当前公开 Desktop Pet v0.4.5 包含此 UI，历史 Herdr v0.3.6 则没有。这不代表双宿主真实账户／提供方运行验证已完成。
+- **capability 2：**统一的连接设置可选择 Auto 或已注册提供商（如 Herdr／Tern），显示实际提供商状态，并将运行中的切换保存到共享配置档；当前公开 Desktop Pet v0.4.7 包含此 UI，历史 Herdr v0.3.6 则没有。这不代表双宿主真实账户／提供方运行验证已完成。
 
 ## 系统要求
 
@@ -66,16 +80,16 @@ desktop-pet status
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
-# 使用已公开的不可变 v0.4.5 安装器及固定资产：
-git checkout --detach v0.4.5
+# 使用已公开的不可变 v0.4.7 安装器及固定资产：
+git checkout --detach v0.4.7
 bash scripts/install.sh --prebuilt
-# 若选择从同一个公开 v0.4.5 标签安装源码：
+# 若选择从同一个公开 v0.4.7 标签安装源码：
 # bash scripts/install.sh --source
 # Replace with the installer-reported executable and your actual profile paths:
 /absolute/reported/desktop-pet --config-dir /absolute/dev/config --state-dir /absolute/dev/state start
 ```
 
-不可变 v0.4.5 的默认／`--prebuilt` 使用精确公开固定资产（历史 v0.4.0／v0.4.1 保留各自 pin）。下载／验证失败绝不暗中构建 source。显式 `--source` 构建所选 core 检出，包括实际公开 v0.4.5 标签。 standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
+不可变 v0.4.7 的默认／`--prebuilt` 使用精确公开固定资产（历史 v0.4.0／v0.4.1 保留各自 pin）。下载／验证失败绝不暗中构建 source。显式 `--source` 构建所选 core 检出，包括实际公开 v0.4.7 标签。 standalone prebuilt 使用**实际 OS 账户 home** 的 `Applications/DesktopPet.app`，获准 source 使用 core 的 `dist/DesktopPet.app`。admission 可复用已验证健康现有所有者；请使用安装器报告的执行文件，勿假定 dist 路径。共享 locator 原子保存到账户 home `.local/share/desktop-pet/installation.json`，只是发现证据而非权限。无效显式路径／locator 不回退，执行文件／签名／capability／origin 每次重新验证。Brew 拥有实际 formula／prefix，不暗中接管 live／已预约的安装。
 
 仅安装需要的集成。Herdr 是轻量消费者；Tern 不下载、构建、安装或自动启动原生应用。插件更新与卸载只影响集成，不删除共享应用、配置档或角色。常规应用更新不重新安装 Herdr 插件。
 
