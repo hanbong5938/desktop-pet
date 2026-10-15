@@ -291,18 +291,51 @@ mod process_admission_tests {
         Ok(Path::new(std::ffi::OsStr::from_bytes(&buffer[..end])).to_path_buf())
     }
 
-    struct UnlinkedSleep {
+    const UNLINKED_CHILD_ENV: &str = "DESKTOP_PET_TEST_UNLINKED_CHILD";
+    const UNLINKED_CHILD_TEST: &str = "processes::process_admission_tests::unlinked_unrelated_executable_is_admitted_but_cannot_authorize_a_process";
+
+    fn unlinked_child_mode() -> bool {
+        if std::env::var_os(UNLINKED_CHILD_ENV).is_none() {
+            return false;
+        }
+        use std::io::{Read, Write};
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout().lock();
+        writeln!(
+            stdout,
+            "DESKTOP_PET_UNLINKED_CHILD_READY:{}",
+            std::process::id()
+        )
+        .unwrap();
+        stdout.flush().unwrap();
+        drop(stdout);
+        // Keep the real executable alive until its owning parent closes stdin.
+        loop {
+            match stdin.read(&mut [0]) {
+                Ok(0) => return true,
+                Ok(_) => panic!("unlinked child received unexpected parent input"),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("unlinked child lifetime pipe failed: {error}"),
+            }
+        }
+    }
+
+    struct UnlinkedExecutable {
         child: std::process::Child,
         executable: PathBuf,
         _directory: tempfile::TempDir,
     }
 
-    impl UnlinkedSleep {
+    impl UnlinkedExecutable {
         fn start(basename: &str, alias: Option<&str>) -> Self {
+            use std::process::{Command, Stdio};
             let directory = tempfile::tempdir().unwrap();
             let root = fs::canonicalize(directory.path()).unwrap();
             let executable = root.join(basename);
-            fs::copy("/bin/sleep", &executable).unwrap();
+            // proc_pidpath can expose an exec image before userspace is ready.
+            // Unlike /bin/sleep, this real copied image explicitly acknowledges
+            // startup before the parent is allowed to unlink it.
+            fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
             let launcher = if let Some(alias) = alias {
                 let launcher = root.join(alias);
                 std::os::unix::fs::symlink(&executable, &launcher).unwrap();
@@ -310,8 +343,11 @@ mod process_admission_tests {
             } else {
                 executable.clone()
             };
-            let child = std::process::Command::new(launcher)
-                .arg("300")
+            let child = Command::new(launcher)
+                .args(["--exact", UNLINKED_CHILD_TEST, "--nocapture"])
+                .env(UNLINKED_CHILD_ENV, "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .spawn()
                 .unwrap();
             let mut process = Self {
@@ -319,6 +355,7 @@ mod process_admission_tests {
                 executable,
                 _directory: directory,
             };
+            process.wait_for_ready();
             process.wait_for_path(true);
             process
         }
@@ -327,14 +364,89 @@ mod process_admission_tests {
             self.child.id() as libc::pid_t
         }
 
+        fn assert_live(&mut self, context: &str) {
+            match self.child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) => panic!(
+                    "unlinked executable child {} ({}) exited with {status} ({status:?}) while {context}",
+                    self.child.id(),
+                    self.executable.display()
+                ),
+                Err(error) => panic!(
+                    "cannot inspect unlinked executable child {} while {context}: {error}",
+                    self.child.id()
+                ),
+            }
+        }
+
+        fn wait_for_ready(&mut self) {
+            use std::io::Read;
+            use std::os::fd::AsRawFd;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let marker = format!("DESKTOP_PET_UNLINKED_CHILD_READY:{}\n", self.child.id());
+            let mut output = Vec::new();
+            loop {
+                self.assert_live("waiting for userspace readiness");
+                let remaining = deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .unwrap_or_default();
+                assert!(
+                    !remaining.is_zero(),
+                    "unlinked executable child {} did not report userspace readiness; stdout: {}",
+                    self.child.id(),
+                    String::from_utf8_lossy(&output)
+                );
+                let mut fd = libc::pollfd {
+                    fd: self.child.stdout.as_ref().unwrap().as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready =
+                    unsafe { libc::poll(&mut fd, 1, remaining.as_millis().max(1) as libc::c_int) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    panic!("cannot poll unlinked executable child readiness: {error}");
+                }
+                if ready == 0 {
+                    continue;
+                }
+                let mut bytes = [0; 1024];
+                let count = match self.child.stdout.as_mut().unwrap().read(&mut bytes) {
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        panic!("cannot read unlinked executable child readiness: {error}")
+                    }
+                };
+                if count == 0 {
+                    self.assert_live("stdout closed before userspace readiness");
+                    panic!(
+                        "unlinked executable child {} closed stdout before readiness; stdout: {}",
+                        self.child.id(),
+                        String::from_utf8_lossy(&output)
+                    );
+                }
+                output.extend_from_slice(&bytes[..count]);
+                if output
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+                {
+                    self.assert_live("acknowledging userspace readiness");
+                    return;
+                }
+            }
+        }
+
         fn wait_for_path(&mut self, available: bool) {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let context = format!("waiting for path availability {available}");
             loop {
+                self.assert_live(&context);
                 let observed = process_path(self.pid());
-                assert!(
-                    self.child.try_wait().unwrap().is_none(),
-                    "sleep child exited while waiting for path availability {available}"
-                );
+                self.assert_live(&context);
                 let ready = match (&observed, available) {
                     (Ok(path), true) => path == &self.executable,
                     (Err(_), false) => true,
@@ -342,23 +454,26 @@ mod process_admission_tests {
                 };
                 if ready {
                     assert_eq!(unsafe { libc::kill(self.pid(), 0) }, 0);
+                    self.assert_live(&context);
                     return;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "sleep path did not reach availability {available}: {observed:?}"
+                    "unlinked executable child {} path did not reach availability {available}: {observed:?}",
+                    self.child.id()
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
 
         fn unlink(&mut self) {
+            self.assert_live("unlinking its executable");
             fs::remove_file(&self.executable).unwrap();
             self.wait_for_path(false);
         }
     }
 
-    impl Drop for UnlinkedSleep {
+    impl Drop for UnlinkedExecutable {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -367,39 +482,46 @@ mod process_admission_tests {
 
     #[test]
     fn unlinked_unrelated_executable_is_admitted_but_cannot_authorize_a_process() {
-        let mut process = UnlinkedSleep::start("unrelated-sleeper", None);
+        if unlinked_child_mode() {
+            return;
+        }
+        let mut process = UnlinkedExecutable::start("unrelated-sleeper", None);
         let roots = [process.executable.parent().unwrap().to_path_buf()];
         let image = executable_identity(&process.executable).unwrap();
-        assert_eq!(
-            installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]),
-            Ok(())
-        );
+        let admission = installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]);
+        process.assert_live("checking admission of its linked unrelated image");
+        assert_eq!(admission, Ok(()));
         process.unlink();
-        assert_eq!(
-            installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]),
-            Ok(())
-        );
+        let admission = installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]);
+        process.assert_live("checking admission of its unlinked unrelated image");
+        assert_eq!(admission, Ok(()));
+        let authorization = installation_roots_admitted(&[], &[(process.child.id(), image)]);
+        process.assert_live("checking that an unlinked image cannot authorize its PID");
         assert!(
-            installation_roots_admitted(&[], &[(process.child.id(), image)]).is_err(),
+            authorization.is_err(),
             "negative comm classification must not authenticate an authorized PID"
         );
     }
 
     fn assert_unlinked_pet_blocks(basename: &str, alias: Option<&str>) {
-        let mut process = UnlinkedSleep::start(basename, alias);
+        let mut process = UnlinkedExecutable::start(basename, alias);
         let roots = [process.executable.parent().unwrap().to_path_buf()];
-        let error =
-            installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]).unwrap_err();
+        let admission = installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]);
+        process.assert_live("checking refusal of its linked pet image");
+        let error = admission.unwrap_err();
         assert!(error.starts_with("live installation process "));
         process.unlink();
-        let info = process_short_bsd_info(process.pid()).unwrap();
+        let info = process_short_bsd_info(process.pid());
+        process.assert_live("observing its unlinked executable-derived comm");
+        let info = info.unwrap();
         assert_ne!(info.status, libc::SZOMB);
         assert!(
             process_comm_may_be_pet(&info.comm),
             "an executable-derived pet comm must survive unlinking and symlink aliases"
         );
-        let error =
-            installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]).unwrap_err();
+        let admission = installation_process_admitted(process.pid(), &roots, &[], &mut [0; 4096]);
+        process.assert_live("checking refusal of its unlinked pet image");
+        let error = admission.unwrap_err();
         assert!(error.starts_with(&format!(
             "cannot authenticate live process image {}:",
             process.pid()
