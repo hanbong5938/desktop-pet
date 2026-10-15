@@ -1340,6 +1340,75 @@ fn worktree_error_text(locale: UiLocale, error: &WorktreeRemoveError) -> String 
         _ => text(locale, message).to_owned(),
     }
 }
+enum MigrationLaunchOutcome {
+    Recorded(desktop_pet_update_coordinator::migration::MigrationRecord),
+    Cancelled {
+        plan: desktop_pet_update_coordinator::migration::MigrationPlan,
+        retirement_only: bool,
+    },
+}
+
+#[derive(Default)]
+struct MigrationUiState {
+    busy: bool,
+    launch_error: Option<String>,
+    plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
+    record: Option<desktop_pet_update_coordinator::migration::MigrationRecord>,
+}
+
+impl MigrationUiState {
+    fn review_allowed(&self) -> bool {
+        !self.busy && self.launch_error.is_none()
+    }
+
+    /// Return only the operation whose owned preparation window may close.
+    fn settle_launch(
+        &mut self,
+        result: Result<MigrationLaunchOutcome, String>,
+        frozen: bool,
+        consent_operation: Option<&str>,
+    ) -> Option<String> {
+        self.busy = false;
+        match result {
+            Ok(MigrationLaunchOutcome::Recorded(record)) => {
+                self.launch_error = None;
+                self.record = Some(record);
+            }
+            Ok(MigrationLaunchOutcome::Cancelled {
+                plan,
+                retirement_only,
+            }) => {
+                let matching_history = if retirement_only {
+                    self.record.as_ref().is_some_and(|record| {
+                        record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed
+                    })
+                } else {
+                    self.record.is_none()
+                };
+                if frozen
+                    || self.launch_error.is_some()
+                    || self.plan.as_ref() != Some(&plan)
+                    || consent_operation != Some(plan.operation_id.as_str())
+                    || !matching_history
+                {
+                    self.launch_error.get_or_insert_with(|| {
+                        "Migration cancellation no longer matches its pending UI consent; outcome is unknown".into()
+                    });
+                    return None;
+                }
+                // The authenticated helper cancelled before engine entry. Drop
+                // only this pending initial plan, never retained migration history.
+                if !retirement_only {
+                    self.plan = None;
+                }
+                return Some(plan.operation_id);
+            }
+            Err(error) => self.launch_error = Some(error),
+        }
+        None
+    }
+}
+
 struct Ui {
     mtm: MainThreadMarker,
     shared: Arc<Mutex<AppState>>,
@@ -1446,16 +1515,11 @@ struct Ui {
     painted_app_update: Option<(u64, UiLocale, bool)>,
     update_frozen: Option<String>,
     update_consent: Option<(String, Retained<NSAlert>)>,
-    migration_busy: bool,
+    migration: MigrationUiState,
     migration_plan_receiver: Option<
         mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationPlan, String>>,
     >,
-    migration_launch_receiver: Option<
-        mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
-    >,
-    migration_launch_error: Option<String>,
-    migration_plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
-    migration_record: Option<desktop_pet_update_coordinator::migration::MigrationRecord>,
+    migration_launch_receiver: Option<mpsc::Receiver<Result<MigrationLaunchOutcome, String>>>,
     migration_journal_receiver: Option<
         mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
     >,
@@ -4347,7 +4411,7 @@ fn confirm_legacy_migration(
     };
     if !admitted {
         with_ui_internal(|ui| {
-            ui.migration_busy = false;
+            ui.migration.busy = false;
             ui.painted_app_update = None;
             ui.app_update.set_problem(
                 "Migration source or target image/profile changed; review again".into(),
@@ -4368,7 +4432,7 @@ fn confirm_legacy_migration(
     alert.addButtonWithTitle(&NSString::from_str(text(locale, title)));
     if alert.runModal() != NSAlertSecondButtonReturn {
         with_ui_internal(|ui| {
-            ui.migration_busy = false;
+            ui.migration.busy = false;
             ui.painted_app_update = None;
             ui.refresh_app_update();
         });
@@ -4381,7 +4445,7 @@ fn confirm_legacy_migration(
     with_ui_update_action(move |ui| {
         let blockers = ui.restart_blockers_snapshot();
         if !blockers.is_empty() {
-            ui.migration_busy = false;
+            ui.migration.busy = false;
             ui.app_update.set_problem(blockers.join("; "));
             return;
         }
@@ -4402,7 +4466,7 @@ fn confirm_legacy_migration(
         alert.layout();
         alert.window().orderFrontRegardless();
         if !alert.window().isVisible() {
-            ui.migration_busy = false;
+            ui.migration.busy = false;
             ui.app_update
                 .set_problem("Migration consent window is not visible".into());
             return;
@@ -4410,47 +4474,69 @@ fn confirm_legacy_migration(
         ui.clear_update_consent();
         ui.update_consent = Some((plan.operation_id.clone(), alert));
         ui.sync_update_consent_visibility();
-        ui.migration_plan = Some(plan.clone());
-        ui.migration_busy = true;
+        ui.migration.plan = Some(plan.clone());
+        ui.migration.busy = true;
         ui.painted_app_update = None;
         let (sender, receiver) = mpsc::sync_channel(1);
         ui.migration_launch_receiver = Some(receiver);
         std::thread::spawn(move || {
             use std::os::unix::process::CommandExt;
-            let result = (|| -> Result<desktop_pet_update_coordinator::migration::MigrationRecord, String> {
+            let result = (|| -> Result<MigrationLaunchOutcome, String> {
                 let directory = plan.profiles[0].state_dir.join("updates-v4");
-                let path = if resume { directory.join(format!("{}.migration-plan.json", plan.operation_id)) } else {
-                    let existing = directory.join(format!("{}.migration-consent.json", plan.operation_id));
+                let path = if resume {
+                    directory.join(format!("{}.migration-plan.json", plan.operation_id))
+                } else {
+                    let existing =
+                        directory.join(format!("{}.migration-consent.json", plan.operation_id));
                     if existing.exists() {
-                        if desktop_pet_update_coordinator::migration::read_plan(&existing)? != plan { return Err("Migration consent evidence changed".into()); }
+                        if desktop_pet_update_coordinator::migration::read_plan(&existing)? != plan
+                        {
+                            return Err("Migration consent evidence changed".into());
+                        }
                         existing
-                    } else { desktop_pet_update_coordinator::migration::write_new_plan(&plan)? }
+                    } else {
+                        desktop_pet_update_coordinator::migration::write_new_plan(&plan)?
+                    }
                 };
-                let helper = plan.target.staged_bundle.join("Contents/MacOS").join(desktop_pet_update_coordinator::identity::neutral::HELPER);
+                let helper = plan
+                    .target
+                    .staged_bundle
+                    .join("Contents/MacOS")
+                    .join(desktop_pet_update_coordinator::identity::neutral::HELPER);
                 let mut command = std::process::Command::new(helper);
                 command.arg("migrate-legacy").arg("--plan").arg(&path);
-                if resume { command.arg("--resume-retirement"); }
-                command.env_clear().envs(&plan.profiles[0].environment).stdin(std::process::Stdio::null()).stdout(if resume { std::process::Stdio::null() } else { std::process::Stdio::piped() }).stderr(std::process::Stdio::null());
-                unsafe { command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
-                let mut child = command.spawn().map_err(|error| format!("Verified migration helper could not start: {error}"))?;
-                let ownership = if !resume {
-                    match child.stdout.take() {
-                        Some(mut stdout) => desktop_pet_update_coordinator::migration::read_final_visible_ack(&mut stdout, &plan, &path)
-                            .and_then(|_| std::io::copy(&mut stdout, &mut std::io::sink())
-                                .map(|_| ())
-                                .map_err(|error| format!("Migration helper result channel failed: {error}"))),
-                        None => Err("Migration helper ownership channel is missing".into()),
-                    }
-                } else {
-                    Ok(())
-                };
-                // Reap even when the ownership channel closes before its ACK.
-                let status = child.wait().map_err(|error| format!("Migration helper wait failed; delivery is unknown: {error}"))?;
-                ownership?;
-                if !status.success() {
-                    return Err(format!("Migration helper exited with {status}; inspect the retained journal before another operation"));
+                if resume {
+                    command.arg("--resume-retirement");
                 }
-                desktop_pet_update_coordinator::migration::read_record(&plan)
+                command
+                    .env_clear()
+                    .envs(&plan.profiles[0].environment)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            Err(std::io::Error::last_os_error())
+                        } else {
+                            Ok(())
+                        }
+                    });
+                }
+                let mut child = command.spawn().map_err(|error| {
+                    format!("Verified migration helper could not start: {error}")
+                })?;
+                match desktop_pet_update_coordinator::migration::wait_for_final_consent(
+                    &mut child, &plan, &path, resume,
+                )? {
+                    desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::Cancelled => {
+                        Ok(MigrationLaunchOutcome::Cancelled { plan, retirement_only: resume })
+                    }
+                    desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::VisibleApproved => {
+                        desktop_pet_update_coordinator::migration::read_record(&plan)
+                            .map(MigrationLaunchOutcome::Recorded)
+                    }
+                }
             })();
             let _ = sender.send(result);
         });
@@ -5901,12 +5987,13 @@ impl Ui {
             painted_app_update: None,
             update_frozen: None,
             update_consent: None,
-            migration_busy: migration_plan.is_some(),
+            migration: MigrationUiState {
+                busy: migration_plan.is_some(),
+                plan: migration_plan,
+                ..MigrationUiState::default()
+            },
             migration_plan_receiver: None,
             migration_launch_receiver: None,
-            migration_launch_error: None,
-            migration_plan,
-            migration_record: None,
             migration_journal_receiver: None,
             migration_next_poll: Instant::now(),
             update_composer_editable: None,
@@ -5970,7 +6057,7 @@ impl Ui {
         ui.clamp_panel();
         ui.update_bubble_frame();
         ui.prepare_initial_rig_surface()?;
-        if let Some(plan) = ui.migration_plan.as_ref() {
+        if let Some(plan) = ui.migration.plan.as_ref() {
             let alert = NSAlert::new(ui.mtm);
             alert.setMessageText(&NSString::from_str(text(
                 ui.locale,
@@ -8309,16 +8396,13 @@ impl Ui {
     }
 
     fn begin_legacy_migration(&mut self) {
-        if self.migration_busy
-            || self.migration_launch_error.is_some()
-            || self.update_frozen.is_some()
-        {
+        if !self.migration.review_allowed() || self.update_frozen.is_some() {
             return;
         }
-        if let Some(plan) = self.migration_plan.clone() {
-            let resume = self.migration_record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed);
-            if resume || self.migration_record.is_none() {
-                self.migration_busy = true;
+        if let Some(plan) = self.migration.plan.clone() {
+            let resume = self.migration.record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed);
+            if resume || self.migration.record.is_none() {
+                self.migration.busy = true;
                 self.painted_app_update = None;
                 schedule_migration_confirmation(plan, resume);
                 return;
@@ -8341,7 +8425,7 @@ impl Ui {
         }
         let (sender, receiver) = mpsc::sync_channel(1);
         self.migration_plan_receiver = Some(receiver);
-        self.migration_busy = true;
+        self.migration.busy = true;
         self.painted_app_update = None;
         std::thread::spawn(move || {
             let result = desktop_pet_update_coordinator::migration::prepare_bridge_plan(
@@ -8368,7 +8452,7 @@ impl Ui {
                 match result {
                     Ok(plan) => schedule_migration_confirmation(plan, false),
                     Err(error) => {
-                        self.migration_busy = false;
+                        self.migration.busy = false;
                         self.app_update.set_problem(error);
                     }
                 }
@@ -8382,15 +8466,17 @@ impl Ui {
             };
             if let Some(result) = result {
                 self.migration_launch_receiver = None;
-                self.migration_busy = false;
-                self.painted_app_update = None;
-                match result {
-                    Ok(record) => {
-                        self.migration_launch_error = None;
-                        self.migration_record = Some(record);
-                    }
-                    Err(error) => self.migration_launch_error = Some(error),
+                let consent_operation = self.update_consent.as_ref().map(|(id, _)| id.as_str());
+                if self
+                    .migration
+                    .settle_launch(result, self.update_frozen.is_some(), consent_operation)
+                    .is_some()
+                {
+                    self.clear_update_consent();
+                    self.migration_journal_receiver = None;
+                    self.migration_next_poll = Instant::now();
                 }
+                self.painted_app_update = None;
             }
         }
         if let Some(receiver) = &self.migration_journal_receiver {
@@ -8407,7 +8493,7 @@ impl Ui {
                 self.painted_app_update = None;
                 match result {
                     Ok(record) => {
-                        self.migration_busy = !matches!(record.phase,
+                        self.migration.busy = !matches!(record.phase,
                             desktop_pet_update_coordinator::migration::MigrationPhase::Complete
                             | desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed
                             | desktop_pet_update_coordinator::migration::MigrationPhase::ManagerUnknown
@@ -8415,13 +8501,13 @@ impl Ui {
                             | desktop_pet_update_coordinator::migration::MigrationPhase::UserStopped
                             | desktop_pet_update_coordinator::migration::MigrationPhase::Failed
                             | desktop_pet_update_coordinator::migration::MigrationPhase::RolledBack);
-                        if !self.migration_busy {
-                            self.migration_launch_error = None;
-                        } else if self.migration_launch_error.is_some() {
-                            self.migration_busy = false;
+                        if !self.migration.busy {
+                            self.migration.launch_error = None;
+                        } else if self.migration.launch_error.is_some() {
+                            self.migration.busy = false;
                         }
-                        self.migration_record = Some(record);
-                        if self.migration_record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete) && self.update_frozen.is_none() {
+                        self.migration.record = Some(record);
+                        if self.migration.record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete) && self.update_frozen.is_none() {
                             self.clear_update_consent();
                         }
                     }
@@ -8431,8 +8517,16 @@ impl Ui {
                 }
             }
         }
-        if self.migration_journal_receiver.is_none() && Instant::now() >= self.migration_next_poll {
-            if let Some(plan) = self.migration_plan.clone() {
+        // An initial final-consent dialog has not entered the engine yet.
+        // Observe its journal only after launch settlement; a pending dialog
+        // must not turn an expected pre-engine state into a global check error.
+        let observe_journal =
+            self.migration_launch_receiver.is_none() || self.migration.record.is_some();
+        if observe_journal
+            && self.migration_journal_receiver.is_none()
+            && Instant::now() >= self.migration_next_poll
+        {
+            if let Some(plan) = self.migration.plan.clone() {
                 let (sender, receiver) = mpsc::sync_channel(1);
                 self.migration_journal_receiver = Some(receiver);
                 std::thread::spawn(move || {
@@ -8471,9 +8565,9 @@ impl Ui {
         let mut model = self.app_update.model(self.locale);
         let migration_was_primary =
             model.primary_action == Some(crate::update_card::UpdateCardPrimaryAction::Migrate);
-        if let Some(plan) = &self.migration_plan {
+        if let Some(plan) = &self.migration.plan {
             model.primary_action = None;
-            if self.migration_record.as_ref().is_some_and(|record| {
+            if self.migration.record.as_ref().is_some_and(|record| {
                 record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
             }) {
                 model.migration_visible = false;
@@ -8498,7 +8592,7 @@ impl Ui {
                     plan.operation_id,
                     migration_consent_detail(plan, self.locale)
                 ));
-                if let Some(record) = &self.migration_record {
+                if let Some(record) = &self.migration.record {
                     use desktop_pet_update_coordinator::migration::MigrationPhase;
                     let message = match record.phase {
                         MigrationPhase::Complete => Message::MigrationRetired,
@@ -8573,11 +8667,11 @@ impl Ui {
                         record.target_committed
                     );
                 } else {
-                    model.migration_available = !self.migration_busy;
+                    model.migration_available = !self.migration.busy;
                 }
             }
         }
-        if let Some(error) = &self.migration_launch_error {
+        if let Some(error) = &self.migration.launch_error {
             model.primary_action = None;
             model.busy = false;
             model.status = desktop_pet_update_coordinator::CheckStatus::Failed;
@@ -8585,7 +8679,7 @@ impl Ui {
             model.detail = error.clone();
             model.migration_available = false;
         }
-        if self.migration_busy {
+        if self.migration.busy {
             model.busy = true;
             model.primary_action = None;
             model.migration_available = false;
@@ -8595,13 +8689,15 @@ impl Ui {
         }
         if let Some((operation_id, alert)) = &self.update_consent {
             if self
-                .migration_plan
+                .migration
+                .plan
                 .as_ref()
                 .is_some_and(|plan| &plan.operation_id == operation_id)
             {
                 alert.setMessageText(&NSString::from_str(&model.status_text));
                 let plan = self
-                    .migration_plan
+                    .migration
+                    .plan
                     .as_ref()
                     .expect("matched migration consent");
                 set_migration_alert_detail(
@@ -8757,10 +8853,10 @@ impl Ui {
                         .migration_history_checked(&context, result.is_ok());
                     match result {
                         Ok(Some((plan, record)))
-                            if self.migration_plan.is_none() && !self.migration_busy =>
+                            if self.migration.plan.is_none() && !self.migration.busy =>
                         {
                             use desktop_pet_update_coordinator::migration::MigrationPhase;
-                            self.migration_busy = !matches!(
+                            self.migration.busy = !matches!(
                                 record.phase,
                                 MigrationPhase::Complete
                                     | MigrationPhase::RetirementFailed
@@ -8770,8 +8866,8 @@ impl Ui {
                                     | MigrationPhase::Failed
                                     | MigrationPhase::RolledBack
                             );
-                            self.migration_plan = Some(plan);
-                            self.migration_record = Some(record);
+                            self.migration.plan = Some(plan);
+                            self.migration.record = Some(record);
                             self.migration_next_poll = Instant::now();
                             self.painted_app_update = None;
                         }
@@ -14215,6 +14311,234 @@ mod tests {
     use super::*;
     use crate::automation::{test_automation, OperationState, PresentationRequest};
     use crate::composer_layout::BOTTOM_INSET;
+
+    fn migration_ui_plan() -> desktop_pet_update_coordinator::migration::MigrationPlan {
+        use desktop_pet_update_coordinator::migration::{
+            LegacyOrigin, LegacyProfile, MigrationPlan, MigrationTarget, PreviousRecord,
+        };
+        use desktop_pet_update_coordinator::{
+            ExecutableIdentity, InstallOrigin, ReleaseCandidate, ReleaseChannel,
+        };
+        let root = PathBuf::from("/private/tmp/migration-ui-transition");
+        let source_bundle = root.join("HerdrDesktopPet.app");
+        let target_bundle = root.join("DesktopPet.app");
+        let version = desktop_pet_update_coordinator::identity::neutral::VERSION;
+        MigrationPlan {
+            version: 1,
+            kind: "legacy_to_desktop_pet".into(),
+            operation_id: "1".repeat(32),
+            token: "2".repeat(64),
+            source_image: ExecutableIdentity { path: source_bundle.join("Contents/MacOS/herdr-desktop-pet"), sha256: "a".repeat(64) },
+            source_origin: LegacyOrigin::Manual { bundle: source_bundle },
+            profiles: vec![LegacyProfile {
+                config_dir: root.join("config"),
+                state_dir: root.join("state"),
+                control_socket: root.join("state/control.sock"),
+                pid: 1000,
+                instance_id: "exact-source-instance".into(),
+                stop_generation: 0,
+                observation: desktop_pet_contracts::ObservationSelection::Auto,
+                herdr_socket: None,
+                assets_override: None,
+                host_plugin_config_dir: None,
+                tern_reconnect_required: false,
+                environment: Default::default(),
+            }],
+            readonly_target_profiles: Vec::new(),
+            target: MigrationTarget {
+                release: ReleaseCandidate {
+                    version: version.into(),
+                    channel: ReleaseChannel::Stable,
+                    tag: format!("v{version}"),
+                    release_id: 1,
+                    asset_name: format!("DesktopPet-v{version}-macos-arm64.tar.gz"),
+                    archive_url: format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{version}/DesktopPet-v{version}-macos-arm64.tar.gz"),
+                    archive_size: 1,
+                    sha256: "b".repeat(64),
+                    checksum_url: format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{version}/DesktopPet-v{version}-macos-arm64.tar.gz.sha256"),
+                },
+                image: ExecutableIdentity { path: target_bundle.join("Contents/MacOS/desktop-pet"), sha256: "c".repeat(64) },
+                origin: InstallOrigin::Standalone { bundle: target_bundle },
+                staged_bundle: root.join("stage/DesktopPet.app"),
+            },
+            target_manager_program: None,
+            legacy_aliases: Vec::new(),
+            previous_locator: PreviousRecord { path: root.join("installation.json"), bytes: None },
+            previous_default_profile: PreviousRecord { path: root.join("default-profile.json"), bytes: None },
+            adopt_as_default: false,
+            retirement_consent: true,
+            tern_reconnect_required: false,
+        }
+    }
+
+    fn migration_ui_record(
+        plan: &desktop_pet_update_coordinator::migration::MigrationPlan,
+        phase: desktop_pet_update_coordinator::migration::MigrationPhase,
+    ) -> desktop_pet_update_coordinator::migration::MigrationRecord {
+        desktop_pet_update_coordinator::migration::MigrationRecord {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            plan_sha256: "d".repeat(64),
+            phase,
+            prepared_profiles: Vec::new(),
+            preparing_profiles: Vec::new(),
+            acknowledged_profiles: Vec::new(),
+            stopped_profiles: Vec::new(),
+            target_pid: None,
+            target_instance: None,
+            locator_adopted: false,
+            default_adopted: false,
+            native_ready: true,
+            target_committed: true,
+            manager: None,
+            target_manager: None,
+            reconnected_profiles: Vec::new(),
+            retirement_attempt: 1,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn authenticated_final_cancel_releases_only_its_pending_review_state() {
+        let plan = migration_ui_plan();
+        let operation = plan.operation_id.clone();
+        let mut state = MigrationUiState {
+            busy: true,
+            plan: Some(plan.clone()),
+            ..MigrationUiState::default()
+        };
+        assert!(!state.review_allowed());
+        let closed_operation = state.settle_launch(
+            Ok(MigrationLaunchOutcome::Cancelled {
+                plan,
+                retirement_only: false,
+            }),
+            false,
+            Some(&operation),
+        );
+        assert_eq!(closed_operation.as_deref(), Some(operation.as_str()));
+        assert!(state.review_allowed());
+        assert!(state.plan.is_none());
+        assert!(state.record.is_none());
+        assert!(state.launch_error.is_none());
+        assert!(!state.busy);
+    }
+
+    #[test]
+    fn ambiguous_helper_delivery_keeps_pending_consent_and_blocks_fresh_review() {
+        let plan = migration_ui_plan();
+        let mut state = MigrationUiState {
+            busy: true,
+            plan: Some(plan.clone()),
+            ..MigrationUiState::default()
+        };
+        assert!(state
+            .settle_launch(
+                Err("unproven child delivery".into()),
+                false,
+                Some(&plan.operation_id)
+            )
+            .is_none());
+        assert!(!state.review_allowed());
+        assert_eq!(state.plan.as_ref(), Some(&plan));
+        assert!(state.launch_error.is_some());
+        assert!(state.record.is_none());
+        assert!(!state.busy);
+        // A late cancellation must not clear an already unknown operation.
+        assert!(state
+            .settle_launch(
+                Ok(MigrationLaunchOutcome::Cancelled {
+                    plan: plan.clone(),
+                    retirement_only: false
+                }),
+                false,
+                Some(&plan.operation_id),
+            )
+            .is_none());
+        assert!(!state.review_allowed());
+        assert_eq!(state.plan.as_ref(), Some(&plan));
+    }
+
+    #[test]
+    fn final_cancel_cannot_close_foreign_frozen_or_retained_unknown_consent() {
+        use desktop_pet_update_coordinator::migration::MigrationPhase;
+        let plan = migration_ui_plan();
+        for (foreign_plan, foreign_consent, frozen, retained_unknown) in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            let record = retained_unknown
+                .then(|| migration_ui_record(&plan, MigrationPhase::ManagerUnknown));
+            let mut state = MigrationUiState {
+                busy: true,
+                plan: Some(plan.clone()),
+                record: record.clone(),
+                ..MigrationUiState::default()
+            };
+            let mut cancelled = plan.clone();
+            if foreign_plan {
+                cancelled.target.image.sha256 = "f".repeat(64);
+            }
+            let consent = if foreign_consent {
+                "foreign-operation"
+            } else {
+                &plan.operation_id
+            };
+            assert!(state
+                .settle_launch(
+                    Ok(MigrationLaunchOutcome::Cancelled {
+                        plan: cancelled,
+                        retirement_only: retained_unknown
+                    }),
+                    frozen,
+                    Some(consent),
+                )
+                .is_none());
+            assert!(!state.review_allowed());
+            assert_eq!(state.plan.as_ref(), Some(&plan));
+            assert_eq!(state.record, record);
+        }
+    }
+
+    #[test]
+    fn retirement_cancel_preserves_definite_failure_history_and_approved_record_remains_distinct() {
+        use desktop_pet_update_coordinator::migration::MigrationPhase;
+        let plan = migration_ui_plan();
+        let record = migration_ui_record(&plan, MigrationPhase::RetirementFailed);
+        let mut state = MigrationUiState {
+            busy: true,
+            plan: Some(plan.clone()),
+            record: Some(record.clone()),
+            ..MigrationUiState::default()
+        };
+        assert_eq!(
+            state
+                .settle_launch(
+                    Ok(MigrationLaunchOutcome::Cancelled {
+                        plan: plan.clone(),
+                        retirement_only: true
+                    }),
+                    false,
+                    Some(&plan.operation_id),
+                )
+                .as_deref(),
+            Some(plan.operation_id.as_str())
+        );
+        assert!(state.review_allowed());
+        assert_eq!(state.plan.as_ref(), Some(&plan));
+        assert_eq!(state.record, Some(record));
+        let completed = migration_ui_record(&plan, MigrationPhase::Complete);
+        assert!(state
+            .settle_launch(
+                Ok(MigrationLaunchOutcome::Recorded(completed.clone())),
+                false,
+                Some(&plan.operation_id)
+            )
+            .is_none());
+        assert_eq!(state.record, Some(completed));
+    }
 
     fn routing_event(timestamp: f64, source: PointerSource) -> EventIdentity {
         EventIdentity {

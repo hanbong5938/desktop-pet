@@ -9,6 +9,16 @@ fn migration_digest(plan: &MigrationPlan) -> Result<[u8; 32], String> {
     Ok(Sha256::digest(serde_json::to_vec(plan).map_err(|e| e.to_string())?).into())
 }
 
+fn migration_confirmation_response(response: isize) -> Result<bool, String> {
+    match response {
+        1000 => Ok(true),
+        1001 => Ok(false),
+        _ => Err(format!(
+            "native migration consent ended without an explicit decision: {response}"
+        )),
+    }
+}
+
 fn migration_summary(plan: &MigrationPlan) -> String {
     let source_manager = match &plan.source_origin {
         desktop_pet_update_coordinator::migration::LegacyOrigin::Homebrew { brew, formula, cellar_formula_root, .. } =>
@@ -919,10 +929,10 @@ mod mac {
                 send_object(alert, "addButtonWithTitle:", string("Cancel"));
                 let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
                     std::mem::transmute(objc_msgSend as *const ());
-                let accepted = modal(alert, selector("runModal")) == 1000;
+                let response = modal(alert, selector("runModal"));
                 send_void(alert, "release");
                 self.pump();
-                Ok(accepted)
+                super::migration_confirmation_response(response)
             }
         }
         pub fn require_migration_visible(&self, plan: &super::MigrationPlan) -> Result<(), String> {
@@ -1251,5 +1261,19 @@ impl MigrationPresentation for Panel {
     }
     fn require_visible(&self, plan: &MigrationPlan) -> Result<(), String> {
         self.require_migration_visible(plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migration_confirmation_response;
+
+    #[test]
+    fn native_final_consent_only_accepts_real_approve_or_cancel_responses() {
+        assert_eq!(migration_confirmation_response(1000).unwrap(), true);
+        assert_eq!(migration_confirmation_response(1001).unwrap(), false);
+        for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
+            assert!(migration_confirmation_response(response).is_err());
+        }
     }
 }

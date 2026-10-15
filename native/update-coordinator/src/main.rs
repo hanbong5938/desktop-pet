@@ -113,8 +113,9 @@ fn run() -> Result<(), String> {
                 return Err("unexpected migration argument".into());
             }
             if !confirm_reconnect && !panel.confirm_migration(&approved, resume)? {
+                migration::write_final_consent_cancelled(&approved, &plan, resume)?;
                 panel.close();
-                return Err("migration consent cancelled; no migration action started".into());
+                return Ok(());
             }
             let result = match action.as_deref() {
                 None => migration::run_with_presentation(&plan, &panel),

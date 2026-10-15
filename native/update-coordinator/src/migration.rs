@@ -1738,7 +1738,7 @@ fn execute(
         save(plan, record)?;
     }
     visible(presentation, plan)?;
-    write_final_visible_ack(plan, record)?;
+    write_final_visible_ack(plan, record, false)?;
     transition(plan, record, MigrationPhase::Stopping, presentation)?;
     for profile in &plan.profiles {
         if stop_requested(plan)? {
@@ -2354,6 +2354,7 @@ fn resume_retirement_impl(
     let live = status(&plan.profiles[0])?;
     verify_committed_target(&plan, &record, &live)?;
     visible(presentation, &plan)?;
+    write_final_visible_ack(&plan, &record, true)?;
     match retire(&plan, &reservation, &mut record, presentation) {
         Ok(()) => Ok(record),
         Err(error) => {
@@ -3690,7 +3691,7 @@ mod tests {
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
-        for version in ["0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5"] {
+        for version in ["0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6"] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();
             assert!(validate_plan(&obsolete).is_err());
@@ -4058,35 +4059,228 @@ mod tests {
         assert_eq!(fs::read(journal_path(&plan)).unwrap(), journal_before);
     }
     #[test]
-    fn false_final_visible_ack_and_wrong_plan_digest_are_rejected() {
+    fn retained_046_unknown_history_cannot_authorize_the_047_engine() {
+        let (_temp, plan) = retained_fixture("0.4.6");
+        let mut record = persist_fixture(&plan);
+        record.phase = MigrationPhase::ManagerUnknown;
+        save(&plan, &record).unwrap();
+        let evidence_before = fs::read(evidence_path(&plan)).unwrap();
+        let journal_before = fs::read(journal_path(&plan)).unwrap();
+        assert_eq!(
+            latest_for_context(&context(&plan)).unwrap(),
+            Some((plan.clone(), record))
+        );
+        assert!(read_plan(&evidence_path(&plan)).is_err());
+        assert!(write_new_plan(&plan).is_err());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), evidence_before);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), journal_before);
+    }
+
+    fn consent_frame(
+        plan: &MigrationPlan,
+        path: &Path,
+        retirement_only: bool,
+        outcome: MigrationFinalConsentOutcome,
+    ) -> MigrationFinalConsentFrame {
+        final_consent_frame(
+            plan,
+            format!(
+                "{:x}",
+                Sha256::digest(owned_private_file(path, MAX_PLAN).unwrap())
+            ),
+            retirement_only,
+            outcome,
+        )
+    }
+
+    fn frame_bytes(frame: &MigrationFinalConsentFrame) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(frame).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn final_consent_cancel_is_distinct_from_visible_approval_and_preserves_profiles() {
+        let (_temp, plan) = fixture();
+        let config = plan.profiles[0].config_dir.join("config.json");
+        let state = plan.profiles[0].state_dir.join("state.json");
+        fs::write(&config, b"original configuration").unwrap();
+        fs::write(&state, b"original state").unwrap();
+        let path = write_new_plan(&plan).unwrap();
+        let plan_before = fs::read(&path).unwrap();
+        for retirement_only in [false, true] {
+            for outcome in [
+                MigrationFinalConsentOutcome::Cancelled,
+                MigrationFinalConsentOutcome::VisibleApproved,
+            ] {
+                let frame = consent_frame(&plan, &path, retirement_only, outcome);
+                assert_eq!(
+                    frame.helper_ui_visible,
+                    outcome == MigrationFinalConsentOutcome::VisibleApproved
+                );
+                assert_eq!(
+                    frame.source_ui_visible,
+                    outcome == MigrationFinalConsentOutcome::VisibleApproved && !retirement_only
+                );
+                let mut bytes = frame_bytes(&frame);
+                if outcome == MigrationFinalConsentOutcome::VisibleApproved {
+                    bytes.extend_from_slice(b"retained terminal result\n");
+                }
+                let mut reader = bytes.as_slice();
+                assert_eq!(
+                    read_final_consent_outcome(&mut reader, &plan, &path, retirement_only).unwrap(),
+                    outcome
+                );
+                assert!(reader.is_empty());
+            }
+        }
+        assert_eq!(fs::read(config).unwrap(), b"original configuration");
+        assert_eq!(fs::read(state).unwrap(), b"original state");
+        assert_eq!(fs::read(path).unwrap(), plan_before);
+        assert!(!journal_path(&plan).exists());
+        assert!(!evidence_path(&plan).exists());
+    }
+
+    #[test]
+    fn final_consent_rejects_foreign_authority_and_false_visibility() {
         let (_temp, plan) = fixture();
         let path = write_new_plan(&plan).unwrap();
-        let mut ack = MigrationConsentAcknowledgement {
-            version: 4,
-            kind: "legacy_migration_consent_ack".into(),
-            operation_id: plan.operation_id.clone(),
-            plan_sha256: format!(
-                "{:x}",
-                Sha256::digest(owned_private_file(&path, MAX_PLAN).unwrap())
-            ),
-            source_image: plan.source_image.clone(),
-            target_image: plan.target.image.clone(),
-            profile_paths: vec![MigrationProfilePaths {
-                config_dir: plan.profiles[0].config_dir.clone(),
-                state_dir: plan.profiles[0].state_dir.clone(),
-            }],
-            helper_ui_visible: false,
-            source_ui_visible: true,
-        };
-        let frame = |value: &MigrationConsentAcknowledgement| {
-            let mut bytes = serde_json::to_vec(value).unwrap();
+        for outcome in [
+            MigrationFinalConsentOutcome::Cancelled,
+            MigrationFinalConsentOutcome::VisibleApproved,
+        ] {
+            let original = consent_frame(&plan, &path, false, outcome);
+            let mut altered = Vec::new();
+            let mut frame = original.clone();
+            frame.operation_id = "f".repeat(32);
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.plan_sha256 = "0".repeat(64);
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.source_image.sha256 = "e".repeat(64);
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.target_image.sha256 = "e".repeat(64);
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.profile_paths[0].state_dir.push("foreign");
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.helper_ui_visible = !frame.helper_ui_visible;
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.source_ui_visible = !frame.source_ui_visible;
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.retirement_only = true;
+            altered.push(frame);
+            let mut frame = original.clone();
+            frame.version = 3;
+            altered.push(frame);
+            let mut frame = original;
+            frame.kind = "legacy_migration_consent_ack".into();
+            altered.push(frame);
+            for frame in altered {
+                let bytes = frame_bytes(&frame);
+                let mut reader = bytes.as_slice();
+                assert!(read_final_consent_outcome(&mut reader, &plan, &path, false).is_err());
+                assert!(reader.is_empty());
+            }
+        }
+        let mut changed_plan = plan.clone();
+        changed_plan.adopt_as_default = true;
+        let frame = consent_frame(
+            &changed_plan,
+            &path,
+            false,
+            MigrationFinalConsentOutcome::Cancelled,
+        );
+        assert!(read_final_consent_outcome(
+            &mut frame_bytes(&frame).as_slice(),
+            &changed_plan,
+            &path,
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn final_consent_eof_truncation_invalid_frames_and_cancel_extra_output_stay_ambiguous() {
+        let (_temp, plan) = fixture();
+        let path = write_new_plan(&plan).unwrap();
+        let valid = frame_bytes(&consent_frame(
+            &plan,
+            &path,
+            false,
+            MigrationFinalConsentOutcome::Cancelled,
+        ));
+        let mut cases = vec![
+            Vec::new(),
+            valid[..valid.len() - 1].to_vec(),
+            b"{broken}\n".to_vec(),
+            vec![b'x'; MAX_PLAN as usize + 1],
+        ];
+        for (field, value) in [
+            ("outcome", serde_json::json!("unsupported")),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut frame: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+            frame[field] = value;
+            let mut bytes = serde_json::to_vec(&frame).unwrap();
             bytes.push(b'\n');
-            bytes
-        };
-        assert!(read_final_visible_ack(&mut frame(&ack).as_slice(), &plan, &path).is_err());
-        ack.helper_ui_visible = true;
-        ack.plan_sha256 = "0".repeat(64);
-        assert!(read_final_visible_ack(&mut frame(&ack).as_slice(), &plan, &path).is_err());
+            cases.push(bytes);
+        }
+        let text = String::from_utf8(valid.clone()).unwrap();
+        cases.push(
+            text.replacen("\"version\":4", "\"version\":4,\"version\":4", 1)
+                .into_bytes(),
+        );
+        for extra in [b"\n".as_slice(), b"{\"phase\":\"complete\"}\n".as_slice()] {
+            let mut bytes = valid.clone();
+            bytes.extend_from_slice(extra);
+            cases.push(bytes);
+        }
+        for bytes in cases {
+            let mut reader = bytes.as_slice();
+            assert!(read_final_consent_outcome(&mut reader, &plan, &path, false).is_err());
+            assert!(reader.is_empty());
+        }
+    }
+
+    #[test]
+    fn final_consent_cancel_requires_a_successful_reaped_child_not_a_frame_alone() {
+        let (_temp, plan) = fixture();
+        let path = write_new_plan(&plan).unwrap();
+        let bytes = frame_bytes(&consent_frame(
+            &plan,
+            &path,
+            false,
+            MigrationFinalConsentOutcome::Cancelled,
+        ));
+        for (output, termination, expected_cancel) in [
+            (bytes.as_slice(), "exit 0", true),
+            (bytes.as_slice(), "exit 1", false),
+            (bytes.as_slice(), "kill -TERM $$", false),
+            (b"".as_slice(), "exit 0", false),
+            (b"".as_slice(), "kill -TERM $$", false),
+            (b"{broken}\n".as_slice(), "exit 0", false),
+        ] {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &format!("cat; {termination}")])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(output).unwrap();
+            let result = wait_for_final_consent(&mut child, &plan, &path, false);
+            if expected_cancel {
+                assert_eq!(result.unwrap(), MigrationFinalConsentOutcome::Cancelled);
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(child.try_wait().unwrap().is_some());
+        }
     }
 }
 
@@ -4156,20 +4350,91 @@ pub struct MigrationProfilePaths {
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationFinalConsentOutcome {
+    VisibleApproved,
+    Cancelled,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct MigrationConsentAcknowledgement {
-    pub version: u32,
-    pub kind: String,
-    pub operation_id: String,
-    pub plan_sha256: String,
-    pub source_image: ExecutableIdentity,
-    pub target_image: ExecutableIdentity,
-    pub profile_paths: Vec<MigrationProfilePaths>,
-    pub helper_ui_visible: bool,
-    pub source_ui_visible: bool,
+struct MigrationFinalConsentFrame {
+    version: u32,
+    kind: String,
+    operation_id: String,
+    plan_sha256: String,
+    source_image: ExecutableIdentity,
+    target_image: ExecutableIdentity,
+    profile_paths: Vec<MigrationProfilePaths>,
+    retirement_only: bool,
+    outcome: MigrationFinalConsentOutcome,
+    helper_ui_visible: bool,
+    source_ui_visible: bool,
 }
-fn write_final_visible_ack(plan: &MigrationPlan, record: &MigrationRecord) -> Result<(), String> {
+fn final_consent_frame(
+    plan: &MigrationPlan,
+    plan_sha256: String,
+    retirement_only: bool,
+    outcome: MigrationFinalConsentOutcome,
+) -> MigrationFinalConsentFrame {
+    let approved = outcome == MigrationFinalConsentOutcome::VisibleApproved;
+    MigrationFinalConsentFrame {
+        version: 4,
+        kind: "legacy_migration_final_consent".into(),
+        operation_id: plan.operation_id.clone(),
+        plan_sha256,
+        source_image: plan.source_image.clone(),
+        target_image: plan.target.image.clone(),
+        profile_paths: plan
+            .profiles
+            .iter()
+            .map(|profile| MigrationProfilePaths {
+                config_dir: profile.config_dir.clone(),
+                state_dir: profile.state_dir.clone(),
+            })
+            .collect(),
+        retirement_only,
+        outcome,
+        helper_ui_visible: approved,
+        source_ui_visible: approved && !retirement_only,
+    }
+}
+fn write_final_consent_frame(frame: &MigrationFinalConsentFrame) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(frame).map_err(|e| e.to_string())?;
+    if bytes.len() + 1 > MAX_PLAN as usize {
+        return Err("final consent outcome exceeds bound".into());
+    }
+    bytes.push(b'\n');
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&bytes)
+        .and_then(|_| stdout.flush())
+        .map_err(|e| format!("cannot flush migration final consent outcome: {e}"))
+}
+/// Called only after the native final dialog actually returns Cancel, before
+/// entering the migration engine. Cancellation is not a visibility acknowledgement.
+pub fn write_final_consent_cancelled(
+    plan: &MigrationPlan,
+    plan_path: &Path,
+    retirement_only: bool,
+) -> Result<(), String> {
+    let evidence = owned_private_file(plan_path, MAX_PLAN)?;
+    let stored: MigrationPlan = serde_json::from_slice(&evidence).map_err(|e| e.to_string())?;
+    if stored != *plan {
+        return Err("cancelled migration consent plan changed".into());
+    }
+    write_final_consent_frame(&final_consent_frame(
+        plan,
+        format!("{:x}", Sha256::digest(&evidence)),
+        retirement_only,
+        MigrationFinalConsentOutcome::Cancelled,
+    ))
+}
+fn write_final_visible_ack(
+    plan: &MigrationPlan,
+    record: &MigrationRecord,
+    retirement_only: bool,
+) -> Result<(), String> {
     if !plan
         .profiles
         .iter()
@@ -4177,84 +4442,106 @@ fn write_final_visible_ack(plan: &MigrationPlan, record: &MigrationRecord) -> Re
     {
         return Err("not every source profile flushed its final consent acknowledgement".into());
     }
-    let ack = MigrationConsentAcknowledgement {
-        version: 4,
-        kind: "legacy_migration_consent_ack".into(),
-        operation_id: plan.operation_id.clone(),
-        plan_sha256: record.plan_sha256.clone(),
-        source_image: plan.source_image.clone(),
-        target_image: plan.target.image.clone(),
-        profile_paths: plan
-            .profiles
-            .iter()
-            .map(|p| MigrationProfilePaths {
-                config_dir: p.config_dir.clone(),
-                state_dir: p.state_dir.clone(),
-            })
-            .collect(),
-        helper_ui_visible: true,
-        source_ui_visible: true,
-    };
-    let mut bytes = serde_json::to_vec(&ack).map_err(|e| e.to_string())?;
-    if bytes.len() + 1 > MAX_PLAN as usize {
-        return Err("final-visible acknowledgement exceeds bound".into());
-    }
-    bytes.push(b'\n');
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(&bytes)
-        .and_then(|_| stdout.flush())
-        .map_err(|e| format!("cannot flush migration final-visible acknowledgement: {e}"))
+    write_final_consent_frame(&final_consent_frame(
+        plan,
+        record.plan_sha256.clone(),
+        retirement_only,
+        MigrationFinalConsentOutcome::VisibleApproved,
+    ))
 }
-/// Read only the first stdout frame. The helper's later terminal record is not
-/// proof of a visible consent window and cannot substitute for this handshake.
-pub fn read_final_visible_ack<R: Read>(
+fn read_final_consent_frame<R: Read>(
     reader: &mut R,
     plan: &MigrationPlan,
     plan_path: &Path,
-) -> Result<MigrationConsentAcknowledgement, String> {
+    retirement_only: bool,
+) -> Result<MigrationFinalConsentOutcome, String> {
     let mut bytes = Vec::with_capacity(2048);
     let mut byte = [0u8; 1];
     loop {
         if bytes.len() >= MAX_PLAN as usize {
-            return Err("helper acknowledgement exceeds bound".into());
+            return Err("helper final consent outcome exceeds bound".into());
         }
         if reader.read(&mut byte).map_err(|e| e.to_string())? == 0 {
-            return Err("helper exited without a final-visible acknowledgement".into());
+            return Err("helper exited without a complete final consent outcome".into());
         }
         if byte[0] == b'\n' {
             break;
         }
         bytes.push(byte[0]);
     }
-    let ack: MigrationConsentAcknowledgement =
+    let frame: MigrationFinalConsentFrame =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let evidence = owned_private_file(plan_path, MAX_PLAN)?;
     let stored: MigrationPlan = serde_json::from_slice(&evidence).map_err(|e| e.to_string())?;
-    let profiles = plan
-        .profiles
-        .iter()
-        .map(|p| MigrationProfilePaths {
-            config_dir: p.config_dir.clone(),
-            state_dir: p.state_dir.clone(),
-        })
-        .collect::<Vec<_>>();
+    let approved = frame.outcome == MigrationFinalConsentOutcome::VisibleApproved;
     if stored != *plan
-        || ack.version != 4
-        || ack.kind != "legacy_migration_consent_ack"
-        || ack.operation_id != plan.operation_id
-        || ack.plan_sha256 != format!("{:x}", Sha256::digest(&evidence))
-        || ack.source_image != plan.source_image
-        || ack.target_image != plan.target.image
-        || ack.profile_paths != profiles
-        || !ack.helper_ui_visible
-        || !ack.source_ui_visible
+        || frame.version != 4
+        || frame.kind != "legacy_migration_final_consent"
+        || frame.operation_id != plan.operation_id
+        || frame.plan_sha256 != format!("{:x}", Sha256::digest(&evidence))
+        || frame.source_image != plan.source_image
+        || frame.target_image != plan.target.image
+        || frame.profile_paths.len() != plan.profiles.len()
+        || !frame
+            .profile_paths
+            .iter()
+            .zip(&plan.profiles)
+            .all(|(paths, profile)| {
+                paths.config_dir == profile.config_dir && paths.state_dir == profile.state_dir
+            })
+        || frame.retirement_only != retirement_only
+        || frame.helper_ui_visible != approved
+        || frame.source_ui_visible != (approved && !retirement_only)
     {
-        return Err(
-            "helper final-visible acknowledgement is not bound to this exact consent plan".into(),
-        );
+        return Err("helper final consent outcome is not bound to this exact consent plan".into());
     }
-    Ok(ack)
+    Ok(frame.outcome)
+}
+/// Consume the owned helper's bounded first frame, then drain its stdout before
+/// the caller reaps it. A cancellation must be the entire successful output;
+/// an approved frame never substitutes for the independently retained journal.
+pub fn read_final_consent_outcome<R: Read>(
+    reader: &mut R,
+    plan: &MigrationPlan,
+    plan_path: &Path,
+    retirement_only: bool,
+) -> Result<MigrationFinalConsentOutcome, String> {
+    let outcome = read_final_consent_frame(reader, plan, plan_path, retirement_only);
+    // Drain even malformed frames so the child cannot block on its output pipe
+    // while the owner waits to reap it.
+    let remaining = std::io::copy(reader, &mut std::io::sink())
+        .map_err(|error| format!("Migration helper result channel failed: {error}"));
+    let outcome = outcome?;
+    if remaining? != 0 && outcome == MigrationFinalConsentOutcome::Cancelled {
+        return Err("cancelled migration helper emitted unexpected additional output".into());
+    }
+    Ok(outcome)
+}
+
+/// Reap the exact launched helper even if its ownership frame is invalid.
+/// A valid cancellation frame alone is insufficient without a coherent exit.
+pub fn wait_for_final_consent(
+    child: &mut std::process::Child,
+    plan: &MigrationPlan,
+    plan_path: &Path,
+    retirement_only: bool,
+) -> Result<MigrationFinalConsentOutcome, String> {
+    let outcome = match child.stdout.take() {
+        Some(mut stdout) => {
+            read_final_consent_outcome(&mut stdout, plan, plan_path, retirement_only)
+        }
+        None => Err("Migration helper ownership channel is missing".into()),
+    };
+    let status = child
+        .wait()
+        .map_err(|error| format!("Migration helper wait failed; delivery is unknown: {error}"))?;
+    let outcome = outcome?;
+    if !status.success() {
+        return Err(format!(
+            "Migration helper exited with {status}; inspect the retained journal before another operation"
+        ));
+    }
+    Ok(outcome)
 }
 
 fn profile_home(environment: &BTreeMap<String, String>, os_home: &Path) -> Result<PathBuf, String> {

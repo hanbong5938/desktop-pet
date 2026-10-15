@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       core_revision:
-        description: "Exact approved published v0.4.6 core commit (40 lowercase hex characters)"
+        description: "Exact approved published v0.4.7 core commit (40 lowercase hex characters)"
         required: true
         type: string
       herdr_migration_revision:
@@ -49,9 +49,9 @@ jobs:
           set -euo pipefail
           [[ "$REQUESTED_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$REQUESTED_CORE_REVISION" ]]
-          [[ "$(git rev-parse 'refs/tags/v0.4.6^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(git rev-parse 'refs/tags/v0.4.7^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
           [[ "$(plutil -extract name raw -o - package.json)" == desktop-pet ]]
-          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.6 ]]
+          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.7 ]]
           [[ "$DESKTOP_PET_HERDR_MIGRATION_REV" == 6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8 ]]
 
       - name: Set up Node.js
@@ -75,10 +75,10 @@ jobs:
           ref="$DESKTOP_PET_HERDR_MIGRATION_REV"
           [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
           [[ "$ref" == 6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8 ]]
-          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.6 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.6" and (.assets | length == 6) and (.assets as $assets | ["DesktopPet-v0.4.6-macos-arm64.tar.gz","DesktopPet-v0.4.6-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.6-rig-native.json","desktop-pet-install-v0.4.6.sh","desktop-pet-install-v0.4.6.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
+          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.7 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.7" and (.assets | length == 6) and (.assets as $assets | ["DesktopPet-v0.4.7-macos-arm64.tar.gz","DesktopPet-v0.4.7-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.7-rig-native.json","desktop-pet-install-v0.4.7.sh","desktop-pet-install-v0.4.7.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
           repository=hanbong5938/herdr-desktop-pet
           gh api "repos/$repository/releases/tags/v0.4.1" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.1" and (.assets | length == 0)' >/dev/null
-          for authority in "hanbong5938/desktop-pet v0.4.6 $REQUESTED_CORE_REVISION" "$repository v0.4.1 $ref"; do
+          for authority in "hanbong5938/desktop-pet v0.4.7 $REQUESTED_CORE_REVISION" "$repository v0.4.1 $ref"; do
             read -r repo tag expected <<< "$authority"
             [[ "$(gh api "repos/$repo/commits/$expected" --jq '.sha')" == "$expected" ]]
             object="$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object')"
@@ -94,19 +94,19 @@ jobs:
           done
           # Authenticate the actually published neutral package source, not
           # merely a tag whose assets might carry a different build identity.
-          gh release download v0.4.6 --repo hanbong5938/desktop-pet \
-            --pattern DesktopPet-v0.4.6-rig-native.json --pattern SHA256SUMS \
+          gh release download v0.4.7 --repo hanbong5938/desktop-pet \
+            --pattern DesktopPet-v0.4.7-rig-native.json --pattern SHA256SUMS \
             --dir "$RUNNER_TEMP/published-core"
           bun -e '
             const {createHash}=await import("node:crypto");
-            const name="DesktopPet-v0.4.6-rig-native.json";
+            const name="DesktopPet-v0.4.7-rig-native.json";
             const dir=process.env.RUNNER_TEMP+"/published-core/";
             const bytes=await Bun.file(dir+name).arrayBuffer();
             const entries=(await Bun.file(dir+"SHA256SUMS").text()).trim().split("\n").map(line=>line.trim().split(/\s+/)).filter(parts=>parts[1]?.replace(/^\*/,"")===name);
             if(entries.length!==1||entries[0].length!==2||!/^[a-f0-9]{64}$/.test(entries[0][0])||createHash("sha256").update(Buffer.from(bytes)).digest("hex")!==entries[0][0])throw Error("published core provenance checksum mismatch");
             const p=JSON.parse(Buffer.from(bytes).toString("utf8"));
             const i=p.distribution_identity;
-            if(p.version!==1||p.paths_relative_to!=="Contents"||p.core_revision!==process.env.REQUESTED_CORE_REVISION||i?.core_revision!==p.core_revision||i.distribution!=="neutral"||i.app_version!=="0.4.6"||i.protocol!==4||i.observation_mode!==2||i.integration_api!==1||i.app_name!=="DesktopPet.app"||i.executable!=="desktop-pet"||i.helper!=="desktop-pet-update-coordinator"||i.bundle_id!=="io.github.hanbong5938.desktop-pet"||i.herdr_migration_revision!=null)throw Error("published core provenance identity mismatch");
+            if(p.version!==1||p.paths_relative_to!=="Contents"||p.core_revision!==process.env.REQUESTED_CORE_REVISION||i?.core_revision!==p.core_revision||i.distribution!=="neutral"||i.app_version!=="0.4.7"||i.protocol!==4||i.observation_mode!==2||i.integration_api!==1||i.app_name!=="DesktopPet.app"||i.executable!=="desktop-pet"||i.helper!=="desktop-pet-update-coordinator"||i.bundle_id!=="io.github.hanbong5938.desktop-pet"||i.herdr_migration_revision!=null)throw Error("published core provenance identity mismatch");
           '
           # No existing public or draft bridge release may be replaced by this
           # successor build. Publication remains a separate authorization.
