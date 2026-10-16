@@ -201,14 +201,26 @@ fn brew_origin(path: &Path) -> Result<Option<InstallOrigin>, String> {
     }))
 }
 
-pub(crate) fn origin_for_executable(path: &Path) -> Result<InstallOrigin, String> {
+/// `validated` is a full bundle validation the caller just performed for this executable; the
+/// standalone owner reuses it only for that exact physical bundle instead of validating it twice.
+pub(crate) fn origin_for_executable(
+    path: &Path,
+    validated: Option<&crate::installation::ValidatedApp>,
+) -> Result<InstallOrigin, String> {
     let path = normalized(path)?;
     if let Some(origin) = brew_origin(&path)? {
         return Ok(origin);
     }
     let bundle = standalone_bundle()?;
     if app_binary(&bundle) == path && normalized(&bundle)? == bundle {
-        let proof = crate::installation::validate_staged_app(&bundle)?;
+        let fresh;
+        let proof = match validated {
+            Some(app) if app.bundle == bundle => app,
+            _ => {
+                fresh = crate::installation::validate_staged_app(&bundle)?;
+                &fresh
+            }
+        };
         if proof.image.path != path {
             return Err("standalone image escaped bundle".into());
         }
@@ -245,21 +257,21 @@ fn locator(origin: &InstallOrigin) -> Result<PathBuf, String> {
 pub fn detect_origin(c: &UpdateContext) -> Result<InstallOrigin, String> {
     context_valid(c)?;
     let Some(captured) = &c.running_origin else {
-        return origin_for_executable(&c.running.path);
+        return origin_for_executable(&c.running.path, None);
     };
     let current = match captured.as_ref() {
         InstallOrigin::Homebrew {
             cellar_formula_root,
             ..
         } if c.running.path.starts_with(cellar_formula_root) => {
-            origin_for_executable(&locator(captured)?)
+            origin_for_executable(&locator(captured)?, None)
         }
         InstallOrigin::Source { root } if source_binary(root) == c.running.path => {
             validate_source_root(root)?;
             Ok((**captured).clone())
         }
         InstallOrigin::Standalone { bundle } if app_binary(bundle) == c.running.path => {
-            origin_for_executable(&locator(captured)?)
+            origin_for_executable(&locator(captured)?, None)
         }
         InstallOrigin::Manual { locator } if *locator == c.running.path => Ok((**captured).clone()),
         _ => Err("captured running image is outside its installation".into()),
@@ -531,7 +543,7 @@ fn installed_image(plan: &UpdatePlan, original: bool) -> Result<VerifiedInstalla
         plan.target_origin()
     };
     let path = locator(expected)?;
-    let actual = origin_for_executable(&path)?;
+    let actual = origin_for_executable(&path, None)?;
     if &actual != expected {
         return Err("installed candidate changed origin".into());
     }

@@ -39,8 +39,8 @@ const packageVersion = typeof packageJson.version === "string"
 if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(packageVersion)) {
   fail("package version must be a stable semantic version");
 }
-if (packageVersion !== "0.4.11") {
-  fail("the authorized neutral and legacy-0.3.15 distributions must use the same approved 0.4.11 core revision");
+if (packageVersion !== "0.4.12") {
+  fail("the authorized neutral and legacy-0.3.15 distributions must use the same approved 0.4.12 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");

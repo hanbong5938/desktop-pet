@@ -23,6 +23,7 @@ use desktop_pet_update_coordinator::protocol::{
 use desktop_pet_update_coordinator::{
     detect_origin, executable_identity, InstallOrigin, UpdateContext,
 };
+use std::cell::Cell;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions, Permissions};
@@ -653,7 +654,13 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
     };
     if command == CommandKind::Daemon {
         let (generation, token) = updater_start_authorization()?;
-        admit_startup(&paths, generation, token.as_deref(), &observation_mode)?;
+        admit_startup(
+            &paths,
+            generation,
+            token.as_deref(),
+            &observation_mode,
+            &Cell::new(None),
+        )?;
         let automatic_start = match env::var("DESKTOP_PET_AUTOMATIC_START") {
             Ok(value) if value == "1" => true,
             Ok(value) if value == "0" => false,
@@ -1153,7 +1160,14 @@ pub(crate) fn new_operation_id() -> String {
     format!("{nanos:x}-{:x}-{counter:x}", std::process::id())
 }
 
-fn startup_origin(paths: &Paths, selection: ObservationSelection) -> Result<InstallOrigin, String> {
+/// `verified` is this launch's already verified installation owner. Owner classification fully
+/// validates the app bundle, so it is not repeated for every admission (as in the daemon); the
+/// context, migration authorization and updater fences are still rebuilt and re-read each time.
+fn startup_origin(
+    paths: &Paths,
+    selection: ObservationSelection,
+    verified: Option<InstallOrigin>,
+) -> Result<InstallOrigin, String> {
     let executable = bundle::executable().map_err(|e| e.to_string())?;
     let context = UpdateContext {
         running: executable_identity(&executable)?,
@@ -1173,7 +1187,9 @@ fn startup_origin(paths: &Paths, selection: ObservationSelection) -> Result<Inst
         locale: "en".into(),
     };
     daemon::validate_migration_startup_context(&context)?;
-    Ok(detect_origin(&context).unwrap_or_else(|reason| InstallOrigin::Unknown { reason }))
+    Ok(verified.unwrap_or_else(|| {
+        detect_origin(&context).unwrap_or_else(|reason| InstallOrigin::Unknown { reason })
+    }))
 }
 
 fn updater_start_authorization() -> Result<(Option<u64>, Option<String>), String> {
@@ -1197,14 +1213,21 @@ fn admit_startup(
     expected_generation: Option<u64>,
     updater_token: Option<&str>,
     observation_mode: &ObservationSelection,
+    verified_origin: &Cell<Option<InstallOrigin>>,
 ) -> Result<(), String> {
-    let origin = startup_origin(paths, observation_mode.clone())?;
-    start_allowed(
+    let origin = startup_origin(paths, observation_mode.clone(), verified_origin.take())?;
+    let allowed = start_allowed(
         &origin,
         &paths.state_dir,
         expected_generation,
         updater_token,
-    )
+    );
+    // An unverified owner is re-detected next time so a transient validation failure never
+    // relaxes later installation reservation checks.
+    if !matches!(origin, InstallOrigin::Unknown { .. }) {
+        verified_origin.set(Some(origin));
+    }
+    allowed
 }
 
 fn ensure(
@@ -1222,7 +1245,16 @@ fn ensure(
         return open_settings(&paths);
     }
     let (generation, token) = updater_start_authorization()?;
-    let admit = || admit_startup(&paths, generation, token.as_deref(), &observation_mode);
+    let verified_origin = Cell::new(None);
+    let admit = || {
+        admit_startup(
+            &paths,
+            generation,
+            token.as_deref(),
+            &observation_mode,
+            &verified_origin,
+        )
+    };
     admit()?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let mut last_error = None;

@@ -799,7 +799,7 @@ fn inspect_neutral(executable: &Path) -> Result<InstallationRecord, String> {
         return Err("invalid executable layout".into());
     }
     let app = validate_staged_app(bundle)?;
-    let actual = origin::origin_for_executable(&canonical)?;
+    let actual = origin::origin_for_executable(&canonical, Some(&app))?;
     let kind = match &actual {
         InstallOrigin::Homebrew { .. } => InstallationKind::Homebrew,
         InstallOrigin::Source { .. } => InstallationKind::Source,

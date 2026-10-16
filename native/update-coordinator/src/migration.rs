@@ -4043,7 +4043,7 @@ mod tests {
         };
         let cellar = temp.path().join("Cellar/desktop-pet");
         plan.target.image.path =
-            cellar.join("0.4.11/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
+            cellar.join("0.4.12/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
         plan.target.origin = InstallOrigin::Homebrew {
             brew: brew.path.clone(),
             prefix: temp.path().into(),
@@ -4246,7 +4246,7 @@ mod tests {
         validate_plan(&plan).unwrap();
         for version in [
             "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9",
-            "0.4.10",
+            "0.4.10", "0.4.11",
         ] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();

@@ -149,7 +149,7 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
             .get("target")
             .filter(|target| !target.is_null())
             .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.15"))
-        || plan.target.release.version != "0.4.11"
+        || plan.target.release.version != "0.4.12"
     {
         return Err("original update does not attest this exact successor bridge, profile and bounded core target".into());
     }
@@ -466,6 +466,7 @@ mod tests {
             "0.3.11+unverified",
             "0.4.10",
             "0.4.11",
+            "0.4.12",
             "unknown",
             "",
         ] {
@@ -568,7 +569,7 @@ mod tests {
                 .unwrap();
             assert!(bridge_authority(&plan, &id).is_ok());
             let mut wrong_core = plan.clone();
-            wrong_core.target.release.version = "0.4.10".into();
+            wrong_core.target.release.version = "0.4.11".into();
             assert!(bridge_authority(&wrong_core, &id).is_err());
             original["target"]["origin"]["root"] = serde_json::json!("/unrelated/bridge");
             protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)
