@@ -6,11 +6,15 @@
 
 ## 現在の公開状態と予定の単一承認経路
 
-**公開の基準:** 後継が実際に適格性確認・公開されるまでは Core v0.4.8 が現在の公開版です。Core v0.4.9 / bridge v0.3.13 / Tern v0.2.1 は予定版であり、適格性確認・公開は未完了です。この契約は導入・公開・実行受入れの証拠ではありません。
+**公開・consumer の基準:** [Core v0.4.9](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.9) は不変 source `aadc43999993a2961847faf9d80a01b7851b46d0` から実際に公開済みで、tag/assets の付け替え・上書きは禁止です。ただし component の公開は migration 全体の成功証拠ではなく、旧 protocol-3 predecessor の自動継続には受入れの空白が残ります。修正版 Core v0.4.10 / genuine bridge v0.3.14 は予定 envelope で、ここでは公開・受入れ完了を主張しません。bridge v0.3.13 は未公開です。実際の最終 successor assets を検証するまで現在の consumer pin は Core v0.4.8 のままです。Tern v0.2.1 source `69696023e00a0fcda8b85b332a075bfa26d6c26d`、凍結 Herdr retirement v0.4.1 source `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`、beta は変更しません。
 
 **予定の通常経路:** 最初の承認1回 → 正確に同じ profile の `migrationReady` / Commit → 更新 Tern consumer の配信・ロード → SDK optimistic identity guard と atomic canonical save → 実際の同じ Tern ウィンドウの fresh binding → 自動 native handover receipt → 承認済み旧所有者の retirement。**実際の再接続と receipt は retirement より先**です。保存や ACK は再接続ではなく、この SDK guard は真の cross-VM transactional CAS ではありません。別の B/source review/Migrate 承認や手動 Configure → Save → Connect / Resume は通常経路に追加しません。複数 profile では影響を受ける各 target が start・Commit・rebind する必要があり、旧 blanket live-profile guard だけでは完成しません。独立 profile は統合しません。
 
+**正確な旧 source 承認境界:** 修正経路は既知の許可済み stable predecessor v0.3.9・v0.3.10・v0.3.11・v0.3.12・v0.3.13 の真正な元 protocol-3 承認をすべて対象とし、実際に導入済みの v0.3.10/v0.3.11 も含みます。v0.3.12 専用ではありません。保持された元の matching signed helper・plan/result・解放済み lease・確定した成功/quiescent manager 結果が、正確な **現在の v0.3.14 candidate**、image、installation root/owner、元 config/state profile を認証し、Stop fence が不変である必要があります。過去の v0.3.11 candidate の Completed は現在の移行許可ではありません。Unknown・prerelease/未知 source version・protocol 2・hash 変更・無関係な profile・利用者 Stop は delegated approval に fallback しません。v0.3.6 と凍結 protocol-2/beta entry は別の互換経路であり、この条件による新規許可ではありません。追加 B/Migrate 承認や UI acknowledgement は真正な元承認の代用になりません。
+
 **Commit 済み履歴の修復と失敗の区別:** 実際の othermachine 問題は Commit 済み `AwaitingReconnect` 後の古い保存パス `/opt/homebrew/bin/herdr-desktop-pet` であり、Commit 失敗や manager 再実行の証拠ではありません。same-image / 適格 successor 修復は旧 plan/journal をバイト単位で不変に保ち、新 repair/handover receipt だけを追加します。manager replay・手動 Configure・手動 Resume は行いません。実際の旧証拠・helper・reservation・config/state・資格情報・provider/account データ・prompt/transcript・無関係な profile を保持します。definite no-spawn、Commit 後の未再接続、確定した quiescent retirement 失敗、typed cancellation、Unknown を区別します。Unknown は clear/replay も cancelled への変更もしません。実際の利用者 Stop は rollback を含む再起動を禁止します。必要な全 binding と native receipt までは retirement を阻止します。文書や旧実行は現在の tools Mac の状態を証明しません。
+
+**過去の C1 / v0.4.9 観測境界:** 以前の C1 署名 app/helper bundle（neutral 72 / legacy 68 ファイル）と instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` の真正な SDK GUI binding は、その source/run の証拠としてのみ保持します。所有 GUI は自然な `signed_out` 状態で、ローカル SDK binding を証明したのであって、モデル認証や意味的なモデル完了ではありません。この観測や旧 passing suite は修正版 v0.4.10/v0.3.14 経路や実際の旧導入 source の継続を認定しません。承認回帰の検証は parent 管理（修正前の失敗確認後に fix 適用）であり、ここでは新たな test 通過・最終 assets の適格性確認・公開を主張しません。tools Mac は問題の導入先ではありません。
 
 ## 過去の公開・実行記録 — 予定の通常経路ではない
 
@@ -72,7 +76,7 @@ desktop-pet status
 
 プリビルド・ソース導入は Herdr 連携ではなく **core** チェックアウトで実行します。既定はプリビルドのみで、取得・検証失敗からソースビルドへ黙って切り替えません。`--source` は現在の core だけを構築し、その `dist/DesktopPet.app` を使用します。
 
-**過去の固定 v0.4.7 導入例（最新版の指示ではない）:** 以下は意図的に旧不変版を選びます。現在の公開基準は v0.4.8 であり、未公開 v0.4.9 のアセットに置き換えません。
+**過去の固定 v0.4.7 導入例（最新版の指示ではない）:** 以下は意図的に旧不変版を選びます。Core v0.4.9 は公開済みですが、最終 successor assets の検証まで consumer pin は v0.4.8 のままです。未公開 v0.4.10 assets に置き換えません。
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git

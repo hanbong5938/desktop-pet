@@ -1,6 +1,6 @@
 [package]
 name = "desktop-pet"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 publish = false
 
@@ -10,7 +10,7 @@ herdr = ["dep:desktop-pet-herdr"]
 tern = ["dep:desktop-pet-tern"]
 
 [dependencies]
-desktop-pet-core = { path = "../core", version = "0.4.9" }
-desktop-pet-update-coordinator = { path = "../update-coordinator", version = "0.4.9" }
+desktop-pet-core = { path = "../core", version = "0.4.10" }
+desktop-pet-update-coordinator = { path = "../update-coordinator", version = "0.4.10" }
 desktop-pet-herdr = { git = "https://github.com/hanbong5938/herdr-desktop-pet", rev = "2a1dae743c2a67659e8a6782eff9a11714a31837", version = "0.1.0", optional = true }
 desktop-pet-tern = { git = "https://github.com/hanbong5938/tern-desktop-pet", rev = "69696023e00a0fcda8b85b332a075bfa26d6c26d", version = "0.1.0", optional = true }

@@ -1,18 +1,18 @@
-name: Build authorized legacy 0.3.13 envelope
+name: Build authorized legacy 0.3.14 envelope
 
 on:
   workflow_dispatch:
     inputs:
       core_revision:
-        description: "Exact approved published v0.4.9 core commit (40 lowercase hex characters)"
+        description: "Exact approved published v0.4.10 core commit (40 lowercase hex characters)"
         required: true
         type: string
       herdr_migration_revision:
         description: "Exact published integration-only Herdr v0.4.1 commit for approved managed retirement (40 lowercase hex)"
         required: true
         type: string
-      authorize_legacy_0_3_13:
-        description: "Authorize only the planned genuine legacy 0.3.13 distribution envelope"
+      authorize_legacy_0_3_14:
+        description: "Authorize only the planned genuine legacy 0.3.14 distribution envelope"
         required: true
         default: false
         type: boolean
@@ -21,17 +21,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-pet-legacy-0.3.13
+  group: desktop-pet-legacy-0.3.14
   cancel-in-progress: false
 
 jobs:
   bridge:
-    if: github.repository == 'hanbong5938/desktop-pet' && inputs.authorize_legacy_0_3_13
+    if: github.repository == 'hanbong5938/desktop-pet' && inputs.authorize_legacy_0_3_14
     environment: legacy-bridge-build
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
-      DESKTOP_PET_DISTRIBUTION: legacy-0.3.13
+      DESKTOP_PET_DISTRIBUTION: legacy-0.3.14
       DESKTOP_PET_CARGO_TARGET: aarch64-apple-darwin
       REQUESTED_CORE_REVISION: ${{ inputs.core_revision }}
       DESKTOP_PET_HERDR_MIGRATION_REV: ${{ inputs.herdr_migration_revision }}
@@ -49,9 +49,9 @@ jobs:
           set -euo pipefail
           [[ "$REQUESTED_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$REQUESTED_CORE_REVISION" ]]
-          [[ "$(git rev-parse 'refs/tags/v0.4.9^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
+          [[ "$(git rev-parse 'refs/tags/v0.4.10^{commit}')" == "$REQUESTED_CORE_REVISION" ]]
           [[ "$(plutil -extract name raw -o - package.json)" == desktop-pet ]]
-          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.9 ]]
+          [[ "$(plutil -extract version raw -o - package.json)" == 0.4.10 ]]
           [[ "$DESKTOP_PET_HERDR_MIGRATION_REV" == 6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8 ]]
 
       - name: Set up Node.js
@@ -75,10 +75,10 @@ jobs:
           ref="$DESKTOP_PET_HERDR_MIGRATION_REV"
           [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
           [[ "$ref" == 6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8 ]]
-          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.9 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.9" and (.assets | length == 6) and (.assets as $assets | ["DesktopPet-v0.4.9-macos-arm64.tar.gz","DesktopPet-v0.4.9-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.9-rig-native.json","desktop-pet-install-v0.4.9.sh","desktop-pet-install-v0.4.9.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
+          gh api repos/hanbong5938/desktop-pet/releases/tags/v0.4.10 | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.10" and (.assets | length == 6) and (.assets as $assets | ["DesktopPet-v0.4.10-macos-arm64.tar.gz","DesktopPet-v0.4.10-macos-arm64.tar.gz.sha256","SHA256SUMS","DesktopPet-v0.4.10-rig-native.json","desktop-pet-install-v0.4.10.sh","desktop-pet-install-v0.4.10.sh.sha256"] | all(.[]; . as $name | any($assets[]; .name == $name and .state == "uploaded" and .size > 0)))' >/dev/null
           repository=hanbong5938/herdr-desktop-pet
           gh api "repos/$repository/releases/tags/v0.4.1" | jq -e '.draft == false and .prerelease == false and .published_at != null and .tag_name == "v0.4.1" and (.assets | length == 0)' >/dev/null
-          for authority in "hanbong5938/desktop-pet v0.4.9 $REQUESTED_CORE_REVISION" "$repository v0.4.1 $ref"; do
+          for authority in "hanbong5938/desktop-pet v0.4.10 $REQUESTED_CORE_REVISION" "$repository v0.4.1 $ref"; do
             read -r repo tag expected <<< "$authority"
             [[ "$(gh api "repos/$repo/commits/$expected" --jq '.sha')" == "$expected" ]]
             object="$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object')"
@@ -94,24 +94,24 @@ jobs:
           done
           # Authenticate the actually published neutral package source, not
           # merely a tag whose assets might carry a different build identity.
-          gh release download v0.4.9 --repo hanbong5938/desktop-pet \
-            --pattern DesktopPet-v0.4.9-rig-native.json --pattern SHA256SUMS \
+          gh release download v0.4.10 --repo hanbong5938/desktop-pet \
+            --pattern DesktopPet-v0.4.10-rig-native.json --pattern SHA256SUMS \
             --dir "$RUNNER_TEMP/published-core"
           bun -e '
             const {createHash}=await import("node:crypto");
-            const name="DesktopPet-v0.4.9-rig-native.json";
+            const name="DesktopPet-v0.4.10-rig-native.json";
             const dir=process.env.RUNNER_TEMP+"/published-core/";
             const bytes=await Bun.file(dir+name).arrayBuffer();
             const entries=(await Bun.file(dir+"SHA256SUMS").text()).trim().split("\n").map(line=>line.trim().split(/\s+/)).filter(parts=>parts[1]?.replace(/^\*/,"")===name);
             if(entries.length!==1||entries[0].length!==2||!/^[a-f0-9]{64}$/.test(entries[0][0])||createHash("sha256").update(Buffer.from(bytes)).digest("hex")!==entries[0][0])throw Error("published core provenance checksum mismatch");
             const p=JSON.parse(Buffer.from(bytes).toString("utf8"));
             const i=p.distribution_identity;
-            if(p.version!==1||p.paths_relative_to!=="Contents"||p.core_revision!==process.env.REQUESTED_CORE_REVISION||i?.core_revision!==p.core_revision||i.distribution!=="neutral"||i.app_version!=="0.4.9"||i.protocol!==4||i.observation_mode!==2||i.integration_api!==1||i.app_name!=="DesktopPet.app"||i.executable!=="desktop-pet"||i.helper!=="desktop-pet-update-coordinator"||i.bundle_id!=="io.github.hanbong5938.desktop-pet"||i.herdr_migration_revision!=null)throw Error("published core provenance identity mismatch");
+            if(p.version!==1||p.paths_relative_to!=="Contents"||p.core_revision!==process.env.REQUESTED_CORE_REVISION||i?.core_revision!==p.core_revision||i.distribution!=="neutral"||i.app_version!=="0.4.10"||i.protocol!==4||i.observation_mode!==2||i.integration_api!==1||i.app_name!=="DesktopPet.app"||i.executable!=="desktop-pet"||i.helper!=="desktop-pet-update-coordinator"||i.bundle_id!=="io.github.hanbong5938.desktop-pet"||i.herdr_migration_revision!=null)throw Error("published core provenance identity mismatch");
           '
           # No existing public or draft bridge release may be replaced by this
           # successor build. Publication remains a separate authorization.
           releases="$(gh api "repos/$repository/releases?per_page=100" --paginate --slurp)"
-          [[ "$(printf '%s' "$releases" | jq '[.[][] | select(.tag_name == "v0.3.13")] | length')" == 0 ]]
+          [[ "$(printf '%s' "$releases" | jq '[.[][] | select(.tag_name == "v0.3.14")] | length')" == 0 ]]
           tree="$(gh api "repos/$repository/git/commits/$ref" --jq '.tree.sha')"
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]]
           gh api "repos/$repository/git/trees/$tree?recursive=1" | jq --arg tree "$tree" -e '
@@ -150,7 +150,7 @@ jobs:
           set -euo pipefail
           bun run check
           cargo fmt --check --all --manifest-path native/Cargo.toml
-          cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/legacy-0.3.13 --manifest-path native/Cargo.toml
+          cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/legacy-0.3.14 --manifest-path native/Cargo.toml
           bun run build:native
           bun run package:native
 
@@ -160,11 +160,11 @@ jobs:
           TMPDIR: /tmp
         run: |
           set -euo pipefail
-          source migration/legacy-0.3.13/ingress/scripts/validate.sh
+          source migration/legacy-0.3.14/ingress/scripts/validate.sh
           revision="$REQUESTED_CORE_REVISION"
           migration_revision="$DESKTOP_PET_HERDR_MIGRATION_REV"
           [[ "$migration_revision" == 6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8 ]]
-          validate_app "$PWD/dist/HerdrDesktopPet.app" 0.3.13
+          validate_app "$PWD/dist/HerdrDesktopPet.app" 0.3.14
 
       - name: Verify real legacy app/helper identity and package migration evidence
         shell: bash
@@ -173,7 +173,7 @@ jobs:
           app=dist/HerdrDesktopPet.app
           binary="$app/Contents/MacOS/herdr-desktop-pet"
           helper="$app/Contents/MacOS/herdr-update-coordinator"
-          [[ "$("$binary" --version)" == 'herdr-desktop-pet 0.3.13' ]]
+          [[ "$("$binary" --version)" == 'herdr-desktop-pet 0.3.14' ]]
           for executable in "$binary" "$helper"; do
             [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]]
             [[ "$(lipo -archs "$executable")" == arm64 ]]
@@ -182,30 +182,30 @@ jobs:
           done
           codesign --verify --deep --strict "$app"
           mkdir bridge-assets
-          COPYFILE_DISABLE=1 tar --no-xattrs -czf bridge-assets/HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz -C dist HerdrDesktopPet.app
-          cp dist/HerdrDesktopPet.app.rig-native.json bridge-assets/HerdrDesktopPet-v0.3.13-rig-native.json
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf bridge-assets/HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz -C dist HerdrDesktopPet.app
+          cp dist/HerdrDesktopPet.app.rig-native.json bridge-assets/HerdrDesktopPet-v0.3.14-rig-native.json
           node --input-type=module <<'NODE'
           import {readFile,writeFile} from 'node:fs/promises';
           import {createHash} from 'node:crypto';
           const provenance=JSON.parse(await readFile('dist/HerdrDesktopPet.app.rig-native.json','utf8'));
           const identity=provenance.distribution_identity;
-          if(provenance.core_revision!==process.env.REQUESTED_CORE_REVISION||identity?.core_revision!==provenance.core_revision||identity.distribution!=='legacy-0.3.13'||identity.app_version!=='0.3.13'||identity.protocol!==3||identity.observation_mode!==1||identity.integration_api!==1||identity.app_name!=='HerdrDesktopPet.app'||identity.executable!=='herdr-desktop-pet'||identity.helper!=='herdr-update-coordinator'||identity.bundle_id!=='dev.herdr.desktop-pet')throw Error('compiled bridge identity/revision mismatch');
+          if(provenance.core_revision!==process.env.REQUESTED_CORE_REVISION||identity?.core_revision!==provenance.core_revision||identity.distribution!=='legacy-0.3.14'||identity.app_version!=='0.3.14'||identity.protocol!==3||identity.observation_mode!==1||identity.integration_api!==1||identity.app_name!=='HerdrDesktopPet.app'||identity.executable!=='herdr-desktop-pet'||identity.helper!=='herdr-update-coordinator'||identity.bundle_id!=='dev.herdr.desktop-pet')throw Error('compiled bridge identity/revision mismatch');
           if(identity.herdr_migration_revision!==process.env.DESKTOP_PET_HERDR_MIGRATION_REV||!/^[a-f0-9]{40}$/.test(identity.herdr_migration_revision))throw Error('compiled managed-retirement ref differs from authenticated published integration');
-          const archive='HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz';
+          const archive='HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz';
           const archive_sha256=createHash('sha256').update(await readFile(`bridge-assets/${archive}`)).digest('hex');
-          const record={version:1,source_core_revision:provenance.core_revision,herdr_migration_revision:identity.herdr_migration_revision,distribution:identity.distribution,app_version:identity.app_version,protocol:identity.protocol,observation_mode:identity.observation_mode,integration_api:identity.integration_api,archive,archive_sha256,provenance:'HerdrDesktopPet-v0.3.13-rig-native.json'};
+          const record={version:1,source_core_revision:provenance.core_revision,herdr_migration_revision:identity.herdr_migration_revision,distribution:identity.distribution,app_version:identity.app_version,protocol:identity.protocol,observation_mode:identity.observation_mode,integration_api:identity.integration_api,archive,archive_sha256,provenance:'HerdrDesktopPet-v0.3.14-rig-native.json'};
           await writeFile('bridge-assets/release.json',JSON.stringify(record,null,2)+'\n');
           NODE
-          (cd bridge-assets && shasum -a 256 HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz > HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz.sha256 && shasum -a 256 HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz HerdrDesktopPet-v0.3.13-rig-native.json release.json > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+          (cd bridge-assets && shasum -a 256 HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz > HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz.sha256 && shasum -a 256 HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz HerdrDesktopPet-v0.3.14-rig-native.json release.json > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
 
       - name: Gate real materialized managed Git admission without hiding user changes
         shell: bash
         run: |
           set -euo pipefail
           ingress="$RUNNER_TEMP/legacy-ingress-git-admission"
-          bash migration/legacy-0.3.13/ingress/scripts/materialize-release.sh \
-            "$PWD/bridge-assets/HerdrDesktopPet-v0.3.13-macos-arm64.tar.gz" \
-            "$PWD/bridge-assets/HerdrDesktopPet-v0.3.13-rig-native.json" \
+          bash migration/legacy-0.3.14/ingress/scripts/materialize-release.sh \
+            "$PWD/bridge-assets/HerdrDesktopPet-v0.3.14-macos-arm64.tar.gz" \
+            "$PWD/bridge-assets/HerdrDesktopPet-v0.3.14-rig-native.json" \
             "$PWD/bridge-assets/release.json" "$ingress"
           git -C "$ingress" init --quiet
           git -C "$ingress" add -- .gitignore herdr-plugin.toml release.json packaging-release.json rig-native-provenance.json scripts
@@ -225,7 +225,7 @@ jobs:
       - name: Save bridge bytes for separately authorized metadata-only ingress publication
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: desktop-pet-legacy-0.3.13-${{ inputs.core_revision }}
+          name: desktop-pet-legacy-0.3.14-${{ inputs.core_revision }}
           path: bridge-assets/
           if-no-files-found: error
           retention-days: 30

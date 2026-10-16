@@ -135,7 +135,12 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
             .filter(|origin| !origin.is_null())
             .is_some_and(|origin| origin != &prior["origin"])
         || !context["instance_id"].as_str().is_some_and(instance_valid)
-        || context["version"].as_str() != Some("0.3.12")
+        // The original approval predates the bridge: accept only known stable
+        // protocol-three sources, not arbitrary semver-compatible releases.
+        || !matches!(
+            context["version"].as_str(),
+            Some("0.3.9" | "0.3.10" | "0.3.11" | "0.3.12" | "0.3.13")
+        )
         || context["config_dir"].as_str() != profile.config_dir.to_str()
         || context["state_dir"].as_str() != profile.state_dir.to_str()
         || candidate != &plan.source_image
@@ -143,8 +148,8 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
         || prior
             .get("target")
             .filter(|target| !target.is_null())
-            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.13"))
-        || plan.target.release.version != "0.4.9"
+            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.14"))
+        || plan.target.release.version != "0.4.10"
     {
         return Err("original update does not attest this exact successor bridge, profile and bounded core target".into());
     }
@@ -202,7 +207,7 @@ pub fn prepare_automatic_bridge_plan(
     context: &UpdateContext,
     integration: Option<&str>,
 ) -> Result<Option<MigrationPlan>, String> {
-    if context.version != "0.3.13" {
+    if context.version != "0.3.14" {
         return Ok(None);
     }
     // This token/generation was already authenticated by the real native startup
@@ -303,7 +308,7 @@ pub fn approve_profile_update(
     }
     let context: UpdateContext =
         serde_json::from_value(response["context"].clone()).map_err(|e| e.to_string())?;
-    if context.config_dir != config || context.state_dir != state || context.version != "0.3.13" {
+    if context.config_dir != config || context.state_dir != state || context.version != "0.3.14" {
         return Err(
             "explicit update approval does not select the exact successor bridge profile".into(),
         );
@@ -322,20 +327,27 @@ mod tests {
         plan: &MigrationPlan,
         candidate: ExecutableIdentity,
     ) -> (String, PathBuf, protocol::OperationRecord) {
+        original_from_version(plan, candidate, "0.3.12")
+    }
+
+    fn original_from_version(
+        plan: &MigrationPlan,
+        candidate: ExecutableIdentity,
+        source_version: &str,
+    ) -> (String, PathBuf, protocol::OperationRecord) {
         let id = "a".repeat(32);
         let base = plan.profiles[0].state_dir.join("updates");
         ensure_private_directory(&base).unwrap();
         let running = ExecutableIdentity {
-            path: plan
-                .source_origin
-                .root()
-                .join("old-3.12/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+            path: plan.source_origin.root().join(format!(
+                "old-{source_version}/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+            )),
             sha256: "e".repeat(64),
         };
         let prior = serde_json::json!({
             "version":3,"operation_id":id,"running":running,"candidate":null,"target":null,
             "origin":{"kind":"source","root":plan.source_origin.root()},
-            "context":{"version":"0.3.12","instance_id":"original-approved-instance","running":running,
+            "context":{"version":source_version,"instance_id":"original-approved-instance","running":running,
                 "config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir}
         });
         let result = protocol::OperationRecord {
@@ -407,6 +419,197 @@ mod tests {
         other = plan.clone();
         other.profiles[0].config_dir.push("different");
         assert!(bridge_authority(&other, &id).is_err());
+    }
+
+    #[test]
+    fn authentic_original_0310_and_0311_approvals_continue_to_exact_current_bridge() {
+        for source_version in ["0.3.10", "0.3.11", "0.3.9", "0.3.12", "0.3.13"] {
+            let (_temp, plan) = crate::migration::tests::fixture();
+            let (id, base, _) =
+                original_from_version(&plan, plan.source_image.clone(), source_version);
+            let before_plan = fs::read(base.join(format!("{id}.plan.json"))).unwrap();
+            let before_result = fs::read(base.join(format!("{id}.result.json"))).unwrap();
+            let authority = bridge_authority(&plan, &id)
+                .unwrap_or_else(|error| panic!("{source_version} original approval: {error}"));
+            retain(&plan, authority).unwrap();
+            assert!(delegated_approval(&plan).unwrap());
+            let original: serde_json::Value = serde_json::from_slice(&before_plan).unwrap();
+            let source: ExecutableIdentity =
+                serde_json::from_value(original["running"].clone()).unwrap();
+            assert_eq!(
+                original_source_route(
+                    &plan,
+                    &source.path,
+                    &plan.profiles[0].config_dir,
+                    &plan.profiles[0].state_dir,
+                )
+                .unwrap(),
+                Some(source)
+            );
+            assert_eq!(
+                fs::read(base.join(format!("{id}.plan.json"))).unwrap(),
+                before_plan
+            );
+            assert_eq!(
+                fs::read(base.join(format!("{id}.result.json"))).unwrap(),
+                before_result
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_and_prerelease_original_sources_never_delegate() {
+        for source_version in [
+            "0.3.8",
+            "0.3.14",
+            "0.3.10-beta.1",
+            "0.3.11+unverified",
+            "0.4.10",
+            "unknown",
+            "",
+        ] {
+            let (_temp, plan) = crate::migration::tests::fixture();
+            let (id, base, _) =
+                original_from_version(&plan, plan.source_image.clone(), source_version);
+            let before = fs::read(base.join(format!("{id}.plan.json"))).unwrap();
+            assert!(bridge_authority(&plan, &id).is_err(), "{source_version}");
+            assert!(!approval_path(&plan).exists());
+            assert_eq!(
+                fs::read(base.join(format!("{id}.plan.json"))).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn older_approval_keeps_protocol_profile_source_root_and_instance_fences() {
+        let (_temp, plan) = crate::migration::tests::fixture();
+        let (id, base, _) = original_from_version(&plan, plan.source_image.clone(), "0.3.10");
+        let path = base.join(format!("{id}.plan.json"));
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for (field, value) in [
+            ("/version", serde_json::json!(2)),
+            ("/operation_id", serde_json::json!("b".repeat(32))),
+            ("/context/version", serde_json::Value::Null),
+            (
+                "/context/config_dir",
+                serde_json::json!("/unrelated/config"),
+            ),
+            ("/context/state_dir", serde_json::json!("/unrelated/state")),
+            ("/context/instance_id", serde_json::json!("")),
+            ("/context/running/sha256", serde_json::json!("f".repeat(64))),
+            ("/origin/root", serde_json::json!("/unrelated/source")),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(field).unwrap() = value;
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            protocol::write_private_bytes(&path, &bytes, 0o600).unwrap();
+            assert!(bridge_authority(&plan, &id).is_err(), "{field}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(!approval_path(&plan).exists());
+        }
+    }
+
+    #[test]
+    fn older_approval_requires_protocol_three_certain_completed_manager_result() {
+        let (_temp, plan) = crate::migration::tests::fixture();
+        let (id, base, result) = original_from_version(&plan, plan.source_image.clone(), "0.3.11");
+        let path = base.join(format!("{id}.result.json"));
+        let original = serde_json::to_value(result).unwrap();
+        for (field, value) in [
+            ("/version", serde_json::json!(2)),
+            ("/operation_id", serde_json::json!("b".repeat(32))),
+            ("/phase", serde_json::json!("unknown")),
+            ("/phase", serde_json::json!("user_stopped")),
+            ("/phase", serde_json::json!("failed")),
+            ("/execution_fence", serde_json::json!("manager_intent")),
+            ("/installed", serde_json::json!(false)),
+            ("/applied", serde_json::json!(false)),
+            ("/candidate/sha256", serde_json::json!("f".repeat(64))),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(field).unwrap() = value;
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            protocol::write_private_bytes(&path, &bytes, 0o600).unwrap();
+            assert!(bridge_authority(&plan, &id).is_err(), "{field}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(!approval_path(&plan).exists());
+        }
+    }
+
+    #[test]
+    fn completed_historical_candidates_are_not_current_bridge_approval() {
+        for candidate_version in ["0.3.11", "0.3.13"] {
+            let (_temp, plan) = crate::migration::tests::fixture();
+            let (id, base, _) = original_from_version(&plan, plan.source_image.clone(), "0.3.10");
+            let path = base.join(format!("{id}.plan.json"));
+            let mut original: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            original["target"] = serde_json::json!({
+                "origin": original["origin"],
+                "release": {"version": candidate_version},
+            });
+            let bytes = serde_json::to_vec(&original).unwrap();
+            protocol::write_private_bytes(&path, &bytes, 0o600).unwrap();
+            // Even an otherwise identical candidate image cannot turn an old
+            // completed target into approval for the current bridge.
+            assert!(bridge_authority(&plan, &id).is_err(), "{candidate_version}");
+            let mut context = crate::migration::tests::context(&plan);
+            context.version = candidate_version.into();
+            assert!(prepare_automatic_bridge_plan(&context, None)
+                .unwrap()
+                .is_none());
+            assert!(!approval_path(&plan).exists());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            original["target"]["release"]["version"] = serde_json::json!("0.3.14");
+            protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)
+                .unwrap();
+            assert!(bridge_authority(&plan, &id).is_ok());
+            let mut wrong_core = plan.clone();
+            wrong_core.target.release.version = "0.4.9".into();
+            assert!(bridge_authority(&wrong_core, &id).is_err());
+            original["target"]["origin"]["root"] = serde_json::json!("/unrelated/bridge");
+            protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)
+                .unwrap();
+            assert!(bridge_authority(&plan, &id).is_err());
+        }
+    }
+
+    #[test]
+    fn older_approval_does_not_override_user_stop_or_rewrite_original_evidence() {
+        for directory in ["updates", "updates-v4"] {
+            let (_temp, plan) = crate::migration::tests::fixture();
+            let (id, base, _) = original_from_version(&plan, plan.source_image.clone(), "0.3.10");
+            let before_plan = fs::read(base.join(format!("{id}.plan.json"))).unwrap();
+            let before_result = fs::read(base.join(format!("{id}.result.json"))).unwrap();
+            retain(&plan, bridge_authority(&plan, &id).unwrap()).unwrap();
+            assert!(delegated_approval(&plan).unwrap());
+            assert!(!stop_requested(&plan).unwrap());
+            protocol::write_private_new(
+                &plan.profiles[0]
+                    .state_dir
+                    .join(directory)
+                    .join("stop-generation.json"),
+                b"1",
+                0o600,
+            )
+            .unwrap();
+            assert!(stop_requested(&plan).unwrap());
+            for target in [false, true] {
+                let error =
+                    launch(&plan, &plan.profiles[0], target, (0, "c".repeat(64))).unwrap_err();
+                assert!(error.contains("user Stop"));
+            }
+            assert_eq!(
+                fs::read(base.join(format!("{id}.plan.json"))).unwrap(),
+                before_plan
+            );
+            assert_eq!(
+                fs::read(base.join(format!("{id}.result.json"))).unwrap(),
+                before_result
+            );
+        }
     }
 
     #[test]

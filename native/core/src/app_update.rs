@@ -1663,7 +1663,7 @@ mod tests {
     fn eligible_settled_bridge(status: CheckStatus) -> AppUpdateService {
         let mut snapshot = local_check();
         let mut context = snapshot.plan.take().unwrap().context;
-        context.version = "0.3.13".into();
+        context.version = "0.3.14".into();
         snapshot.installed_version = Some(context.version.clone());
         snapshot.status = status;
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
@@ -2184,7 +2184,7 @@ mod tests {
         current_plan.origin = snapshot.origin.clone();
         current_plan.action = UpdateAction::HomebrewUpgrade;
         current_plan.context.state_dir = state.clone();
-        current_plan.context.version = "0.3.13".into();
+        current_plan.context.version = "0.3.14".into();
         current_plan.context.running_origin = Some(Box::new(snapshot.origin.clone()));
         current_plan.running.path = root.join("current-app");
         current_plan.running.sha256 = "c".repeat(64);
