@@ -2635,14 +2635,39 @@ fn install_target_manager(
     }
     Ok(())
 }
+/// The approved old stable Brew owner publishes exactly these native/helper
+/// commands. Retirement and historical native-route authorization share this
+/// contract; a missing arbitrary path under the prefix is not owner evidence.
+fn legacy_brew_cli_publications(origin: &LegacyOrigin) -> Result<Option<[PathBuf; 2]>, String> {
+    let LegacyOrigin::Homebrew {
+        prefix,
+        cellar_formula_root,
+        formula,
+        ..
+    } = origin
+    else {
+        return Ok(None);
+    };
+    if formula != "hanbong5938/tap/herdr-desktop-pet"
+        || cellar_formula_root != &prefix.join("Cellar/herdr-desktop-pet")
+    {
+        return Err("legacy CLI publications lack the approved stable Brew owner".into());
+    }
+    Ok(Some([
+        prefix.join("bin/herdr-desktop-pet"),
+        prefix.join("bin/herdr-update-coordinator"),
+    ]))
+}
 fn retired(plan: &MigrationPlan) -> Result<(), String> {
     if plan.source_image.path.exists() || source_bundle(plan)?.exists() {
         return Err("legacy image/bundle remains installed".into());
     }
-    if let LegacyOrigin::Homebrew { prefix, .. } = &plan.source_origin {
-        for name in ["herdr-desktop-pet", "herdr-update-coordinator"] {
-            if fs::symlink_metadata(prefix.join("bin").join(name)).is_ok() {
-                return Err("legacy CLI alias remains published".into());
+    if let Some(publications) = legacy_brew_cli_publications(&plan.source_origin)? {
+        for alias in publications {
+            match fs::symlink_metadata(&alias) {
+                Ok(_) => return Err("legacy CLI alias remains published".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
             }
         }
     }
@@ -3856,6 +3881,65 @@ mod tests {
         let record = make_record(plan, &bytes);
         save(plan, &record).unwrap();
         record
+    }
+    /// Old-schema immutable owner approval and its actual-shaped retained
+    /// Commit/retirement journal; this does not supply signing or SDK evidence.
+    pub(super) fn retained_brew_fixture() -> (tempfile::TempDir, MigrationPlan, MigrationRecord) {
+        let (temp, mut plan) = retained_fixture("0.4.8");
+        let prefix = fs::canonicalize(temp.path()).unwrap().join("brew");
+        let brew = ExecutableIdentity {
+            path: prefix.join("bin/brew"),
+            sha256: "d".repeat(64),
+        };
+        let cellar_formula_root = prefix.join("Cellar/herdr-desktop-pet");
+        plan.source_image.path = cellar_formula_root
+            .join("0.3.12/libexec/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet");
+        plan.source_origin = LegacyOrigin::Homebrew {
+            brew: brew.clone(),
+            prefix,
+            cellar_formula_root,
+            formula: "hanbong5938/tap/herdr-desktop-pet".into(),
+        };
+        plan.profiles[0].observation = ObservationSelection::Provider("tern".into());
+        plan.profiles[0].tern_reconnect_required = true;
+        plan.tern_reconnect_required = true;
+        let tern_root = plan.profiles[0].state_dir.join("tern");
+        plan.profiles[0].environment.insert(
+            "TERN_CONFIG_DIR".into(),
+            tern_root.to_string_lossy().into_owned(),
+        );
+        let mut value = serde_json::to_value(&plan).unwrap();
+        for field in [
+            "source_ancestry",
+            "tern_delivery",
+            "tern_deliveries",
+            "tern_delivery_problem",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        protocol::write_private_new(&evidence_path(&plan), &bytes, 0o600).unwrap();
+        let mut record = make_record(&plan, &bytes);
+        record.phase = MigrationPhase::AwaitingReconnect;
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_pid = Some(2000);
+        record.target_instance = Some("original-committed".into());
+        record.retirement_attempt = 1;
+        record.manager = Some(ManagerEvidence {
+            program: brew,
+            args: vec![
+                "uninstall".into(),
+                "hanbong5938/tap/herdr-desktop-pet".into(),
+            ],
+            intent_at: 1,
+            pid: Some(2001),
+            pgid: Some(2001),
+            exit_code: Some(0),
+            quiescent: true,
+        });
+        save(&plan, &record).unwrap();
+        (temp, plan, record)
     }
     pub(super) fn context(plan: &MigrationPlan) -> UpdateContext {
         let profile = &plan.profiles[0];

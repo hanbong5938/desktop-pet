@@ -148,21 +148,22 @@ pub(super) fn verify_source_ancestry(plan: &MigrationPlan) -> Result<(), String>
     Ok(())
 }
 
-/// Resolve only exact retained routes. In particular, a deleted Brew alias is
-/// never reconstructed from its basename, prefix convention or another profile.
+/// Resolve captured routes, or the exact native CLI publication of an
+/// authenticated, committed and certainly retired approved Brew owner. The
+/// latter uses the owning-manager contract, not an inferred deleted path.
 pub(super) fn retained_source_route(
     plan: &MigrationPlan,
     executable: &Path,
     config: &Path,
     state: &Path,
 ) -> Result<Option<ExecutableIdentity>, String> {
-    if !plan
+    let Some(profile) = plan
         .profiles
         .iter()
-        .any(|profile| profile.config_dir == config && profile.state_dir == state)
-    {
+        .find(|profile| profile.config_dir == config && profile.state_dir == state)
+    else {
         return Ok(None);
-    }
+    };
     if executable == plan.source_image.path
         || plan.legacy_aliases.iter().any(|alias| alias == executable)
     {
@@ -175,12 +176,172 @@ pub(super) fn retained_source_route(
     {
         return Ok(Some(ancestor.image.clone()));
     }
+    if let Some([native, _helper]) = legacy_brew_cli_publications(&plan.source_origin)? {
+        if executable == native {
+            // Old plans did not capture aliases/SDK routes. Their immutable
+            // owner approval and original journal can still prove this one
+            // native publication, but never the helper or an arbitrary keg.
+            validate_plan_structure(plan)?;
+            let record = read_record(plan)?;
+            integrations::verify_retained_commit(plan, &record, profile)?;
+            return Ok(Some(plan.source_image.clone()));
+        }
+    }
     approval::original_source_route(plan, executable, config, state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_schema_brew_native_publication_uses_immutable_committed_owner_record() {
+        let (_temp, plan, _record) = crate::migration::tests::retained_brew_fixture();
+        let [native, helper] = legacy_brew_cli_publications(&plan.source_origin)
+            .unwrap()
+            .unwrap();
+        let profile = &plan.profiles[0];
+        let original_plan = fs::read(evidence_path(&plan)).unwrap();
+        let original_journal = fs::read(journal_path(&plan)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&original_plan).unwrap();
+        assert!(value.get("source_ancestry").is_none());
+        assert!(value.get("tern_delivery").is_none());
+        assert!(value.get("tern_deliveries").is_none());
+        assert!(plan.legacy_aliases.is_empty());
+        assert_eq!(
+            retained_source_route(&plan, &native, &profile.config_dir, &profile.state_dir).unwrap(),
+            Some(plan.source_image.clone())
+        );
+        for executable in [
+            helper,
+            native.with_file_name("desktop-pet"),
+            native.parent().unwrap().join("other/herdr-desktop-pet"),
+            plan.source_origin
+                .root()
+                .join("unapproved/libexec/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"),
+        ] {
+            assert!(retained_source_route(
+                &plan,
+                &executable,
+                &profile.config_dir,
+                &profile.state_dir,
+            )
+            .unwrap()
+            .is_none());
+        }
+        assert!(retained_source_route(
+            &plan,
+            &native,
+            &profile.config_dir,
+            &profile.state_dir.join("other"),
+        )
+        .unwrap()
+        .is_none());
+        assert!(retained_source_route(
+            &plan,
+            &native,
+            &profile.config_dir.join("other"),
+            &profile.state_dir,
+        )
+        .unwrap()
+        .is_none());
+        let mut different_prefix = plan.clone();
+        if let LegacyOrigin::Homebrew { prefix, .. } = &mut different_prefix.source_origin {
+            *prefix = prefix.join("other");
+        }
+        assert!(retained_source_route(
+            &different_prefix,
+            &native,
+            &profile.config_dir,
+            &profile.state_dir,
+        )
+        .is_err());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), original_plan);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), original_journal);
+    }
+
+    #[test]
+    fn old_schema_brew_native_publication_rejects_uncommitted_or_uncertain_owner() {
+        let (_temp, plan, record) = crate::migration::tests::retained_brew_fixture();
+        let [native, _] = legacy_brew_cli_publications(&plan.source_origin)
+            .unwrap()
+            .unwrap();
+        let profile = &plan.profiles[0];
+        let denied = |changed: &MigrationRecord| {
+            save(&plan, changed).unwrap();
+            assert!(
+                retained_source_route(&plan, &native, &profile.config_dir, &profile.state_dir,)
+                    .is_err()
+            );
+        };
+        let mut changed = record.clone();
+        changed.target_committed = false;
+        denied(&changed);
+        changed = record.clone();
+        changed.native_ready = false;
+        denied(&changed);
+        changed = record.clone();
+        changed.phase = MigrationPhase::ManagerUnknown;
+        denied(&changed);
+        changed = record.clone();
+        changed.retirement_attempt = 0;
+        denied(&changed);
+        changed = record.clone();
+        changed.manager = None;
+        denied(&changed);
+        changed = record.clone();
+        changed.manager.as_mut().unwrap().quiescent = false;
+        denied(&changed);
+        changed = record.clone();
+        changed.manager.as_mut().unwrap().exit_code = None;
+        denied(&changed);
+        changed = record.clone();
+        changed.manager.as_mut().unwrap().exit_code = Some(1);
+        denied(&changed);
+        changed = record.clone();
+        changed.manager.as_mut().unwrap().args[1] = "another/formula".into();
+        denied(&changed);
+        changed = record.clone();
+        changed.manager.as_mut().unwrap().program.sha256 = "e".repeat(64);
+        denied(&changed);
+        changed = record.clone();
+        changed.plan_sha256 = "f".repeat(64);
+        denied(&changed);
+    }
+
+    #[test]
+    fn old_schema_brew_native_publication_rejects_existing_or_dangling_aliases() {
+        let (_temp, plan, _record) = crate::migration::tests::retained_brew_fixture();
+        let publications = legacy_brew_cli_publications(&plan.source_origin)
+            .unwrap()
+            .unwrap();
+        let native = &publications[0];
+        let profile = &plan.profiles[0];
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        for alias in &publications {
+            fs::write(alias, b"another executable").unwrap();
+            assert!(
+                retained_source_route(&plan, native, &profile.config_dir, &profile.state_dir,)
+                    .is_err()
+            );
+            fs::remove_file(alias).unwrap();
+            std::os::unix::fs::symlink("/nonexistent-retired-source", alias).unwrap();
+            assert!(
+                retained_source_route(&plan, native, &profile.config_dir, &profile.state_dir,)
+                    .is_err()
+            );
+            fs::remove_file(alias).unwrap();
+            std::os::unix::fs::symlink(&profile.state_dir, alias).unwrap();
+            assert!(
+                retained_source_route(&plan, native, &profile.config_dir, &profile.state_dir,)
+                    .is_err()
+            );
+            fs::remove_file(alias).unwrap();
+        }
+        fs::create_dir_all(source_bundle(&plan).unwrap()).unwrap();
+        assert!(
+            retained_source_route(&plan, native, &profile.config_dir, &profile.state_dir,).is_err()
+        );
+    }
     #[test]
     fn missing_brew_alias_requires_exact_retained_route_and_original_pair() {
         let (_temp, mut plan) = crate::migration::tests::fixture();

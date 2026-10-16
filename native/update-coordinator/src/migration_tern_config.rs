@@ -122,6 +122,7 @@ fn capture(
     profile: &LegacyProfile,
     previous_target: Option<&ExecutableIdentity>,
     retained: Option<&TernConfiguration>,
+    retained_plan: Option<&MigrationPlan>,
 ) -> Result<Option<TernConfiguration>, String> {
     let (_, state) = roots(profile)?;
     let path = state.join("plugin-data/tern-desktop-pet/kv.json");
@@ -154,7 +155,7 @@ fn capture(
         source_binding_sha256 = retained.source_binding_sha256.clone();
         retained.bound_source.clone()
     } else if let Some(image) = ancestry::retained_source_route(
-        plan,
+        retained_plan.unwrap_or(plan),
         &connection.executable,
         &connection.config_dir,
         &connection.state_dir,
@@ -207,11 +208,12 @@ fn capture(
     Ok(Some(configuration))
 }
 pub(super) fn configure_delivery(plan: &mut MigrationPlan) {
-    configure_delivery_with_previous(plan, None);
+    configure_delivery_with_previous(plan, None, None);
 }
 pub(super) fn configure_delivery_with_previous(
     plan: &mut MigrationPlan,
     previous_target: Option<&ExecutableIdentity>,
+    retained_plan: Option<&MigrationPlan>,
 ) {
     let retained_deliveries = std::mem::take(&mut plan.tern_deliveries);
     let retained_primary = plan.tern_delivery.take();
@@ -232,6 +234,7 @@ pub(super) fn configure_delivery_with_previous(
                 profile,
                 previous_target,
                 retained.map(|delivery| &delivery.configuration),
+                retained_plan,
             )?
             else {
                 if plan.profiles[index].tern_reconnect_required {
@@ -424,17 +427,18 @@ mod tests {
         )
         .unwrap();
         plan.legacy_aliases.push(alias);
-        let retained = capture(&plan, &plan.profiles[0], None, None)
+        let retained = capture(&plan, &plan.profiles[0], None, None, None)
             .unwrap()
             .unwrap();
         plan.legacy_aliases.clear();
         let before = fs::read(&configuration.path).unwrap();
-        assert!(capture(&plan, &plan.profiles[0], None, None).is_err());
+        assert!(capture(&plan, &plan.profiles[0], None, None, None).is_err());
         let repaired = capture(
             &plan,
             &plan.profiles[0],
             Some(&plan.target.image),
             Some(&retained),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -442,12 +446,68 @@ mod tests {
         assert_eq!(repaired.bound_source, plan.source_image);
         let mut other = plan.profiles[0].clone();
         other.config_dir = other.config_dir.join("different");
-        assert!(
-            capture(&plan, &other, Some(&plan.target.image), Some(&retained))
-                .unwrap()
-                .is_none()
-        );
+        assert!(capture(
+            &plan,
+            &other,
+            Some(&plan.target.image),
+            Some(&retained),
+            None
+        )
+        .unwrap()
+        .is_none());
         assert_eq!(fs::read(&configuration.path).unwrap(), before);
+    }
+
+    #[test]
+    fn current_sdk_route_capture_uses_original_old_schema_retired_brew_authority() {
+        let (_temp, original, mut record) = crate::migration::tests::retained_brew_fixture();
+        let [native, _] = legacy_brew_cli_publications(&original.source_origin)
+            .unwrap()
+            .unwrap();
+        let mut saved = fixture_configuration(&original);
+        saved.connection.executable = native.clone();
+        let kv_bytes =
+            serde_json::to_vec(&serde_json::json!({"connection": saved.connection})).unwrap();
+        protocol::write_private_bytes(&saved.path, &kv_bytes, 0o600).unwrap();
+        let original_plan = fs::read(evidence_path(&original)).unwrap();
+        let original_journal = fs::read(journal_path(&original)).unwrap();
+        let mut current = original.clone();
+        current.target.image.path = current
+            .target
+            .image
+            .path
+            .with_file_name("current-desktop-pet");
+        current.target.image.sha256 = "e".repeat(64);
+        current.target.release.version = crate::identity::neutral::VERSION.into();
+        current.profiles[0].stop_generation = 4;
+        current.profiles[0].instance_id = "current-instance".into();
+        let captured = capture(
+            &current,
+            &current.profiles[0],
+            Some(&original.target.image),
+            None,
+            Some(&original),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(captured.connection.executable, native);
+        assert_eq!(captured.bound_source, original.source_image);
+        assert!(captured.source_binding_sha256.is_none());
+        verify_configuration(&captured).unwrap();
+        assert_eq!(fs::read(&saved.path).unwrap(), kv_bytes);
+        assert_eq!(fs::read(evidence_path(&original)).unwrap(), original_plan);
+        assert_eq!(fs::read(journal_path(&original)).unwrap(), original_journal);
+        record.target_committed = false;
+        save(&original, &record).unwrap();
+        assert!(capture(
+            &current,
+            &current.profiles[0],
+            Some(&original.target.image),
+            None,
+            Some(&original),
+        )
+        .is_err());
+        assert_eq!(fs::read(&saved.path).unwrap(), kv_bytes);
     }
 }
 

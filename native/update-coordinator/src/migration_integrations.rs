@@ -522,7 +522,11 @@ fn deliver_forward(
             return delivery_error(&previous).map_or(Ok(()), Err);
         }
         let previous_image = target_image(original, record)?;
-        tern_config::configure_delivery_with_previous(current, Some(previous_image));
+        tern_config::configure_delivery_with_previous(
+            current,
+            Some(previous_image),
+            Some(original),
+        );
         let Some(delivery) = current.tern_deliveries.first() else {
             return current.tern_delivery_problem.clone().map_or(Ok(()), Err);
         };
@@ -631,7 +635,7 @@ fn verify_target_manager_result(
     }
     Ok(())
 }
-fn verify_retained_commit(
+pub(super) fn verify_retained_commit(
     plan: &MigrationPlan,
     record: &MigrationRecord,
     profile: &LegacyProfile,
@@ -705,7 +709,7 @@ fn integration_observations(
             verify_neutral_profile(historical_image.unwrap_or(image), profile, &live)?;
             Ok(live)
         });
-        if profile.herdr_socket.is_some() {
+        if profile.observation.includes_provider("herdr") && profile.herdr_socket.is_some() {
             let result = live.as_ref().map_err(Clone::clone).and_then(|live| {
                 if live.host_connections.get("herdr").copied().unwrap_or(0) > 0 {
                     Ok(())
@@ -718,7 +722,7 @@ fn integration_observations(
             });
             observations.push(observation(profile, "herdr", result));
         }
-        if profile.tern_reconnect_required {
+        if profile.observation.includes_provider("tern") && profile.tern_reconnect_required {
             let result = live
                 .as_ref()
                 .map_err(Clone::clone)
@@ -1774,6 +1778,91 @@ pub fn integration_handover(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn integration_observations_honor_provider_selection_without_claiming_reconnection() {
+        use std::os::unix::net::UnixListener;
+
+        for (selection, required_providers) in [
+            (ObservationSelection::Provider("tern".into()), vec!["tern"]),
+            (
+                ObservationSelection::Provider("herdr".into()),
+                vec!["herdr"],
+            ),
+            (ObservationSelection::Auto, vec!["herdr", "tern"]),
+            (ObservationSelection::Provider("other".into()), vec![]),
+        ] {
+            let (_temp, mut plan) = crate::migration::tests::fixture();
+            let image =
+                executable_identity(&actual_process_image(std::process::id()).unwrap()).unwrap();
+            plan.target.image = image.clone();
+            plan.tern_reconnect_required = true;
+            let profile = &mut plan.profiles[0];
+            profile.observation = selection.clone();
+            profile.herdr_socket = Some(profile.state_dir.join("unused-herdr.sock"));
+            profile.tern_reconnect_required = true;
+            let profile = profile.clone();
+            let mut record = crate::migration::tests::persist_fixture(&plan);
+            record.phase = MigrationPhase::AwaitingReconnect;
+            record.native_ready = true;
+            record.target_committed = true;
+            record.target_pid = Some(std::process::id());
+            record.target_instance = Some("ready-target".into());
+            let old_plan = fs::read(evidence_path(&plan)).unwrap();
+            let old_journal = fs::read(journal_path(&plan)).unwrap();
+            // Even a live Tern connection is not a confirmed same-window handover.
+            protocol::write_private_new(
+                &handover_path(&plan, &profile.state_dir, &image, true),
+                b"{}",
+                0o600,
+            )
+            .unwrap();
+            let listener = UnixListener::bind(&profile.control_socket).unwrap();
+            fs::set_permissions(&profile.control_socket, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let response = serde_json::to_vec(&serde_json::json!({
+                "ok":true,"running":true,"shutdown":false,"ready":true,
+                "ui_ready":true,"control_ready":true,"observation_mode":selection.as_str(),
+                "app_version":crate::identity::neutral::VERSION,
+                "updater_protocol":4,"observation_capability":2,"integration_api":1,
+                "instance_id":"ready-target","pid":std::process::id(),
+                "executable_path":image.path,"running_sha256":image.sha256,
+                "config_dir":profile.config_dir,"state_dir":profile.state_dir,
+                "host_connections":{"herdr":0,"tern":1}
+            }))
+            .unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                stream.write_all(&response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            });
+            let (observations, reconnected) = integration_observations(&plan, &record, None);
+            server.join().unwrap();
+            let expected = required_providers
+                .into_iter()
+                .map(|provider| MigrationIntegrationStatus {
+                    config_dir: profile.config_dir.clone(),
+                    state_dir: profile.state_dir.clone(),
+                    provider: provider.into(),
+                    connected: false,
+                    error: Some(if provider == "herdr" {
+                        format!(
+                            "Herdr adapter has not connected to configured socket {}",
+                            profile.herdr_socket.as_ref().unwrap().display()
+                        )
+                    } else {
+                        "missing field `version` at line 1 column 2".into()
+                    }),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observations, expected, "selection {selection:?}");
+            assert_eq!(reconnected, Vec::<MigrationProfilePaths>::new());
+            assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+            assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+        }
+    }
 
     fn delivery_fixture() -> (tempfile::TempDir, MigrationPlan) {
         let (temp, mut plan) = crate::migration::tests::fixture();
