@@ -175,12 +175,24 @@ pub(crate) fn captured_environment(
             "HOME",
             "XDG_CONFIG_HOME",
             "XDG_STATE_HOME",
+            "TERN_CONFIG_DIR",
+            "TERN_DAEMON_SOCKET",
             "DESKTOP_PET_CONFIG_DIR",
             "DESKTOP_PET_STATE_DIR",
         ]
         .into_iter()
         .filter_map(|key| lookup(key).map(|value| (key.to_owned(), value)))
         .collect::<BTreeMap<_, _>>();
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            if let Some(value) = environment.get(key) {
+                if value.len() > 4096
+                    || value.contains('\0')
+                    || !std::path::Path::new(value).is_absolute()
+                {
+                    return Err(format!("invalid captured Tern routing variable {key}"));
+                }
+            }
+        }
         environment.insert(
             OBSERVATION_SELECTION_ENV.to_owned(),
             observation_mode.as_str().to_owned(),
@@ -298,6 +310,10 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         .as_deref()
         .expect("origin captured")
         .clone();
+    let runtime_start_fence =
+        desktop_pet_update_coordinator::protocol::capture_runtime_start_fence(
+            &config.paths.state_dir,
+        )?;
     start_allowed(
         &origin,
         &config.paths.state_dir,
@@ -355,11 +371,20 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
             updater_generation,
             updater_token.as_deref(),
         )?;
-        Some(ActiveUpdateGuard {
+        let guard = ActiveUpdateGuard {
             origin: origin.clone(),
             state_dir: config.paths.state_dir.clone(),
             instance_id,
-        })
+        };
+        desktop_pet_update_coordinator::protocol::retain_runtime_start(
+            &origin,
+            &config.paths.state_dir,
+            std::process::id(),
+            &guard.instance_id,
+            &context.running,
+            runtime_start_fence,
+        )?;
+        Some(guard)
     };
     let executable = context.running.path.clone();
     initial_state.set_update_context(context)?;
@@ -502,6 +527,43 @@ mod tests {
             Some("auto")
         );
         assert!(!environment.keys().any(|key| key.starts_with("HERDR")));
+    }
+
+    #[test]
+    #[cfg(not(desktop_pet_legacy))]
+    fn tern_delivery_keeps_exact_endpoint_and_rejects_invalid_explicit_routing() {
+        let environment = captured_environment(ObservationSelection::Auto, |key| match key {
+            "TERN_CONFIG_DIR" => Some("/isolated/tern/config".into()),
+            "TERN_DAEMON_SOCKET" => Some("/isolated/tern/control.sock".into()),
+            "TERN_WINDOW_KEY" => Some("not-routing-authority".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            environment.get("TERN_CONFIG_DIR").map(String::as_str),
+            Some("/isolated/tern/config")
+        );
+        assert_eq!(
+            environment.get("TERN_DAEMON_SOCKET").map(String::as_str),
+            Some("/isolated/tern/control.sock")
+        );
+        assert!(!environment.contains_key("TERN_WINDOW_KEY"));
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                assert!(
+                    captured_environment(ObservationSelection::Auto, |candidate| {
+                        (candidate == key).then(|| invalid.clone())
+                    })
+                    .is_err(),
+                    "{key} must not silently fall back from invalid explicit routing"
+                );
+            }
+        }
     }
     #[test]
     fn domain_callback_is_once_and_poison_never_invokes_it() {

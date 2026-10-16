@@ -63,6 +63,9 @@ const USAGE: &str = concat!(
     "    installation inspect --json  Verify this executable's actual distribution and owner\n",
     "    installation discover [--executable ABS] --json  Resolve a verified installation\n",
     "    update-status [OPID] Show offline durable updater outcome (--state-dir PATH)\n",
+    "    update --yes        Approve the successor bridge's bounded automatic migration; requires both profile paths\n",
+    "    legacy-migration-route  Authenticate a committed original integration route from bounded stdin JSON\n",
+    "    migration-integration-handover  Confirm loaded consumer and fresh same-window binding from bounded stdin JSON\n",
     "    show                Show character; reattach visible bubble\n",
     "    hide                Hide character; leave enabled bubble standalone\n",
     "    toggle              Toggle character visibility, independently of bubble\n",
@@ -154,6 +157,9 @@ enum CommandKind {
     Profile,
     Installation,
     DistributionIdentity,
+    LegacyMigrationRoute,
+    MigrationIntegrationHandover,
+    Update,
     Extension,
     Settings,
     Show,
@@ -194,6 +200,9 @@ impl CommandKind {
             "profile" => Self::Profile,
             "installation" => Self::Installation,
             "distribution-identity" => Self::DistributionIdentity,
+            "legacy-migration-route" => Self::LegacyMigrationRoute,
+            "migration-integration-handover" => Self::MigrationIntegrationHandover,
+            "update" => Self::Update,
             "update-status" => Self::UpdateStatus,
             "settings" => Self::Settings,
             "show" => Self::Show,
@@ -236,6 +245,9 @@ impl CommandKind {
             Self::Profile => "profile",
             Self::Installation => "installation",
             Self::DistributionIdentity => "distribution-identity",
+            Self::LegacyMigrationRoute => "legacy-migration-route",
+            Self::MigrationIntegrationHandover => "migration-integration-handover",
+            Self::Update => "update",
             Self::Extension => "extension",
             Self::Restart => "restart",
             Self::Status => "status",
@@ -324,6 +336,7 @@ struct Cli {
     state_dir: Option<PathBuf>,
     version: bool,
     help: bool,
+    approve_update: bool,
 }
 
 pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
@@ -369,6 +382,9 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
                 | CommandKind::Profile
                 | CommandKind::Installation
                 | CommandKind::Extension
+                | CommandKind::LegacyMigrationRoute
+                | CommandKind::MigrationIntegrationHandover
+                | CommandKind::Update
         )
     {
         return Err("--assets is not valid with this command".into());
@@ -431,6 +447,87 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
             );
         };
         return update_status(&state_dir, cli.update_operation.as_deref());
+    }
+    if command == CommandKind::Update {
+        if !identity::LEGACY
+            || !cli.approve_update
+            || cli.config_dir.is_none()
+            || cli.state_dir.is_none()
+        {
+            return Err("update --yes is an explicit successor bridge approval and requires both --config-dir ABS and --state-dir ABS".into());
+        }
+        let paths = Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?;
+        let (plan, path) = desktop_pet_update_coordinator::migration::approve_profile_update(
+            &paths.config_dir,
+            &paths.state_dir,
+            identity::herdr_migration_revision(),
+        )?;
+        let helper = plan
+            .target
+            .staged_bundle
+            .join("Contents/MacOS")
+            .join(identity::neutral::HELPER);
+        // Replace this legacy CLI process so real source-root retirement is not
+        // obstructed by an otherwise idle waiter mapped from the retiring image.
+        let error = Command::new(helper)
+            .args(["migrate-legacy", "--plan"])
+            .arg(path)
+            .env_clear()
+            .envs(&plan.profiles[0].environment)
+            .stdin(Stdio::null())
+            .exec();
+        return Err(format!(
+            "verified automatic update helper could not execute: {error}"
+        ));
+    }
+    if command == CommandKind::LegacyMigrationRoute {
+        if identity::LEGACY {
+            return Err("legacy distributions cannot authorize neutral integration routes".into());
+        }
+        if cli.config_dir.is_none() || cli.state_dir.is_none() {
+            return Err(
+                "legacy-migration-route requires both original absolute profile directories".into(),
+            );
+        }
+        let paths = Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?;
+        let mut input = Vec::new();
+        io::stdin()
+            .lock()
+            .take(16385)
+            .read_to_end(&mut input)
+            .map_err(|e| e.to_string())?;
+        if input.len() > 16384 {
+            return Err("migration route request exceeds its bound".into());
+        }
+        let route = desktop_pet_update_coordinator::migration::committed_route(
+            &paths.config_dir,
+            &paths.state_dir,
+            &input,
+        )?;
+        let executable = bundle::executable().map_err(|e| e.to_string())?;
+        if route["target"]["executable"].as_str() != executable.to_str() {
+            return Err("migration route target is not this verified executable".into());
+        }
+        return print_json(&route);
+    }
+    if command == CommandKind::MigrationIntegrationHandover {
+        if identity::LEGACY {
+            return Err("legacy distributions cannot confirm neutral integration handovers".into());
+        }
+        let (config_dir, state_dir) = migration_handover_profile(&cli)?;
+        let mut input = Vec::new();
+        io::stdin()
+            .lock()
+            .take(16385)
+            .read_to_end(&mut input)
+            .map_err(|e| e.to_string())?;
+        if input.len() > 16384 {
+            return Err("migration handover request exceeds its bound".into());
+        }
+        let response = desktop_pet_update_coordinator::migration::integration_handover(
+            config_dir, state_dir, &input,
+        )?;
+        return print_json(&response);
     }
     let paths = if command == CommandKind::Extension || command == CommandKind::Status {
         Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?
@@ -586,6 +683,29 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
         composition,
         cli.extension_options,
     )
+}
+
+fn migration_handover_profile(cli: &Cli) -> Result<(&Path, &Path), String> {
+    let config_dir = cli
+        .config_dir
+        .as_deref()
+        .ok_or("migration-integration-handover requires --config-dir ABS")?;
+    let state_dir = cli
+        .state_dir
+        .as_deref()
+        .ok_or("migration-integration-handover requires --state-dir ABS")?;
+    if !config_dir.is_absolute() || !state_dir.is_absolute() {
+        return Err(
+            "migration-integration-handover requires both original absolute profile directories"
+                .into(),
+        );
+    }
+    if cli.host.is_some() || cli.assets.is_some() || !cli.extension_options.is_empty() {
+        return Err(
+            "migration-integration-handover accepts only the original profile directories".into(),
+        );
+    }
+    Ok((config_dir, state_dir))
 }
 
 fn require_profile_identity(response: &ControlResponse, paths: &Paths) -> Result<(), String> {
@@ -1694,6 +1814,13 @@ where
     let mut automation_tokens = Vec::new();
     let mut update_tokens = Vec::new();
     while let Some(argument) = arguments.next() {
+        if argument == "--yes" && cli.command == Some(CommandKind::Update) {
+            if cli.approve_update {
+                return Err("--yes was supplied more than once".into());
+            }
+            cli.approve_update = true;
+            continue;
+        }
         if cli.command == Some(CommandKind::Preferences) {
             let is_extension_value = automation_tokens.last().is_some_and(|last: &String| {
                 composition.extensions.lifecycle.iter().any(|extension| {

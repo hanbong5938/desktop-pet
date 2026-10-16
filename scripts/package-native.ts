@@ -7,10 +7,10 @@ import { validateProductMetadata } from "./release-docs";
 
 const root = join(import.meta.dir, "..");
 const distribution = process.env.DESKTOP_PET_DISTRIBUTION ?? "neutral";
-if (distribution !== "neutral" && distribution !== "legacy-0.3.12") {
-  fail("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.12");
+if (distribution !== "neutral" && distribution !== "legacy-0.3.13") {
+  fail("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.13");
 }
-const legacy = distribution === "legacy-0.3.12";
+const legacy = distribution === "legacy-0.3.13";
 const cargoTarget = process.env.DESKTOP_PET_CARGO_TARGET?.trim() ?? "";
 if (cargoTarget && !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(cargoTarget)) {
   fail(`invalid DESKTOP_PET_CARGO_TARGET: ${cargoTarget}`);
@@ -39,8 +39,8 @@ const packageVersion = typeof packageJson.version === "string"
 if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(packageVersion)) {
   fail("package version must be a stable semantic version");
 }
-if (packageVersion !== "0.4.8") {
-  fail("the authorized neutral and legacy-0.3.12 distributions must use the same approved 0.4.8 core revision");
+if (packageVersion !== "0.4.9") {
+  fail("the authorized neutral and legacy-0.3.13 distributions must use the same approved 0.4.9 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");
@@ -62,7 +62,7 @@ const expectedIdentity: Omit<BuildIdentity, "core_revision" | "herdr_migration_r
   helper: legacy ? "herdr-update-coordinator" : "desktop-pet-update-coordinator",
   display_name: legacy ? "Herdr Desktop Pet" : "Desktop Pet",
   bundle_id: legacy ? "dev.herdr.desktop-pet" : "io.github.hanbong5938.desktop-pet",
-  app_version: legacy ? "0.3.12" : packageVersion,
+  app_version: legacy ? "0.3.13" : packageVersion,
   protocol: legacy ? 3 : 4, observation_mode: legacy ? 1 : 2, integration_api: 1,
 };
 for (const key of Object.keys(expectedIdentity) as (keyof typeof expectedIdentity)[]) {
@@ -135,6 +135,67 @@ async function sha256(path: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
+}
+
+async function stageTernConsumer(): Promise<void> {
+  // Only the neutral target delivers the integration; the legacy bridge never
+  // substitutes mutable local consumer sources for the signed target package.
+  if (legacy) return;
+  const pin = JSON.parse(await readFile(join(root, "migration", "tern-consumer.json"), "utf8")) as {
+    version: number; repository: string; revision: string; plugin_version: string;
+    files: Record<string, string>;
+  };
+  const names = ["LICENSE.txt", "plugin.toml", "window.luau"];
+  if (!pin || pin.version !== 1 || pin.repository !== "hanbong5938/tern-desktop-pet" ||
+      !/^[a-f0-9]{40}$/.test(pin.revision) || pin.plugin_version !== "0.2.1" ||
+      !pin.files || Object.keys(pin.files).sort().join("\n") !== names.join("\n")) {
+    fail("invalid immutable Tern consumer packaging authority");
+  }
+  const repository = `https://github.com/${pin.repository}`;
+  const cargo = Bun.TOML.parse(await readFile(join(root, "native", "app", "Cargo.toml"), "utf8")) as {
+    dependencies?: Record<string, { git?: unknown; rev?: unknown }>;
+  };
+  const lock = Bun.TOML.parse(await readFile(join(root, "native", "Cargo.lock"), "utf8")) as {
+    package?: { name?: unknown; source?: unknown }[];
+  };
+  const adapter = cargo.dependencies?.["desktop-pet-tern"];
+  const lockedAdapters = lock.package?.filter((entry) => entry.name === "desktop-pet-tern") ?? [];
+  if (adapter?.git !== repository || adapter.rev !== pin.revision ||
+      lockedAdapters.length !== 1 ||
+      lockedAdapters[0]?.source !== `git+${repository}?rev=${pin.revision}#${pin.revision}`) {
+    fail("bundled Tern consumer and compiled adapter must select the same immutable revision");
+  }
+  const destination = join(appResources, "integrations", "tern-desktop-pet");
+  await mkdir(destination, { recursive: true });
+  for (const name of names) {
+    const expected = pin.files[name];
+    if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) {
+      fail(`invalid Tern consumer digest: ${name}`);
+    }
+    const response = await fetch(
+      `https://raw.githubusercontent.com/${pin.repository}/${pin.revision}/${name}`,
+      { redirect: "error", signal: AbortSignal.timeout(30_000) },
+    );
+    if (!response.ok) fail(`immutable Tern consumer download failed: ${name} (${response.status})`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // Match the shipped coordinator's package_identity bounds before signing.
+    const maximumBytes = name === "plugin.toml" ? 65_536 : 512 * 1024;
+    if (bytes.byteLength === 0 || bytes.byteLength > maximumBytes ||
+        createHash("sha256").update(bytes).digest("hex") !== expected) {
+      fail(`immutable Tern consumer bytes differ from reviewed source: ${name}`);
+    }
+    if (name === "plugin.toml") {
+      const manifest = Bun.TOML.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as {
+        schema?: unknown; id?: unknown; version?: unknown; window?: unknown;
+      };
+      if (manifest.schema !== 1 || manifest.id !== "tern-desktop-pet" ||
+          manifest.version !== pin.plugin_version || manifest.window !== "window.luau") {
+        fail("pinned Tern manifest disagrees with the signed production package");
+      }
+    }
+    await writeFile(join(destination, name), bytes, { mode: 0o644 });
+  }
+  await writeFile(join(destination, "revision"), `${pin.revision}\n`, { mode: 0o644 });
 }
 
 async function filesUnder(directory: string): Promise<string[]> {
@@ -353,6 +414,7 @@ async function main(): Promise<void> {
   await cp(join(root, "native", "rig", "limits.json"), join(appResources, "rig", "limits.json"));
   await cp(join(root, "tools", "character-pack.py"), join(appCreator, "character-pack.py"));
   await cp(join(root, ".agents", "skills", "character-creator", "SKILL.md"), join(appCreator, "SKILL.md"));
+  await stageTernConsumer();
   for (const binary of [appBinary, appRigLibrary, appRigWorker]) {
     await stripDevelopmentRpaths(binary);
   }

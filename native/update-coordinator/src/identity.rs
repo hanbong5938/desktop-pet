@@ -1,6 +1,6 @@
 //! The app and its paired helper use this single compiled product identity.
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/identity.rs"]
+#[path = "../../../migration/legacy-0.3.13/identity.rs"]
 mod selected;
 #[cfg(desktop_pet_legacy)]
 pub use selected::*;
@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.8";
+    pub const VERSION: &str = "0.4.9";
     pub const BINARY: &str = "desktop-pet";
     pub const HELPER: &str = "desktop-pet-update-coordinator";
     pub const APP_NAME: &str = "DesktopPet.app";
@@ -40,11 +40,21 @@ pub use neutral::*;
 pub const CORE_REVISION: &str = env!("DESKTOP_PET_COMPILED_CORE_REVISION");
 
 pub fn capabilities() -> serde_json::Value {
-    serde_json::json!({
+    let value = serde_json::json!({
         "protocol": PROTOCOL,
         "observation_mode": OBSERVATION_CAPABILITY,
         "integration_api": INTEGRATION_API,
-    })
+    });
+    #[cfg(not(desktop_pet_legacy))]
+    let value = {
+        let mut value = value;
+        value
+            .as_object_mut()
+            .expect("compiled capabilities object")
+            .insert("migration_handover_protocol".into(), 1.into());
+        value
+    };
+    value
 }
 
 pub fn json() -> serde_json::Value {
@@ -61,6 +71,15 @@ pub fn json() -> serde_json::Value {
         "observation_mode": OBSERVATION_CAPABILITY,
         "integration_api": INTEGRATION_API,
     });
+    #[cfg(not(desktop_pet_legacy))]
+    let value = {
+        let mut value = value;
+        value
+            .as_object_mut()
+            .expect("compiled identity object")
+            .insert("migration_handover_protocol".into(), 1.into());
+        value
+    };
     #[cfg(desktop_pet_legacy)]
     let value = {
         let mut value = value;

@@ -1,5 +1,7 @@
 //! Verified public installation discovery and explicitly requested atomic installation.
 //! The locator is a preference, never authority: every use re-proves its actual image and owner.
+//! Migration approval may upgrade a verified older neutral owner without adopting its locator:
+//! source/standalone replacement requires an inactive root, while Brew retains its old live keg.
 use crate::{
     ensure_absolute, executable_identity, identity, origin, owned_file, owned_private_file,
     physical_install_root, protocol, ExecutableIdentity, InstallOrigin, ReleaseChannel,
@@ -237,7 +239,7 @@ fn stable_version(version: &str) -> Result<Version, String> {
     }
     Ok(parsed)
 }
-fn capabilities(binary: &Path) -> Result<(), String> {
+fn capabilities(binary: &Path) -> Result<Option<u64>, String> {
     let parsed: Value = serde_json::from_str(&origin::command_output(
         binary,
         &["update-capabilities"],
@@ -256,7 +258,7 @@ fn capabilities(binary: &Path) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    crate::migration_handover_capability(&parsed)
 }
 
 fn files_under(
@@ -661,8 +663,11 @@ fn validate_neutral_bundle(bundle: &Path) -> Result<ValidatedApp, String> {
     }
     executable_identity(&helper)?;
     executable_identity(&worker)?;
-    capabilities(&image.path)?;
-    capabilities(&helper)?;
+    let app_handover = capabilities(&image.path)?;
+    let helper_handover = capabilities(&helper)?;
+    if app_handover != helper_handover {
+        return Err("app and helper migration handover capabilities differ".into());
+    }
     let load_commands = tool("/usr/bin/otool", &["-l", path_str(&helper)?], 65536, 5)?;
     if load_commands
         .lines()
@@ -961,10 +966,14 @@ fn bundle_for_origin(origin: &InstallOrigin) -> Result<PathBuf, String> {
     }
 }
 
-#[cfg(not(desktop_pet_legacy))]
+// The bridge uses a neutral helper's verified owner proof; it must still compare the staged
+// revision without applying its own legacy package identity to the neutral source checkout.
 fn check_source_revision(app: &ValidatedApp, origin: &InstallOrigin) -> Result<(), String> {
     if let InstallOrigin::Source { root } = origin {
+        #[cfg(not(desktop_pet_legacy))]
         origin::validate_source_root(root)?;
+        #[cfg(desktop_pet_legacy)]
+        physical_directory(root, false)?;
         let sidecar: Value =
             serde_json::from_slice(&owned_file(&sidecar_path(&app.bundle), MAX_RECORD)?)
                 .map_err(|e| e.to_string())?;
@@ -1656,9 +1665,235 @@ fn commit_source_neutral(
     })
 }
 
-/// Operation B retains signed archive evidence before any bridge Prepare/Stop handshake.
+fn migration_target_path(origin: &InstallOrigin, version: &str) -> Result<PathBuf, String> {
+    match origin {
+        InstallOrigin::Standalone { bundle } => Ok(bundle.join("Contents/MacOS/desktop-pet")),
+        InstallOrigin::Source { root } => {
+            Ok(root.join("dist/DesktopPet.app/Contents/MacOS/desktop-pet"))
+        }
+        InstallOrigin::Homebrew {
+            cellar_formula_root,
+            ..
+        } => Ok(cellar_formula_root
+            .join(version)
+            .join("libexec/DesktopPet.app/Contents/MacOS/desktop-pet")),
+        _ => Err("migration target has no supported verified installation owner".into()),
+    }
+}
+
+/// A revisioned formula would install in a different keg than the exact approved target path.
+/// Read cached metadata only; the engine rechecks the release after its captured Brew update.
+fn check_migration_brew_revision(origin: &InstallOrigin) -> Result<(), String> {
+    let InstallOrigin::Homebrew { brew, formula, .. } = origin else {
+        return Ok(());
+    };
+    if formula != &format!("hanbong5938/tap/{}", identity::neutral::STABLE_FORMULA) {
+        return Err("migration requires the official neutral stable Homebrew formula".into());
+    }
+    let output = origin::command_output(
+        brew,
+        &["info", "--json=v2", "--formula", formula],
+        65536,
+        15,
+    )?;
+    let metadata: Value = serde_json::from_str(&output)
+        .map_err(|e| format!("invalid migration Homebrew metadata: {e}"))?;
+    let formulae = metadata
+        .get("formulae")
+        .and_then(Value::as_array)
+        .ok_or("migration Homebrew metadata lacks its exact formula")?;
+    if formulae.len() != 1
+        || formulae[0].get("name").and_then(Value::as_str)
+            != Some(identity::neutral::STABLE_FORMULA)
+        || formulae[0].get("full_name").and_then(Value::as_str) != Some(formula.as_str())
+    {
+        return Err("migration Homebrew metadata names a different formula/owner".into());
+    }
+    if formulae[0]
+        .get("revision")
+        .is_some_and(|revision| revision.as_u64() != Some(0))
+    {
+        return Err(
+            "migration Homebrew formula revision does not match the approved unrevisioned keg path"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(not(desktop_pet_legacy))]
-pub fn stage_migration_target(plan: &crate::migration::MigrationPlan) -> Result<StagedApp, String> {
+fn validate_migration_previous(target: &crate::migration::MigrationTarget) -> Result<(), String> {
+    let Some(previous) = target.previous_installation.as_deref() else {
+        return Ok(());
+    };
+    let kind_matches = matches!(
+        (&previous.kind, &target.origin),
+        (
+            InstallationKind::Standalone,
+            InstallOrigin::Standalone { .. }
+        ) | (InstallationKind::Source, InstallOrigin::Source { .. })
+            | (InstallationKind::Homebrew, InstallOrigin::Homebrew { .. })
+    );
+    if previous.version != 1
+        || previous.protocol != 4
+        || previous.observation_mode != 2
+        || previous.integration_api != 1
+        || previous.executable != previous.image.path
+        || previous.origin != target.origin
+        || !kind_matches
+        || !matches!(previous.app_version.as_str(), "0.4.7" | "0.4.8")
+        || stable_version(&previous.app_version)? >= stable_version(&target.release.version)?
+        || target.image.path != migration_target_path(&target.origin, &target.release.version)?
+    {
+        return Err(
+            "migration previous installation is not the exact supported older neutral owner".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Re-prove the approved old owner until replacement, or the exact final image after it.
+/// A retained Brew keg stops being the active locator after upgrade and must not be rediscovered.
+#[cfg(not(desktop_pet_legacy))]
+fn migration_target_installed(
+    plan: &crate::migration::MigrationPlan,
+    stage: &StagedApp,
+    image: &ExecutableIdentity,
+) -> Result<bool, String> {
+    let target = &plan.target;
+    validate_migration_previous(target)?;
+    if image.path != target.image.path {
+        return Err("migration candidate path differs from the approved target".into());
+    }
+    if image != &target.image {
+        if validate_installed_migration_candidate(plan, stage)? != *image {
+            return Err(
+                "installed migration candidate differs from the captured manager image".into(),
+            );
+        }
+        return Ok(true);
+    }
+    if exists(&target.image.path)? {
+        let installed = inspect(&target.image.path)?;
+        if installed.image == target.image
+            && installed.origin == target.origin
+            && installed.app_version == target.release.version
+        {
+            if let Some(previous) = target.previous_installation.as_deref() {
+                if matches!(&target.origin, InstallOrigin::Homebrew { .. })
+                    && executable_identity(&previous.executable)? != previous.image
+                {
+                    return Err(
+                        "retained previous Homebrew image changed during migration upgrade".into(),
+                    );
+                }
+            }
+            return Ok(true);
+        }
+        if target.previous_installation.as_deref() == Some(&installed) {
+            return Ok(false);
+        }
+        return Err("existing migration target differs from consented image/owner".into());
+    }
+    if let Some(previous) = target.previous_installation.as_deref() {
+        if inspect(&previous.executable)? != *previous {
+            return Err("previous migration installation changed before owner upgrade".into());
+        }
+    }
+    Ok(false)
+}
+
+/// Accept a different executable hash only for an actual Brew-derived installation whose retained
+/// original record is byte-for-byte the authenticated public release record. `inspect` verifies the
+/// receipt, active owner, signature, complete deployed closure and the declared signing-only changes.
+#[cfg(not(desktop_pet_legacy))]
+fn validate_installed_migration_candidate(
+    plan: &crate::migration::MigrationPlan,
+    stage: &StagedApp,
+) -> Result<ExecutableIdentity, String> {
+    let target = &plan.target;
+    validate_migration_previous(target)?;
+    let installed = inspect(&target.image.path)?;
+    if installed.image.path != target.image.path
+        || installed.origin != target.origin
+        || installed.app_version != target.release.version
+    {
+        return Err(
+            "installed migration candidate differs from the approved path/version/owner".into(),
+        );
+    }
+    if target.previous_installation.is_some() && target.image.sha256 != stage.image.sha256 {
+        return Err("approved migration upgrade image differs from its signed stage".into());
+    }
+    if installed.image != target.image {
+        if !matches!(&target.origin, InstallOrigin::Homebrew { .. })
+            || target.image.sha256 != stage.image.sha256
+        {
+            return Err(
+                "only the approved raw release may have a Homebrew-derived migration image".into(),
+            );
+        }
+        let bundle = installed
+            .executable
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or("installed migration candidate lacks its bundle")?;
+        let original = bundle
+            .parent()
+            .ok_or("installed migration bundle lacks its manager directory")?
+            .join("DesktopPet.app.release-rig-native.json");
+        let original_bytes = owned_file(&original, MAX_RECORD)?;
+        let approved_bytes = owned_file(&sidecar_path(&stage.bundle), MAX_RECORD)?;
+        if original_bytes != approved_bytes {
+            return Err(
+                "Homebrew migration original record differs from the signed public release".into(),
+            );
+        }
+        let approved_digest = format!("{:x}", Sha256::digest(&approved_bytes));
+        let deployed: Value =
+            serde_json::from_slice(&owned_file(&sidecar_path(bundle), MAX_RECORD)?)
+                .map_err(|e| format!("invalid installed migration deployment record: {e}"))?;
+        if deployed
+            .pointer("/signing_derivation/kind")
+            .and_then(Value::as_str)
+            != Some("homebrew_ad_hoc")
+            || deployed
+                .pointer("/signing_derivation/original_sha256")
+                .and_then(Value::as_str)
+                != Some(approved_digest.as_str())
+        {
+            return Err(
+                "Homebrew migration candidate lacks its exact approved signing derivation".into(),
+            );
+        }
+    }
+    if let Some(previous) = target.previous_installation.as_deref() {
+        if matches!(&target.origin, InstallOrigin::Homebrew { .. })
+            && executable_identity(&previous.executable)? != previous.image
+        {
+            return Err("retained previous Homebrew image changed during migration upgrade".into());
+        }
+    }
+    if executable_identity(&installed.executable)? != installed.image {
+        return Err("installed migration candidate changed during verification".into());
+    }
+    Ok(installed.image)
+}
+
+/// Read-only candidate proof. The caller must bind any derived image to the successful, quiescent
+/// captured manager transaction before using it for migration startup or Commit.
+#[cfg(not(desktop_pet_legacy))]
+pub fn installed_migration_candidate(
+    plan: &crate::migration::MigrationPlan,
+) -> Result<ExecutableIdentity, String> {
+    let stage = load_migration_stage(plan)?;
+    validate_installed_migration_candidate(plan, &stage)
+}
+
+/// Retain and revalidate the signed public release independently of the manager's deployed image.
+#[cfg(not(desktop_pet_legacy))]
+fn load_migration_stage(plan: &crate::migration::MigrationPlan) -> Result<StagedApp, String> {
     require_neutral()?;
     protocol::validate_operation_id(&plan.operation_id)?;
     let release = &plan.target.release;
@@ -1699,18 +1934,37 @@ pub fn stage_migration_target(plan: &crate::migration::MigrationPlan) -> Result<
     if stage.version != release.version {
         return Err("signed migration stage version differs from consented release".into());
     }
-    if exists(&plan.target.image.path)? {
-        let installed = inspect(&plan.target.image.path)?;
-        if installed.image != plan.target.image
-            || installed.origin != plan.target.origin
-            || installed.app_version != release.version
-        {
-            return Err("existing migration target differs from consented image/owner".into());
-        }
-    } else if stage.image.sha256 != plan.target.image.sha256 {
+    Ok(stage)
+}
+
+/// Pre-manager staging accepts only the original immutable header image or exact previous owner.
+#[cfg(not(desktop_pet_legacy))]
+pub fn stage_migration_target(plan: &crate::migration::MigrationPlan) -> Result<StagedApp, String> {
+    stage_migration_target_with_image(plan, &plan.target.image)
+}
+
+/// Post-manager staging binds the caller's exact captured image without rewriting approval scope.
+#[cfg(not(desktop_pet_legacy))]
+pub fn stage_migration_target_with_image(
+    plan: &crate::migration::MigrationPlan,
+    image: &ExecutableIdentity,
+) -> Result<StagedApp, String> {
+    let stage = load_migration_stage(plan)?;
+    let installed = migration_target_installed(plan, &stage, image)?;
+    if (plan.target.previous_installation.is_some() || !installed)
+        && stage.image.sha256 != plan.target.image.sha256
+    {
         return Err("signed migration stage differs from consented target image".into());
     }
-    if !exists(&plan.target.image.path)? {
+    if !installed {
+        if plan.target.previous_installation.is_some()
+            && !matches!(&plan.target.origin, InstallOrigin::Homebrew { .. })
+        {
+            crate::processes::installation_roots_inactive(&[physical_install_root(
+                &plan.target.origin,
+            )?
+            .to_path_buf()])?;
+        }
         check_source_revision(
             &ValidatedApp {
                 bundle: stage.bundle.clone(),
@@ -1724,33 +1978,27 @@ pub fn stage_migration_target(plan: &crate::migration::MigrationPlan) -> Result<
 }
 
 /// Operation B's guard owns both namespaces and disjoint source/target roots already.
-/// This installs only a previously absent neutral target and never switches the locator.
+/// Installs an absent target or atomically upgrades its approved inactive owner; never switches locator.
 #[cfg(not(desktop_pet_legacy))]
 pub fn commit_migration_target(
     plan: &crate::migration::MigrationPlan,
     stage: &StagedApp,
+    image: &ExecutableIdentity,
 ) -> Result<(), String> {
-    let verified = stage_migration_target(plan)?;
+    let verified = stage_migration_target_with_image(plan, image)?;
     if &verified != stage {
         return Err("migration stage changed after source quiescence".into());
     }
     let _lock = install_lock()?;
     let target = &plan.target;
-    if exists(&target.image.path)? {
-        let installed = inspect(&target.image.path)?;
-        if installed.image != target.image
-            || installed.origin != target.origin
-            || installed.app_version != target.release.version
-        {
-            return Err("existing migration target image or owner differs from consent".into());
-        }
+    if migration_target_installed(plan, stage, image)? {
         return Ok(());
     }
     if matches!(&target.origin, InstallOrigin::Homebrew { .. }) {
         return Err("migration Brew target requires the engine's captured manager transaction before commit".into());
     }
     let bundle = bundle_for_origin(&target.origin)?;
-    if exists(&bundle)? {
+    if exists(&bundle)? && target.previous_installation.is_none() {
         return Err("migration must not replace an existing unconsented target bundle".into());
     }
     crate::processes::installation_roots_inactive(&[
@@ -1762,8 +2010,13 @@ pub fn commit_migration_target(
         version: stage.version.clone(),
     };
     check_source_revision(&app, &target.origin)?;
-    let installed = replace_bundle(&app, &target.origin, None, false)?;
-    if installed.image != target.image || installed.origin != target.origin {
+    let installed = replace_bundle(
+        &app,
+        &target.origin,
+        target.previous_installation.as_deref(),
+        false,
+    )?;
+    if installed.image != *image || installed.origin != target.origin {
         return Err("installed migration target differs from consented image/owner".into());
     }
     Ok(())
@@ -1835,11 +2088,43 @@ pub fn stage_neutral_migration_release(
         }
         selected
     };
-    let (image, origin) = if let Some(installed) = selected {
-        if installed.app_version != release.version {
-            return Err("existing public installation needs a separately consented version transition before legacy migration".into());
+    let (image, origin, previous_installation) = if let Some(installed) = selected {
+        let installed_version = stable_version(&installed.app_version)?;
+        let release_version = stable_version(&release.version)?;
+        if installed_version > release_version {
+            return Err("existing public installation is newer than the approved migration release; downgrade is forbidden".into());
         }
-        (installed.image, installed.origin)
+        if installed_version == release_version {
+            (installed.image, installed.origin, None)
+        } else {
+            if !matches!(installed.app_version.as_str(), "0.4.7" | "0.4.8") {
+                return Err("existing public installation is not a supported neutral 0.4.7/0.4.8 migration owner".into());
+            }
+            if matches!(&installed.origin, InstallOrigin::Homebrew { .. }) {
+                check_migration_brew_revision(&installed.origin)?;
+            } else {
+                crate::processes::installation_roots_inactive(&[physical_install_root(
+                    &installed.origin,
+                )?
+                .to_path_buf()])?;
+            }
+            check_source_revision(
+                &ValidatedApp {
+                    bundle: stage.bundle.clone(),
+                    image: stage.image.clone(),
+                    version: stage.version.clone(),
+                },
+                &installed.origin,
+            )?;
+            (
+                ExecutableIdentity {
+                    path: migration_target_path(&installed.origin, &release.version)?,
+                    sha256: stage.image.sha256.clone(),
+                },
+                installed.origin.clone(),
+                Some(Box::new(installed)),
+            )
+        }
     } else {
         let bundle = os_home()?.join("Applications/DesktopPet.app");
         (
@@ -1848,6 +2133,7 @@ pub fn stage_neutral_migration_release(
                 sha256: stage.image.sha256.clone(),
             },
             InstallOrigin::Standalone { bundle },
+            None,
         )
     };
     Ok(crate::migration::MigrationTarget {
@@ -1855,5 +2141,6 @@ pub fn stage_neutral_migration_release(
         image,
         origin,
         staged_bundle: stage.bundle,
+        previous_installation,
     })
 }

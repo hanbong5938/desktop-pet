@@ -1,7 +1,7 @@
 //! App-side, read-only update discovery and explicit helper handoff.
 //! AppKit never waits for a manager, hash, source probe, or helper stdout.
-//! A settled, verified legacy bridge offers migration as the next UI action;
-//! the ordinary update plan and independent migration consent remain separate.
+//! The successor bridge continues the authenticated original update approval.
+//! No independent migration consent is required after that bounded approval.
 use crate::i18n::{text, Message, UiLocale};
 use crate::update_card::{UpdateCardModel, UpdateCardPrimaryAction};
 use desktop_pet_update_coordinator::protocol::{
@@ -57,6 +57,13 @@ pub(super) enum Event {
             )>,
             String,
         >,
+    },
+    AutomaticMigrationStarted {
+        context: UpdateContext,
+    },
+    AutomaticMigration {
+        context: UpdateContext,
+        result: Result<Option<desktop_pet_update_coordinator::migration::MigrationPlan>, String>,
     },
 }
 
@@ -123,6 +130,7 @@ pub(super) struct AppUpdateService {
     migration_available: bool,
     migration_problem: Option<String>,
     migration_history_verified: bool,
+    migration_blocked: bool,
 }
 
 impl AppUpdateService {
@@ -175,8 +183,8 @@ impl AppUpdateService {
             migration_available: false,
             migration_problem: None,
             migration_history_verified: false,
+            migration_blocked: false,
         };
-        service.check_due();
         service.check_migration_eligibility();
         service.check_migration_history();
         service
@@ -238,10 +246,27 @@ impl AppUpdateService {
         let Some(context) = self.context.clone() else {
             return;
         };
+        self.migration_blocked = true;
         let sender = self.sender.clone();
         std::thread::spawn(move || {
             let result = desktop_pet_update_coordinator::migration::latest_for_context(&context);
-            let _ = sender.send(Event::MigrationHistory { context, result });
+            let continue_update =
+                desktop_pet_update_coordinator::identity::LEGACY && matches!(&result, Ok(None));
+            let _ = sender.send(Event::MigrationHistory {
+                context: context.clone(),
+                result,
+            });
+            if continue_update {
+                let _ = sender.send(Event::AutomaticMigrationStarted {
+                    context: context.clone(),
+                });
+                let result =
+                    desktop_pet_update_coordinator::migration::prepare_automatic_bridge_plan(
+                        &context,
+                        desktop_pet_update_coordinator::identity::herdr_migration_revision(),
+                    );
+                let _ = sender.send(Event::AutomaticMigration { context, result });
+            }
         });
     }
 
@@ -250,11 +275,39 @@ impl AppUpdateService {
             return;
         }
         self.migration_history_verified = verified;
+        self.migration_blocked = !verified;
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub(super) fn migration_preparing(&mut self) {
+        if !self.migration_blocked {
+            self.migration_blocked = true;
+            self.pending_request = None;
+            self.check_busy = false;
+            self.snapshot = None;
+            self.candidate_generation = self.candidate_generation.wrapping_add(1);
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    pub(super) fn migration_observed(
+        &mut self,
+        record: &desktop_pet_update_coordinator::migration::MigrationRecord,
+    ) {
+        use desktop_pet_update_coordinator::migration::MigrationPhase;
+        // Historical observations may expose Complete only through their separate
+        // authenticated settlement receipt. No old journal is changed here.
+        if record.phase != MigrationPhase::Complete {
+            self.migration_preparing();
+        } else if self.migration_blocked {
+            self.migration_blocked = false;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     pub(super) fn settings_admitted(&self) -> bool {
-        !self.check_busy
+        !self.migration_blocked
+            && !self.check_busy
             && self.launching.is_none()
             && self.launch_plan.is_none()
             && self.prepared_plan.is_none()
@@ -434,7 +487,8 @@ impl AppUpdateService {
     }
 
     fn begin_check(&mut self) -> Option<(u64, u64, UpdateContext)> {
-        if self.check_busy
+        if self.migration_blocked
+            || self.check_busy
             || self.launching.is_some()
             || (self.launch_plan.is_some()
                 && !self
@@ -597,7 +651,8 @@ impl AppUpdateService {
         checked_at
     }
     pub(super) fn plan(&self) -> Option<&UpdatePlan> {
-        if self.check_busy
+        if self.migration_blocked
+            || self.check_busy
             || self.launching.is_some()
             || self.launch_plan.is_some()
             || self.prepared_plan.is_some()
@@ -1158,7 +1213,8 @@ impl AppUpdateService {
         UpdateCardModel {
             auto_check: self.auto_check,
             receive_beta_updates: self.policy == UpdatePolicy::StableAndBeta,
-            busy: self.check_busy
+            busy: self.migration_blocked
+                || self.check_busy
                 || self.launching.is_some()
                 || self.launch_plan.is_some()
                 || self.prepared_plan.is_some()
@@ -1545,10 +1601,69 @@ mod tests {
         plan.context = context;
         snapshot
     }
+
+    #[test]
+    fn unresolved_migration_fences_checks_and_stale_candidates_until_settlement() {
+        use desktop_pet_update_coordinator::migration::{MigrationPhase, MigrationRecord};
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let snapshot = local_check();
+        let context = snapshot.plan.as_ref().unwrap().context.clone();
+        service.context = Some(context);
+        service.checked(Ok(snapshot.clone()), None);
+        let consent = service.consent_generation();
+        let plan = service.plan().unwrap().clone();
+        let mut record: MigrationRecord = serde_json::from_value(serde_json::json!({
+            "version":1,"operation_id":"a".repeat(32),"plan_sha256":"b".repeat(64),
+            "phase":"integrating","prepared_profiles":[],"preparing_profiles":[],
+            "acknowledged_profiles":[],"stopped_profiles":[],"target_pid":null,
+            "target_instance":null,"locator_adopted":false,"default_adopted":false,
+            "native_ready":true,"target_committed":true,"manager":null,
+            "target_manager":null,"reconnected_profiles":[],"retirement_attempt":0,"error":null
+        }))
+        .unwrap();
+        for phase in [
+            MigrationPhase::Integrating,
+            MigrationPhase::AwaitingReconnect,
+            MigrationPhase::RetirementFailed,
+            MigrationPhase::ManagerUnknown,
+        ] {
+            record.phase = phase;
+            service.migration_observed(&record);
+            assert!(service.begin_check().is_none());
+            assert!(!service.settings_admitted());
+            assert!(service.plan().is_none());
+            assert!(!service.consent_matches(&plan, consent));
+        }
+        record.phase = MigrationPhase::Complete;
+        service.migration_observed(&record);
+        assert!(service.settings_admitted());
+        assert!(
+            service.plan().is_none(),
+            "settlement must not resurrect a stale candidate"
+        );
+        assert!(service.begin_check().is_some());
+    }
+
+    #[test]
+    fn initial_history_admission_blocks_update_until_the_exact_context_is_checked() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let context = local_check().plan.unwrap().context;
+        service.reconcile_context(Some(context.clone()));
+        assert!(service.begin_check().is_none());
+        assert!(!service.settings_admitted());
+        let mut stale = context.clone();
+        stale.instance_id = "other-instance".into();
+        service.migration_history_checked(&stale, true);
+        assert!(service.begin_check().is_none());
+        service.migration_history_checked(&context, false);
+        assert!(service.begin_check().is_none());
+        service.migration_history_checked(&context, true);
+        assert!(service.begin_check().is_some());
+    }
     fn eligible_settled_bridge(status: CheckStatus) -> AppUpdateService {
         let mut snapshot = local_check();
         let mut context = snapshot.plan.take().unwrap().context;
-        context.version = "0.3.12".into();
+        context.version = "0.3.13".into();
         snapshot.installed_version = Some(context.version.clone());
         snapshot.status = status;
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
@@ -1728,6 +1843,7 @@ mod tests {
         ));
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         service.reconcile_context(state.update_context().cloned());
+        service.migration_history_checked(state.update_context().unwrap(), true);
         let history = failed_record('a');
         service.previous_outcome = Some(history.clone());
         let (request, policy, context) = service.begin_check().unwrap();
@@ -1756,6 +1872,7 @@ mod tests {
                 service.checked_at_for_save(old_request, old_policy, &Ok(snapshot.clone())),
                 None
             );
+            service.migration_history_checked(state.update_context().unwrap(), true);
             let (request, policy, context) = service.begin_check().unwrap();
             assert_eq!(context.observation_mode().unwrap(), mode);
             assert_eq!(
@@ -2067,7 +2184,7 @@ mod tests {
         current_plan.origin = snapshot.origin.clone();
         current_plan.action = UpdateAction::HomebrewUpgrade;
         current_plan.context.state_dir = state.clone();
-        current_plan.context.version = "0.3.12".into();
+        current_plan.context.version = "0.3.13".into();
         current_plan.context.running_origin = Some(Box::new(snapshot.origin.clone()));
         current_plan.running.path = root.join("current-app");
         current_plan.running.sha256 = "c".repeat(64);

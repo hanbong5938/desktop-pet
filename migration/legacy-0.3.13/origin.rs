@@ -111,6 +111,8 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
                 | "HERDR_SOCKET_PATH"
                 | "XDG_CONFIG_HOME"
                 | "XDG_STATE_HOME"
+                | "TERN_CONFIG_DIR"
+                | "TERN_DAEMON_SOCKET"
                 | "HOME"
                 | OBSERVATION_MODE_ENV
         ) || value.len() > 4096
@@ -119,6 +121,9 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
             return Err(format!(
                 "unapproved host routing environment variable {key}"
             ));
+        }
+        if matches!(key.as_str(), "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET") {
+            ensure_absolute(Path::new(value))?;
         }
     }
     if c.running_origin.is_none() && executable_identity(&c.executable)? != c.running {
@@ -2237,6 +2242,25 @@ mod tests {
             locale: "en".into(),
         };
         assert!(context_valid(&context).is_ok());
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            context
+                .environment
+                .insert(key.into(), "/isolated/tern/endpoint".into());
+            assert!(context_valid(&context).is_ok());
+            let bytes = serde_json::to_vec(&context).unwrap();
+            let retained: UpdateContext = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(retained, context);
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                context.environment.insert(key.into(), invalid);
+                assert!(context_valid(&context).is_err());
+            }
+            context.environment.remove(key);
+        }
         let default_context = context.clone();
         for mode in ["herdr", "tern", "auto"] {
             context

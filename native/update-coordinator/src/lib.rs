@@ -3,14 +3,14 @@
 pub mod identity;
 pub mod installation;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/codec.rs"]
+#[path = "../../../migration/legacy-0.3.13/codec.rs"]
 pub mod legacy_codec;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/entry.rs"]
+#[path = "../../../migration/legacy-0.3.13/entry.rs"]
 pub mod legacy_entry;
 pub mod migration;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/origin.rs"]
+#[path = "../../../migration/legacy-0.3.13/origin.rs"]
 mod origin;
 #[cfg(not(desktop_pet_legacy))]
 mod origin;
@@ -442,7 +442,20 @@ fn validate_capabilities(
     {
         return Err("candidate does not support the integration API".into());
     }
+    if migration_handover_capability(capabilities)?.is_some() && identity::LEGACY {
+        return Err("legacy candidate cannot authorize neutral migration handover".into());
+    }
     validate_observation_capability(capabilities, mode)
+}
+
+pub(crate) fn migration_handover_capability(
+    capabilities: &serde_json::Value,
+) -> Result<Option<u64>, String> {
+    match capabilities.get("migration_handover_protocol") {
+        None => Ok(None),
+        Some(value) if value.as_u64() == Some(1) => Ok(Some(1)),
+        Some(_) => Err("unsupported migration handover capability".into()),
+    }
 }
 
 fn validate_observation_capability(
@@ -614,6 +627,32 @@ mod observation_capability_tests {
             changed[field] = serde_json::json!(999);
             assert!(validate_capabilities(&changed, &mode).is_err());
         }
+    }
+
+    #[test]
+    fn historical_absence_is_not_handover_support_and_malformed_support_is_rejected() {
+        let mut capabilities = identity::capabilities();
+        capabilities
+            .as_object_mut()
+            .unwrap()
+            .remove("migration_handover_protocol");
+        assert_eq!(migration_handover_capability(&capabilities).unwrap(), None);
+        assert!(validate_capabilities(&capabilities, &ObservationSelection::Auto).is_ok());
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("1"),
+            serde_json::json!(0),
+            serde_json::json!(2),
+        ] {
+            capabilities["migration_handover_protocol"] = invalid;
+            assert!(validate_capabilities(&capabilities, &ObservationSelection::Auto).is_err());
+        }
+        capabilities["migration_handover_protocol"] = serde_json::json!(1);
+        assert_eq!(
+            validate_capabilities(&capabilities, &ObservationSelection::Auto).is_ok(),
+            !identity::LEGACY
+        );
     }
 
     #[cfg(not(desktop_pet_legacy))]

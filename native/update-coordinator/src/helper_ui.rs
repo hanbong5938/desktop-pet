@@ -1206,6 +1206,11 @@ impl MigrationPresentation for Panel {
                 "Desktop Pet native-ready",
                 "Legacy retirement and reconnect are not yet complete.",
             ),
+            MigrationPhase::Integrating => (
+                Phase::Finalizing,
+                "Connecting approved integrations",
+                "App committed. Waiting automatically for the loaded consumer and actual same-profile SDK binding before legacy retirement.",
+            ),
             MigrationPhase::Retiring => (
                 Phase::Installing,
                 "Retiring legacy installation",
@@ -1213,8 +1218,8 @@ impl MigrationPresentation for Panel {
             ),
             MigrationPhase::RetirementFailed => (
                 Phase::Attention(Attention::Interrupted),
-                "Legacy retirement failed",
-                "Desktop Pet native-ready is not migration complete. Explicit resume only.",
+                "Migration incomplete; retirement pending",
+                "App state and integration errors are retained. The legacy owner is not removed before every required connection is verified.",
             ),
             MigrationPhase::ManagerUnknown => (
                 Phase::Attention(Attention::Interrupted),
@@ -1223,13 +1228,13 @@ impl MigrationPresentation for Panel {
             ),
             MigrationPhase::AwaitingReconnect => (
                 Phase::Attention(Attention::Completion),
-                "Awaiting Tern reconnect",
-                "Native readiness alone is not reconnect confirmation.",
+                "App cutover recorded; integration status is separate",
+                "Current-owner verification can settle this retained record without manager replay.",
             ),
             MigrationPhase::Complete => (
                 Phase::Finalizing,
                 "Migration complete",
-                "Native readiness, legacy retirement and required reconnect verified.",
+                "Every affected profile committed and required integrations connected before approved legacy retirement.",
             ),
             MigrationPhase::RollingBack => (
                 Phase::RestoringOriginal,

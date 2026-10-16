@@ -1,7 +1,7 @@
 //! Compiled distribution envelope for the one-time protocol-3 bridge.
-pub const DISTRIBUTION: &str = "legacy-0.3.12";
+pub const DISTRIBUTION: &str = "legacy-0.3.13";
 pub const LEGACY: bool = true;
-pub const VERSION: &str = "0.3.12";
+pub const VERSION: &str = "0.3.13";
 pub const BINARY: &str = "herdr-desktop-pet";
 pub const HELPER: &str = "herdr-update-coordinator";
 pub const APP_NAME: &str = "HerdrDesktopPet.app";

@@ -61,12 +61,17 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
                 | "DESKTOP_PET_STATE_DIR"
                 | "XDG_CONFIG_HOME"
                 | "XDG_STATE_HOME"
+                | "TERN_CONFIG_DIR"
+                | "TERN_DAEMON_SOCKET"
                 | "HOME"
                 | identity::OBSERVATION_ENV
         ) || value.len() > 4096
             || value.contains('\0')
         {
             return Err(format!("unapproved profile environment variable {key}"));
+        }
+        if matches!(key.as_str(), "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET") {
+            ensure_absolute(Path::new(value))?;
         }
     }
     if c.running_origin.is_none() && executable_identity(&c.executable)? != c.running {
@@ -731,6 +736,9 @@ pub(crate) fn verify_migration_brew_release(
         environment,
     )?;
     let details = brew_metadata_details(STABLE_FORMULA, formula, &output)?;
+    if details.get("revision").and_then(Value::as_u64) != Some(0) {
+        return Err("approved migration Brew target does not permit a revisioned keg path".into());
+    }
     brew_matches_release(&details, release)
 }
 
@@ -999,6 +1007,29 @@ mod tests {
         ] {
             c.environment.insert(key.into(), "/tmp/injected".into());
             assert!(context_valid(&c).is_err());
+            c.environment.remove(key);
+        }
+    }
+
+    #[test]
+    fn immutable_context_preserves_exact_tern_routing_and_rejects_invalid_values() {
+        let mut c = context();
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            c.environment
+                .insert(key.into(), "/isolated/tern/endpoint".into());
+            assert!(context_valid(&c).is_ok());
+            let bytes = serde_json::to_vec(&c).unwrap();
+            let retained: UpdateContext = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(retained, c);
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                c.environment.insert(key.into(), invalid);
+                assert!(context_valid(&c).is_err());
+            }
             c.environment.remove(key);
         }
     }

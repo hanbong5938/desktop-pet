@@ -4,9 +4,21 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## 現在の公開状態と予定の単一承認経路
+
+**公開の基準:** 後継が実際に適格性確認・公開されるまでは Core v0.4.8 が現在の公開版です。Core v0.4.9 / bridge v0.3.13 / Tern v0.2.1 は予定版であり、適格性確認・公開は未完了です。この契約は導入・公開・実行受入れの証拠ではありません。
+
+**予定の通常経路:** 最初の承認1回 → 正確に同じ profile の `migrationReady` / Commit → 更新 Tern consumer の配信・ロード → SDK optimistic identity guard と atomic canonical save → 実際の同じ Tern ウィンドウの fresh binding → 自動 native handover receipt → 承認済み旧所有者の retirement。**実際の再接続と receipt は retirement より先**です。保存や ACK は再接続ではなく、この SDK guard は真の cross-VM transactional CAS ではありません。別の B/source review/Migrate 承認や手動 Configure → Save → Connect / Resume は通常経路に追加しません。複数 profile では影響を受ける各 target が start・Commit・rebind する必要があり、旧 blanket live-profile guard だけでは完成しません。独立 profile は統合しません。
+
+**Commit 済み履歴の修復と失敗の区別:** 実際の othermachine 問題は Commit 済み `AwaitingReconnect` 後の古い保存パス `/opt/homebrew/bin/herdr-desktop-pet` であり、Commit 失敗や manager 再実行の証拠ではありません。same-image / 適格 successor 修復は旧 plan/journal をバイト単位で不変に保ち、新 repair/handover receipt だけを追加します。manager replay・手動 Configure・手動 Resume は行いません。実際の旧証拠・helper・reservation・config/state・資格情報・provider/account データ・prompt/transcript・無関係な profile を保持します。definite no-spawn、Commit 後の未再接続、確定した quiescent retirement 失敗、typed cancellation、Unknown を区別します。Unknown は clear/replay も cancelled への変更もしません。実際の利用者 Stop は rollback を含む再起動を禁止します。必要な全 binding と native receipt までは retirement を阻止します。文書や旧実行は現在の tools Mac の状態を証明しません。
+
+## 過去の公開・実行記録 — 予定の通常経路ではない
+
+以下の版・PID・SHA・取消/Unknown 観測・受入れ範囲は元の歴史的範囲を保持します。当時の「現在」という表現や別 A/B 承認・手動接続手順は予定の単一承認経路の指示ではありません。
+
 **Core v0.4.7:** [Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, source `52514da5115f09aac22de5429c08f7acdd993258` (2026-10-15T08:39:17Z). Six anonymous assets, strict/deep signatures, protocol 4 / observation 2 / API 1 and exact 68-file closure passed. Current observed acceptance: [v0.4.7 ledger](releases/v0.4.7.md). Pages is not yet observed; Wiki publication lacks dedicated `WIKI_PUBLISH_TOKEN`.
 
-**現在の経路（公開 Brew A′/B は未観測）:** 実行中 v0.3.10 → 独立 native 同意の通常 v0.3.11 更新 A′ → 保持した元の対応する署名 helper で terminal/quiescent settlement を確認 → 別の source review と最終表示 native **Migrate** 同意で Core v0.4.7 B → 正確な profile の ready/Commit → 実際の所有 manager による retirement。A′ を省略せず、その同意を B に再利用しません。v0.3.6 互換経路は別で、beta は先に凍結した一致 v0.3.6 pair が必要です。
+**過去の v0.4.7 経路（置換済み、当時は公開 Brew A′/B 未観測）:** 実行中 v0.3.10 → 独立 native 同意の通常 v0.3.11 更新 A′ → 保持した元の対応する署名 helper で terminal/quiescent settlement を確認 → 別の source review と最終表示 native **Migrate** 同意で Core v0.4.7 B → 正確な profile の ready/Commit → 実際の所有 manager による retirement。当時は A′ と B に別同意が必要でした。v0.3.6 互換経路は別で、beta は先に凍結した一致 v0.3.6 pair が必要でした。
 
 **同意と復旧:** v0.4.7 は bound typed Cancelled と VisibleApproved を区別します。予期しない native 応答・EOF・invalid/foreign/nonzero・不整合 delivery は Unknown のままです。Unknown manager を clear/replay したり cancelled に変更しません。ユーザー Stop は rollback start を含む再起動を禁止します。元 helper/journal/reservation・正確な config/state・無関係な profile を保持し、target ready/Commit 後にレビューした所有 source だけを retire します。v0.4.6 final-cancel false-Unknown 証拠は不変の過去記録です。現行の手動 candidate→公開 v0.4.7 観測は ledger を参照。公開 Brew A′/B・ManagerUnknown・late Stop・definite retirement failure/Resume は未観測です。
 
@@ -26,13 +38,13 @@
 
 **過去の v0.4.4 新規 Brew 導入証明:** 中立 v0.4.4 formula は tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586` に公開済みです。適格な Brew v0.4.4 新規導入は通過しました（74ファイル / 44.3 MB、内外の再署名5個）。認証済み検査で Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312` を確認しました。導入・検査は中立 config/state・standalone app を作成せず、デーモンも起動しませんでした。明示的な手動 **Start** の後だけ実際の v0.4.4 UI/control ready、PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` に達しました。ルベリアと実際の Settings は **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0** を表示し、その後の明示 Hidden は同じ既定 instance を保持しました。新規導入の証拠であり、v0.4.4 通常更新や managed 移行の完了証明ではありません。
 
-**Current public bridge v0.3.11:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. Stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves Core v0.4.7 / bridge v0.3.11; beta is unchanged.
+**Historical public bridge v0.3.11 publication:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. At that publication, stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` served Core v0.4.7 / bridge v0.3.11; beta was unchanged.
 
 **過去の v0.3.9/v0.4.4 managed A 完了:** 凍結 v0.3.6 Check は公開 v0.3.9 を選択し、`preferences/last_update_check` のみ変更しました（`1791963743` → `1791965310`）。Check 中は他の4 tree bytes・source PID `2467`・無関係な既定 PID `2641` が不変です。正確な source `0f33f28` の native A 同意で operation `d5b2bf6f02e031eabb5a8c8fdd805cab` が完了しました（`completed` / `manager_exited`、installed/applied true）。実際の公開 v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`、image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce` は正確な旧 private config/state で一致 protocol 3 / capability 1 / API 1・UI/control ready・Herdr 1 / Tern 0 に達しました。実 managed source の Git status は完全に clean です。保持した元の v0.3.6 helper の strict/deep署名と実際の completed status も通過しました。baseline は旧 A 証拠87個と全 state ファイル91個を hash で保存します。
 
 **過去の v0.3.9/v0.4.4 managed B 完了:** 別の Move preview と独立 strict/deep 検証済み公開 v0.4.4 coordinator が native **Migrate** 同意を受け、operation `d729fd740f4e459945edda00bf48d944`、plan SHA-256 `6471e928254229a66a6fc64a88f67095777d6bd890d621feb36b08a4c7d1fc69` で **COMPLETE** に達しました。Native Prepare/Stop で公開 v0.3.9 PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14` を停止し、適格な既存 Brew v0.4.4 app root/image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312` を使用しました。`target_manager:null` のため **再導入はありません**。Target PID `4104` / instance `8912b3aad5419b1c14a78ef3418ae36f` は正確な旧 private config/state と保存 Herdr 選択（Herdr 1 / Tern 0）を維持し、protocol 4 / capability 2 / API 1・実 UI/control ready に達しました。native_ready・target_committed は true です。実 Herdr retirement attempt 1 は PID = PGID `4140`、exit 0、quiescent true、error null です。実 plugin list は不変 Herdr v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` の enabled integration-only Desktop Pet を表示し、managed Git HEAD も一致しました。実 manager 出力は v0.4.1・21 actions・startup/client-attached hooks です。Managed dist/app と旧 PID `3417` は消え、standalone `DesktopPet.app` は作成しませんでした。正確な retired v0.4.1 タグの歴史的 Core v0.4.2-minimum wrapper は同じ v0.4.4 PID/instance を実際に再利用しました。新 app・新 tag はありません。元の A 証拠87個の SHA-256 と既存旧 source-config hash は全て不変、無関係な既定 config/state の両 tree は byte-identical です。hidden の既定 v0.4.4 PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` は不変で稼働中です。Private XDG base profile を adopt し、global default と merge していません。実 GUI は Desktop Pet / 内蔵ルベリア・Settings **Herdr Connected 1 / Tern Disabled 0** と視覚確認し、clean-image capture のみ保留です。Fault のない最終公開 v0.3.9/v0.4.4 A/B happy path は、別途通過した過去 working metadata `f7edf5e` の definite failure/明示 Resume 証明と区別します。
 
-**Current consumer / SDK boundary:** Herdr integration remains assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`), only for Herdr-managed retirement. Current local consumer scripts/eight evidence files are materialized from public Core v0.4.7, not yet pushed main; no new integration tag or consumer native build. Actual user Mac remains unchanged. Manual same-source v0.3.11 candidate → public Core v0.4.7 B passed, not public Brew owning-manager retirement. Tern requires genuine Configure → Save → Connect of the same executable/config/state pair; account/provider and both-order runtime acceptance are not complete. See [current observations](releases/v0.4.7.md).
+**過去の v0.4.7 consumer / SDK 記録:** Herdr integration は当時 assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`) でした。local consumer scripts/evidence 全8件は公開 Core v0.4.7 由来で、当時 main push・新 integration tag・consumer native build はありませんでした。手動 same-source v0.3.11 candidate → 公開 Core v0.4.7 B は通過しましたが公開 Brew owning-manager retirement の証拠ではありません。当時は同じ executable/config/state の Configure → Save → Connect が必要で account/provider・両起動順の受入れは未完了でした。[過去の観測](releases/v0.4.7.md)は現在の Mac 状態の証拠ではありません。
 
 **Historical v0.4.5 consumer evidence:** **consumer・SDK 境界:** Herdr 連携は公開 v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`（assetless release `412252863`）を維持します。歴史的 Core v0.4.2 minimum は凍結され、健全な Core v0.4.3 再利用は観測済みです。現在の Herdr consumer scripts と metadata/evidence 全8ファイルは、公開 Core v0.4.5 release `412667385` / ソース `51dcf22415b1ff0faf07651cb83c1c696c980f43` から実際に materialize されました。新 Herdr タグはなく、最終公開 managed retirement と不変 wrapper の v0.4.4 再利用は上記の実 B 結果で別途確認しました。Tern v0.2.0 と互換 Core v0.4.1 pin は不変です。Tern は検証済み実行ファイルと実際の config/state 組を明示 **Configure → Save → Connect** で接続し、アプリを導入・自動起動しません。実 Tern keychain/provider sign-in と genuine OMP 18.10.3 providerSignIn/NoModel は両起動順序の同一 instance/prompt/transcript/reconnect 受入れを引き続き阻止しています。資格情報の複製・偽アカウント・ACK・完了で代替しません。**全 matrix は完了していません。** 実際の現行 Herdr v0.4.5 reviewed-consumer VM smoke は通過: materialized wrapper は同じ Brew v0.4.5 PID `10377` / instance `37953e017fc9208bfcc785a4ff138494` を発見。Hide 後 ensure は bootstrap なしで Hidden / visible false・同じ instance を保持し、明示 Show で復元しました。現在の Herdr source 検証通過: integration-only ownership v0.4.1・shell/manifests/TypeScript・固定 contracts `85c644cd90d8c6a9e97e9dc313cc4750f344235f`・**Rust adapter test 104件と含まれる test の child 再実行1件**（105件の別 test・Bun ではない）。Native app/release 構築なし。
 
@@ -60,6 +72,8 @@ desktop-pet status
 
 プリビルド・ソース導入は Herdr 連携ではなく **core** チェックアウトで実行します。既定はプリビルドのみで、取得・検証失敗からソースビルドへ黙って切り替えません。`--source` は現在の core だけを構築し、その `dist/DesktopPet.app` を使用します。
 
+**過去の固定 v0.4.7 導入例（最新版の指示ではない）:** 以下は意図的に旧不変版を選びます。現在の公開基準は v0.4.8 であり、未公開 v0.4.9 のアセットに置き換えません。
+
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
 cd desktop-pet
@@ -85,7 +99,7 @@ tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 
 新規プロファイルは Auto です。Connection は登録されたプロバイダーの実際の接続を示し、インストール有無を接続と扱いません。ID は不透明な値で、権限は名前の接頭辞やパスではなく capability で判断します。Auto は同時観測で、fallback ではありません。リモートは読み取り専用、Tern は返信のみで worktree 削除は不可です。受付はエージェントの完了ではありません。
 
-[利用ガイド](usage.ja.md)、[正確なプロファイル・探索契約](development.md#profiles-and-installation-discovery)、[A→B 移行](migrations/desktop-pet.md)を参照してください。status / Connection の実際の実行ファイル・config・state を Tern Configure に指定し Connect します。既存の Tern・beta・custom プロファイルはその場で保持し、マージしません。
+[profile・探索契約](development.md#profiles-and-installation-discovery)と[移行・保存履歴](migrations/desktop-pet.md)を参照してください。予定の移行は実際の executable/config/state を自動で引き継ぎ、同じ Tern ウィンドウを fresh rebind してから retire します。手動 Configure/Connect を追加しません。移行外の初回独立接続は明示設定できます。既存 Tern・beta・custom profile はその場で保持し、統合しません。
 
 ```sh
 desktop-pet profile show --json
@@ -214,7 +228,7 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 
 **設定 → アプリ更新**には独立した自動チェック（既定オン）、**ベータ更新を受け取る**（既定オフ）、**今すぐ確認**、現在版／インストール元、ポリシー別の最後の成功確認、インストール元に応じた明示的な操作があります。安定版のみなら公式の安定リリース、ベータを含めるなら対象の安定／ベータの最高 SemVer を選び、同じ基底版の正式版がベータより優先です。ベータ解除でダウングレードしません。開いている間の自動確認は１日最大１回、安定のみ／ベータ含む確認には別々の時刻があります。ベータ設定変更で以前の候補は失効し、自動確認オンの場合だけ新方針で確認します。設定や確認だけではインストール／再起動、Brew メタデータ更新、Git 変更は行わず、別のネイティブの同意が必要です。 確認は lifecycle・導入・稼働 image・選択 profile を変更しませんが、成功時は `preferences.json` のポリシー別 timestamp キャッシュ（`last_update_check` / `last_beta_update_check`）を書き込めるため、バイト単位の読み取り専用ではありません。
 
-- **Standalone:** 固定された中立リリースのバイトを検証／stage し、native installation admission の下で実 OS アカウント home のアプリを原子的に置換します。共有 locator が実際の導入元を識別し、host manifest／socket の親から推測しません。検証済み既存所有者は再利用でき、live profile／予約は危険な置換を阻止します。通常更新は Herdr plugin manager を呼びません。旧 Herdr 管理は別同意の [A→B 移行](migrations/desktop-pet.md)のみです。
+- **Standalone:** 固定中立 release を検証・stage し、native installation admission の下でアカウント home のアプリを原子的に置換します。共有 locator は導入の探索根拠で、host manifest/socket 親から推測しません。検証済み所有者を再利用でき、live profile/予約は危険な置換を阻止します。通常中立更新は Herdr plugin manager を呼ばず、旧所有者 retirement は最初に承認した[移行経路](migrations/desktop-pet.md)だけに属します。
 - **Homebrew：**取得した管理ツール／prefix を維持し、対象 formula／版を明示します。物理置換範囲は prefix 全体ではなく、各 keg にまたがる formula の **Cellar サブツリー**です。適格と確認した安定 ↔ ベータ移行は両方の物理インストール根を確保し、新しい対象メタデータを検証して導入／更新し、元 formula を密かにアンインストールしません。確認だけならキャッシュ済みメタデータを読みます。
 - **ローカルチェックアウト：**現在のディスク上のファイルを明示的に再ビルドし、Git pull／reset／参照変更はしません。再ビルドした実行ファイルが同一でも、置換したインスタンスが本当に準備完了なら構いません。
 - **検証済み外部インストール：**署名済みで protocol-4 互換の導入済みパッケージはインストーラを再実行せず**導入済み更新を適用**できます。安定版のみの方針でも明示的に受け入れた適格な導入済みベータは対象です。手動／不明の出所を Herdr／Homebrew と密かに再分類しません。
@@ -223,7 +237,7 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 
 独立した**署名済みヘルパー**、選択済み設定／状態、独自アセットは物理的に変更されるインストールの外側に置きます。同じインストールを使う別の生きたプロファイルは置換を阻止します。ヘルパーは選択済みプロファイル／バックエンド／アセットを維持し、新インスタンスが実際に準備完了か検証し、**導入済み**と**適用済み**を区別します。適用済みは公開最新版という意味ではありません。候補起動には現在のディスクから復元した pin ではなく、正確に永続化された**イメージと導入元**の組が必要です。互換の部分マーカーは管理ツールを再実行せず修復可能ですが、不完全な pin、ドリフト、管理ツール実行の不確実性は阻止したままです。独立検証済み Original は永続化された更新失敗の目的でのみ復元でき、アップグレードと報告しません。利用者 Stop は復活を禁じますが、十分に安全な停止が証明された取引の整合と解放は許します。証明された **NoSpawn** 中断で元インスタンスが正確に準備完了なら稼働／解凍を維持し、後の新しい成功確認では履歴を消さず別の計画を提示できます。管理ツールを自動で再実行したり記録を黙って削除したりしません。オフライン `update-status` は保存記録を報告するだけでライブプロセス／署名の証明ではありません。検証済み私有ヘルパーの `status` と明示的なリース付き `recover` を[更新状態／復旧仕様（英語）](cli.md#app-update-status-and-recovery)に従って使います。
 
-旧 protocol-1/2/3 証拠は保存／阻止したまま、保留した署名済み matching helper だけで照会／復旧し、v4 に変換しません。新 `updates-v4/` と実 OS アカウント home の `.desktop-pet-updates` は旧 `updates/`／`.herdr-updates` と共存します。lock 順は old global → new global → ソートした installation roots、legacy stop-generation も検査します。bridge A→neutral B は別同意と検証済み v4 `migrate-legacy --plan ABS` が必要です。文書／候補 package は公開や最終受入完了の証拠ではありません。[移行／復旧](migrations/desktop-pet.md)。
+旧 protocol-1/2/3 証拠は保存・阻止したまま、一致する保持済み署名 helper だけで照会・復旧し v4 に変換しません。`updates-v4/` と実 OS アカウント home の `.desktop-pet-updates` は旧 `updates/`/`.herdr-updates` と共存します。lock 順は old global → new global → ソート installation roots、legacy stop-generation も確認します。**過去の** bridge A→neutral B は別同意と検証済み v4 `migrate-legacy --plan ABS` が必要でした。予定の通常経路は最初の承認で同一 profile Commit・実 consumer rebind・native receipt、その後の承認済み retirement を自動実行します。文書・候補 package は公開や受入れの証拠ではありません。[移行・復旧](migrations/desktop-pet.md)。
 
 ## 設定とトラブルシューティング
 

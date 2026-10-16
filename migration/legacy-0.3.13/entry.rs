@@ -340,11 +340,11 @@ mod tests {
     #[test]
     fn normal_status_wire_keeps_legacy_both_spelling() {
         let value = encode_control_response(serde_json::json!({
-            "observation_mode":"auto","app_version":"0.3.12",
+            "observation_mode":"auto","app_version":"0.3.13",
         }))
         .unwrap();
         assert_eq!(value["observation_mode"], "both");
-        assert_eq!(value["app_version"], "0.3.12");
+        assert_eq!(value["app_version"], "0.3.13");
     }
 }
 
@@ -357,6 +357,8 @@ const LEGACY_ROUTING_KEYS: &[&str] = &[
     "HERDR_SOCKET_PATH",
     "XDG_CONFIG_HOME",
     "XDG_STATE_HOME",
+    "TERN_CONFIG_DIR",
+    "TERN_DAEMON_SOCKET",
     "HOME",
     "HERDR_PET_OBSERVATION_MODE",
 ];
@@ -372,6 +374,11 @@ pub fn capture_environment(
         }
         if let Some(value) = lookup(key) {
             if value.len() > 4096 || value.contains('\0') {
+                return Err(format!("invalid captured legacy routing variable {key}"));
+            }
+            if matches!(key, "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET")
+                && !std::path::Path::new(&value).is_absolute()
+            {
                 return Err(format!("invalid captured legacy routing variable {key}"));
             }
             environment.insert(key.to_owned(), value);
@@ -416,6 +423,50 @@ pub fn saved_observation_override(
 #[cfg(test)]
 mod saved_observation_tests {
     use super::*;
+
+    #[test]
+    fn migration_preserves_captured_tern_endpoint_without_private_authority() {
+        let mut captured = capture_environment(
+            &desktop_pet_contracts::ObservationSelection::Auto,
+            |key| match key {
+                "TERN_CONFIG_DIR" => Some("/isolated/tern/config".into()),
+                "TERN_DAEMON_SOCKET" => Some("/isolated/tern/control.sock".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        captured.insert(
+            "DESKTOP_PET_MIGRATION_TOKEN".into(),
+            "private-authorization".into(),
+        );
+        let published = migration_source_environment(&captured);
+        assert_eq!(
+            published.get("TERN_CONFIG_DIR").map(String::as_str),
+            Some("/isolated/tern/config")
+        );
+        assert_eq!(
+            published.get("TERN_DAEMON_SOCKET").map(String::as_str),
+            Some("/isolated/tern/control.sock")
+        );
+        assert!(!published.contains_key("DESKTOP_PET_MIGRATION_TOKEN"));
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                assert!(
+                    capture_environment(
+                        &desktop_pet_contracts::ObservationSelection::Auto,
+                        |candidate| { (candidate == key).then(|| invalid.clone()) }
+                    )
+                    .is_err(),
+                    "{key} must not silently fall back from invalid explicit routing"
+                );
+            }
+        }
+    }
 
     #[test]
     fn historical_absence_does_not_override_existing_selection_bytes() {

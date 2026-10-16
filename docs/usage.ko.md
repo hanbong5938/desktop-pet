@@ -4,9 +4,21 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## 현재 공개 상태와 예정된 단일 승인 경로
+
+**공개 기준:** 후속 버전이 실제 적격 검증·공개되기 전까지 현재 공개 버전은 Core v0.4.8입니다. Core v0.4.9 / bridge v0.3.13 / Tern v0.2.1은 예정 버전이며 아직 적격 검증·공개되지 않았습니다. 이 계약은 설치·출시·런타임 수락 증거가 아닙니다.
+
+**예정된 일반 경로:** 최초 승인 한 번 → 정확히 같은 profile의 `migrationReady` / Commit → 갱신된 Tern consumer 전달·로드 → SDK optimistic identity guard와 atomic canonical save → 실제 같은 Tern 창의 fresh binding → 자동 native handover receipt → 승인된 옛 소유자 retirement 순서입니다. **실제 재연결·receipt가 retirement보다 먼저**입니다. 저장이나 ACK는 재연결이 아니며 SDK guard는 진정한 cross-VM transactional CAS가 아닙니다. 별도 B/source review/Migrate 승인이나 수동 Configure → Save → Connect / Resume은 이 일반 경로의 단계가 아닙니다. 여러 profile이면 영향받는 각 target이 start·Commit·rebind해야 하며 옛 blanket live-profile guard만으로는 완성되지 않습니다. 독립 profile은 병합하지 않습니다.
+
+**Commit된 과거 기록 복구·실패 구분:** 실제 othermachine 문제는 Commit된 `AwaitingReconnect` 뒤 저장 경로 `/opt/homebrew/bin/herdr-desktop-pet`가 낡은 것이며 Commit 실패나 manager 재실행 근거가 아닙니다. same-image 및 적격 successor 복구는 옛 plan/journal을 바이트 단위로 보존하고 새 repair/handover receipt만 추가합니다. manager replay·수동 Configure·수동 Resume은 하지 않습니다. 실제 옛 증거·helper·reservation·config/state·자격 증명·provider/account 데이터·prompt/transcript·무관 profile을 보존합니다. definite no-spawn 실패, Commit 후 미재연결, 확정된 quiescent retirement 실패, typed cancellation, Unknown은 구별합니다. Unknown은 clear/replay하거나 cancelled로 바꾸지 않으며 실제 사용자 Stop은 rollback을 포함한 재시작을 금지합니다. 모든 필요한 실제 binding·native receipt 전에는 retirement를 막습니다. 문서나 옛 실행으로 현재 tools Mac 상태를 단정하지 않습니다.
+
+## 과거 공개·실행 기록 — 예정된 일반 경로가 아님
+
+아래 버전·PID·SHA·취소/Unknown 관측·수락 한계는 원래 과거 범위 그대로입니다. 당시 “현재”라는 표현과 별도 A/B 승인·수동 연결 단계는 예정된 단일 승인 경로의 지침이 아닙니다.
+
 **Core v0.4.7:** [Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, source `52514da5115f09aac22de5429c08f7acdd993258` (2026-10-15T08:39:17Z). Six anonymous assets, strict/deep signatures, protocol 4 / observation 2 / API 1 and exact 68-file closure passed. Current observed acceptance: [v0.4.7 ledger](releases/v0.4.7.md). Pages is not yet observed; Wiki publication lacks dedicated `WIKI_PUBLISH_TOKEN`.
 
-**현재 경로(공개 Brew A′/B는 아직 대기):** 실행 중 v0.3.10 → 별도 native 동의의 일반 v0.3.11 업데이트 A′ → 보존한 원래 일치 서명 helper로 terminal/quiescent 정리 확인 → 독립 source review·최종 표시 native **Migrate** 동의로 Core v0.4.7 B → 정확한 profile ready/Commit → 실제 소유 manager의 retirement. A′를 생략하거나 동의를 B에 재사용하지 않습니다. v0.3.6 호환 경로는 별도이며 beta는 먼저 동결 일치 v0.3.6 pair가 필요합니다.
+**과거 v0.4.7 경로(대체됨; 당시 공개 Brew A′/B 대기):** 실행 중 v0.3.10 → 별도 native 동의의 일반 v0.3.11 업데이트 A′ → 보존한 원래 일치 서명 helper로 terminal/quiescent 정리 확인 → 독립 source review·최종 표시 native **Migrate** 동의로 Core v0.4.7 B → 정확한 profile ready/Commit → 실제 소유 manager의 retirement. 당시 A′와 B는 별도 동의가 필요했습니다. v0.3.6 호환 경로는 별도였으며 beta는 먼저 동결 일치 v0.3.6 pair가 필요했습니다.
 
 **동의·복구:** v0.4.7은 bound typed Cancelled와 VisibleApproved를 구분합니다. 예상 밖 native 응답·EOF·invalid/foreign/nonzero·불일치 delivery는 Unknown입니다. Unknown manager를 clear/replay하거나 cancelled로 바꾸지 마세요. 사용자 Stop은 rollback start를 포함한 재시작을 금지합니다. 원래 helper/journal/reservation·정확한 config/state·무관한 profile을 보존하며 target ready/Commit 후 검토한 소유 source만 retire합니다. v0.4.6 final-cancel false-Unknown 증거는 불변 과거 기록입니다. 현재 수동 candidate→공개 v0.4.7 결과는 ledger를 참조하세요. 공개 Brew A′/B·ManagerUnknown·late Stop·definite retirement failure/Resume은 대기 중입니다.
 
@@ -26,13 +38,13 @@
 
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다.
 
-**Current public bridge v0.3.11:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. Stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves Core v0.4.7 / bridge v0.3.11; beta is unchanged.
+**Historical public bridge v0.3.11 publication:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. At that publication, stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` served Core v0.4.7 / bridge v0.3.11; beta was unchanged.
 
 **과거 v0.3.9/v0.4.4 managed A 완료:** 동결 v0.3.6 Check는 공개 v0.3.9를 선택하고 `preferences/last_update_check`만 바꿨습니다(`1791963743` → `1791965310`). Check 중 다른 네 tree bytes·source PID `2467`·무관한 기본 PID `2641`은 불변입니다. 정확한 source `0f33f28` native A 동의로 operation `d5b2bf6f02e031eabb5a8c8fdd805cab`가 완료됐습니다(`completed` / `manager_exited`, installed/applied true). 실제 공개 v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`, image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce`는 정확한 옛 private config/state에서 일치 protocol 3 / capability 1 / API 1·UI/control ready·Herdr 1 / Tern 0에 도달했습니다. 실제 managed source Git status는 완전히 clean입니다. 보존한 원래 v0.3.6 helper의 strict/deep 서명과 실제 completed status도 통과했습니다. baseline은 옛 A 증거 87개와 전체 state 파일 91개를 해시로 보존합니다. 
 
 **과거 v0.3.9/v0.4.4 managed B 완료:** 별도 Move preview와 독립 strict/deep 검증을 통과한 공개 v0.4.4 coordinator가 native **Migrate** 동의를 받아 operation `d729fd740f4e459945edda00bf48d944`, plan SHA-256 `6471e928254229a66a6fc64a88f67095777d6bd890d621feb36b08a4c7d1fc69`으로 **COMPLETE**에 도달했습니다. Native Prepare/Stop으로 공개 v0.3.9 PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`를 종료하고 적격 기존 Brew v0.4.4 app root/image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 사용했습니다. `target_manager:null`이므로 **재설치가 없었습니다**. Target PID `4104` / instance `8912b3aad5419b1c14a78ef3418ae36f`는 정확한 옛 private config/state와 저장된 Herdr 선택(Herdr 1 / Tern 0)을 유지하며 protocol 4 / capability 2 / API 1·실제 UI/control ready에 도달했고 native_ready·target_committed가 true입니다. 실제 Herdr retirement attempt 1은 PID = PGID `4140`, exit 0, quiescent true, error null입니다. 실제 plugin list는 불변 Herdr v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`의 enabled integration-only Desktop Pet을 표시했고 managed Git HEAD도 일치합니다. 실제 manager 출력은 v0.4.1·actions 21개·startup/client-attached 훅입니다. Managed dist/app 및 옛 PID `3417`은 사라졌고 standalone `DesktopPet.app`은 만들지 않았습니다. 정확한 retired v0.4.1 태그의 역사적 Core v0.4.2-minimum wrapper는 같은 v0.4.4 PID/instance를 실제 재사용했습니다. 새 앱·새 태그는 없습니다. 원래 A 증거 87개 SHA-256·기존 옛 source-config 해시는 모두 불변이고 무관한 기본 config/state 두 tree는 byte-identical입니다. 숨겨진 기본 v0.4.4 PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`은 변경 없이 실행 중입니다. Private XDG base profile만 adopt했고 global default와 병합하지 않았습니다. 실제 GUI는 Desktop Pet / 내장 루벨리아·Settings **Herdr Connected 1 / Tern Disabled 0**으로 시각 확인했으며 clean-image 캡처는 아직 대기 중입니다. Fault 없는 최종 공개 v0.3.9/v0.4.4 A/B happy path는 별도로 통과한 과거 working metadata `f7edf5e` definite failure/명시 Resume 검증과 구분합니다.
 
-**Current consumer / SDK boundary:** Herdr integration remains assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`), only for Herdr-managed retirement. Current local consumer scripts/eight evidence files are materialized from public Core v0.4.7, not yet pushed main; no new integration tag or consumer native build. Actual user Mac remains unchanged. Manual same-source v0.3.11 candidate → public Core v0.4.7 B passed, not public Brew owning-manager retirement. Tern requires genuine Configure → Save → Connect of the same executable/config/state pair; account/provider and both-order runtime acceptance are not complete. See [current observations](releases/v0.4.7.md).
+**과거 v0.4.7 consumer / SDK 기록:** Herdr integration은 당시 assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`)이었습니다. 로컬 consumer scripts/evidence 8개는 공개 Core v0.4.7에서 materialize됐고 당시 main push·새 integration tag·consumer native build는 없었습니다. 수동 same-source v0.3.11 candidate → 공개 Core v0.4.7 B는 통과했지만 공개 Brew owning-manager retirement 증거는 아닙니다. 당시 consumer는 같은 executable/config/state를 Configure → Save → Connect해야 했고 account/provider·양쪽 시작 순서 수락은 미완료였습니다. [과거 관측](releases/v0.4.7.md)은 현재 Mac 상태 증거가 아닙니다.
 
 **Historical v0.4.5 consumer evidence:** **consumer·SDK 경계:** Herdr 연동은 공개 v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`(자산 없는 release `412252863`)을 유지합니다. 역사적 Core v0.4.2 minimum은 동결 상태이고 정상 Core v0.4.3 재사용은 관측됐습니다. 현재 Herdr consumer scripts 및 metadata/evidence 파일 8개는 공개 Core v0.4.5 release `412667385` / 소스 `51dcf22415b1ff0faf07651cb83c1c696c980f43`에서 실제 materialize됐습니다. 새 Herdr 태그는 없으며 최종 공개 managed retirement와 불변 wrapper의 v0.4.4 재사용은 위 실제 B 결과로 별도 확인했습니다. Tern v0.2.0과 호환 Core v0.4.1 pin은 불변입니다. Tern은 검증된 실행 파일과 실제 config/state 쌍을 명시적 **Configure → Save → Connect**로 연결하며 앱을 설치·자동 시작하지 않습니다. 실제 Tern keychain/provider 로그인 및 genuine OMP 18.10.3 providerSignIn/NoModel은 양쪽 시작 순서의 동일 instance/prompt/transcript/reconnect 수락을 여전히 막습니다. 자격 증명 복사·가짜 계정·ACK·완료를 만들지 않습니다. **전체 matrix는 완료되지 않았습니다.** 실제 현재 Herdr v0.4.5 reviewed-consumer VM smoke 통과: materialized wrapper는 같은 Brew v0.4.5 PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`을 발견했습니다. Hide 후 ensure는 bootstrap 없이 Hidden / visible false·같은 instance를 유지했고 명시 Show로 복원했습니다. 현재 Herdr source 검증 통과: integration-only ownership v0.4.1·shell/manifests/TypeScript·고정 contracts `85c644cd90d8c6a9e97e9dc313cc4750f344235f`·**Rust adapter test 104개와 포함 test의 child 재실행 1개**(서로 다른 105개 test·Bun 아님). Native app/release 빌드는 없습니다.
 
@@ -59,6 +71,8 @@ desktop-pet status
 ```
 
 사전 빌드·소스 설치는 Herdr 연동이 아니라 **core** 체크아웃에서 실행합니다. 기본 설치는 prebuilt-only이며 다운로드·검증 실패를 소스 빌드로 숨기지 않습니다. `--source`는 현재 core 체크아웃만 빌드하고 그 `dist/DesktopPet.app`을 사용합니다.
+
+**과거 고정 v0.4.7 설치 예시(최신 버전 지침 아님):** 아래 명령은 의도적으로 옛 불변 버전을 선택합니다. 현재 공개 기준은 v0.4.8이며 미공개 v0.4.9 자산으로 바꾸지 않습니다.
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
@@ -93,7 +107,7 @@ tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 
 새 프로필은 Auto입니다. Connection은 등록된 제공자의 실제 연결을 표시하며 설치 여부로 추측하지 않습니다. 제공자 ID는 불투명 값이고 작업 권한은 출처 이름 접두사·경로가 아니라 capability로 결정합니다. Auto는 동시 관찰이지 fallback이 아닙니다. 원격은 읽기 전용이며 Tern은 답장만 지원하고 worktree 제거는 지원하지 않습니다. 접수는 에이전트 완료가 아닙니다.
 
-[사용법](usage.ko.md), [정확한 프로필·탐색 계약](development.md#profiles-and-installation-discovery), [A→B 이전 안내](migrations/desktop-pet.md)를 확인하세요. status 또는 Connection의 실제 실행 파일/config/state 세 값을 Tern Configure에 입력하고 Connect하세요. 기존 별도 Tern·beta·custom 프로필은 그 자리에서 보존하고 병합하지 않습니다.
+[프로필·탐색 계약](development.md#profiles-and-installation-discovery)과 [이전·보존 기록](migrations/desktop-pet.md)을 확인하세요. 예정된 이전은 실제 executable/config/state를 자동 인계하고 같은 Tern 창을 fresh rebind한 뒤 retire합니다. 이 경로에 수동 Configure/Connect를 추가하지 않습니다. 이전과 무관한 최초 독립 연결은 명시 설정할 수 있습니다. 기존 별도 Tern·beta·custom profile은 보존하며 병합하지 않습니다.
 
 ```sh
 desktop-pet profile show --json
@@ -222,7 +236,7 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 **설정 → 앱 업데이트**에는 독립적인 자동 확인(기본 켜짐)·**베타 업데이트 받기**(기본 꺼짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인과 명시적 버튼이 있습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다. 확인은 lifecycle·설치·실행 이미지·선택 프로필을 바꾸지 않지만 성공 확인은 `preferences.json`의 정책별 timestamp 캐시(`last_update_check` / `last_beta_update_check`)를 쓸 수 있으므로 바이트 단위 읽기 전용은 아닙니다.
 
-- **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 update는 Herdr plugin manager를 호출하지 않으며 레거시 Herdr 관리는 별도 동의한 [A→B 이전](migrations/desktop-pet.md)에만 속합니다.
+- **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 중립 update는 Herdr plugin manager를 호출하지 않으며 옛 소유자 retirement는 최초 승인한 [이전 경로](migrations/desktop-pet.md)에만 속합니다.
 - **Homebrew:** 캡처한 manager·prefix를 유지하고 대상 포뮬러·버전을 명시합니다. 실제 교체 경계는 prefix 전체가 아닌 **그 포뮬러의 모든 keg를 포괄하는 Cellar 하위 트리**입니다. 승인된 적격 안정판 ↔ 베타 이전은 양쪽 물리 설치 루트를 예약하고 대상 메타데이터를 재검증해 대상 포뮬러를 설치·업그레이드하며 원본 포뮬러를 몰래 제거하지 않습니다. 확인은 캐시 메타데이터만 읽습니다.
 - **로컬 체크아웃:** 디스크의 현재 파일을 명시적으로 다시 빌드하고 Git pull/reset/ref 변경은 하지 않습니다. 동일 실행 파일로 재빌드됐어도 새 인스턴스가 실제 준비돼야 적용입니다.
 - **검증된 외부 설치:** 이미 설치된 서명·protocol-4 호환 패키지라면 설치기를 재실행하지 않는 **설치된 업데이트 적용**을 제안할 수 있습니다. 안정판만 받는 정책에서도 적격 기설치 베타를 명시적으로 승인해 적용할 수 있습니다. 수동/불명 출처를 Herdr/Homebrew로 몰래 바꾸지 않습니다.
@@ -231,7 +245,7 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 독립 **서명 도우미**와 선택 설정·상태·사용자 에셋은 실제 교체할 설치 경로 밖에 있어야 하며 같은 물리 설치를 공유하는 다른 실행 프로필도 교체를 막습니다. 도우미는 선택 프로필·백엔드·에셋을 유지하고 새 인스턴스의 실제 준비를 확인하며 **설치**와 **적용**을 구분합니다. 적용됨은 “공개 최신판”이 아닙니다. 후보 시작에는 영속화된 정확한 **이미지와 설치 출처** 쌍이 필요하며 현재 디스크에서 누락된 pin을 추정하지 않습니다. 호환되는 일부 예약 표식은 manager 재실행 없이 복구할 수 있지만 불완전한 pin·변경된 근거·불명확한 manager 실행은 차단합니다. 독립적으로 검증된 Original도 영속화된 업데이트 실패 목적에서만 복원하며 업그레이드로 보고하지 않습니다. 사용자 Stop은 재시작을 금지하지만 안전하게 중지된 작업이 완전히 입증되면 조정·예약 해제를 허용합니다. 정확한 원본이 준비된 **NoSpawn** 중단만 입증되면 원본을 재시작하지 않고 해동하며 이후 새 Check는 기존 이력을 지우지 않고 새 계획을 제안할 수 있습니다. 관리자 자동 재실행이나 저널 자동 삭제는 하지 않습니다. 오프라인 `update-status`는 저장 기록이지 현재 프로세스/서명 증명이 아닙니다. 검증한 비공개 도우미의 `status`와 lease를 갖는 명시적 `recover`를 [상태·복구 계약](cli.md#앱-업데이트-상태와-복구)에 따라 사용하세요.
 
-구 protocol-1/2/3 근거는 차단·보존하며 matching signed helper로만 조회·복구하고 v4로 바꾸지 않습니다. 새 `updates-v4/`와 실제 계정 home `.desktop-pet-updates`는 구 `updates/`/`.herdr-updates`와 공존합니다. lock 순서는 old global → new global → 정렬 installation roots이며 legacy stop-generation도 검사합니다. bridge A→neutral B는 별도 동의와 검증된 v4 `migrate-legacy --plan ABS`가 필요합니다. 문서·후보 패키지는 공개 게시나 최종 수락 완료의 증거가 아닙니다. [이전·복구](migrations/desktop-pet.md).
+구 protocol-1/2/3 근거는 차단·보존하며 matching signed helper로만 조회·복구하고 v4로 바꾸지 않습니다. 새 `updates-v4/`와 실제 계정 home `.desktop-pet-updates`는 구 `updates/`/`.herdr-updates`와 공존합니다. lock 순서는 old global → new global → 정렬 installation roots이며 legacy stop-generation도 검사합니다. **과거** bridge A→neutral B는 별도 동의와 검증된 v4 `migrate-legacy --plan ABS`가 필요했습니다. 예정된 일반 경로는 최초 승인으로 같은 profile Commit·실제 consumer rebind·native receipt 이후 승인된 retirement까지 자동 진행합니다. 문서·후보 패키지는 공개 게시나 최종 수락 완료의 증거가 아닙니다. [이전·복구](migrations/desktop-pet.md).
 
 ## 설정과 문제 해결
 

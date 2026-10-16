@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url"
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const rigRoot = join(root, "native", "rig")
 const distribution = process.env.DESKTOP_PET_DISTRIBUTION ?? "neutral"
-if (distribution !== "neutral" && distribution !== "legacy-0.3.12") throw new Error("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.12")
+if (distribution !== "neutral" && distribution !== "legacy-0.3.13") throw new Error("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.13")
 const profile = process.env.DESKTOP_PET_RIG_BUILD_PROFILE?.trim() || "release"
 if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(profile)) throw new Error(`invalid DESKTOP_PET_RIG_BUILD_PROFILE: ${profile}`)
 const outputRoot = join(root, "native", "target", distribution, "rig-native", profile)
