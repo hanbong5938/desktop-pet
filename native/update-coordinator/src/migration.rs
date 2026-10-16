@@ -941,7 +941,10 @@ fn status_at(socket: &Path) -> Result<LiveStatus, String> {
     .map_err(|e| e.to_string())
 }
 fn live_observation(live: &LiveStatus) -> Result<ObservationSelection, String> {
-    if matches!(live.app_version.as_str(), "0.3.12" | "0.3.13" | "0.3.14") {
+    if matches!(
+        live.app_version.as_str(),
+        "0.3.12" | "0.3.13" | "0.3.14" | "0.3.15"
+    ) {
         ObservationSelection::migrate_legacy_input(Some(&live.observation_mode))
     } else {
         live.observation_mode.parse()
@@ -992,7 +995,7 @@ fn verify_status(
             != if target {
                 crate::identity::neutral::VERSION
             } else {
-                "0.3.14"
+                "0.3.15"
             }
         || live.updater_protocol != if target { 4 } else { 3 }
         || live.observation_capability != if target { 2 } else { 1 }
@@ -1098,7 +1101,7 @@ fn verify_source(plan: &MigrationPlan) -> Result<(), String> {
         return Err("bridge image changed".into());
     }
     let version = command_output(&plan.source_image.path, &["--version".into()])?;
-    if version.trim() != "herdr-desktop-pet 0.3.14" {
+    if version.trim() != "herdr-desktop-pet 0.3.15" {
         return Err("Operation A must finish with the genuine bridge image".into());
     }
     let caps: serde_json::Value = serde_json::from_str(&command_output(
@@ -1310,7 +1313,7 @@ pub fn startup_authorization(
         }
         if record.phase != MigrationPhase::RollingBack
             || record.manager.is_some()
-            || context.version != "0.3.14"
+            || context.version != "0.3.15"
         {
             return Err("bridge restart lacks valid rollback authorization".into());
         }
@@ -2917,10 +2920,10 @@ pub fn source_origin_from_context(
 /// Availability never stages, writes a plan, acquires reservations or starts a
 /// manager. The worker repeats durable admission before a consent can execute.
 pub fn readonly_eligibility(context: &UpdateContext) -> Result<(), String> {
-    if context.version != "0.3.14" || executable_identity(&context.running.path)? != context.running
+    if context.version != "0.3.15" || executable_identity(&context.running.path)? != context.running
     {
         return Err(
-            "finish the approved update with genuine bridge 0.3.14 before automatic migration"
+            "finish the approved update with genuine bridge 0.3.15 before automatic migration"
                 .into(),
         );
     }
@@ -3858,7 +3861,7 @@ mod tests {
         let profile = &plan.profiles[0];
         UpdateContext {
             executable: plan.source_image.path.clone(),
-            version: "0.3.14".into(),
+            version: "0.3.15".into(),
             instance_id: profile.instance_id.clone(),
             config_dir: profile.config_dir.clone(),
             state_dir: profile.state_dir.clone(),
@@ -4040,7 +4043,7 @@ mod tests {
         };
         let cellar = temp.path().join("Cellar/desktop-pet");
         plan.target.image.path =
-            cellar.join("0.4.10/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
+            cellar.join("0.4.11/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
         plan.target.origin = InstallOrigin::Homebrew {
             brew: brew.path.clone(),
             prefix: temp.path().into(),
@@ -4242,7 +4245,8 @@ mod tests {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
         for version in [
-            "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7",
+            "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9",
+            "0.4.10",
         ] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();
@@ -4270,12 +4274,16 @@ mod tests {
             "0.3.8",
             "0.3.9",
             "0.3.10",
+            "0.3.11",
+            "0.3.12",
+            "0.3.13",
+            "0.3.14",
             crate::identity::neutral::VERSION,
         ] {
             ctx.version = version.into();
             assert!(readonly_eligibility(&ctx).is_err());
         }
-        ctx.version = "0.3.14".into();
+        ctx.version = "0.3.15".into();
         ctx.running.sha256 = "f".repeat(64);
         assert!(readonly_eligibility(&ctx).is_err());
     }
@@ -4531,7 +4539,7 @@ mod tests {
         let (_temp, plan) = fixture();
         let mut value = serde_json::json!({
             "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
-            "app_version":"0.3.14","updater_protocol":3,"observation_capability":1,"integration_api":1,
+            "app_version":"0.3.15","updater_protocol":3,"observation_capability":1,"integration_api":1,
             "instance_id":"source-instance","running_sha256":plan.source_image.sha256,"pid":1000,
             "executable_path":plan.source_image.path,"config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir,
             "observation_mode":"both","host_connections":{"herdr":1,"tern":0}

@@ -1,6 +1,6 @@
 //! The app and its paired helper use this single compiled product identity.
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.14/identity.rs"]
+#[path = "../../../migration/legacy-0.3.15/identity.rs"]
 mod selected;
 #[cfg(desktop_pet_legacy)]
 pub use selected::*;
@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.10";
+    pub const VERSION: &str = "0.4.11";
     pub const BINARY: &str = "desktop-pet";
     pub const HELPER: &str = "desktop-pet-update-coordinator";
     pub const APP_NAME: &str = "DesktopPet.app";

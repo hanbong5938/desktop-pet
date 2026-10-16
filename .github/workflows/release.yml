@@ -3,7 +3,7 @@ name: Release Desktop Pet
 on:
   push:
     tags:
-      - "v0.4.10"
+      - "v0.4.11"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.10'
+    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.11'
     runs-on: macos-15
     permissions:
       contents: write
@@ -54,7 +54,7 @@ jobs:
           version="${tag#v}"
           # This approved self-contained installer is pinned, never a mutable
           # latest script or a host manifest-derived app version.
-          [[ "$tag" == v0.4.10 && "$version" == 0.4.10 ]]
+          [[ "$tag" == v0.4.11 && "$version" == 0.4.11 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
@@ -144,7 +144,7 @@ jobs:
           const root='dist/DesktopPet.app/Contents';
           const record=JSON.parse(await readFile('dist/DesktopPet.app.rig-native.json','utf8'));
           const identity=record.distribution_identity;
-          if(record.version!==1||record.paths_relative_to!=='Contents'||record.core_revision!==process.env.GITHUB_SHA||identity?.core_revision!==record.core_revision||identity.distribution!=='neutral'||identity.app_version!=='0.4.10'||identity.protocol!==4||identity.observation_mode!==2||identity.integration_api!==1||identity.herdr_migration_revision!=null)throw Error('invalid signed rig provenance');
+          if(record.version!==1||record.paths_relative_to!=='Contents'||record.core_revision!==process.env.GITHUB_SHA||identity?.core_revision!==record.core_revision||identity.distribution!=='neutral'||identity.app_version!=='0.4.11'||identity.protocol!==4||identity.observation_mode!==2||identity.integration_api!==1||identity.herdr_migration_revision!=null)throw Error('invalid signed rig provenance');
           async function files(dir){const out=[];for(const e of await readdir(dir,{withFileTypes:true})){const p=join(dir,e.name);if(e.isDirectory())out.push(...await files(p));else if(e.isFile())out.push(relative(root,p));else throw Error('nonregular signed resource');}return out.sort();}
           const paths=await files(root);
           if(JSON.stringify(paths)!==JSON.stringify(Object.keys(record.deployed_sha256).sort()))throw Error('signed resource closure mismatch');

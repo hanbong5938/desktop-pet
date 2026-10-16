@@ -139,7 +139,7 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
         // protocol-three sources, not arbitrary semver-compatible releases.
         || !matches!(
             context["version"].as_str(),
-            Some("0.3.9" | "0.3.10" | "0.3.11" | "0.3.12" | "0.3.13")
+            Some("0.3.9" | "0.3.10" | "0.3.11" | "0.3.12" | "0.3.13" | "0.3.14")
         )
         || context["config_dir"].as_str() != profile.config_dir.to_str()
         || context["state_dir"].as_str() != profile.state_dir.to_str()
@@ -148,8 +148,8 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
         || prior
             .get("target")
             .filter(|target| !target.is_null())
-            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.14"))
-        || plan.target.release.version != "0.4.10"
+            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.15"))
+        || plan.target.release.version != "0.4.11"
     {
         return Err("original update does not attest this exact successor bridge, profile and bounded core target".into());
     }
@@ -207,7 +207,7 @@ pub fn prepare_automatic_bridge_plan(
     context: &UpdateContext,
     integration: Option<&str>,
 ) -> Result<Option<MigrationPlan>, String> {
-    if context.version != "0.3.14" {
+    if context.version != "0.3.15" {
         return Ok(None);
     }
     // This token/generation was already authenticated by the real native startup
@@ -308,7 +308,7 @@ pub fn approve_profile_update(
     }
     let context: UpdateContext =
         serde_json::from_value(response["context"].clone()).map_err(|e| e.to_string())?;
-    if context.config_dir != config || context.state_dir != state || context.version != "0.3.14" {
+    if context.config_dir != config || context.state_dir != state || context.version != "0.3.15" {
         return Err(
             "explicit update approval does not select the exact successor bridge profile".into(),
         );
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn authentic_original_0310_and_0311_approvals_continue_to_exact_current_bridge() {
-        for source_version in ["0.3.10", "0.3.11", "0.3.9", "0.3.12", "0.3.13"] {
+        for source_version in ["0.3.10", "0.3.11", "0.3.9", "0.3.12", "0.3.13", "0.3.14"] {
             let (_temp, plan) = crate::migration::tests::fixture();
             let (id, base, _) =
                 original_from_version(&plan, plan.source_image.clone(), source_version);
@@ -461,10 +461,11 @@ mod tests {
     fn unknown_and_prerelease_original_sources_never_delegate() {
         for source_version in [
             "0.3.8",
-            "0.3.14",
+            "0.3.15",
             "0.3.10-beta.1",
             "0.3.11+unverified",
             "0.4.10",
+            "0.4.11",
             "unknown",
             "",
         ] {
@@ -540,7 +541,7 @@ mod tests {
 
     #[test]
     fn completed_historical_candidates_are_not_current_bridge_approval() {
-        for candidate_version in ["0.3.11", "0.3.13"] {
+        for candidate_version in ["0.3.11", "0.3.13", "0.3.14"] {
             let (_temp, plan) = crate::migration::tests::fixture();
             let (id, base, _) = original_from_version(&plan, plan.source_image.clone(), "0.3.10");
             let path = base.join(format!("{id}.plan.json"));
@@ -562,12 +563,12 @@ mod tests {
                 .is_none());
             assert!(!approval_path(&plan).exists());
             assert_eq!(fs::read(&path).unwrap(), bytes);
-            original["target"]["release"]["version"] = serde_json::json!("0.3.14");
+            original["target"]["release"]["version"] = serde_json::json!("0.3.15");
             protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)
                 .unwrap();
             assert!(bridge_authority(&plan, &id).is_ok());
             let mut wrong_core = plan.clone();
-            wrong_core.target.release.version = "0.4.9".into();
+            wrong_core.target.release.version = "0.4.10".into();
             assert!(bridge_authority(&wrong_core, &id).is_err());
             original["target"]["origin"]["root"] = serde_json::json!("/unrelated/bridge");
             protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)

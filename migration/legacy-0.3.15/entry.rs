@@ -340,11 +340,11 @@ mod tests {
     #[test]
     fn normal_status_wire_keeps_legacy_both_spelling() {
         let value = encode_control_response(serde_json::json!({
-            "observation_mode":"auto","app_version":"0.3.14",
+            "observation_mode":"auto","app_version":"0.3.15",
         }))
         .unwrap();
         assert_eq!(value["observation_mode"], "both");
-        assert_eq!(value["app_version"], "0.3.14");
+        assert_eq!(value["app_version"], "0.3.15");
     }
 }
 
