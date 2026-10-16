@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**当前后继版本：Core v0.4.12 / genuine bridge v0.3.16——尚未完成验证或公开。** Core v0.4.11 已公开：release `414563938`，时间 `2026-10-16T05:16:03Z`，source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`；6个公开资产均已独立验证。单独 Wiki job 缺少 `WIKI_PUBLISH_TOKEN`。genuine bridge v0.3.15 CI `38855045701` 成功，但没有公开 tag/release。公开 provenance 不等于历史迁移修复验收。 See [current successor ledger](docs/releases/v0.4.12.md).
+
+**历史启动缺陷与永久修正：**自有 VM 中实际公开 v0.4.11 的历史操作运行失败，原文为 `Migration history: current native daemon does not prove the migrated image/profile readiness`。没有新 receipt 或 SDK 交付；SDK 0.1 仍报告 `/opt/homebrew/bin/herdr-desktop-pet` 不存在。UI Ready 前的 observation 错误丢失了保留 operation。v0.4.12 用只读 discovery 在 Ready 前保留 operation，再由既有经批准的 observation/poll 稍后交付；所有 current image/owner/profile、signed-stage、合法 runtime 启动、Stop、Unknown guard 均保留。不重跑旧 manager、不改写 plan/journal、不要求手动重连。针对性 source 回归通过不代表端到端成功。
+
+**验收契约：**一次原始 Update 批准覆盖静默迁移、签名 SDK 替换/加载、精确保存 route 切换、同一 Tern 窗口的真实 fresh binding、自动 native receipt，之后才 retirement 已批准旧 owner。不增加第二次同意、Configure、Connect、ACK 或 Resume。保留每个原始 config/state profile、角色、台词/历史、account/provider、无关 profile，以及 Stop、Unknown。local 7c signed-out GUI/frame-driven sequence 47 和重启 sequence 13 仅为 component 证据，不证明 quiet/authenticated 交付、完整 lifecycle 或另一台电脑恢复。
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 独立的原生 macOS 桌面伙伴。露贝莉娅回应触摸，显示 Herdr、Tern 等已注册提供商的会话，并在来源允许时发送回复。无需宿主也能运行。
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)

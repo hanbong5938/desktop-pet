@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](docs/releases/v0.4.12.md).
+
+**Historical startup defect and permanent correction:** the actual public v0.4.11 historical run in the owned VM failed with `Migration history: current native daemon does not prove the migrated image/profile readiness`; no new receipt or SDK delivery occurred, and SDK 0.1 still reported missing `/opt/homebrew/bin/herdr-desktop-pet`. Startup observation ran before UI readiness and lost the retained operation. The v0.4.12 correction uses read-only historical discovery to retain that operation before Ready; the existing admitted observation/poll delivers later, retaining all current-image/owner/profile, signed-stage, legitimate-runtime-start, Stop and Unknown guards. It never replays the old manager, rewrites the old plan/journal, or requires manual reconnect. The targeted source regression passed; this is not end-to-end qualification.
+
+**Acceptance contract:** one original Update approval covers quiet migration, signed SDK replacement/load, exact saved-route switch, real fresh binding in the same Tern window, automatic native receipt, and only then approved old-owner retirement. Preserve each exact config/state profile, character, dialogue/history, account/provider data and unrelated profiles; no second consent, Configure, Connect, ACK or Resume. Stop and Unknown remain fail-closed. The signed-out, GUI/frame-driven sequence 47 then restart sequence 13 on local 7c source is component evidence only, not autonomous quiet/authenticated delivery, lifecycle or affected-machine acceptance.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 An independent native macOS desktop companion. Rubelia reacts to touch, displays sessions from registered providers such as Herdr and Tern, and lets you reply when that source grants prompt capability. The app also runs without a host.
 
 **English** · [한국어](readme.ko.md) · [简体中文](readme.zh-Hans.md) · [日本語](readme.ja.md) · [Release history](docs/releases/README.md) · [Core releases](https://github.com/hanbong5938/desktop-pet/releases)

@@ -3,14 +3,14 @@
 pub mod identity;
 pub mod installation;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.15/codec.rs"]
+#[path = "../../../migration/legacy-0.3.16/codec.rs"]
 pub mod legacy_codec;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.15/entry.rs"]
+#[path = "../../../migration/legacy-0.3.16/entry.rs"]
 pub mod legacy_entry;
 pub mod migration;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.15/origin.rs"]
+#[path = "../../../migration/legacy-0.3.16/origin.rs"]
 mod origin;
 #[cfg(not(desktop_pet_legacy))]
 mod origin;

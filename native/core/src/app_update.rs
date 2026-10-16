@@ -249,7 +249,9 @@ impl AppUpdateService {
         self.migration_blocked = true;
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = desktop_pet_update_coordinator::migration::latest_for_context(&context);
+            // Ui::new has not published readiness yet. Retain the operation
+            // without delivery; the existing per-plan observer runs afterward.
+            let result = desktop_pet_update_coordinator::migration::discover_for_context(&context);
             let continue_update =
                 desktop_pet_update_coordinator::identity::LEGACY && matches!(&result, Ok(None));
             let _ = sender.send(Event::MigrationHistory {
@@ -1663,7 +1665,7 @@ mod tests {
     fn eligible_settled_bridge(status: CheckStatus) -> AppUpdateService {
         let mut snapshot = local_check();
         let mut context = snapshot.plan.take().unwrap().context;
-        context.version = "0.3.15".into();
+        context.version = "0.3.16".into();
         snapshot.installed_version = Some(context.version.clone());
         snapshot.status = status;
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
@@ -2184,7 +2186,7 @@ mod tests {
         current_plan.origin = snapshot.origin.clone();
         current_plan.action = UpdateAction::HomebrewUpgrade;
         current_plan.context.state_dir = state.clone();
-        current_plan.context.version = "0.3.15".into();
+        current_plan.context.version = "0.3.16".into();
         current_plan.context.running_origin = Some(Box::new(snapshot.origin.clone()));
         current_plan.running.path = root.join("current-app");
         current_plan.running.sha256 = "c".repeat(64);

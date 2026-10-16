@@ -1,5 +1,10 @@
 # Legacy Herdr Desktop Pet → independent Desktop Pet
 
+
+**Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](../releases/v0.4.12.md). **Acceptance contract:** one original Update approval covers quiet migration, signed SDK replacement/load, exact saved-route switch, real fresh binding in the same Tern window, automatic native receipt, and only then approved old-owner retirement. Preserve each exact config/state profile, character, dialogue/history, account/provider data and unrelated profiles; no second consent, Configure, Connect, ACK or Resume. Stop and Unknown remain fail-closed. The signed-out, GUI/frame-driven sequence 47 then restart sequence 13 on local 7c source is component evidence only, not autonomous quiet/authenticated delivery, lifecycle or affected-machine acceptance.
+
+Older separate A/B instructions below are historical and must not be added to the approved one-original-Update route.
+
 [Core installation](../../readme.md) · [Profile and discovery contract](../development.md#profiles-and-installation-discovery) · [Current v0.4.8 ledger](../releases/v0.4.8.md) · [Historical v0.4.7 acceptance](../releases/v0.4.7.md) · [Historical v0.4.6 failure](../releases/v0.4.6.md) · [Historical v0.4.5 acceptance](../releases/v0.4.5.md) · [Herdr integration](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)
 
 ## Publication boundary

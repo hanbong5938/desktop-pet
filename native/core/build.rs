@@ -14,8 +14,8 @@ fn main() {
     let distribution = env::var("DESKTOP_PET_DISTRIBUTION").unwrap_or_else(|_| "neutral".into());
     match distribution.as_str() {
         "neutral" => {}
-        "legacy-0.3.15" => println!("cargo:rustc-cfg=desktop_pet_legacy"),
-        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.15"),
+        "legacy-0.3.16" => println!("cargo:rustc-cfg=desktop_pet_legacy"),
+        _ => panic!("DESKTOP_PET_DISTRIBUTION must be neutral or legacy-0.3.16"),
     }
     for path in [
         "native/core/build.rs",

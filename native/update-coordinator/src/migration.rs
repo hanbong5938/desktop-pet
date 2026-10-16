@@ -943,7 +943,7 @@ fn status_at(socket: &Path) -> Result<LiveStatus, String> {
 fn live_observation(live: &LiveStatus) -> Result<ObservationSelection, String> {
     if matches!(
         live.app_version.as_str(),
-        "0.3.12" | "0.3.13" | "0.3.14" | "0.3.15"
+        "0.3.12" | "0.3.13" | "0.3.14" | "0.3.15" | "0.3.16"
     ) {
         ObservationSelection::migrate_legacy_input(Some(&live.observation_mode))
     } else {
@@ -995,7 +995,7 @@ fn verify_status(
             != if target {
                 crate::identity::neutral::VERSION
             } else {
-                "0.3.15"
+                "0.3.16"
             }
         || live.updater_protocol != if target { 4 } else { 3 }
         || live.observation_capability != if target { 2 } else { 1 }
@@ -1101,7 +1101,7 @@ fn verify_source(plan: &MigrationPlan) -> Result<(), String> {
         return Err("bridge image changed".into());
     }
     let version = command_output(&plan.source_image.path, &["--version".into()])?;
-    if version.trim() != "herdr-desktop-pet 0.3.15" {
+    if version.trim() != "herdr-desktop-pet 0.3.16" {
         return Err("Operation A must finish with the genuine bridge image".into());
     }
     let caps: serde_json::Value = serde_json::from_str(&command_output(
@@ -1313,7 +1313,7 @@ pub fn startup_authorization(
         }
         if record.phase != MigrationPhase::RollingBack
             || record.manager.is_some()
-            || context.version != "0.3.15"
+            || context.version != "0.3.16"
         {
             return Err("bridge restart lacks valid rollback authorization".into());
         }
@@ -2920,10 +2920,10 @@ pub fn source_origin_from_context(
 /// Availability never stages, writes a plan, acquires reservations or starts a
 /// manager. The worker repeats durable admission before a consent can execute.
 pub fn readonly_eligibility(context: &UpdateContext) -> Result<(), String> {
-    if context.version != "0.3.15" || executable_identity(&context.running.path)? != context.running
+    if context.version != "0.3.16" || executable_identity(&context.running.path)? != context.running
     {
         return Err(
-            "finish the approved update with genuine bridge 0.3.15 before automatic migration"
+            "finish the approved update with genuine bridge 0.3.16 before automatic migration"
                 .into(),
         );
     }
@@ -3861,7 +3861,7 @@ mod tests {
         let profile = &plan.profiles[0];
         UpdateContext {
             executable: plan.source_image.path.clone(),
-            version: "0.3.15".into(),
+            version: "0.3.16".into(),
             instance_id: profile.instance_id.clone(),
             config_dir: profile.config_dir.clone(),
             state_dir: profile.state_dir.clone(),
@@ -4043,7 +4043,7 @@ mod tests {
         };
         let cellar = temp.path().join("Cellar/desktop-pet");
         plan.target.image.path =
-            cellar.join("0.4.11/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
+            cellar.join("0.4.12/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
         plan.target.origin = InstallOrigin::Homebrew {
             brew: brew.path.clone(),
             prefix: temp.path().into(),
@@ -4246,7 +4246,7 @@ mod tests {
         validate_plan(&plan).unwrap();
         for version in [
             "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9",
-            "0.4.10",
+            "0.4.10", "0.4.11",
         ] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();
@@ -4278,12 +4278,13 @@ mod tests {
             "0.3.12",
             "0.3.13",
             "0.3.14",
+            "0.3.15",
             crate::identity::neutral::VERSION,
         ] {
             ctx.version = version.into();
             assert!(readonly_eligibility(&ctx).is_err());
         }
-        ctx.version = "0.3.15".into();
+        ctx.version = "0.3.16".into();
         ctx.running.sha256 = "f".repeat(64);
         assert!(readonly_eligibility(&ctx).is_err());
     }
@@ -4539,7 +4540,7 @@ mod tests {
         let (_temp, plan) = fixture();
         let mut value = serde_json::json!({
             "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
-            "app_version":"0.3.15","updater_protocol":3,"observation_capability":1,"integration_api":1,
+            "app_version":"0.3.16","updater_protocol":3,"observation_capability":1,"integration_api":1,
             "instance_id":"source-instance","running_sha256":plan.source_image.sha256,"pid":1000,
             "executable_path":plan.source_image.path,"config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir,
             "observation_mode":"both","host_connections":{"herdr":1,"tern":0}
@@ -4593,6 +4594,86 @@ mod tests {
         wrong.config_dir = wrong.config_dir.join("other");
         assert!(latest_for_context(&wrong).unwrap().is_none());
     }
+    #[test]
+    fn startup_discovery_retains_old_operation_before_current_runtime_readiness() {
+        let (_temp, plan) = retained_fixture("0.4.8");
+        let mut record = persist_fixture(&plan);
+        record.phase = MigrationPhase::AwaitingReconnect;
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_pid = Some(2000);
+        record.target_instance = Some("original-committed".into());
+        record.retirement_attempt = 1;
+        save(&plan, &record).unwrap();
+        let old_plan = fs::read(evidence_path(&plan)).unwrap();
+        let old_journal = fs::read(journal_path(&plan)).unwrap();
+        let mut ctx = context(&plan);
+        ctx.running =
+            executable_identity(&actual_process_image(std::process::id()).unwrap()).unwrap();
+        ctx.executable = ctx.running.path.clone();
+        ctx.version = crate::identity::neutral::VERSION.into();
+        ctx.running_origin = Some(Box::new(plan.target.origin.clone()));
+        ctx.instance_id = "current-runtime".into();
+        let listener = UnixListener::bind(&plan.profiles[0].control_socket).unwrap();
+        fs::set_permissions(
+            &plan.profiles[0].control_socket,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let profile = plan.profiles[0].clone();
+        let image = ctx.running.clone();
+        let server = thread::spawn(move || {
+            for ready in [false, true] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                let mut reply = serde_json::to_vec(&serde_json::json!({
+                    "ok":true,"running":true,"shutdown":false,"ready":ready,
+                    "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
+                    "app_version":crate::identity::neutral::VERSION,
+                    "updater_protocol":4,"observation_capability":2,"integration_api":1,
+                    "instance_id":"another-ready-instance","pid":std::process::id(),
+                    "executable_path":image.path,"running_sha256":image.sha256,
+                    "config_dir":profile.config_dir,"state_dir":profile.state_dir
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                stream.write_all(&reply).unwrap();
+            }
+        });
+        let discovered = discover_for_context(&ctx).unwrap().unwrap();
+        assert_eq!(discovered, (plan.clone(), record.clone()));
+        // The old startup lookup consumed readiness before it returned the
+        // plan, leaving the UI with no operation to observe on later ticks.
+        assert!(latest_for_context(&ctx).unwrap_err().contains("readiness"));
+        assert_eq!(
+            discover_for_context(&ctx).unwrap(),
+            Some(discovered.clone())
+        );
+        // A later ready status reaches the next identity guard through the
+        // retained plan; discovery has not granted settlement authority.
+        assert_eq!(
+            integrations::observe_for_context(&discovered.0, &ctx).unwrap_err(),
+            "current runtime instance changed during retained settlement"
+        );
+        server.join().unwrap();
+        let mut unrelated = ctx.clone();
+        unrelated.config_dir = unrelated.config_dir.join("other");
+        assert!(discover_for_context(&unrelated).unwrap().is_none());
+        let mut old_source_version = ctx;
+        old_source_version.version = "0.3.10".into();
+        assert!(discover_for_context(&old_source_version).unwrap().is_none());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+        for suffix in ["migration-settlement.json", "tern-delivery.json"] {
+            assert!(!plan.profiles[0]
+                .state_dir
+                .join("updates-v4")
+                .join(format!("{}.{suffix}", plan.operation_id))
+                .exists());
+        }
+    }
+
     #[test]
     fn unverified_newer_native_image_cannot_settle_old_completed_history() {
         let (_temp, plan) = retained_fixture("0.4.2");
@@ -5248,10 +5329,25 @@ fn capture_target_profiles(
     }
     Ok(profiles)
 }
-/// Bounded, read-only history lookup. A terminal native journal is not converted
-/// into new authority; explicit resume still verifies its owned scope and Stop.
+/// Bounded discovery retains the validated historical operation even before the
+/// current UI is ready. Discovery never delivers integrations or settles it;
+/// the caller must observe the retained plan once runtime witnesses are ready.
+pub fn discover_for_context(
+    context: &UpdateContext,
+) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
+    history_for_context(context, false)
+}
+
+/// Lookup with current-owner observation, preserving control-route semantics.
 pub fn latest_for_context(
     context: &UpdateContext,
+) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
+    history_for_context(context, true)
+}
+
+fn history_for_context(
+    context: &UpdateContext,
+    observe: bool,
 ) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
     crate::ensure_absolute(&context.state_dir)?;
     image_valid(&context.running)?;
@@ -5304,11 +5400,13 @@ pub fn latest_for_context(
         {
             continue;
         }
-        let record = if &context.running != actual_target && context.running != plan.source_image {
-            integrations::observe_for_context(&plan, context)?
-        } else {
-            retained
-        };
+        let record =
+            if observe && &context.running != actual_target && context.running != plan.source_image
+            {
+                integrations::observe_for_context(&plan, context)?
+            } else {
+                retained
+            };
         let modified = fs::symlink_metadata(journal_path(&plan))
             .map_err(|e| e.to_string())?
             .modified()

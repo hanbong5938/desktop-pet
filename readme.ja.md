@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**現在の後継: Core v0.4.12 / genuine bridge v0.3.16 — 適格性確認・公開は未完了です。** Core v0.4.11 は release `414563938`、公開時刻 `2026-10-16T05:16:03Z`、source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0` から公開され、公開6資産を独立検証済みです。別 Wiki job は `WIKI_PUBLISH_TOKEN` がありませんでした。genuine bridge v0.3.15 CI `38855045701` は成功しましたが tag/release は未公開です。公開 provenance は過去移行修復の受入証拠ではありません。 See [current successor ledger](docs/releases/v0.4.12.md).
+
+**過去の起動欠陥と恒久修正:** 所有 VM の実際の公開 v0.4.11 履歴実行は `Migration history: current native daemon does not prove the migrated image/profile readiness` で失敗しました。新 receipt・SDK 配信はなく SDK 0.1 は `/opt/homebrew/bin/herdr-desktop-pet` 不在エラーのままでした。UI Ready 前の観測エラーが保持 operation を失わせました。v0.4.12 は read-only discovery で Ready 前に operation を保持し、既存の認可済み observation/poll が後で配信します。current image/owner/profile・signed-stage・正当な runtime 起動・Stop・Unknown guard を維持し、旧 manager 再実行・plan/journal 書換え・手動再接続はしません。対象ソース回帰の成功は end-to-end 成功ではありません。
+
+**受入契約:** 最初の Update 承認1回で quiet 移行・署名 SDK 交換/ロード・正確な保存 route 切替・同じ Tern 窓の実際の fresh binding・自動 native receipt を経て初めて承認済み旧 owner を retirement します。追加同意・Configure・Connect・ACK・Resume は不要です。各元 config/state profile・キャラクター・台詞/履歴・account/provider・無関係 profile と Stop・Unknown を保存します。local 7c の signed-out GUI/frame-driven sequence 47 と再起動 sequence 13 は component 証拠のみで quiet/authenticated 配信・全 lifecycle・別コンピュータ復旧の証拠ではありません。
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)

@@ -6,15 +6,20 @@
 
 ## 現在の公開状態と予定の単一承認経路
 
-**公開・consumer の基準:** Core v0.4.9 は不変 source `aadc43999993a2961847faf9d80a01b7851b46d0` から公開済みですが、旧 protocol-3 predecessor の承認には空白が残ります。tag/assets と失敗履歴を保持します。Core v0.4.10 tag `7c40127abf79603ca68837f39c6dca362b2acc7c` の CI run `38851954184`、job `116814920899` は、release 文書の先頭が必須の `# Desktop Pet v0.4.10 release notes` ではなく `# Desktop Pet v0.4.10 release ledger` だったため、assets 公開前に失敗しました。tag は不変で、Core v0.4.10 assets・genuine bridge v0.3.14 は未公開です。bridge v0.3.13 も未公開です。新しい予定 envelope は [Core v0.4.11 / genuine bridge v0.3.15](releases/v0.4.11.md) で、最終 source の適格性確認・公開は未完了です。実際の最終 assets の検証まで公開 consumer pin は Core v0.4.8 のままです。Tern v0.2.1 source `69696023e00a0fcda8b85b332a075bfa26d6c26d`、Herdr retirement v0.4.1 source `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`、beta は変更しません。
+**過去の起動欠陥と恒久修正:** 所有 VM の実際の公開 v0.4.11 履歴実行は `Migration history: current native daemon does not prove the migrated image/profile readiness` で失敗しました。新 receipt・SDK 配信はなく SDK 0.1 は `/opt/homebrew/bin/herdr-desktop-pet` 不在エラーのままでした。UI Ready 前の観測エラーが保持 operation を失わせました。v0.4.12 は read-only discovery で Ready 前に operation を保持し、既存の認可済み observation/poll が後で配信します。current image/owner/profile・signed-stage・正当な runtime 起動・Stop・Unknown guard を維持し、旧 manager 再実行・plan/journal 書換え・手動再接続はしません。対象ソース回帰の成功は end-to-end 成功ではありません。
+
+**別の fixture 前提:** 診断 fixture には対応 Tern.app CLI の両配置がありませんでした。親は所有 VM だけに真正な完全 SDK app を導入し、default old consumer/KV は変更していません。この導入は source 修正でも配信・binding 証拠でもありません。tools Mac・VM はアクセス不能の問題の別コンピュータではなく、host 導入 app を変更したりその復旧を主張しません。
+
+
+**現在の後継: Core v0.4.12 / genuine bridge v0.3.16 — 適格性確認・公開は未完了です。** Core v0.4.11 は release `414563938`、公開時刻 `2026-10-16T05:16:03Z`、source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0` から公開され、公開6資産を独立検証済みです。別 Wiki job は `WIKI_PUBLISH_TOKEN` がありませんでした。genuine bridge v0.3.15 CI `38855045701` は成功しましたが tag/release は未公開です。公開 provenance は過去移行修復の受入証拠ではありません。 See [successor release notes](releases/v0.4.12.md) for the pending correction and immutable predecessor failures. Consumer metadata remains Core v0.4.8 until actual public successor materialization; Tern production stays `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
 
 **予定の通常経路:** 最初の承認1回 → 正確に同じ profile の `migrationReady` / Commit → 更新 Tern consumer の配信・ロード → SDK optimistic identity guard と atomic canonical save → 実際の同じ Tern ウィンドウの fresh binding → 自動 native handover receipt → 承認済み旧所有者の retirement。**実際の再接続と receipt は retirement より先**です。保存や ACK は再接続ではなく、この SDK guard は真の cross-VM transactional CAS ではありません。別の B/source review/Migrate 承認や手動 Configure → Save → Connect / Resume は通常経路に追加しません。複数 profile では影響を受ける各 target が start・Commit・rebind する必要があり、旧 blanket live-profile guard だけでは完成しません。独立 profile は統合しません。
 
-**正確な旧 source 承認境界:** 実際の導入済み v0.3.10/v0.3.11 を含む stable protocol-3 predecessor v0.3.9–v0.3.14 の真正な元承認を対象とします。保持された matching signed helper・plan/result・解放済み lease・確定した成功/quiescent manager 結果が正確な **現在の v0.3.15 candidate**、image、installation root/owner、元 config/state profile を認証し、Stop fence が不変である必要があります。過去の v0.3.11 candidate Completed は現在の移行許可ではありません。Unknown・prerelease/未知 source・protocol 2・hash 変更・無関係な profile・利用者 Stop は fallback 許可になりません。v0.3.6 と凍結 protocol-2/beta entry は別の互換経路です。追加 B/Migrate 承認や UI acknowledgement は元承認の代用になりません。
+**正確な旧 source 承認境界:** 実際の導入済み v0.3.10/v0.3.11 を含む stable protocol-3 predecessor v0.3.9–v0.3.14 の真正な元承認を対象とします。保持された matching signed helper・plan/result・解放済み lease・確定した成功/quiescent manager 結果が正確な **現在の v0.3.16 candidate**、image、installation root/owner、元 config/state profile を認証し、Stop fence が不変である必要があります。過去の v0.3.11 candidate Completed は現在の移行許可ではありません。Unknown・prerelease/未知 source・protocol 2・hash 変更・無関係な profile・利用者 Stop は fallback 許可になりません。v0.3.6 と凍結 protocol-2/beta entry は別の互換経路です。追加 B/Migrate 承認や UI acknowledgement は元承認の代用になりません。
 
 **Commit 済み履歴の修復と失敗の区別:** 実際の othermachine 問題は Commit 済み `AwaitingReconnect` 後の古い保存パス `/opt/homebrew/bin/herdr-desktop-pet` であり、Commit 失敗や manager 再実行の証拠ではありません。same-image / 適格 successor 修復は旧 plan/journal をバイト単位で不変に保ち、新 repair/handover receipt だけを追加します。manager replay・手動 Configure・手動 Resume は行いません。実際の旧証拠・helper・reservation・config/state・資格情報・provider/account データ・prompt/transcript・無関係な profile を保持します。definite no-spawn、Commit 後の未再接続、確定した quiescent retirement 失敗、typed cancellation、Unknown を区別します。Unknown は clear/replay も cancelled への変更もしません。実際の利用者 Stop は rollback を含む再起動を禁止します。必要な全 binding と native receipt までは retirement を阻止します。文書や旧実行は現在の tools Mac の状態を証明しません。
 
-**過去の観測境界:** C1 署名 bundle（neutral 72 / legacy 68 ファイル）と instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` の実 SDK/native binding は C1 の証拠ですが、headless から隔離されず GUI source への帰属は未証明です。別途 source `7c40127abf79603ca68837f39c6dca362b2acc7c` と変更のない Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d` では、実 GUI/frame-driven sequence `47`、通常の native Stop/Start 後の新 sourceWindow・sequence `13` を Connect・保存 Configure・source patch なしで観測しました。GUI は自然な `signed_out` でした。自律的 quiet-background scheduling・認証済みモデル配信・migration・retirement・別コンピュータの復旧、または v0.4.11 の通過証拠ではありません。tools Mac は問題の導入先ではなく、その代わりに host の導入済み app を変更しません。
+**過去の観測境界:** C1 署名 bundle（neutral 72 / legacy 68 ファイル）と instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` の実 SDK/native binding は C1 の証拠ですが、headless から隔離されず GUI source への帰属は未証明です。別途 source `7c40127abf79603ca68837f39c6dca362b2acc7c` と変更のない Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d` では、実 GUI/frame-driven sequence `47`、通常の native Stop/Start 後の新 sourceWindow・sequence `13` を Connect・保存 Configure・source patch なしで観測しました。GUI は自然な `signed_out` でした。自律的 quiet-background scheduling・認証済みモデル配信・migration・retirement・別コンピュータの復旧、または v0.4.12 の通過証拠ではありません。tools Mac は問題の導入先ではなく、その代わりに host の導入済み app を変更しません。
 
 ## 過去の公開・実行記録 — 予定の通常経路ではない
 
@@ -76,7 +81,7 @@ desktop-pet status
 
 プリビルド・ソース導入は Herdr 連携ではなく **core** チェックアウトで実行します。既定はプリビルドのみで、取得・検証失敗からソースビルドへ黙って切り替えません。`--source` は現在の core だけを構築し、その `dist/DesktopPet.app` を使用します。
 
-**過去の固定 v0.4.7 導入例（最新版の指示ではない）:** 以下は旧不変版を選びます。Core v0.4.9 は公開済みですが、最終 successor assets の検証まで consumer pin は v0.4.8 のままです。未公開 v0.4.10・v0.4.11 assets に置き換えません。
+**Historical pinned v0.4.7 installation examples, not latest-version instructions:** the commands below deliberately select immutable older assets. Core v0.4.11 is public but failed historical repair; consumer metadata remains v0.4.8 pending actual verified v0.4.12 / v0.3.16 publication. Never substitute unpublished assets.
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git

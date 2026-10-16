@@ -148,8 +148,8 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
         || prior
             .get("target")
             .filter(|target| !target.is_null())
-            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.15"))
-        || plan.target.release.version != "0.4.11"
+            .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.16"))
+        || plan.target.release.version != "0.4.12"
     {
         return Err("original update does not attest this exact successor bridge, profile and bounded core target".into());
     }
@@ -207,7 +207,7 @@ pub fn prepare_automatic_bridge_plan(
     context: &UpdateContext,
     integration: Option<&str>,
 ) -> Result<Option<MigrationPlan>, String> {
-    if context.version != "0.3.15" {
+    if context.version != "0.3.16" {
         return Ok(None);
     }
     // This token/generation was already authenticated by the real native startup
@@ -308,7 +308,7 @@ pub fn approve_profile_update(
     }
     let context: UpdateContext =
         serde_json::from_value(response["context"].clone()).map_err(|e| e.to_string())?;
-    if context.config_dir != config || context.state_dir != state || context.version != "0.3.15" {
+    if context.config_dir != config || context.state_dir != state || context.version != "0.3.16" {
         return Err(
             "explicit update approval does not select the exact successor bridge profile".into(),
         );
@@ -462,10 +462,12 @@ mod tests {
         for source_version in [
             "0.3.8",
             "0.3.15",
+            "0.3.16",
             "0.3.10-beta.1",
             "0.3.11+unverified",
             "0.4.10",
             "0.4.11",
+            "0.4.12",
             "unknown",
             "",
         ] {
@@ -541,7 +543,7 @@ mod tests {
 
     #[test]
     fn completed_historical_candidates_are_not_current_bridge_approval() {
-        for candidate_version in ["0.3.11", "0.3.13", "0.3.14"] {
+        for candidate_version in ["0.3.11", "0.3.13", "0.3.14", "0.3.15"] {
             let (_temp, plan) = crate::migration::tests::fixture();
             let (id, base, _) = original_from_version(&plan, plan.source_image.clone(), "0.3.10");
             let path = base.join(format!("{id}.plan.json"));
@@ -563,7 +565,7 @@ mod tests {
                 .is_none());
             assert!(!approval_path(&plan).exists());
             assert_eq!(fs::read(&path).unwrap(), bytes);
-            original["target"]["release"]["version"] = serde_json::json!("0.3.15");
+            original["target"]["release"]["version"] = serde_json::json!("0.3.16");
             protocol::write_private_bytes(&path, &serde_json::to_vec(&original).unwrap(), 0o600)
                 .unwrap();
             assert!(bridge_authority(&plan, &id).is_ok());

@@ -6,15 +6,20 @@
 
 ## 当前公开状态与即将采用的单次批准路径
 
-**公开与 consumer 依据：**Core v0.4.9 已从不可变 source `aadc43999993a2961847faf9d80a01b7851b46d0` 公开，但旧 protocol-3 predecessor 的批准仍有缺口；保留 tag/assets 及失败历史。Core v0.4.10 tag `7c40127abf79603ca68837f39c6dca362b2acc7c` 的 CI run `38851954184`、job `116814920899` 因 release 文档首行为 `# Desktop Pet v0.4.10 release ledger` 而非必需的 `# Desktop Pet v0.4.10 release notes`，在资产公开前失败。tag 保持不变，Core v0.4.10 assets 与 genuine bridge v0.3.14 均未公开；bridge v0.3.13 也未公开。新的待发布 envelope 为 [Core v0.4.11 / genuine bridge v0.3.15](releases/v0.4.11.md)，最终 source 验证与公开仍待完成。实际最终 assets 验证前，公开 consumer pin 保持 Core v0.4.8。Tern v0.2.1 source `69696023e00a0fcda8b85b332a075bfa26d6c26d`、Herdr retirement v0.4.1 source `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` 与 beta 均不变。
+**历史启动缺陷与永久修正：**自有 VM 中实际公开 v0.4.11 的历史操作运行失败，原文为 `Migration history: current native daemon does not prove the migrated image/profile readiness`。没有新 receipt 或 SDK 交付；SDK 0.1 仍报告 `/opt/homebrew/bin/herdr-desktop-pet` 不存在。UI Ready 前的 observation 错误丢失了保留 operation。v0.4.12 用只读 discovery 在 Ready 前保留 operation，再由既有经批准的 observation/poll 稍后交付；所有 current image/owner/profile、signed-stage、合法 runtime 启动、Stop、Unknown guard 均保留。不重跑旧 manager、不改写 plan/journal、不要求手动重连。针对性 source 回归通过不代表端到端成功。
+
+**独立 fixture 前提：**诊断 fixture 中两个受支持的 Tern.app CLI 位置均不存在。父任务仅在自有 VM 安装了真实完整 SDK app，未触碰 default old consumer/KV。这不是 source 修正，也不证明交付或 fresh binding。tools Mac 和 VM 都不是无法访问的实际受影响电脑；不得修改 host 已安装 app 或声称该电脑已恢复。
+
+
+**当前后继版本：Core v0.4.12 / genuine bridge v0.3.16——尚未完成验证或公开。** Core v0.4.11 已公开：release `414563938`，时间 `2026-10-16T05:16:03Z`，source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`；6个公开资产均已独立验证。单独 Wiki job 缺少 `WIKI_PUBLISH_TOKEN`。genuine bridge v0.3.15 CI `38855045701` 成功，但没有公开 tag/release。公开 provenance 不等于历史迁移修复验收。 See [successor release notes](releases/v0.4.12.md) for the pending correction and immutable predecessor failures. Consumer metadata remains Core v0.4.8 until actual public successor materialization; Tern production stays `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
 
 **即将采用的常规路径：**一次原始批准 → 精确同一 profile 的 `migrationReady` / Commit → 交付并加载更新的 Tern consumer → SDK optimistic identity guard 与 atomic canonical save → 实际同一 Tern 窗口中的 fresh binding → 自动 native handover receipt → 已批准的旧所有者 retirement。**真实重连和 receipt 必须早于 retirement**。保存路径或 ACK 不代表重连；SDK guard 不是真正的 cross-VM transactional CAS。常规路径不额外要求 B/source review/Migrate 批准，也不要求手动 Configure → Save → Connect / Resume。多个 profile 时，每个受影响 target 均须 start、Commit、rebind；旧 blanket live-profile guard 并非完整方案。独立 profile 不合并。
 
-**精确旧 source 批准边界：**覆盖 stable protocol-3 predecessor v0.3.9–v0.3.14 的真实原始批准，包括实际已安装 v0.3.10/v0.3.11。保留的 matching signed helper、plan/result、已释放 lease 与确定成功且 quiescent 的 manager 结果须认证精确的**当前 v0.3.15 candidate**、image、installation root/owner、原始 config/state profile，并保持 Stop fence。旧 v0.3.11 candidate Completed 不授权当前迁移。Unknown、prerelease/未知 source、protocol 2、hash 变化、无关 profile 与用户 Stop 均不能 fallback 为批准。v0.3.6 与冻结 protocol-2/beta entry 仍为独立兼容路径。额外 B/Migrate 批准或 UI acknowledgement 不能代替原始授权。
+**精确旧 source 批准边界：**覆盖 stable protocol-3 predecessor v0.3.9–v0.3.14 的真实原始批准，包括实际已安装 v0.3.10/v0.3.11。保留的 matching signed helper、plan/result、已释放 lease 与确定成功且 quiescent 的 manager 结果须认证精确的**当前 v0.3.16 candidate**、image、installation root/owner、原始 config/state profile，并保持 Stop fence。旧 v0.3.11 candidate Completed 不授权当前迁移。Unknown、prerelease/未知 source、protocol 2、hash 变化、无关 profile 与用户 Stop 均不能 fallback 为批准。v0.3.6 与冻结 protocol-2/beta entry 仍为独立兼容路径。额外 B/Migrate 批准或 UI acknowledgement 不能代替原始授权。
 
 **已 Commit 历史修复与失败区分：**实际 othermachine 问题是在已 Commit 的 `AwaitingReconnect` 后仍保存过时路径 `/opt/homebrew/bin/herdr-desktop-pet`，不证明 Commit 失败，也不授权再次执行 manager。same-image 和合格 successor 修复须逐字节保留旧 plan/journal，仅追加新的 repair/handover receipt；不 replay manager、不手动 Configure、不手动 Resume。保留真实旧证据、helper、reservation、config/state、凭据、provider/account 数据、prompt/transcript 与无关 profile。区分明确 no-spawn 失败、已 Commit 但尚未重连、明确且 quiescent 的 retirement 失败、typed cancellation 与 Unknown。绝不 clear/replay Unknown 或改称 cancelled；真实用户 Stop 禁止包括 rollback 在内的重启。所有必要真实 binding/native receipt 完成前阻止 retirement。文档或旧运行不证明当前 tools Mac 的状态。
 
-**历史观察边界：**C1 签名 bundle（neutral 72 / legacy 68 个文件）与 instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` 的真实 SDK/native binding 保留为 C1 证据，但未与 headless 隔离，不能证明来自 GUI source。另在 source `7c40127abf79603ca68837f39c6dca362b2acc7c` 与未改变的 Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d` 中，实际 GUI/frame-driven sequence `47` 及正常 native Stop/Start 后的新 sourceWindow、sequence `13` 均无需 Connect、保存 Configure 或 source patch。GUI 自然为 `signed_out`。这些不证明自主 quiet-background scheduling、已认证模型交付、migration、retirement、另一台电脑恢复或 v0.4.11 通过。tools Mac 不是实际受影响机器，不得更改 host 已安装 app 来代替它。
+**历史观察边界：**C1 签名 bundle（neutral 72 / legacy 68 个文件）与 instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` 的真实 SDK/native binding 保留为 C1 证据，但未与 headless 隔离，不能证明来自 GUI source。另在 source `7c40127abf79603ca68837f39c6dca362b2acc7c` 与未改变的 Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d` 中，实际 GUI/frame-driven sequence `47` 及正常 native Stop/Start 后的新 sourceWindow、sequence `13` 均无需 Connect、保存 Configure 或 source patch。GUI 自然为 `signed_out`。这些不证明自主 quiet-background scheduling、已认证模型交付、migration、retirement、另一台电脑恢复或 v0.4.12 通过。tools Mac 不是实际受影响机器，不得更改 host 已安装 app 来代替它。
 
 ## 历史公开与执行记录——不是即将采用的常规路径
 
@@ -76,7 +81,7 @@ desktop-pet status
 
 预构建与源码安装在 **core** 检出目录中执行，而不是 Herdr 集成目录。默认仅预构建，下载或验证失败不会暗中回退源码编译。`--source` 明确仅构建当前 core，并使用该目录的 `dist/DesktopPet.app`。
 
-**历史固定 v0.4.7 安装示例（不是最新版指令）：**下列命令选择旧不可变版本。Core v0.4.9 已公开，但最终 successor assets 验证前 consumer pin 保持 v0.4.8；不得替换为未公开的 v0.4.10 或 v0.4.11 assets。
+**Historical pinned v0.4.7 installation examples, not latest-version instructions:** the commands below deliberately select immutable older assets. Core v0.4.11 is public but failed historical repair; consumer metadata remains v0.4.8 pending actual verified v0.4.12 / v0.3.16 publication. Never substitute unpublished assets.
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
