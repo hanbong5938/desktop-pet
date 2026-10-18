@@ -34,10 +34,6 @@ const SCROLL_TOP: f64 = 86.0;
 const FOOTER_HEIGHT: f64 = 50.0;
 const CHARACTER_VIEW_TOP: f64 = 106.0;
 const INITIAL_CHARACTER_HEIGHT: f64 = 72.0;
-const BUBBLE_CONTENT_HEIGHT: f64 = 578.0;
-const SETTINGS_BASE_HEIGHT: f64 = 308.0 + 14.0;
-const MENU_BAR_CARD_TOP: f64 = 300.0;
-const MENU_BAR_CARD_GAP: f64 = 8.0;
 const MENU_BAR_CARD_BOTTOM: f64 = 14.0;
 const MIN_SCALE: f64 = 0.35;
 const MAX_SCALE: f64 = 1.25;
@@ -374,6 +370,11 @@ impl MenuTabTrack {
     }
 }
 
+struct ScrollReadingPosition {
+    offset: f64,
+    anchor: Option<(Retained<NSView>, f64)>,
+}
+
 pub(crate) struct MenuPanel {
     panel: Retained<MenuPanelWindow>,
     root: Retained<MenuPanelRoot>,
@@ -403,6 +404,8 @@ pub(crate) struct MenuPanel {
     bubble_theme_label: Retained<NSTextField>,
     bubble_theme_popup: Retained<NSPopUpButton>,
     bubble_colors_label: Retained<NSTextField>,
+    bubble_colors_toggle: Retained<NSButton>,
+    bubble_colors_expanded: bool,
     bubble_color_labels: [Retained<NSTextField>; 5],
     bubble_color_fields: [Retained<NSTextField>; 5],
     bubble_color_swatches: [Retained<NSBox>; 5],
@@ -439,6 +442,8 @@ pub(crate) struct MenuPanel {
     menu_bar_choose: Retained<NSButton>,
     menu_bar_restore: Retained<NSButton>,
     menu_bar_icon_help: Retained<NSTextField>,
+    menu_bar_icon_toggle: Retained<NSButton>,
+    menu_bar_icon_expanded: bool,
     menu_bar_icon_error: Retained<NSTextField>,
     menu_bar_icon_error_detail: Option<(Message, String)>,
     menu_bar_icon_custom: bool,
@@ -471,6 +476,7 @@ pub(crate) struct MenuPanel {
     reset: Retained<NSButton>,
     quit: Retained<NSButton>,
     selected_tab: usize,
+    tab_offsets: Cell<[f64; 3]>,
 }
 
 impl MenuPanel {
@@ -549,7 +555,7 @@ impl MenuPanel {
         let bubble_tab = MenuPanelDocument::new(
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(PANEL_WIDTH, BUBBLE_CONTENT_HEIGHT),
+                NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
             ),
             mtm,
         );
@@ -713,8 +719,6 @@ impl MenuPanel {
         bubble_visibility_card.addSubview(&*bubble_visible_switch);
         bubble_tab.addSubview(&bubble_visibility_card);
 
-        let status_indicators_card = MenuPanelCard::new(NSRect::default(), mtm);
-        set_accessibility_element(&*status_indicators_card, false);
         let status_indicators_label = label(
             text(locale, Message::MenuStatusIndicators),
             12.5,
@@ -728,12 +732,9 @@ impl MenuPanel {
             &*status_indicators_switch,
             text(locale, Message::MenuStatusIndicators),
         );
-        status_indicators_card.addSubview(&status_indicators_label);
-        status_indicators_card.addSubview(&*status_indicators_switch);
-        bubble_tab.addSubview(&status_indicators_card);
+        bubble_visibility_card.addSubview(&status_indicators_label);
+        bubble_visibility_card.addSubview(&*status_indicators_switch);
 
-        let bubble_placement_card = MenuPanelCard::new(NSRect::default(), mtm);
-        set_accessibility_element(&*bubble_placement_card, false);
         let bubble_placement_label = label(
             text(locale, Message::MenuBubblePlacement),
             12.5,
@@ -741,7 +742,7 @@ impl MenuPanel {
             primary(),
             mtm,
         );
-        bubble_placement_card.addSubview(&bubble_placement_label);
+        bubble_visibility_card.addSubview(&bubble_placement_label);
         let placement_specs = [
             (Message::MenuPlacementAuto, sel!(bubbleAuto:)),
             (Message::MenuPlacementAbove, sel!(bubbleAbove:)),
@@ -782,9 +783,8 @@ impl MenuPanel {
             ),
         ];
         for button in &placement_buttons {
-            bubble_placement_card.addSubview(button);
+            bubble_visibility_card.addSubview(button);
         }
-        bubble_tab.addSubview(&bubble_placement_card);
         let bubble_theme_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*bubble_theme_card, false);
         let bubble_theme_label = label(
@@ -811,6 +811,8 @@ impl MenuPanel {
             secondary(),
             mtm,
         );
+        bubble_colors_label.setMaximumNumberOfLines(0);
+        let bubble_colors_toggle = make_action_button("", target, sel!(toggleBubbleColors:), mtm);
         let color_messages = [
             Message::BubbleSurfaceColor,
             Message::BubbleTextColor,
@@ -865,6 +867,7 @@ impl MenuPanel {
         set_accessibility_label(&bubble_apply, text(locale, Message::ApplyBubbleColors));
         set_accessibility_label(&bubble_reset, text(locale, Message::ResetBubbleColors));
         bubble_theme_card.addSubview(&bubble_colors_label);
+        bubble_theme_card.addSubview(&bubble_colors_toggle);
         for ((name, field), swatch) in bubble_color_labels
             .iter()
             .zip(&bubble_color_fields)
@@ -962,8 +965,6 @@ impl MenuPanel {
         scale_card.addSubview(&scale_up);
         scale_card.addSubview(&scale_readout);
 
-        let language_card = MenuPanelCard::new(NSRect::default(), mtm);
-        set_accessibility_element(&*language_card, false);
         let language_label = label(
             text(locale, Message::MenuLanguage),
             12.5,
@@ -980,12 +981,12 @@ impl MenuPanel {
         ];
         let language_popup =
             make_selection_popup(&language_specs, locale, target, sel!(setLanguage:), mtm);
-        language_card.addSubview(&language_label);
-        language_card.addSubview(&language_popup);
         let menu_bar_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*menu_bar_card, false);
+        menu_bar_card.addSubview(&language_label);
+        menu_bar_card.addSubview(&language_popup);
         let menu_bar_label = label(
-            text(locale, Message::MenuBarIcon),
+            text(locale, Message::MenuGeneral),
             12.5,
             true,
             primary(),
@@ -1087,6 +1088,7 @@ impl MenuPanel {
             mtm,
         );
         menu_bar_icon_help.setMaximumNumberOfLines(0);
+        let menu_bar_icon_toggle = make_action_button("", target, sel!(toggleMenuBarIcon:), mtm);
         let menu_bar_icon_error = label("", 10.5, false, NSColor::systemRedColor(), mtm);
         menu_bar_icon_error.setMaximumNumberOfLines(0);
         menu_bar_icon_error.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByCharWrapping);
@@ -1102,6 +1104,7 @@ impl MenuPanel {
         menu_bar_card.addSubview(&menu_bar_choose);
         menu_bar_card.addSubview(&menu_bar_restore);
         menu_bar_card.addSubview(&menu_bar_icon_help);
+        menu_bar_card.addSubview(&menu_bar_icon_toggle);
         menu_bar_card.addSubview(&menu_bar_icon_error);
         let observation_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*observation_card, false);
@@ -1183,9 +1186,9 @@ impl MenuPanel {
         settings_tab.addSubview(&observation_card);
         settings_tab.addSubview(&appearance_card);
         settings_tab.addSubview(&scale_card);
-        settings_tab.addSubview(&language_card);
         settings_tab.addSubview(&menu_bar_card);
-        let lifecycle_card = LifecycleSettingsCard::new(locale, target, mtm);
+        let mut lifecycle_card = LifecycleSettingsCard::new(locale, target, mtm);
+        observation_card.addSubview(lifecycle_card.separate_extensions());
         settings_tab.addSubview(lifecycle_card.view());
         let update_card = AppUpdateCard::new(locale, target, mtm);
         settings_tab.addSubview(update_card.view());
@@ -1236,6 +1239,8 @@ impl MenuPanel {
             bubble_theme_label,
             bubble_theme_popup,
             bubble_colors_label,
+            bubble_colors_toggle,
+            bubble_colors_expanded: false,
             bubble_color_labels,
             bubble_color_fields,
             bubble_color_swatches,
@@ -1272,6 +1277,8 @@ impl MenuPanel {
             menu_bar_choose,
             menu_bar_restore,
             menu_bar_icon_help,
+            menu_bar_icon_toggle,
+            menu_bar_icon_expanded: false,
             menu_bar_icon_error,
             menu_bar_icon_error_detail: None,
             menu_bar_icon_custom: false,
@@ -1304,6 +1311,7 @@ impl MenuPanel {
             reset,
             quit,
             selected_tab: 0,
+            tab_offsets: Cell::new([0.0; 3]),
         };
         panel.set_menu_bar_mode(MenuBarMode::Always);
         panel.select_tab(0);
@@ -1352,6 +1360,9 @@ impl MenuPanel {
 
     pub(crate) fn select_tab(&mut self, index: usize) {
         let index = index.min(2);
+        let mut offsets = self.tab_offsets.get();
+        offsets[self.selected_tab] = self.scroll.contentView().bounds().origin.y;
+        self.tab_offsets.set(offsets);
         if self.selected_tab != index {
             let _ = self.panel.makeFirstResponder(None);
         }
@@ -1364,7 +1375,7 @@ impl MenuPanel {
         self.panel.recalculateKeyViewLoop();
         self.scroll
             .contentView()
-            .scrollToPoint(NSPoint::new(0.0, 0.0));
+            .scrollToPoint(NSPoint::new(0.0, offsets[index]));
         self.scroll
             .reflectScrolledClipView(&self.scroll.contentView());
         if self.panel.isKeyWindow() {
@@ -1403,11 +1414,16 @@ impl MenuPanel {
     pub(crate) fn refresh_bubble_color_controls(&mut self) {
         let conflicted = self.bubble_draft.conflicted();
         let marked = self.bubble_colors_marked();
+        let reading_position =
+            (self.bubble_conflict_label != Some(conflicted)).then(|| self.reading_position());
         if self.bubble_control_state != Some((conflicted, marked)) {
             self.bubble_reload.setEnabled(conflicted && !marked);
             self.bubble_rebase.setEnabled(conflicted && !marked);
             self.bubble_apply.setEnabled(!conflicted && !marked);
+            self.bubble_colors_toggle.setEnabled(!conflicted && !marked);
             self.bubble_control_state = Some((conflicted, marked));
+            self.bubble_reload.setHidden(!conflicted);
+            self.bubble_rebase.setHidden(!conflicted);
         }
         if self.bubble_conflict_label != Some(conflicted) {
             let label = if conflicted {
@@ -1419,6 +1435,7 @@ impl MenuPanel {
                 .setStringValue(&NSString::from_str(label));
             set_accessibility_label(&self.bubble_colors_label, label);
             self.bubble_conflict_label = Some(conflicted);
+            self.layout_documents_at(reading_position.expect("changed conflict captures position"));
         }
     }
 
@@ -1428,6 +1445,8 @@ impl MenuPanel {
         });
         let editing =
             protected.iter().any(|protected| *protected) || self.bubble_draft.conflicted();
+        let theme_changed =
+            self.bubble_draft.latest.map(|saved| saved.theme) != Some(appearance.theme);
         self.bubble_draft.receive(appearance, editing);
         if !editing {
             let tag = match appearance.theme {
@@ -1437,6 +1456,9 @@ impl MenuPanel {
                 BubbleTheme::Custom => 3,
             };
             self.bubble_theme_popup.selectItemWithTag(tag);
+            if theme_changed {
+                self.bubble_colors_expanded = appearance.theme == BubbleTheme::Custom;
+            }
         }
         if !editing {
             let palette = appearance.palette();
@@ -1455,6 +1477,9 @@ impl MenuPanel {
         }
         self.update_color_swatches();
         self.refresh_bubble_color_controls();
+        if theme_changed {
+            self.layout_documents();
+        }
     }
 
     pub(crate) fn bubble_colors_conflicted(&self) -> bool {
@@ -1470,7 +1495,9 @@ impl MenuPanel {
             BubbleTheme::Custom => 3,
         };
         self.bubble_theme_popup.selectItemWithTag(tag);
+        self.bubble_colors_expanded = appearance.theme == BubbleTheme::Custom;
         self.refresh_bubble_color_controls();
+        self.layout_documents();
     }
 
     pub(crate) fn reload_bubble_colors(&mut self) -> bool {
@@ -1512,6 +1539,25 @@ impl MenuPanel {
         }
         self.refresh_bubble_color_controls();
         true
+    }
+
+    pub(crate) fn toggle_bubble_colors(&mut self) {
+        if self.bubble_draft.conflicted() || self.bubble_colors_marked() {
+            return;
+        }
+        let reading_position = self.reading_position();
+        self.bubble_colors_expanded = !self.bubble_colors_expanded;
+        self.panel
+            .makeFirstResponder(Some(&*self.bubble_colors_toggle));
+        self.layout_documents_at(reading_position);
+    }
+
+    pub(crate) fn toggle_menu_bar_icon(&mut self) {
+        let reading_position = self.reading_position();
+        self.menu_bar_icon_expanded = !self.menu_bar_icon_expanded;
+        self.panel
+            .makeFirstResponder(Some(&*self.menu_bar_icon_toggle));
+        self.layout_documents_at(reading_position);
     }
 
     pub(crate) fn set_show_status_indicators(&self, enabled: bool) {
@@ -1831,11 +1877,15 @@ impl MenuPanel {
         actions: &[(String, desktop_pet_contracts::LifecycleActionView)],
         error: Option<&str>,
     ) {
+        let reading_position = self.reading_position();
         self.lifecycle_card.sync_extensions(settings);
         self.lifecycle_card.sync_actions(actions);
         self.observation_error
             .setStringValue(&NSString::from_str(error.unwrap_or("")));
-        self.layout_documents();
+        self.layout_documents_at(reading_position);
+        if !self.frozen_controls.is_empty() {
+            self.set_update_frozen(true);
+        }
     }
 
     pub(crate) fn set_connection_profile(
@@ -1864,6 +1914,7 @@ impl MenuPanel {
     }
 
     pub(crate) fn toggle_connection_settings(&mut self) {
+        let reading_position = self.reading_position();
         self.connection_settings_expanded = !self.connection_settings_expanded;
         set_connection_disclosure(
             &self.connection_settings_toggle,
@@ -1873,10 +1924,11 @@ impl MenuPanel {
         );
         self.panel
             .makeFirstResponder(Some(&*self.connection_settings_toggle));
-        self.layout_documents();
+        self.layout_documents_at(reading_position);
     }
 
     pub(crate) fn toggle_connection_diagnostics(&mut self) {
+        let reading_position = self.reading_position();
         self.connection_diagnostics_expanded = !self.connection_diagnostics_expanded;
         set_connection_disclosure(
             &self.connection_diagnostics_toggle,
@@ -1886,7 +1938,7 @@ impl MenuPanel {
         );
         self.panel
             .makeFirstResponder(Some(&*self.connection_diagnostics_toggle));
-        self.layout_documents();
+        self.layout_documents_at(reading_position);
     }
 
     fn localize_connection(&self) {
@@ -2135,8 +2187,8 @@ impl MenuPanel {
                 Message::FollowSystemSettings,
             ))));
         self.menu_bar_label
-            .setStringValue(&NSString::from_str(text(locale, Message::MenuBarIcon)));
-        set_accessibility_label(&*self.menu_bar_label, text(locale, Message::MenuBarIcon));
+            .setStringValue(&NSString::from_str(text(locale, Message::MenuGeneral)));
+        set_accessibility_label(&*self.menu_bar_label, text(locale, Message::MenuGeneral));
         self.menu_bar_visibility
             .setStringValue(&NSString::from_str(text(
                 locale,
@@ -2276,15 +2328,24 @@ impl MenuPanel {
         self.lifecycle_card.value(key)
     }
     pub(crate) fn refresh_app_update(&mut self, model: &UpdateCardModel) {
+        let reading_position = self.reading_position();
         self.update_card.refresh(model);
-        self.layout_root();
+        self.layout_root_at(reading_position);
         if !self.frozen_controls.is_empty() {
             self.set_update_frozen(true);
         }
     }
     pub(crate) fn toggle_update_diagnostics(&mut self) {
+        let reading_position = self.reading_position();
         self.update_card.toggle_diagnostics();
-        self.layout_documents();
+        self.layout_documents_at(reading_position);
+    }
+    pub(crate) fn toggle_update_options(&mut self) {
+        let reading_position = self.reading_position();
+        self.update_card.toggle_options();
+        self.panel
+            .makeFirstResponder(Some(self.update_card.options_toggle()));
+        self.layout_documents_at(reading_position);
     }
     pub(crate) fn set_update_frozen(&mut self, frozen: bool) {
         for field in &self.bubble_color_fields {
@@ -2299,16 +2360,11 @@ impl MenuPanel {
             }
         }
         if frozen {
-            if !self.frozen_controls.is_empty() {
-                for (control, _) in &self.frozen_controls {
-                    control.setEnabled(false);
-                }
-                return;
-            }
             fn disable(
                 view: &NSView,
                 quit: &NSButton,
                 diagnostics_toggle: &NSButton,
+                options_toggle: &NSButton,
                 diagnostics: &NSTextField,
                 controls: &mut Vec<(Retained<NSControl>, bool)>,
             ) {
@@ -2317,18 +2373,32 @@ impl MenuPanel {
                         if !std::ptr::eq(&*child, quit as &NSView)
                             && !std::ptr::eq(&*child, diagnostics_toggle as &NSView)
                             && !std::ptr::eq(&*child, diagnostics as &NSView)
+                            && !std::ptr::eq(&*child, options_toggle as &NSView)
                         {
-                            controls.push((control.retain(), control.isEnabled()));
+                            if !controls
+                                .iter()
+                                .any(|(saved, _)| std::ptr::eq(&**saved, control))
+                            {
+                                controls.push((control.retain(), control.isEnabled()));
+                            }
                             control.setEnabled(false);
                         }
                     }
-                    disable(&child, quit, diagnostics_toggle, diagnostics, controls);
+                    disable(
+                        &child,
+                        quit,
+                        diagnostics_toggle,
+                        options_toggle,
+                        diagnostics,
+                        controls,
+                    );
                 }
             }
             disable(
                 &self.root,
                 &self.quit,
                 self.update_card.diagnostics_toggle(),
+                self.update_card.options_toggle(),
                 self.update_card.diagnostics(),
                 &mut self.frozen_controls,
             );
@@ -2437,6 +2507,10 @@ impl MenuPanel {
     }
 
     fn layout_root(&self) {
+        self.layout_root_at(self.reading_position());
+    }
+
+    fn layout_root_at(&self, reading_position: ScrollReadingPosition) {
         let bounds = self.root.bounds();
         let width = bounds.size.width.max(1.0);
         let height = bounds.size.height.max(1.0);
@@ -2470,7 +2544,7 @@ impl MenuPanel {
             NSPoint::new(PANEL_EDGE_INSET, SCROLL_TOP),
             NSSize::new((width - PANEL_EDGE_INSET * 2.0).max(1.0), scroll_height),
         ));
-        self.layout_documents();
+        self.layout_documents_at(reading_position);
 
         let footer_y = (height - FOOTER_HEIGHT + 10.0)
             .min((height - FOOTER_HEIGHT).max(SCROLL_TOP + 8.0))
@@ -2497,7 +2571,23 @@ impl MenuPanel {
         ));
     }
 
+    fn reading_position(&self) -> ScrollReadingPosition {
+        let offset = self.scroll.contentView().bounds().origin.y;
+        ScrollReadingPosition {
+            offset,
+            anchor: scroll_reading_anchor(&self.document, &self.document, offset),
+        }
+    }
+
     fn layout_documents(&self) {
+        self.layout_documents_at(self.reading_position());
+    }
+
+    fn layout_documents_at(&self, reading_position: ScrollReadingPosition) {
+        let ScrollReadingPosition {
+            offset: old_offset,
+            anchor,
+        } = reading_position;
         let scroll_frame = self.scroll.frame();
         let scroll_width = scroll_frame.size.width.max(1.0);
         let scroll_height = scroll_frame.size.height.max(1.0);
@@ -2505,12 +2595,12 @@ impl MenuPanel {
         let char_view_height = self.character_content_height;
         let char_content_height = (CHARACTER_VIEW_TOP + char_view_height).max(scroll_height);
 
-        let old_offset = self.scroll.contentView().bounds().origin.y;
         let initial_width = (scroll_width - 30.0).max(1.0);
         let mut settings_height = self.settings_height(initial_width).max(scroll_height);
+        let bubble_height = self.bubble_height(initial_width).max(scroll_height);
         let content_height = match self.selected_tab {
             0 => char_content_height,
-            1 => BUBBLE_CONTENT_HEIGHT,
+            1 => bubble_height,
             _ => settings_height,
         };
 
@@ -2524,7 +2614,7 @@ impl MenuPanel {
         ));
         self.bubble_tab.setFrame(NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, BUBBLE_CONTENT_HEIGHT),
+            NSSize::new(scroll_width, bubble_height),
         ));
         self.settings_tab.setFrame(NSRect::new(
             NSPoint::new(0.0, 0.0),
@@ -2557,6 +2647,17 @@ impl MenuPanel {
         let card_width = (visible_width - outer_margin * 2.0 - scroller_allowance).max(1.0);
 
         settings_height = self.settings_height(card_width).max(scroll_height);
+        let bubble_height = self.bubble_height(card_width).max(scroll_height);
+        self.bubble_tab.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(scroll_width, bubble_height),
+        ));
+        if self.selected_tab == 1 {
+            self.document.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(scroll_width, bubble_height),
+            ));
+        }
         if self.selected_tab == 2 {
             self.document.setFrame(NSRect::new(
                 NSPoint::new(0.0, 0.0),
@@ -2573,11 +2674,26 @@ impl MenuPanel {
         let max_offset = (self.document.frame().size.height
             - self.scroll.contentView().bounds().size.height)
             .max(0.0);
+        let restored_offset = anchor
+            .filter(|(view, _)| {
+                let hidden: bool = unsafe { msg_send![&**view, isHiddenOrHasHiddenAncestor] };
+                view.window().is_some() && !hidden
+            })
+            .map_or(old_offset, |(view, old_y)| {
+                old_offset
+                    + view
+                        .convertRect_toView(view.bounds(), Some(&self.document))
+                        .origin
+                        .y
+                    - old_y
+            })
+            .clamp(0.0, max_offset);
         self.scroll
             .contentView()
-            .scrollToPoint(NSPoint::new(0.0, old_offset.min(max_offset)));
+            .scrollToPoint(NSPoint::new(0.0, restored_offset));
         self.scroll
             .reflectScrolledClipView(&self.scroll.contentView());
+        self.panel.recalculateKeyViewLoop();
     }
 
     fn layout_character(&self, card_width: f64, clip_width: f64, char_view_height: f64) {
@@ -2611,147 +2727,145 @@ impl MenuPanel {
         ));
     }
 
+    fn bubble_theme_height(&self, card_width: f64) -> f64 {
+        if !self.bubble_colors_expanded && !self.bubble_draft.conflicted() {
+            return 94.0;
+        }
+        let conflict_height = if self.bubble_draft.conflicted() {
+            measured_label_height(&self.bubble_colors_label, (card_width - 28.0).max(1.0)) + 8.0
+        } else {
+            0.0
+        };
+        94.0 + conflict_height
+            + 150.0
+            + 36.0
+            + if self.bubble_draft.conflicted() {
+                68.0
+            } else {
+                0.0
+            }
+    }
+
+    fn bubble_height(&self, card_width: f64) -> f64 {
+        244.0 + self.bubble_theme_height(card_width)
+    }
+
     fn layout_bubble(&self, card_width: f64) {
         let cards = self.bubble_tab.subviews();
         let visibility_card = cards.objectAtIndex(0);
-        let status_indicators_card = cards.objectAtIndex(1);
-        let placement_card = cards.objectAtIndex(2);
-        let theme_card = cards.objectAtIndex(3);
-
+        let theme_card = cards.objectAtIndex(1);
+        let width = (card_width - 28.0).max(1.0);
         visibility_card.setFrame(NSRect::new(
             NSPoint::new(8.0, 8.0),
-            NSSize::new(card_width, 48.0),
+            NSSize::new(card_width, 220.0),
         ));
-        self.bubble_visible_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 11.0),
-            NSSize::new((card_width - 80.0).max(1.0), 24.0),
-        ));
-        self.bubble_visible_switch.setFrame(NSRect::new(
-            NSPoint::new(card_width - 58.0, 8.0),
-            NSSize::new(46.0, 30.0),
-        ));
-
-        status_indicators_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 64.0),
-            NSSize::new(card_width, 48.0),
-        ));
-        self.status_indicators_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 11.0),
-            NSSize::new((card_width - 80.0).max(1.0), 24.0),
-        ));
-        self.status_indicators_switch.setFrame(NSRect::new(
-            NSPoint::new(card_width - 58.0, 8.0),
-            NSSize::new(46.0, 30.0),
-        ));
-
-        // Placement card (3x3 Cross layout)
-        placement_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 120.0),
-            NSSize::new(card_width, 126.0),
-        ));
+        for (label, toggle, y) in [
+            (&self.bubble_visible_label, &self.bubble_visible_switch, 8.0),
+            (
+                &self.status_indicators_label,
+                &self.status_indicators_switch,
+                48.0,
+            ),
+        ] {
+            label.setFrame(NSRect::new(
+                NSPoint::new(14.0, y + 3.0),
+                NSSize::new((card_width - 80.0).max(1.0), 24.0),
+            ));
+            toggle.setFrame(NSRect::new(
+                NSPoint::new(card_width - 58.0, y),
+                NSSize::new(46.0, 30.0),
+            ));
+        }
         self.bubble_placement_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 8.0),
-            NSSize::new((card_width - 28.0).max(1.0), 18.0),
+            NSPoint::new(14.0, 91.0),
+            NSSize::new(width, 18.0),
         ));
-
-        let btn_w = 52.0;
-        let btn_h = 24.0;
-        let col_gap = 6.0;
-        let row_gap = 6.0;
-        let grid_w = btn_w * 3.0 + col_gap * 2.0;
-        let start_x = ((card_width - grid_w) / 2.0).max(14.0);
-        let start_y = 30.0;
-
-        // Row 0: Above (col 1)
-        self.placement_buttons[1].setFrame(NSRect::new(
-            NSPoint::new(start_x + btn_w + col_gap, start_y),
-            NSSize::new(btn_w, btn_h),
-        ));
-        // Row 1: Left (col 0), Auto (col 1), Right (col 2)
-        let row1_y = start_y + btn_h + row_gap;
-        self.placement_buttons[3].setFrame(NSRect::new(
-            NSPoint::new(start_x, row1_y),
-            NSSize::new(btn_w, btn_h),
-        ));
-        self.placement_buttons[0].setFrame(NSRect::new(
-            NSPoint::new(start_x + btn_w + col_gap, row1_y),
-            NSSize::new(btn_w, btn_h),
-        ));
-        self.placement_buttons[4].setFrame(NSRect::new(
-            NSPoint::new(start_x + (btn_w + col_gap) * 2.0, row1_y),
-            NSSize::new(btn_w, btn_h),
-        ));
-        // Row 2: Below (col 1)
-        let row2_y = row1_y + btn_h + row_gap;
-        self.placement_buttons[2].setFrame(NSRect::new(
-            NSPoint::new(start_x + btn_w + col_gap, row2_y),
-            NSSize::new(btn_w, btn_h),
-        ));
-
-        // Theme card (native theme popup + 5 color rows + action buttons)
+        let button_width = ((width - 12.0) / 3.0).max(1.0);
+        for (index, column, row) in [(1, 1, 0), (3, 0, 1), (0, 1, 1), (4, 2, 1), (2, 1, 2)] {
+            self.placement_buttons[index].setFrame(NSRect::new(
+                NSPoint::new(
+                    14.0 + column as f64 * (button_width + 6.0),
+                    115.0 + row as f64 * 30.0,
+                ),
+                NSSize::new(button_width, 24.0),
+            ));
+        }
         theme_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 254.0),
-            NSSize::new(card_width, 318.0),
+            NSPoint::new(8.0, 236.0),
+            NSSize::new(card_width, self.bubble_theme_height(card_width)),
         ));
         self.bubble_theme_label.setFrame(NSRect::new(
             NSPoint::new(14.0, 8.0),
-            NSSize::new((card_width - 28.0).max(1.0), 18.0),
+            NSSize::new(width, 18.0),
         ));
         self.bubble_theme_popup.setFrame(NSRect::new(
             NSPoint::new(14.0, 30.0),
-            NSSize::new((card_width - 28.0).max(1.0), 26.0),
+            NSSize::new(width, 26.0),
         ));
-
-        self.bubble_colors_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 60.0),
-            NSSize::new((card_width - 28.0).max(1.0), 18.0),
-        ));
-
+        let conflicted = self.bubble_draft.conflicted();
+        let expanded = self.bubble_colors_expanded || conflicted;
+        set_connection_disclosure(
+            &self.bubble_colors_toggle,
+            self.locale,
+            Message::CustomizeBubbleColors,
+            expanded,
+        );
+        let mut y = 60.0;
+        place_connection_disclosure(&self.bubble_colors_toggle, card_width, &mut y, true);
+        self.bubble_colors_label.setHidden(!conflicted);
+        if conflicted {
+            place_observation_label(&self.bubble_colors_label, 14.0, width, 18.0, &mut y, true);
+            y += 8.0;
+        }
         let field_width = 86.0;
-        let swatch_size = 18.0;
-        let swatch_x = card_width - 14.0 - field_width - 8.0 - swatch_size;
-        let field_x = card_width - 14.0 - field_width;
-
-        for (index, ((name, field), swatch)) in self
+        let swatch_x = card_width - 126.0;
+        for ((name, field), swatch) in self
             .bubble_color_labels
             .iter()
             .zip(&self.bubble_color_fields)
             .zip(&self.bubble_color_swatches)
-            .enumerate()
         {
-            let y = 82.0 + index as f64 * 30.0;
+            name.setHidden(!expanded);
+            field.setHidden(!expanded);
+            field.setRefusesFirstResponder(!expanded);
+            swatch.setHidden(!expanded);
+            if !expanded {
+                continue;
+            }
             name.setFrame(NSRect::new(
                 NSPoint::new(14.0, y + 2.0),
                 NSSize::new((swatch_x - 20.0).max(1.0), 20.0),
             ));
             swatch.setFrame(NSRect::new(
                 NSPoint::new(swatch_x, y + 2.0),
-                NSSize::new(swatch_size, swatch_size),
+                NSSize::new(18.0, 18.0),
             ));
             field.setFrame(NSRect::new(
-                NSPoint::new(field_x, y),
+                NSPoint::new(card_width - 100.0, y),
                 NSSize::new(field_width, 22.0),
             ));
+            y += 30.0;
         }
-
-        let button_gap = 8.0;
-        let button_width = ((card_width - 28.0 - button_gap) / 2.0).max(1.0);
+        for button in [&self.bubble_apply, &self.bubble_reset] {
+            button.setHidden(!expanded);
+            button.setRefusesFirstResponder(!expanded);
+        }
+        let button_width = ((width - 8.0) / 2.0).max(1.0);
         self.bubble_apply.setFrame(NSRect::new(
-            NSPoint::new(14.0, 240.0),
+            NSPoint::new(14.0, y),
             NSSize::new(button_width, 28.0),
         ));
         self.bubble_reset.setFrame(NSRect::new(
-            NSPoint::new(14.0 + button_width + button_gap, 240.0),
+            NSPoint::new(22.0 + button_width, y),
             NSSize::new(button_width, 28.0),
         ));
-        self.bubble_reload.setFrame(NSRect::new(
-            NSPoint::new(14.0, 272.0),
-            NSSize::new(button_width, 28.0),
-        ));
-        self.bubble_rebase.setFrame(NSRect::new(
-            NSPoint::new(14.0 + button_width + button_gap, 272.0),
-            NSSize::new(button_width, 28.0),
-        ));
+        y += 36.0;
+        for button in [&self.bubble_reload, &self.bubble_rebase] {
+            button.setHidden(!conflicted);
+            button.setRefusesFirstResponder(!conflicted);
+            button.setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 28.0)));
+            y += 34.0;
+        }
     }
 
     fn settings_height(&self, card_width: f64) -> f64 {
@@ -2769,80 +2883,76 @@ impl MenuPanel {
 
     fn layout_menu_bar_card(&self, card_width: f64, apply: bool) -> f64 {
         let width = (card_width - 28.0).max(1.0);
+        let label_width = (width * 0.4).max(1.0);
         if apply {
             self.menu_bar_label.setFrame(NSRect::new(
-                NSPoint::new(14.0, 8.0),
+                NSPoint::new(14.0, 10.0),
                 NSSize::new(width, 18.0),
             ));
-            self.menu_bar_visibility.setFrame(NSRect::new(
-                NSPoint::new(14.0, 31.0),
-                NSSize::new(width, 16.0),
-            ));
-            self.menu_bar_popup.setFrame(NSRect::new(
-                NSPoint::new(14.0, 51.0),
-                NSSize::new(width, 26.0),
-            ));
         }
-        let mut y = 84.0;
+        let mut y = 36.0;
+        for (label, popup) in [
+            (&self.language_label, &self.language_popup),
+            (&self.menu_bar_visibility, &self.menu_bar_popup),
+        ] {
+            let height = measured_label_height(label, label_width).max(28.0);
+            if apply {
+                label.setFrame(NSRect::new(
+                    NSPoint::new(14.0, y),
+                    NSSize::new(label_width, height),
+                ));
+                popup.setFrame(NSRect::new(
+                    NSPoint::new(20.0 + label_width, y),
+                    NSSize::new((width - label_width - 6.0).max(1.0), 28.0),
+                ));
+            }
+            y += height + 8.0;
+        }
         place_observation_label(&self.menu_bar_help, 14.0, width, 16.0, &mut y, apply);
-        y += 10.0;
+        y += 8.0;
         if apply {
             self.menu_bar_separator
                 .setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 1.0)));
-        }
-        y += 11.0;
-        if apply {
-            self.menu_bar_preview_well
-                .setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(36.0, 36.0)));
+            self.menu_bar_preview_well.setFrame(NSRect::new(
+                NSPoint::new(14.0, y + 9.0),
+                NSSize::new(36.0, 36.0),
+            ));
             self.menu_bar_preview
                 .setFrame(NSRect::new(NSPoint::new(9.0, 9.0), NSSize::new(18.0, 18.0)));
             self.menu_bar_icon_status.setFrame(NSRect::new(
-                NSPoint::new(60.0, y + 9.0),
+                NSPoint::new(60.0, y + 18.0),
                 NSSize::new((width - 46.0).max(1.0), 18.0),
             ));
+            set_connection_disclosure(
+                &self.menu_bar_icon_toggle,
+                self.locale,
+                Message::MenuBarIconCustomize,
+                self.menu_bar_icon_expanded,
+            );
+            for view in [
+                &*self.menu_bar_choose as &NSView,
+                &*self.menu_bar_restore,
+                &*self.menu_bar_icon_help,
+            ] {
+                view.setHidden(!self.menu_bar_icon_expanded);
+            }
+            self.menu_bar_choose
+                .setRefusesFirstResponder(!self.menu_bar_icon_expanded);
+            self.menu_bar_restore
+                .setRefusesFirstResponder(!self.menu_bar_icon_expanded);
         }
-        y += 46.0;
-        let choose_width = self
-            .menu_bar_choose
-            .cell()
-            .map(|cell| cell.cellSize().width + 8.0)
-            .unwrap_or(110.0)
-            .max(110.0);
-        let restore_width = self
-            .menu_bar_restore
-            .cell()
-            .map(|cell| cell.cellSize().width + 8.0)
-            .unwrap_or(156.0)
-            .max(156.0);
-        let side_by_side = choose_width + 8.0 + restore_width <= width;
-        if apply {
-            self.menu_bar_choose.setFrame(NSRect::new(
-                NSPoint::new(14.0, y),
-                NSSize::new(if side_by_side { choose_width } else { width }, 26.0),
-            ));
-            self.menu_bar_restore.setFrame(NSRect::new(
-                NSPoint::new(
-                    if side_by_side {
-                        22.0 + choose_width
-                    } else {
-                        14.0
-                    },
-                    if side_by_side { y } else { y + 32.0 },
-                ),
-                NSSize::new(
-                    if side_by_side {
-                        width - choose_width - 8.0
-                    } else {
-                        width
-                    },
-                    26.0,
-                ),
-            ));
+        y += 52.0;
+        place_connection_disclosure(&self.menu_bar_icon_toggle, card_width, &mut y, apply);
+        if self.menu_bar_icon_expanded {
+            for button in [&self.menu_bar_choose, &self.menu_bar_restore] {
+                if apply {
+                    button.setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 28.0)));
+                }
+                y += 34.0;
+            }
+            place_observation_label(&self.menu_bar_icon_help, 14.0, width, 16.0, &mut y, apply);
         }
-        y += if side_by_side { 26.0 } else { 58.0 };
-        y += 8.0;
-        place_observation_label(&self.menu_bar_icon_help, 14.0, width, 16.0, &mut y, apply);
-        if !self.menu_bar_icon_error.isHidden() {
+        if self.menu_bar_icon_error_detail.is_some() {
             y += 6.0;
             place_observation_label(&self.menu_bar_icon_error, 14.0, width, 16.0, &mut y, apply);
         }
@@ -2853,16 +2963,9 @@ impl MenuPanel {
         let cards = self.settings_tab.subviews();
         let appearance_card = cards.objectAtIndex(1);
         let scale_card = cards.objectAtIndex(2);
-        let language_card = cards.objectAtIndex(3);
-        let observation_height = self.layout_observation(card_width, true);
-        self.observation_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 8.0),
-            NSSize::new(card_width, observation_height),
-        ));
-        let appearance_offset = observation_height + MENU_BAR_CARD_GAP;
 
         appearance_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 8.0 + appearance_offset),
+            NSPoint::new(8.0, 16.0 + self.menu_bar_card_height(card_width)),
             NSSize::new(card_width, 146.0),
         ));
         self.settings_appearance_label.setFrame(NSRect::new(
@@ -2901,7 +3004,7 @@ impl MenuPanel {
         ));
 
         scale_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 162.0 + appearance_offset),
+            NSPoint::new(8.0, 170.0 + self.menu_bar_card_height(card_width)),
             NSSize::new(card_width, 54.0),
         ));
         self.scale_label.setFrame(NSRect::new(
@@ -2921,43 +3024,28 @@ impl MenuPanel {
             NSSize::new(28.0, 28.0),
         ));
 
-        language_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 224.0 + appearance_offset),
-            NSSize::new(card_width, 68.0),
-        ));
-        self.language_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 8.0),
-            NSSize::new((card_width - 28.0).max(1.0), 18.0),
-        ));
-        self.language_popup.setFrame(NSRect::new(
-            NSPoint::new(14.0, 30.0),
-            NSSize::new((card_width - 28.0).max(1.0), 26.0),
-        ));
-        let menu_bar_height = self.menu_bar_card_height(card_width);
+        let menu_bar_height = self.layout_menu_bar_card(card_width, true);
         self.menu_bar_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, MENU_BAR_CARD_TOP + appearance_offset),
+            NSPoint::new(8.0, 8.0),
             NSSize::new(card_width, menu_bar_height),
         ));
-        self.layout_menu_bar_card(card_width, true);
+        let mut y = menu_bar_height + 232.0;
         let lifecycle_height = self.lifecycle_card.height(card_width);
         self.lifecycle_card.layout(NSRect::new(
-            NSPoint::new(
-                8.0,
-                MENU_BAR_CARD_TOP + menu_bar_height + MENU_BAR_CARD_GAP * 2.0 + observation_height,
-            ),
+            NSPoint::new(8.0, y),
             NSSize::new(card_width, lifecycle_height),
         ));
+        y += lifecycle_height + 8.0;
         let update_height = self.update_card.height(card_width);
         self.update_card.layout(NSRect::new(
-            NSPoint::new(
-                8.0,
-                MENU_BAR_CARD_TOP
-                    + menu_bar_height
-                    + MENU_BAR_CARD_GAP * 3.0
-                    + observation_height
-                    + lifecycle_height,
-            ),
+            NSPoint::new(8.0, y),
             NSSize::new(card_width, update_height),
+        ));
+        y += update_height + 8.0;
+        let observation_height = self.layout_observation(card_width, true);
+        self.observation_card.setFrame(NSRect::new(
+            NSPoint::new(8.0, y),
+            NSSize::new(card_width, observation_height),
         ));
     }
 
@@ -2968,25 +3056,26 @@ impl MenuPanel {
     fn layout_observation(&self, width: f64, apply: bool) -> f64 {
         let content_width = (width - 28.0).max(1.0);
         let settings = self.connection_settings_expanded;
+        let diagnostics = self.connection_diagnostics_expanded;
         let auto = self
             .observation_preferences
             .as_ref()
             .is_none_or(|p| p.host == ObservationSelection::Auto);
         if apply {
             self.connection_auto_help.setHidden(!settings || !auto);
-            self.connection_profile_title.setHidden(!settings);
+            self.connection_status.setHidden(!settings);
+            self.connection_profile_title.setHidden(!diagnostics);
             for (title, value) in self
                 .connection_profile_labels
                 .iter()
                 .zip(&self.connection_profile_values)
             {
-                title.setHidden(!settings);
-                value.setHidden(!settings);
+                title.setHidden(!diagnostics);
+                value.setHidden(!diagnostics);
+                value.setRefusesFirstResponder(!diagnostics);
             }
-            self.observation_error.setHidden(
-                !self.connection_diagnostics_expanded
-                    || self.observation_error.stringValue().length() == 0,
-            );
+            self.observation_error
+                .setHidden(self.observation_error.stringValue().length() == 0);
         }
         let mut y = 14.0;
         place_observation_label(
@@ -3011,16 +3100,18 @@ impl MenuPanel {
             ));
         }
         y += host_height + 6.0;
-        place_observation_label(
-            &self.connection_status,
-            14.0,
-            content_width,
-            16.0,
-            &mut y,
-            apply,
-        );
-        y += 8.0;
         place_connection_disclosure(&self.connection_settings_toggle, width, &mut y, apply);
+        if settings {
+            place_observation_label(
+                &self.connection_status,
+                14.0,
+                content_width,
+                16.0,
+                &mut y,
+                apply,
+            );
+            y += 8.0;
+        }
         if settings {
             if auto {
                 place_observation_label(
@@ -3033,6 +3124,17 @@ impl MenuPanel {
                 );
                 y += 8.0;
             }
+        }
+        let extension_height = self.lifecycle_card.extensions_height(width, settings);
+        if apply {
+            self.lifecycle_card.layout_extensions(
+                NSRect::new(NSPoint::new(0.0, y), NSSize::new(width, extension_height)),
+                settings,
+            );
+        }
+        y += extension_height;
+        place_connection_disclosure(&self.connection_diagnostics_toggle, width, &mut y, apply);
+        if diagnostics {
             place_observation_label(
                 &self.connection_profile_title,
                 14.0,
@@ -3053,9 +3155,7 @@ impl MenuPanel {
                 y += 8.0;
             }
         }
-        place_connection_disclosure(&self.connection_diagnostics_toggle, width, &mut y, apply);
-        if self.connection_diagnostics_expanded && self.observation_error.stringValue().length() > 0
-        {
+        if self.observation_error.stringValue().length() > 0 {
             place_observation_label(
                 &self.observation_error,
                 14.0,
@@ -3068,6 +3168,37 @@ impl MenuPanel {
         }
         y + 10.0
     }
+}
+
+fn scroll_reading_anchor(
+    view: &NSView,
+    document: &NSView,
+    offset: f64,
+) -> Option<(Retained<NSView>, f64)> {
+    let mut best: Option<(Retained<NSView>, f64)> = None;
+    for child in view.subviews().iter() {
+        if child.isHidden() {
+            continue;
+        }
+        let candidate = if child.downcast_ref::<NSControl>().is_some() {
+            let y = child
+                .convertRect_toView(child.bounds(), Some(document))
+                .origin
+                .y;
+            Some((child.retain(), y))
+        } else {
+            scroll_reading_anchor(&child, document, offset)
+        };
+        if let Some((candidate, y)) = candidate {
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_y)| (y - offset).abs() < (*best_y - offset).abs())
+            {
+                best = Some((candidate, y));
+            }
+        }
+    }
+    best
 }
 
 fn set_connection_disclosure(
@@ -3101,12 +3232,7 @@ fn settings_content_height(
     lifecycle_height: f64,
     update_height: f64,
 ) -> f64 {
-    SETTINGS_BASE_HEIGHT
-        + MENU_BAR_CARD_GAP * 2.0
-        + menu_bar_height
-        + observation_height
-        + lifecycle_height
-        + update_height
+    256.0 + menu_bar_height + observation_height + lifecycle_height + update_height
 }
 
 fn measured_label_height(field: &NSTextField, width: f64) -> f64 {

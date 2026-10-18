@@ -2397,6 +2397,30 @@ define_class!(
             });
         }
 
+        #[unsafe(method(toggleUpdateOptions:))]
+        fn toggle_update_options(&self, _sender: Option<&AnyObject>) {
+            with_ui_internal(|ui| {
+                ui.menu_panel.toggle_update_options();
+                ui.sync_character_menu_frame();
+            });
+        }
+
+        #[unsafe(method(toggleBubbleColors:))]
+        fn toggle_bubble_colors(&self, _sender: Option<&AnyObject>) {
+            with_ui_mut(|ui| {
+                ui.menu_panel.toggle_bubble_colors();
+                ui.reanchor_menu_panel();
+            });
+        }
+
+        #[unsafe(method(toggleMenuBarIcon:))]
+        fn toggle_menu_bar_icon(&self, _sender: Option<&AnyObject>) {
+            with_ui_mut(|ui| {
+                ui.menu_panel.toggle_menu_bar_icon();
+                ui.reanchor_menu_panel();
+            });
+        }
+
 
         #[unsafe(method(setLanguage:))]
         fn set_language(&self, sender: Option<&AnyObject>) {

@@ -232,6 +232,23 @@ fn path_str(path: &Path) -> Result<&str, String> {
 fn tool(binary: &str, args: &[&str], max: usize, seconds: u64) -> Result<String, String> {
     origin::command_output(Path::new(binary), args, max, seconds)
 }
+fn installed_version(version: &str) -> Result<Version, String> {
+    let parsed = Version::parse(version).map_err(|e| format!("invalid installed version: {e}"))?;
+    let beta = parsed
+        .pre
+        .as_str()
+        .strip_prefix("beta.")
+        .is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    if (!parsed.pre.is_empty() && !beta)
+        || !parsed.build.is_empty()
+        || parsed.to_string() != version
+    {
+        return Err("public installation requires a canonical stable or beta.N version".into());
+    }
+    Ok(parsed)
+}
 fn stable_version(version: &str) -> Result<Version, String> {
     let parsed = Version::parse(version).map_err(|e| format!("invalid installed version: {e}"))?;
     if !parsed.pre.is_empty() || !parsed.build.is_empty() || parsed.to_string() != version {
@@ -615,7 +632,7 @@ fn validate_neutral_bundle(bundle: &Path) -> Result<ValidatedApp, String> {
     )?
     .trim()
     .to_owned();
-    stable_version(&version)?;
+    installed_version(&version)?;
     if tool(
         "/usr/bin/plutil",
         &[
@@ -799,7 +816,7 @@ fn inspect_neutral(executable: &Path) -> Result<InstallationRecord, String> {
         return Err("invalid executable layout".into());
     }
     let app = validate_staged_app(bundle)?;
-    let actual = origin::origin_for_executable(&canonical)?;
+    let actual = origin::origin_for_executable(&canonical, Some(&app))?;
     let kind = match &actual {
         InstallOrigin::Homebrew { .. } => InstallationKind::Homebrew,
         InstallOrigin::Source { .. } => InstallationKind::Source,
@@ -1036,7 +1053,7 @@ fn install_neutral(request: &InstallRequest) -> Result<InstallationRecord, Strin
         if !admission.holds_root(physical_install_root(&current.origin)?) {
             return Err("installation selection changed outside the fenced roots".into());
         }
-        if stable_version(&current.app_version)? >= stable_version(&staged.version)? {
+        if installed_version(&current.app_version)? >= installed_version(&staged.version)? {
             // A new locator may adopt the verified selection; an existing owner is never rewritten.
             if read_locator()?.is_none() {
                 write_locator(current)?;
@@ -1053,7 +1070,7 @@ fn install_neutral(request: &InstallRequest) -> Result<InstallationRecord, Strin
         if target_record.origin != desired {
             return Err("target bundle has a different actual owner".into());
         }
-        if stable_version(&target_record.app_version)? >= stable_version(&staged.version)? {
+        if installed_version(&target_record.app_version)? >= installed_version(&staged.version)? {
             if current.is_none() {
                 write_locator(&target_record)?;
             }
@@ -1898,10 +1915,12 @@ fn load_migration_stage(plan: &crate::migration::MigrationPlan) -> Result<Staged
     protocol::validate_operation_id(&plan.operation_id)?;
     let release = &plan.target.release;
     release.validate_neutral()?;
-    if release.version != identity::neutral::VERSION || release.channel != ReleaseChannel::Stable {
+    if release.version != identity::neutral::MIGRATION_TARGET_VERSION
+        || release.channel != ReleaseChannel::Stable
+    {
         return Err(format!(
             "legacy migration target must be stable neutral {}",
-            identity::neutral::VERSION
+            identity::neutral::MIGRATION_TARGET_VERSION
         ));
     }
     let bundle = &plan.target.staged_bundle;
@@ -2030,10 +2049,12 @@ pub fn stage_neutral_migration_helper(
 ) -> Result<StagedApp, String> {
     protocol::validate_operation_id(operation_id)?;
     release.validate_neutral()?;
-    if release.version != identity::neutral::VERSION || release.channel != ReleaseChannel::Stable {
+    if release.version != identity::neutral::MIGRATION_TARGET_VERSION
+        || release.channel != ReleaseChannel::Stable
+    {
         return Err(format!(
             "bridge migration may stage only the approved neutral stable {} target",
-            identity::neutral::VERSION,
+            identity::neutral::MIGRATION_TARGET_VERSION,
         ));
     }
     let directory =
@@ -2049,18 +2070,7 @@ pub fn stage_neutral_migration_release(
 ) -> Result<crate::migration::MigrationTarget, String> {
     // Capability two preserves opaque selections; it does not synthesize an enabled integration.
     let _ = observation.as_str();
-    let release = crate::releases::fetch_neutral_candidates()?
-        .into_iter()
-        .find(|release| {
-            release.version == identity::neutral::VERSION
-                && release.channel == ReleaseChannel::Stable
-        })
-        .ok_or_else(|| {
-            format!(
-                "official neutral stable {} release is unavailable",
-                identity::neutral::VERSION
-            )
-        })?;
+    let release = crate::releases::fetch_neutral_migration_candidate()?;
     let stage = stage_neutral_migration_helper(state_dir, operation_id, &release)?;
     #[cfg(not(desktop_pet_legacy))]
     let selected = discover_neutral(None)?;
@@ -2143,4 +2153,27 @@ pub fn stage_neutral_migration_release(
         staged_bundle: stage.bundle,
         previous_installation,
     })
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{installed_version, stable_version};
+
+    #[test]
+    fn direct_install_accepts_canonical_beta_without_relaxing_migration() {
+        let stable = installed_version("0.4.12").unwrap();
+        let beta = installed_version("0.4.13-beta.1").unwrap();
+        assert!(beta > stable);
+        assert!(beta < installed_version("0.4.13").unwrap());
+        assert!(stable_version("0.4.13-beta.1").is_err());
+        for invalid in [
+            "0.4.13-alpha.1",
+            "0.4.13-beta",
+            "0.4.13-beta.01",
+            "0.4.13-beta.1.extra",
+            "0.4.13-beta.1+build",
+        ] {
+            assert!(installed_version(invalid).is_err(), "{invalid}");
+        }
+    }
 }

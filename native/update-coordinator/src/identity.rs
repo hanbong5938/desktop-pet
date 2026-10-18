@@ -5,12 +5,15 @@ mod selected;
 #[cfg(desktop_pet_legacy)]
 pub use selected::*;
 
-/// Fixed neutral target authority is also needed by the one-time bridge staging
-/// boundary; it does not change that bridge's own compiled identity.
+/// Neutral product identity, including the fixed authority used by bridge staging.
+/// The running product version is independent of the approved migration target.
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.12";
+    pub const VERSION: &str = "0.4.13-beta.1";
+    /// One-time legacy migration is authorized only for this stable release.
+    /// A product version bump must never grant a new migration authority.
+    pub const MIGRATION_TARGET_VERSION: &str = "0.4.12";
     pub const BINARY: &str = "desktop-pet";
     pub const HELPER: &str = "desktop-pet-update-coordinator";
     pub const APP_NAME: &str = "DesktopPet.app";

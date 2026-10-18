@@ -9,6 +9,8 @@ Older separate A/B instructions below are historical and must not be added to th
 
 ## Publication boundary
 
+The approved migration target remains **stable Core v0.4.12**, independently of the current product build version. The explicit **v0.4.13-beta.1** product release does not authorize a new legacy bridge, widen original-update trust, or replace the stable migration target. Retained historical plans keep their original release identities; integration-only settlement after an independently authenticated owner upgrade uses the current runtime identity without granting migration execution authority.
+
 The current immutable neutral target is **Core v0.4.8**, [Release `413822006`](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.8), exact source **`2936b2c600235ec8d15d1248ef3380e0a8dca8c0`**. Its matched `DesktopPet.app` / `desktop-pet` / `desktop-pet-update-coordinator` envelope uses bundle ID `io.github.hanbong5938.desktop-pet`, protocol **4 / observation capability 2 / integration API 1**.
 
 The corrected genuine legacy bridge is **v0.3.12**, [Release `413831645`](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.12), built from that same exact Core source. Its eleven-file metadata-only ingress is **`f05a95a46dee042acf613c8d126d25be597fc824`**, with annotated tag object `eb7656fa6465148110b021b2d28efc3dcaa428a5`. The genuine `HerdrDesktopPet.app` / `herdr-desktop-pet` / `herdr-update-coordinator` envelope retains `dev.herdr.desktop-pet` and **3 / 1 / 1**; it does not immediately launch a renamed neutral binary. Previously published v0.3.11 remains immutable historical evidence and does not contain this correction.

@@ -706,7 +706,14 @@ fn integration_observations(
     for profile in &plan.profiles {
         let live = committed_profile_image(plan, record, profile).and_then(|image| {
             let live = status(profile)?;
-            verify_neutral_profile(historical_image.unwrap_or(image), profile, &live)?;
+            // Fresh migration observes its approved stable target; only a
+            // separately authenticated owner upgrade observes the current app.
+            let version = if historical_image.is_some() {
+                crate::identity::neutral::VERSION
+            } else {
+                &plan.target.release.version
+            };
+            verify_neutral_profile(historical_image.unwrap_or(image), version, profile, &live)?;
             Ok(live)
         });
         if profile.observation.includes_provider("herdr") && profile.herdr_socket.is_some() {
@@ -940,7 +947,12 @@ pub fn observe_for_context(
         .ok_or("retained migration profile differs")?;
     verify_retained_commit(plan, &record, selected)?;
     let live = status(selected)?;
-    verify_neutral_profile(&context.running, selected, &live)?;
+    verify_neutral_profile(
+        &context.running,
+        crate::identity::neutral::VERSION,
+        selected,
+        &live,
+    )?;
     if live.instance_id != context.instance_id {
         return Err("current runtime instance changed during retained settlement".into());
     }
@@ -1195,7 +1207,7 @@ fn route_authority(
         });
     }
     verify_retained_commit(plan, record, profile)?;
-    verify_neutral_profile(&image, profile, live)?;
+    verify_neutral_profile(&image, crate::identity::neutral::VERSION, profile, live)?;
     let context = runtime_context(profile, live, image, profile.environment.clone())?;
     let owner = owner_upgrade(plan, &context)?
         .ok_or("retained route has no authenticated current installed owner")?;
@@ -1823,7 +1835,7 @@ mod tests {
             let response = serde_json::to_vec(&serde_json::json!({
                 "ok":true,"running":true,"shutdown":false,"ready":true,
                 "ui_ready":true,"control_ready":true,"observation_mode":selection.as_str(),
-                "app_version":crate::identity::neutral::VERSION,
+                "app_version":plan.target.release.version,
                 "updater_protocol":4,"observation_capability":2,"integration_api":1,
                 "instance_id":"ready-target","pid":std::process::id(),
                 "executable_path":image.path,"running_sha256":image.sha256,

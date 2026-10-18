@@ -35,12 +35,9 @@ try {
 }
 const packageVersion = typeof packageJson.version === "string"
   ? packageJson.version
-  : fail("package version must be a stable semantic version");
-if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(packageVersion)) {
-  fail("package version must be a stable semantic version");
-}
-if (packageVersion !== "0.4.12") {
-  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.12 core revision");
+  : fail("package version must be a semantic version");
+if (packageVersion !== "0.4.13-beta.1") {
+  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.13-beta.1 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");

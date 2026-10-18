@@ -87,6 +87,9 @@ pub(crate) struct AppUpdateCard {
     auto_label: Retained<NSTextField>,
     auto_help: Retained<NSTextField>,
     auto_switch: Retained<NSSwitch>,
+    options_toggle: Retained<NSButton>,
+    options_expanded: bool,
+    beta_summary: Retained<NSTextField>,
     beta_label: Retained<NSTextField>,
     beta_help: Retained<NSTextField>,
     beta_switch: Retained<NSSwitch>,
@@ -130,6 +133,8 @@ impl AppUpdateCard {
             auto_switch.setTarget(Some(target));
             auto_switch.setAction(Some(sel!(toggleUpdateAutoCheck:)));
         }
+        let options_toggle = button(target, sel!(toggleUpdateOptions:), mtm);
+        let beta_summary = label(10.5, false, true, mtm);
         let beta_label = label(12.0, true, false, mtm);
         let beta_help = label(10.5, false, true, mtm);
         let beta_switch: Retained<NSSwitch> = unsafe {
@@ -173,6 +178,8 @@ impl AppUpdateCard {
             &*auto_label,
             &*auto_help,
             &*auto_switch,
+            &*options_toggle,
+            &*beta_summary,
             &*first_separator,
             &*beta_label,
             &*beta_help,
@@ -201,6 +208,9 @@ impl AppUpdateCard {
             auto_label,
             auto_help,
             auto_switch,
+            options_toggle,
+            options_expanded: false,
+            beta_summary,
             beta_label,
             beta_help,
             beta_switch,
@@ -231,6 +241,10 @@ impl AppUpdateCard {
     pub(crate) fn view(&self) -> &NSView {
         &self.view
     }
+    pub(crate) fn options_toggle(&self) -> &NSButton {
+        &self.options_toggle
+    }
+
     pub(crate) fn diagnostics_toggle(&self) -> &NSButton {
         &self.diagnostics_toggle
     }
@@ -298,6 +312,7 @@ impl AppUpdateCard {
                 None,
             );
         }
+        self.refresh_options();
     }
 
     pub(crate) fn refresh(&mut self, model: &UpdateCardModel) {
@@ -385,6 +400,38 @@ impl AppUpdateCard {
         self.migration
             .setEnabled(!busy && model.migration_available);
         self.model = Some(model.clone());
+        self.refresh_options();
+    }
+
+    pub(crate) fn toggle_options(&mut self) {
+        self.options_expanded = !self.options_expanded;
+        self.refresh_options();
+    }
+
+    fn refresh_options(&self) {
+        let title = text(
+            self.locale,
+            if self.options_expanded {
+                Message::AppUpdateHideOptions
+            } else {
+                Message::AppUpdateShowOptions
+            },
+        );
+        self.options_toggle.setTitle(&NSString::from_str(title));
+        accessibility(&self.options_toggle, title);
+        let summary = text(self.locale, Message::AppUpdateBetaEnabledSummary);
+        set_text(&self.beta_summary, summary);
+        accessibility(&self.beta_summary, summary);
+        self.beta_summary.setHidden(
+            self.options_expanded
+                || self
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| !model.receive_beta_updates),
+        );
+        self.beta_label.setHidden(!self.options_expanded);
+        self.beta_help.setHidden(!self.options_expanded);
+        self.beta_switch.setHidden(!self.options_expanded);
     }
 
     pub(crate) fn toggle_diagnostics(&mut self) {
@@ -529,15 +576,32 @@ impl AppUpdateCard {
         }
         y += row_height + 3.0;
         place(&self.auto_help, 14.0, full, 14.0, &mut y, apply);
-        let beta_row_height = measured(&self.beta_label, beside_switch).max(30.0);
+        y += 6.0;
         if apply {
-            self.beta_label
-                .setFrame(rect(14.0, y, beside_switch, beta_row_height));
-            self.beta_switch
-                .setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
+            self.options_toggle.setFrame(rect(
+                14.0,
+                y,
+                button_width(&self.options_toggle, full),
+                25.0,
+            ));
         }
-        y += beta_row_height + 3.0;
-        place(&self.beta_help, 14.0, full, 14.0, &mut y, apply);
+        y += 25.0;
+        if !self.beta_summary.isHidden() {
+            y += 3.0;
+            place(&self.beta_summary, 14.0, full, 14.0, &mut y, apply);
+        }
+        if self.options_expanded {
+            y += 4.0;
+            let beta_row_height = measured(&self.beta_label, beside_switch).max(30.0);
+            if apply {
+                self.beta_label
+                    .setFrame(rect(14.0, y, beside_switch, beta_row_height));
+                self.beta_switch
+                    .setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
+            }
+            y += beta_row_height + 3.0;
+            place(&self.beta_help, 14.0, full, 14.0, &mut y, apply);
+        }
         y += 7.0;
         if apply {
             self.first_separator.setFrame(rect(14.0, y, full, 1.0));

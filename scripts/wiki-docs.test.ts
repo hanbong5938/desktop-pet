@@ -157,6 +157,34 @@ describe("Wiki projection", () => {
     }
   });
 
+  test("canonical beta notes and published prereleases never displace stable Wiki releases", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    const stableTag = "v0.4.12";
+    const betaTag = "v0.4.13-beta.1";
+    await note(options.root, stableTag);
+    const head = commitFixture(options.root);
+    git(options.root, "tag", stableTag);
+    const stable = release(stableTag, { html_url: `https://github.com/${CORE_REPOSITORY}/releases/tag/${stableTag}` });
+    options.releases = [stable];
+    await generateWiki(options);
+    const status = await readFile(join(options.output, "Release-Status.md"), "utf8");
+    const older = await readFile(join(options.output, "Older-Releases.md"), "utf8");
+    await note(options.root, betaTag, "Opt-in beta evidence, not a stable release.");
+    await put(options.root, "docs/releases/README.md", `# Versions\n\n[Beta notes](${betaTag}.md)\n`);
+    const beta = release(betaTag, { html_url: `https://github.com/${CORE_REPOSITORY}/releases/tag/${betaTag}`, prerelease: true });
+    options.releases = [stable, beta];
+    const names = await generateWiki(options);
+    expect(publicationState(betaTag, beta)).toBe("prerelease");
+    expect(() => requirePublishedRelease(betaTag, options.releases!)).toThrow();
+    expect(names).not.toContain(`Release-${betaTag}.md`);
+    expect(await readFile(join(options.output, "Release-Status.md"), "utf8")).toBe(status);
+    expect(await readFile(join(options.output, "Older-Releases.md"), "utf8")).toBe(older);
+    expect((await rendered(await readFile(join(options.output, "Home.md"), "utf8"))).links).toContainEqual({
+      href: `https://github.com/${CORE_REPOSITORY}/blob/${head}/docs/releases/${betaTag}.md`, title: null,
+    });
+  });
+
   test("links portable canonical pages, source guides and images; writes only managed pages", async () => {
     const options = await fixture();
     const head = git(options.root, "rev-parse", "HEAD");
@@ -559,7 +587,7 @@ describe("Wiki projection", () => {
     await expect(generateWiki(options)).rejects.toThrow("Invalid release note heading");
     await rm(join(options.root, "docs/releases/v0.2.0.md"));
     await put(options.root, "docs/releases/v00.2.0.md", "# Invalid version\n");
-    await expect(generateWiki(options)).rejects.toThrow("stable vMAJOR.MINOR.PATCH");
+    await expect(generateWiki(options)).rejects.toThrow();
     await rm(join(options.root, "docs/releases/v00.2.0.md"));
     await put(options.root, "docs/releases/README.md", "# Versions\n[Escape](../../../outside.md)\n");
     await expect(generateWiki(options)).rejects.toThrow();

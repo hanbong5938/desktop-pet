@@ -478,12 +478,12 @@ pub fn read_plan(path: &Path) -> Result<MigrationPlan, String> {
     Ok(plan)
 }
 pub fn validate_plan(plan: &MigrationPlan) -> Result<(), String> {
-    if plan.target.release.version != crate::identity::neutral::VERSION
+    if plan.target.release.version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         || plan.target.release.channel != crate::ReleaseChannel::Stable
     {
         return Err(format!(
             "migration requires approved neutral stable {} release",
-            crate::identity::neutral::VERSION
+            crate::identity::neutral::MIGRATION_TARGET_VERSION
         ));
     }
     validate_plan_structure(plan)
@@ -710,7 +710,7 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
         return Err("migration locator/profile pointer is not a canonical product record".into());
     }
     if plan.adopt_as_default
-        && plan.target.release.version == crate::identity::neutral::VERSION
+        && plan.target.release.version == crate::identity::neutral::MIGRATION_TARGET_VERSION
         && !default_profile_matches(&plan.previous_default_profile, &plan.profiles[0])?
     {
         return Err("migration cannot replace an unrelated existing default profile".into());
@@ -993,7 +993,7 @@ fn verify_status(
         || !live.control_ready
         || live.app_version
             != if target {
-                crate::identity::neutral::VERSION
+                crate::identity::neutral::MIGRATION_TARGET_VERSION
             } else {
                 "0.3.16"
             }
@@ -1318,7 +1318,7 @@ pub fn startup_authorization(
             return Err("bridge restart lacks valid rollback authorization".into());
         }
     } else if &context.running != target_image(&plan, &record)?
-        || context.version != crate::identity::neutral::VERSION
+        || context.version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         || record.phase != MigrationPhase::Starting
     {
         return Err("target startup lacks held migration authorization".into());
@@ -1992,7 +1992,7 @@ fn execute(
         let existing = crate::installation::inspect(&installed_image.path)?;
         if existing.image != installed_image
             || existing.origin != plan.target.origin
-            || existing.app_version != crate::identity::neutral::VERSION
+            || existing.app_version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         {
             return Err(
                 "live read-only target installation changed; migration may not replace it".into(),
@@ -3849,12 +3849,12 @@ mod tests {
                 pid:1000,instance_id:"source-instance".into(),stop_generation:0,observation:ObservationSelection::Auto,environment:BTreeMap::new(),
                 herdr_socket:None,assets_override:None,host_plugin_config_dir:None,tern_reconnect_required:false}],
             target:MigrationTarget {release:ReleaseCandidate {
-                version:crate::identity::neutral::VERSION.into(),channel:crate::ReleaseChannel::Stable,
-                tag:format!("v{}", crate::identity::neutral::VERSION),release_id:1,
-                asset_name:format!("DesktopPet-v{}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
-                archive_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
+                version:crate::identity::neutral::MIGRATION_TARGET_VERSION.into(),channel:crate::ReleaseChannel::Stable,
+                tag:format!("v{}", crate::identity::neutral::MIGRATION_TARGET_VERSION),release_id:1,
+                asset_name:format!("DesktopPet-v{}-macos-arm64.tar.gz", crate::identity::neutral::MIGRATION_TARGET_VERSION),
+                archive_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz", crate::identity::neutral::MIGRATION_TARGET_VERSION),
                 archive_size:10,sha256:"a".repeat(64),
-                checksum_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz.sha256", crate::identity::neutral::VERSION)
+                checksum_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz.sha256", crate::identity::neutral::MIGRATION_TARGET_VERSION)
             },image:ExecutableIdentity {path:target.join("Contents/MacOS/desktop-pet"),sha256:"c".repeat(64)},
                 origin:InstallOrigin::Standalone{bundle:target},staged_bundle:root.join("stage/DesktopPet.app"),previous_installation:None},
             target_manager_program:None,legacy_aliases:Vec::new(),
@@ -4328,6 +4328,7 @@ mod tests {
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
+        assert_eq!(plan.target.release.version, "0.4.12");
         for version in [
             "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9",
             "0.4.10", "0.4.11",
@@ -4342,6 +4343,24 @@ mod tests {
             .archive_url
             .replace("desktop-pet/releases", "herdr-desktop-pet/releases");
         assert!(validate_plan(&plan).is_err());
+    }
+    #[test]
+    fn valid_beta_release_never_gains_stable_migration_authority() {
+        let (_temp, mut plan) = retained_fixture("0.4.13-beta.1");
+        plan.target.release.channel = crate::ReleaseChannel::Beta;
+        plan.target.release.tag = "beta/0.4.13-beta.1".into();
+        plan.target.release.archive_url = format!(
+            "https://github.com/hanbong5938/desktop-pet/releases/download/{}/{}",
+            plan.target.release.tag, plan.target.release.asset_name
+        );
+        plan.target.release.checksum_url = format!("{}.sha256", plan.target.release.archive_url);
+        plan.target.release.validate_neutral().unwrap();
+        assert!(validate_plan(&plan)
+            .unwrap_err()
+            .contains("approved neutral stable 0.4.12"));
+        assert!(validate_plan_structure(&plan).is_err());
+        assert!(approval::authorize_update_approval(&plan).is_err());
+        assert!(!journal_path(&plan).exists());
     }
     #[test]
     fn migration_eligibility_accepts_only_the_current_bridge_image() {
@@ -5357,8 +5376,8 @@ fn capture_target_profiles(
             path: live.executable_path.clone(),
             sha256: live.running_sha256.clone(),
         };
-        let current =
-            image == target.image && live.app_version == crate::identity::neutral::VERSION;
+        let current = image == target.image
+            && live.app_version == crate::identity::neutral::MIGRATION_TARGET_VERSION;
         let retained_brew = matches!(&target.origin, InstallOrigin::Homebrew { cellar_formula_root, .. }
             if image.path.starts_with(cellar_formula_root) && image.path != target.image.path)
             && matches!(live.app_version.as_str(), "0.4.7" | "0.4.8");
@@ -5505,6 +5524,7 @@ fn history_for_context(
 
 fn verify_neutral_profile(
     image: &ExecutableIdentity,
+    version: &str,
     profile: &LegacyProfile,
     live: &LiveStatus,
 ) -> Result<(), String> {
@@ -5515,7 +5535,7 @@ fn verify_neutral_profile(
         || !live.ui_ready
         || !live.control_ready
         || live.migration_gated
-        || live.app_version != crate::identity::neutral::VERSION
+        || live.app_version != version
         || live.updater_protocol != 4
         || live.observation_capability != 2
         || live.integration_api != 1

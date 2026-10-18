@@ -403,8 +403,14 @@ fn fetch_for(authority: Authority) -> Result<Vec<ReleaseCandidate>, String> {
 /// Operation B has one approved stable target, independent of this bridge's
 /// own release stream. Missing or ambiguous published bytes are not fallback.
 pub fn fetch_neutral_migration_candidate() -> Result<ReleaseCandidate, String> {
-    let mut candidates = fetch_neutral_candidates()?.into_iter().filter(|candidate| {
-        candidate.version == crate::identity::neutral::VERSION
+    select_neutral_migration_candidate(fetch_neutral_candidates()?)
+}
+
+fn select_neutral_migration_candidate(
+    candidates: Vec<ReleaseCandidate>,
+) -> Result<ReleaseCandidate, String> {
+    let mut candidates = candidates.into_iter().filter(|candidate| {
+        candidate.version == crate::identity::neutral::MIGRATION_TARGET_VERSION
             && candidate.channel == ReleaseChannel::Stable
     });
     let candidate = candidates
@@ -630,11 +636,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bridge_neutral_staging_uses_fixed_neutral_authority() {
-        let version = crate::identity::neutral::VERSION;
+    fn neutral_fixture(version: &str) -> Value {
         let mut release = fixture(version);
-        let tag = format!("v{version}");
+        let (_, _, tag) = classify(version).unwrap();
         let archive = format!(
             "{}-v{version}-macos-arm64.tar.gz",
             crate::identity::neutral::ARCHIVE_PREFIX
@@ -661,6 +665,12 @@ mod tests {
                 crate::identity::neutral::RELEASE_DOWNLOAD
             ));
         }
+        release
+    }
+
+    #[test]
+    fn bridge_neutral_staging_uses_fixed_neutral_authority() {
+        let mut release = neutral_fixture(crate::identity::neutral::MIGRATION_TARGET_VERSION);
         let page = serde_json::to_string(&vec![release.clone()]).unwrap();
         let candidate = parse_neutral_catalog_page(&page).unwrap().pop().unwrap();
         candidate.validate_neutral().unwrap();
@@ -676,5 +686,34 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn beta_product_release_does_not_authorize_a_new_migration_target() {
+        let stable = neutral_fixture(crate::identity::neutral::MIGRATION_TARGET_VERSION);
+        let beta = neutral_fixture("0.4.13-beta.1");
+        let newer_stable = neutral_fixture("0.4.13");
+        let parse = |releases: Vec<Value>| {
+            parse_neutral_catalog_page(&serde_json::to_string(&releases).unwrap()).unwrap()
+        };
+        let candidates = parse(vec![beta.clone(), newer_stable.clone(), stable.clone()]);
+        assert_eq!(candidates.len(), 3);
+        let direct = select_candidate(&candidates, "0.4.12", UpdatePolicy::StableAndBeta)
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.version, "0.4.13");
+        let beta_only = parse(vec![beta.clone()]);
+        assert_eq!(
+            select_candidate(&beta_only, "0.4.12", UpdatePolicy::StableAndBeta)
+                .unwrap()
+                .unwrap()
+                .version,
+            "0.4.13-beta.1"
+        );
+        let target = select_neutral_migration_candidate(candidates).unwrap();
+        assert_eq!(target.version, "0.4.12");
+        assert_eq!(target.channel, ReleaseChannel::Stable);
+        assert!(select_neutral_migration_candidate(parse(vec![beta, newer_stable])).is_err());
+        assert!(select_neutral_migration_candidate(parse(vec![stable.clone(), stable])).is_err());
     }
 }

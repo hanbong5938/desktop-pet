@@ -149,7 +149,7 @@ fn bridge_authority(plan: &MigrationPlan, operation: &str) -> Result<Authority, 
             .get("target")
             .filter(|target| !target.is_null())
             .is_some_and(|target| target["release"]["version"].as_str() != Some("0.3.16"))
-        || plan.target.release.version != "0.4.12"
+        || plan.target.release.version != crate::identity::neutral::MIGRATION_TARGET_VERSION
     {
         return Err("original update does not attest this exact successor bridge, profile and bounded core target".into());
     }
@@ -419,6 +419,26 @@ mod tests {
         other = plan.clone();
         other.profiles[0].config_dir.push("different");
         assert!(bridge_authority(&other, &id).is_err());
+    }
+    #[test]
+    fn original_update_never_attests_a_beta_core_successor() {
+        let (_temp, mut plan) = crate::migration::tests::fixture();
+        let (id, base, _) = original(&plan, plan.source_image.clone());
+        let before_plan = fs::read(base.join(format!("{id}.plan.json"))).unwrap();
+        let before_result = fs::read(base.join(format!("{id}.result.json"))).unwrap();
+        plan.target.release.version = "0.4.13-beta.1".into();
+        assert!(bridge_authority(&plan, &id)
+            .unwrap_err()
+            .contains("original update does not attest"));
+        assert!(!approval_path(&plan).exists());
+        assert_eq!(
+            fs::read(base.join(format!("{id}.plan.json"))).unwrap(),
+            before_plan
+        );
+        assert_eq!(
+            fs::read(base.join(format!("{id}.result.json"))).unwrap(),
+            before_result
+        );
     }
 
     #[test]

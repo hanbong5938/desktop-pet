@@ -78,6 +78,8 @@ fn accessibility(view: &NSView, value: &str) {
 
 pub(crate) struct LifecycleSettingsCard {
     view: Retained<CardView>,
+    extensions_view: Retained<CardView>,
+    extensions_external: bool,
     heading: Retained<NSTextField>,
     auto_label: Retained<NSTextField>,
     auto_help: Retained<NSTextField>,
@@ -112,6 +114,8 @@ struct ActionRow {
 impl LifecycleSettingsCard {
     pub(crate) fn new(locale: UiLocale, target: &AnyObject, mtm: MainThreadMarker) -> Self {
         let view = CardView::new(mtm);
+        let extensions_view = CardView::new(mtm);
+        view.addSubview(&extensions_view);
         unsafe {
             let _: () = msg_send![&*view, setAccessibilityElement: false];
         }
@@ -148,6 +152,8 @@ impl LifecycleSettingsCard {
         }
         let mut card = Self {
             view,
+            extensions_view,
+            extensions_external: false,
             heading,
             auto_label,
             auto_help,
@@ -216,7 +222,72 @@ impl LifecycleSettingsCard {
         y += 2.0;
         place(&self.auto_help, full_width, 0.0, &mut y);
         y += 6.0;
+        if !self.extensions_external {
+            let height = self.layout_extensions_content(width, true, apply);
+            if apply {
+                self.extensions_view.setFrame(NSRect::new(
+                    NSPoint::new(0.0, y),
+                    NSSize::new(width, height),
+                ));
+            }
+            y += height;
+        }
+        y += 6.0;
+        place(&self.quit_help, full_width, 0.0, &mut y);
+        if !self.error.isHidden() {
+            y += 6.0;
+            place(&self.error, full_width, 0.0, &mut y);
+        }
+        y + 10.0
+    }
+
+    pub(crate) fn separate_extensions(&mut self) -> &NSView {
+        self.extensions_external = true;
+        &self.extensions_view
+    }
+
+    pub(crate) fn extensions_height(&self, width: f64, expanded: bool) -> f64 {
+        self.layout_extensions_content(width, expanded, false)
+    }
+
+    pub(crate) fn layout_extensions(&self, frame: NSRect, expanded: bool) {
+        self.extensions_view.setFrame(frame);
+        self.layout_extensions_content(frame.size.width, expanded, true);
+    }
+
+    fn layout_extensions_content(&self, width: f64, expanded: bool, apply: bool) -> f64 {
+        let full_width = (width - 28.0).max(1.0);
+        let text_width = (width - 82.0).max(1.0);
+        let mut y = 0.0;
+        let place = |field: &NSTextField, width: f64, minimum: f64, y: &mut f64| {
+            let height = field
+                .cell()
+                .expect("extension label cell")
+                .cellSizeForBounds(NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(width, 100_000.0),
+                ))
+                .height
+                .ceil()
+                .max(minimum);
+            if apply {
+                field.setFrame(NSRect::new(
+                    NSPoint::new(14.0, *y),
+                    NSSize::new(width, height),
+                ));
+            }
+            *y += height;
+        };
         for row in &self.extension_rows {
+            if apply {
+                row.label.setHidden(!expanded);
+                row.help.setHidden(!expanded);
+                row.toggle.setHidden(!expanded);
+                row.toggle.setRefusesFirstResponder(!expanded);
+            }
+            if !expanded {
+                continue;
+            }
             let row_y = y;
             place(&row.label, text_width, 32.0, &mut y);
             if apply {
@@ -229,6 +300,7 @@ impl LifecycleSettingsCard {
             place(&row.help, full_width, 0.0, &mut y);
             y += 6.0;
         }
+        // Provider actions can include recovery; keep them reachable when details are collapsed.
         for row in &self.action_rows {
             place(&row.help, full_width, 0.0, &mut y);
             y += 4.0;
@@ -240,13 +312,7 @@ impl LifecycleSettingsCard {
             }
             y += 34.0;
         }
-        y += 6.0;
-        place(&self.quit_help, full_width, 0.0, &mut y);
-        if !self.error.isHidden() {
-            y += 6.0;
-            place(&self.error, full_width, 0.0, &mut y);
-        }
-        y + 10.0
+        y
     }
 
     pub(crate) fn sync_extensions(&mut self, settings: &[(String, LifecycleSettingView)]) {
@@ -274,7 +340,7 @@ impl LifecycleSettingsCard {
                 let setting_label = label("", 12.0, true, false, self.mtm);
                 let help = label("", 10.5, false, true, self.mtm);
                 for child in [&*toggle as &NSView, &*setting_label, &*help] {
-                    self.view.addSubview(child);
+                    self.extensions_view.addSubview(child);
                 }
                 SettingRow {
                     provider: provider.clone(),
@@ -329,8 +395,8 @@ impl LifecycleSettingsCard {
                     )
                 };
                 let help = label("", 10.5, false, true, self.mtm);
-                self.view.addSubview(&button);
-                self.view.addSubview(&help);
+                self.extensions_view.addSubview(&button);
+                self.extensions_view.addSubview(&help);
                 ActionRow {
                     provider: provider.clone(),
                     key: action.key.clone(),
