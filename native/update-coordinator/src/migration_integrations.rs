@@ -799,12 +799,261 @@ enum OwnerUpgradeProof {
         previous_image: ExecutableIdentity,
     },
 }
+/// Read-only settlement under the caller's nonblocking operation lease. Neither
+/// a terminal result nor a bootstrap ACK by itself grants execution authority.
+pub fn verify_standalone_settlement(
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+    record: &crate::standalone_install::StandaloneInstallRecord,
+    context: Option<&UpdateContext>,
+) -> Result<(), String> {
+    use crate::standalone_install::{self, InstallRestart, InstallStatus, StandaloneInstallPhase};
+    record.validate(plan)?;
+    if !standalone_terminal_settleable(record) {
+        return Err("standalone operation is active or has an unresolved outcome".into());
+    }
+    if standalone_install::read_plan(&plan.profile.state_dir, &plan.operation_id)? != *plan
+        || standalone_install::read_record(&plan.profile.state_dir, &plan.operation_id)?.as_ref()
+            != Some(record)
+        || protocol::observe_latest_operation(&plan.profile.state_dir)?.as_ref()
+            != Some(&protocol::OperationObservation::StandaloneInstall(
+                record.clone(),
+            ))
+    {
+        return Err("standalone immutable approval or latest result changed".into());
+    }
+    protocol::start_allowed(plan.origin(), &plan.profile.state_dir, None, None)?;
+    if let Some(context) = context {
+        if context.config_dir != plan.profile.config_dir
+            || context.state_dir != plan.profile.state_dir
+            || context.running_origin.as_deref() != Some(plan.origin())
+        {
+            return Err("standalone settlement profile/owner differs from runtime".into());
+        }
+    }
+    if record.result.installed {
+        let retained = crate::installation::validate_standalone_replacement(plan)?;
+        if record.result.installation.as_ref() != Some(&retained.installation)
+            || record.result.retained_bundle.as_ref() != Some(&retained.retained_bundle)
+        {
+            return Err("standalone result differs from actual replacement evidence".into());
+        }
+        if record.result.applied {
+            let (_, original_context) = plan
+                .running()
+                .ok_or("stopped install has no restart consent")?;
+            let ack = standalone_install::read_stop_ack(plan)?
+                .ok_or("applied bootstrap has no durable Stop ACK")?;
+            ack.validate(plan)?;
+            let baseline = plan
+                .original_stop_generation
+                .checked_add(1)
+                .ok_or("Stop generation overflow")?;
+            let installed = crate::VerifiedInstallation {
+                image: retained.installation.image,
+                origin: retained.installation.origin,
+            };
+            let live = crate::native_runtime::verify_installed_ready(
+                original_context,
+                &installed,
+                baseline,
+            )?;
+            if live.context.environment != original_context.environment
+                || context.is_some_and(|context| {
+                    context.running != live.image
+                        || context.instance_id != live.instance_id
+                        || context.version != live.context.version
+                        || context.assets_override != live.context.assets_override
+                        || context.environment != live.context.environment
+                })
+            {
+                return Err(
+                    "standalone runtime differs from approved restart or current instance".into(),
+                );
+            }
+        } else {
+            if let Some(context) = context {
+                // A subsequent ordinary, independently fenced user launch may
+                // settle installed-only history; it never changes applied=false.
+                let live = crate::native_runtime::capture_instance(plan.origin(), &plan.profile)?;
+                let generation = protocol::stop_generation(&plan.profile.state_dir)?;
+                if live.image != retained.installation.image
+                    || live.image != context.running
+                    || live.instance_id != context.instance_id
+                    || live.context.version != context.version
+                    || live.context.environment != context.environment
+                    || live.context.assets_override != context.assets_override
+                    || live.context.observation_mode()? != context.observation_mode()?
+                    || protocol::verified_runtime_start_fence(
+                        plan.origin(),
+                        &plan.profile.state_dir,
+                        live.incarnation.pid,
+                        &live.instance_id,
+                        &live.image,
+                    )? != generation
+                {
+                    return Err(
+                        "later ordinary startup does not prove installed-only settlement".into(),
+                    );
+                }
+            } else {
+                if !crate::native_runtime::profile_quiescent(&plan.profile)? {
+                    return Err("installed-only standalone profile is not stopped".into());
+                }
+                let recovered = crate::installation::recover_replacement(
+                    &retained.intent_path,
+                    &plan.operation_id,
+                    &plan.original,
+                )?;
+                let scope =
+                    crate::native_runtime::recover_install_scope(&recovered, &plan.profile)?;
+                scope.admit(None)?;
+            }
+            if plan.running().is_none()
+                && (record.phase != StandaloneInstallPhase::Completed
+                    || record.result.status != InstallStatus::InstalledStopped
+                    || record.result.restart != InstallRestart::NotRequested)
+            {
+                return Err("stopped-source outcome attempted restart authority".into());
+            }
+        }
+    } else {
+        if crate::installation::inspect(&plan.original.executable)? != plan.original {
+            return Err(
+                "uninstalled standalone outcome did not preserve the original owner".into(),
+            );
+        }
+        let intent =
+            standalone_install::replacement_path(&plan.profile.state_dir, &plan.operation_id)?;
+        match fs::symlink_metadata(&intent) {
+            Ok(_) => {
+                let recovered = crate::installation::recover_replacement(
+                    &intent,
+                    &plan.operation_id,
+                    &plan.original,
+                )?;
+                if recovered.installation.is_some() {
+                    return Err(
+                        "uninstalled result contradicts committed replacement evidence".into(),
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let original =
+            crate::installation::validate_staged_app(crate::physical_install_root(plan.origin())?)?;
+        let scope = crate::native_runtime::NativeInstallScope::capture(&original, &plan.profile)?;
+        if crate::native_runtime::profile_quiescent(&plan.profile)? {
+            scope.admit(None)?;
+        } else if let Some((approved, original_context)) = plan.running() {
+            let live = crate::native_runtime::capture_instance(plan.origin(), &plan.profile)?;
+            let generation = protocol::stop_generation(&plan.profile.state_dir)?;
+            if live.image != approved.image
+                || live.context.environment != original_context.environment
+                || live.context.assets_override != original_context.assets_override
+                || live.context.observation_mode()? != original_context.observation_mode()?
+                || context.is_some_and(|context| {
+                    context.instance_id != live.instance_id || context.running != live.image
+                })
+            {
+                return Err("preserved original runtime is not the approved profile/image".into());
+            }
+            if live.instance_id == approved.instance_id {
+                if live.incarnation.pid != approved.pid
+                    || live.incarnation.start_sec != approved.start_sec
+                    || live.incarnation.start_usec != approved.start_usec
+                    || generation != plan.original_stop_generation
+                {
+                    return Err("preserved original incarnation or Stop fence changed".into());
+                }
+            } else {
+                // With the reservation released, a later independently fenced
+                // ordinary launch may settle failed history. It is not an
+                // updater restoration and grants no old bootstrap authority.
+                if protocol::verified_runtime_start_fence(
+                    plan.origin(),
+                    &plan.profile.state_dir,
+                    live.incarnation.pid,
+                    &live.instance_id,
+                    &live.image,
+                )? != generation
+                {
+                    return Err("current preserved-original startup fence is unproved".into());
+                }
+            }
+            scope.admit(Some(&live))?;
+        } else {
+            if !crate::native_runtime::profile_quiescent(&plan.profile)? {
+                return Err("original stopped profile is no longer quiescent".into());
+            }
+            scope.admit(None)?;
+        }
+    }
+    // Close the disk/runtime sampling window against a new reservation or Stop.
+    protocol::start_allowed(plan.origin(), &plan.profile.state_dir, None, None)?;
+    if record.result.applied
+        && protocol::stop_generation(&plan.profile.state_dir)?
+            != plan
+                .original_stop_generation
+                .checked_add(1)
+                .ok_or("Stop generation overflow")?
+    {
+        return Err("user Stop superseded the applied standalone runtime".into());
+    }
+    Ok(())
+}
+
+fn standalone_terminal_settleable(
+    record: &crate::standalone_install::StandaloneInstallRecord,
+) -> bool {
+    use crate::standalone_install::{InstallStatus, StandaloneInstallPhase};
+    match record.phase {
+        StandaloneInstallPhase::Completed => {
+            matches!(
+                record.result.status,
+                InstallStatus::Applied | InstallStatus::InstalledStopped
+            ) && record.result.installed
+        }
+        StandaloneInstallPhase::Failed | StandaloneInstallPhase::UserStopped => {
+            !record.result.applied
+                && matches!(
+                    record.result.status,
+                    InstallStatus::Failed
+                        | InstallStatus::Cancelled
+                        | InstallStatus::InstalledNotApplied
+                )
+        }
+        _ => false,
+    }
+}
+
 fn owner_upgrade(
     plan: &MigrationPlan,
     context: &UpdateContext,
 ) -> Result<Option<OwnerUpgradeProof>, String> {
-    let Some(result) = protocol::latest_operation(&context.state_dir)? else {
+    let Some(observation) = protocol::observe_latest_operation(&context.state_dir)? else {
         return installed_owner_upgrade(plan, context);
+    };
+    let result = match observation {
+        protocol::OperationObservation::Update(result) => result,
+        protocol::OperationObservation::StandaloneInstall(result) => {
+            let _lease = protocol::lock_operation(&context.state_dir, &result.operation_id)?;
+            let approval =
+                crate::standalone_install::read_plan(&context.state_dir, &result.operation_id)?;
+            verify_standalone_settlement(&approval, &result, Some(context))?;
+            if !result.result.installed {
+                return installed_owner_upgrade(plan, context);
+            }
+            // Bootstrap approval/Stop ACK never becomes migration authority.
+            // Only the real installed owner and a signed previous target can
+            // establish the existing InstalledOwner proof.
+            let retained = crate::installation::validate_standalone_replacement(&approval)?;
+            return installed_owner_upgrade_with_previous(
+                plan,
+                context,
+                Some(&retained.retained_bundle.join("Contents/MacOS/desktop-pet")),
+            );
+        }
     };
     if result.version != protocol::UPDATER_PROTOCOL {
         return installed_owner_upgrade(plan, context);
@@ -852,6 +1101,13 @@ fn installed_owner_upgrade(
     plan: &MigrationPlan,
     context: &UpdateContext,
 ) -> Result<Option<OwnerUpgradeProof>, String> {
+    installed_owner_upgrade_with_previous(plan, context, None)
+}
+fn installed_owner_upgrade_with_previous(
+    plan: &MigrationPlan,
+    context: &UpdateContext,
+    retained_previous: Option<&Path>,
+) -> Result<Option<OwnerUpgradeProof>, String> {
     if context.version != crate::identity::neutral::VERSION {
         return Ok(None);
     }
@@ -869,7 +1125,11 @@ fn installed_owner_upgrade(
     // external upgrade. Neither an arbitrary current version nor an ACK suffices.
     let staged_image = plan.target.staged_bundle.join("Contents/MacOS/desktop-pet");
     let mut previous = None;
-    for candidate in [&staged_image, &plan.target.image.path] {
+    for candidate in [&staged_image, &plan.target.image.path]
+        .into_iter()
+        .map(PathBuf::as_path)
+        .chain(retained_previous)
+    {
         if !candidate.is_file() {
             continue;
         }
@@ -1795,6 +2055,65 @@ pub fn integration_handover(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn standalone_settlement_rejects_active_unknown_and_inconsistent_terminal_outcomes() {
+        use crate::standalone_install::{
+            InstallRestart, InstallStatus, StandaloneInstallPhase, StandaloneInstallRecord,
+            StandaloneInstallResult,
+        };
+        let mut record = StandaloneInstallRecord {
+            version: 1,
+            operation_id: "a".repeat(32),
+            phase: StandaloneInstallPhase::Approved,
+            result: StandaloneInstallResult {
+                version: 1,
+                operation_id: "a".repeat(32),
+                state_dir: "/isolated/state".into(),
+                status: InstallStatus::Accepted,
+                installation: None,
+                installed: false,
+                applied: false,
+                restart: InstallRestart::NotRequested,
+                retained_bundle: None,
+                error: None,
+            },
+        };
+        for phase in [
+            StandaloneInstallPhase::Approved,
+            StandaloneInstallPhase::StopIntent,
+            StandaloneInstallPhase::StopAcknowledged,
+            StandaloneInstallPhase::OriginalStopped,
+            StandaloneInstallPhase::Replacing,
+            StandaloneInstallPhase::Installed,
+            StandaloneInstallPhase::Starting,
+            StandaloneInstallPhase::Unknown,
+        ] {
+            record.phase = phase;
+            for status in [
+                InstallStatus::Accepted,
+                InstallStatus::Running,
+                InstallStatus::Unknown,
+                InstallStatus::Failed,
+            ] {
+                record.result.status = status;
+                assert!(!standalone_terminal_settleable(&record));
+            }
+        }
+        record.phase = StandaloneInstallPhase::Failed;
+        record.result.status = InstallStatus::Failed;
+        assert!(standalone_terminal_settleable(&record));
+        record.result.applied = true;
+        assert!(!standalone_terminal_settleable(&record));
+        record.phase = StandaloneInstallPhase::Completed;
+        record.result.applied = false;
+        record.result.status = InstallStatus::InstalledStopped;
+        assert!(!standalone_terminal_settleable(&record));
+        record.result.installed = true;
+        assert!(standalone_terminal_settleable(&record));
+        record.result.status = InstallStatus::Unknown;
+        assert!(!standalone_terminal_settleable(&record));
+    }
 
     fn observation_fixture(profiles: usize) -> (tempfile::TempDir, MigrationPlan, MigrationRecord) {
         let (temp, mut plan) = crate::migration::tests::fixture();

@@ -28,7 +28,7 @@ pub use approval::{
 mod integrations;
 pub use integrations::{
     committed_route, integration_handover, observe_for_context, refresh_committed_integrations,
-    MigrationIntegrationStatus, TernDelivery,
+    verify_standalone_settlement, MigrationIntegrationStatus, TernDelivery,
 };
 #[path = "migration_ancestry.rs"]
 mod ancestry;

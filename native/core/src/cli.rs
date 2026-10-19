@@ -18,7 +18,8 @@ use desktop_pet_contracts::{
 };
 use desktop_pet_update_coordinator::identity;
 use desktop_pet_update_coordinator::protocol::{
-    latest_operation, read_operation, record_user_stop, start_allowed,
+    observe_latest_operation, observe_operation, record_user_stop, start_allowed,
+    OperationObservation,
 };
 use desktop_pet_update_coordinator::{
     detect_origin, executable_identity, InstallOrigin, UpdateContext,
@@ -1183,7 +1184,10 @@ fn startup_origin(
         herdr_socket: desktop_pet_update_coordinator::legacy_entry::herdr_socket(),
         running_origin: None,
         assets_override: None,
-        environment: daemon::captured_environment(selection, |key| env::var(key).ok())?,
+        environment: desktop_pet_update_coordinator::native_runtime::captured_environment(
+            selection,
+            |key| env::var(key).ok(),
+        )?,
         locale: "en".into(),
     };
     daemon::validate_migration_startup_context(&context)?;
@@ -1512,15 +1516,44 @@ fn update_status_payload(
     operation_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let record = if let Some(id) = operation_id {
-        read_operation(state_dir, id)?
+        observe_operation(state_dir, id)?
             .ok_or_else(|| format!("no durable update operation found for {id}"))?
     } else {
-        let Some(record) = latest_operation(state_dir)? else {
+        let Some(record) = observe_latest_operation(state_dir)? else {
             return Ok(serde_json::json!({
                 "type": "update-status", "record": null, "recovery": "No update operation recorded for this profile."
             }));
         };
         record
+    };
+    let record = match record {
+        OperationObservation::Update(record) => record,
+        OperationObservation::StandaloneInstall(record) => {
+            let plan = desktop_pet_update_coordinator::standalone_install::read_plan(
+                state_dir,
+                &record.operation_id,
+            )?;
+            record.validate(&plan)?;
+            let helper = &plan.helper_image.path;
+            let staged = fs::symlink_metadata(helper).ok().is_some_and(|metadata| {
+                metadata.is_file()
+                    && metadata.uid() == lifecycle::effective_uid()
+                    && metadata.permissions().mode() & 0o077 == 0
+            });
+            return Ok(serde_json::json!({
+                "type": "update-status",
+                "kind": "standalone_install",
+                "operation_id": record.operation_id,
+                "record": record,
+                "plan": plan,
+                "live_process_evidence": "Not inspected by this offline journal command.",
+                "staged_helper_present_private": staged,
+                "staged_helper_signature_verified": false,
+                "helper_status_command": staged.then(|| serde_json::json!([helper, "install-status", "--state-dir", state_dir, "--operation-id", record.operation_id])),
+                "helper_recover_command": staged.then(|| serde_json::json!([helper, "install-recover", "--state-dir", state_dir, "--operation-id", record.operation_id])),
+                "recovery": "Verify the retained private helper signature and identity against the immutable plan, then use install-status and install-recover. Recovery reconciles existing authority; it does not grant a new restart or repeat Stop."
+            }));
+        }
     };
     let plan = desktop_pet_update_coordinator::read_plan(state_dir, &record.operation_id);
     let helper = state_dir
@@ -1537,6 +1570,7 @@ fn update_status_payload(
     let last_durable_phase = record.phase;
     Ok(serde_json::json!({
         "type": "update-status",
+        "kind": "update",
         "operation_id": id,
         "record": record,
         "last_durable_phase": last_durable_phase,
@@ -2883,14 +2917,126 @@ mod tests {
     use super::*;
     #[test]
     #[cfg(not(desktop_pet_legacy))]
+    fn update_status_observes_standalone_without_normal_plan_or_start_authority() {
+        use desktop_pet_update_coordinator::{
+            installation::{InstallationKind, InstallationRecord},
+            native_runtime::ProfilePaths,
+            standalone_install::{
+                self, InstallRestart, InstallSource, InstallStatus, StandaloneInstallPhase,
+                StandaloneInstallPlan, StandaloneInstallRecord, StandaloneInstallResult,
+            },
+            ExecutableIdentity,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let state = temp.path().join("state");
+        for path in [&config, &state] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, Permissions::from_mode(0o700)).unwrap();
+        }
+        let bundle = temp.path().join("DesktopPet.app");
+        let executable = bundle.join("Contents/MacOS/desktop-pet");
+        let candidate = temp.path().join("candidate/DesktopPet.app");
+        let helper = temp.path().join("helper");
+        fs::write(&helper, b"private fixture; never executed").unwrap();
+        fs::set_permissions(&helper, Permissions::from_mode(0o700)).unwrap();
+        let profile = ProfilePaths {
+            config_dir: config,
+            state_dir: state.clone(),
+        };
+        let plan = StandaloneInstallPlan {
+            version: 1,
+            operation_id: "a".repeat(32),
+            original: InstallationRecord {
+                version: 1,
+                executable: executable.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: "0.4.13-beta.1".into(),
+                protocol: 4,
+                observation_mode: 1,
+                integration_api: 1,
+                origin: InstallOrigin::Standalone { bundle },
+                image: ExecutableIdentity {
+                    path: executable,
+                    sha256: "1".repeat(64),
+                },
+            },
+            candidate_bundle: candidate.clone(),
+            candidate_image: ExecutableIdentity {
+                path: candidate.join("Contents/MacOS/desktop-pet"),
+                sha256: "2".repeat(64),
+            },
+            candidate_version: "0.4.13-beta.5".into(),
+            helper_image: ExecutableIdentity {
+                path: helper.clone(),
+                sha256: "3".repeat(64),
+            },
+            profile: profile.clone(),
+            source: InstallSource::Stopped { profile },
+            original_stop_generation: 0,
+            control_token: "4".repeat(64),
+        };
+        standalone_install::write_plan(&plan).unwrap();
+        let record = StandaloneInstallRecord {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            phase: StandaloneInstallPhase::Replacing,
+            result: StandaloneInstallResult {
+                version: 1,
+                operation_id: plan.operation_id.clone(),
+                state_dir: state.clone(),
+                status: InstallStatus::Running,
+                installation: None,
+                installed: false,
+                applied: false,
+                restart: InstallRestart::NotRequested,
+                retained_bundle: None,
+                error: None,
+            },
+        };
+        standalone_install::write_record(&state, &record).unwrap();
+        for id in [None, Some(plan.operation_id.as_str())] {
+            let value = update_status_payload(&state, id).unwrap();
+            assert_eq!(value["kind"], "standalone_install");
+            assert_eq!(value["record"], serde_json::to_value(&record).unwrap());
+            assert_eq!(value["staged_helper_signature_verified"], false);
+            assert_eq!(
+                value["helper_status_command"],
+                serde_json::json!([
+                    helper,
+                    "install-status",
+                    "--state-dir",
+                    state,
+                    "--operation-id",
+                    plan.operation_id
+                ])
+            );
+            assert_eq!(
+                value["helper_recover_command"],
+                serde_json::json!([
+                    helper,
+                    "install-recover",
+                    "--state-dir",
+                    state,
+                    "--operation-id",
+                    plan.operation_id
+                ])
+            );
+            assert!(desktop_pet_update_coordinator::read_plan(&state, &plan.operation_id).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(not(desktop_pet_legacy))]
     fn startup_capture_preserves_selected_opaque_provider() {
         for mode in [
             ObservationSelection::Auto,
             ObservationSelection::Provider("provider-x".into()),
         ] {
-            let captured = daemon::captured_environment(mode.clone(), |key| {
-                (key == "HOME").then(|| "/tmp/home".into())
-            })
+            let captured = desktop_pet_update_coordinator::native_runtime::captured_environment(
+                mode.clone(),
+                |key| (key == "HOME").then(|| "/tmp/home".into()),
+            )
             .expect("capture");
             assert_eq!(captured.get("HOME").map(String::as_str), Some("/tmp/home"));
             assert_eq!(

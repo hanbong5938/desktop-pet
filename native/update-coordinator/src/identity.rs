@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.13-beta.5";
+    pub const VERSION: &str = "0.4.13-beta.6";
     /// One-time legacy migration is authorized only for this stable release.
     /// A product version bump must never grant a new migration authority.
     pub const MIGRATION_TARGET_VERSION: &str = "0.4.12";
@@ -55,6 +55,10 @@ pub fn capabilities() -> serde_json::Value {
             .as_object_mut()
             .expect("compiled capabilities object")
             .insert("migration_handover_protocol".into(), 1.into());
+        value
+            .as_object_mut()
+            .expect("compiled capabilities object")
+            .insert("installation_client_contract".into(), 1.into());
         value
     };
     value

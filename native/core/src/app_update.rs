@@ -5,9 +5,12 @@
 use crate::i18n::{text, Message, UiLocale};
 use crate::update_card::{UpdateCardModel, UpdateCardPrimaryAction};
 use desktop_pet_update_coordinator::protocol::{
-    historical_operation_plan, latest_operation, lock_operation, private_updates,
-    read_operation_observation, start_allowed, ExecutionFence, OperationPhase, OperationRecord,
-    UPDATER_PROTOCOL,
+    historical_operation_plan, lock_operation, observe_latest_operation, observe_operation,
+    private_updates, start_allowed, ExecutionFence, OperationObservation, OperationPhase,
+    OperationRecord, UPDATER_PROTOCOL,
+};
+use desktop_pet_update_coordinator::standalone_install::{
+    self, InstallStatus, StandaloneInstallRecord,
 };
 use desktop_pet_update_coordinator::{
     check, read_operation, read_plan, recheck_plan, stage_helper, write_plan, CheckSnapshot,
@@ -40,10 +43,10 @@ pub(super) enum Event {
     },
     Journal {
         operation_id: String,
-        result: Result<Option<OperationRecord>, String>,
+        result: Result<Option<OperationObservation>, String>,
         prepared_recovery: Option<PreparedRecoveryProof>,
     },
-    LatestJournal(Result<Option<OperationRecord>, String>),
+    LatestJournal(Result<Option<OperationObservation>, String>),
     MigrationEligibility {
         context: UpdateContext,
         result: Result<(), String>,
@@ -86,7 +89,10 @@ pub(super) enum LaunchFailure {
 
 // Only a background admission check can construct this proof. It identifies the exact
 // journal observation that a fresh check may retire; durable evidence is never removed.
-pub(super) struct SettledOperationProof(OperationRecord);
+pub(super) enum SettledOperationProof {
+    Update(OperationRecord),
+    StandaloneInstall(StandaloneInstallRecord),
+}
 // Constructed only by the journal worker while holding the finished helper's
 // operation lease. Unlike fresh-check retirement, this must match the original
 // prepared instance and its immutable plan, not a replacement check's context.
@@ -106,6 +112,8 @@ pub(super) struct AppUpdateService {
     cancelled_preparation: Option<String>,
     operation: Option<OperationRecord>,
     previous_outcome: Option<OperationRecord>,
+    standalone_operation: Option<StandaloneInstallRecord>,
+    previous_standalone_outcome: Option<StandaloneInstallRecord>,
     observed_operation_id: Option<String>,
     retired_operation_id: Option<String>,
     next_journal_poll: Instant,
@@ -145,7 +153,7 @@ impl AppUpdateService {
             let sender = sender.clone();
             let state_dir = context.state_dir.clone();
             std::thread::spawn(move || {
-                let _ = sender.send(Event::LatestJournal(latest_operation(&state_dir)));
+                let _ = sender.send(Event::LatestJournal(observe_latest_operation(&state_dir)));
             });
         }
         let mut service = Self {
@@ -159,6 +167,8 @@ impl AppUpdateService {
             cancelled_preparation: None,
             previous_outcome: None,
             operation: None,
+            standalone_operation: None,
+            previous_standalone_outcome: None,
             observed_operation_id: None,
             retired_operation_id: None,
             next_journal_poll: Instant::now(),
@@ -511,7 +521,11 @@ impl AppUpdateService {
                 && !self
                     .operation
                     .as_ref()
-                    .is_some_and(|record| terminal_phase(record.phase)))
+                    .is_some_and(|record| terminal_phase(record.phase))
+                && !self
+                    .standalone_operation
+                    .as_ref()
+                    .is_some_and(|record| record.result.terminal()))
             || self.journal_error.is_some()
         {
             return None;
@@ -543,18 +557,25 @@ impl AppUpdateService {
         let sender = self.sender.clone();
         let observed_operation_id = self.observed_operation_id.clone();
         std::thread::spawn(move || {
-            let result = check(&context, policy);
-            let prior_operation = observed_operation_id.or_else(|| {
-                latest_operation(&context.state_dir)
-                    .ok()
-                    .flatten()
-                    .map(|record| record.operation_id)
-            });
-            let settled = result.as_ref().ok().and_then(|snapshot| {
-                prior_operation.as_deref().and_then(|operation_id| {
-                    settlement_proof(&context, snapshot, operation_id).ok()
-                })
-            });
+            let (result, settled) = match observe_latest_operation(&context.state_dir) {
+                Err(error) => (Err(error), None),
+                Ok(latest) => {
+                    let prior_operation = observed_operation_id
+                        .or_else(|| latest.map(|record| observation_id(&record).to_owned()));
+                    let result = check(&context, policy);
+                    match (result, prior_operation) {
+                        (Ok(snapshot), Some(operation_id))
+                            if snapshot.status != CheckStatus::Failed =>
+                        {
+                            match settlement_proof(&context, &snapshot, &operation_id) {
+                                Ok(proof) => (Ok(snapshot), Some(proof)),
+                                Err(error) => (Err(error), None),
+                            }
+                        }
+                        (result, _) => (result, None),
+                    }
+                }
+            };
             let _ = sender.send(Event::Checked {
                 request_id,
                 policy_generation,
@@ -603,7 +624,26 @@ impl AppUpdateService {
                 self.last_checked = checked_at;
                 self.next_auto_due = checked_at.map(|time| time.saturating_add(CHECK_INTERVAL));
                 self.problem = None;
-                if let Some(SettledOperationProof(record)) = settled {
+                if let Some(SettledOperationProof::StandaloneInstall(record)) = settled.as_ref() {
+                    if self.launching.is_none()
+                        && self.launch_plan.is_none()
+                        && self.prepared_plan.is_none()
+                        && self.journal_error.is_none()
+                        && ((self.observed_operation_id.as_deref()
+                            == Some(record.operation_id.as_str())
+                            && self.standalone_operation.as_ref() == Some(record))
+                            || (self.observed_operation_id.is_none()
+                                && self.operation.is_none()
+                                && self.standalone_operation.is_none()))
+                    {
+                        self.previous_standalone_outcome = Some(record.clone());
+                        self.retired_operation_id = Some(record.operation_id.clone());
+                        self.observed_operation_id = None;
+                        self.standalone_operation = None;
+                        changed = true;
+                    }
+                }
+                if let Some(SettledOperationProof::Update(record)) = settled {
                     let matching_observation = self.observed_operation_id.as_deref()
                         == Some(record.operation_id.as_str())
                         && self.operation.as_ref() == Some(&record);
@@ -857,12 +897,18 @@ impl AppUpdateService {
         let context = context.clone();
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = read_operation_observation(&context.state_dir, &operation_id);
-            let prepared_recovery = result
-                .as_ref()
-                .ok()
-                .and_then(Option::as_ref)
-                .and_then(|record| prepared_recovery_proof(&context, &operation_id, record).ok());
+            let result = observe_operation(&context.state_dir, &operation_id);
+            let prepared_recovery =
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .and_then(|record| match record {
+                        OperationObservation::Update(record) => {
+                            prepared_recovery_proof(&context, &operation_id, record).ok()
+                        }
+                        OperationObservation::StandaloneInstall(_) => None,
+                    });
             let _ = sender.send(Event::Journal {
                 operation_id,
                 result,
@@ -872,6 +918,95 @@ impl AppUpdateService {
     }
 
     pub(super) fn journal(
+        &mut self,
+        operation_id: &str,
+        result: Result<Option<OperationObservation>, String>,
+        prepared_recovery: Option<PreparedRecoveryProof>,
+    ) -> Option<UpdateContext> {
+        match result {
+            Ok(Some(OperationObservation::StandaloneInstall(record))) => {
+                if self.journal_in_flight.as_deref() == Some(operation_id) {
+                    self.journal_in_flight = None;
+                }
+                if self.observed_operation_id.as_deref() == Some(operation_id)
+                    && record.operation_id == operation_id
+                    && self.operation.is_none()
+                {
+                    self.observe_standalone(record);
+                }
+                None
+            }
+            Ok(Some(OperationObservation::Update(record)))
+                if self.standalone_operation.is_none() =>
+            {
+                self.update_journal(operation_id, Ok(Some(record)), prepared_recovery)
+            }
+            Ok(Some(_)) => self.update_journal(
+                operation_id,
+                Err("operation kind changed during observation".into()),
+                None,
+            ),
+            Ok(None) => self.update_journal(operation_id, Ok(None), None),
+            Err(error) => self.update_journal(operation_id, Err(error), None),
+        }
+    }
+
+    pub(super) fn latest_journal(&mut self, result: Result<Option<OperationObservation>, String>) {
+        match result {
+            Ok(Some(OperationObservation::StandaloneInstall(record))) => {
+                if self.retired_operation_id.as_deref() == Some(record.operation_id.as_str())
+                    || self.launching.is_some()
+                    || self.launch_plan.is_some()
+                    || self.prepared_plan.is_some()
+                    || self
+                        .operation
+                        .as_ref()
+                        .is_some_and(|record| !terminal_phase(record.phase))
+                    || self.standalone_operation.as_ref().is_some_and(|prior| {
+                        prior.operation_id != record.operation_id && !prior.result.terminal()
+                    })
+                {
+                    return;
+                }
+                self.operation = None;
+                self.observed_operation_id = Some(record.operation_id.clone());
+                self.observe_standalone(record);
+            }
+            Ok(Some(OperationObservation::Update(record))) => {
+                if let Some(prior) = self.standalone_operation.as_ref() {
+                    if !prior.result.terminal() || terminal_phase(record.phase) {
+                        return;
+                    }
+                    self.standalone_operation = None;
+                    self.observed_operation_id = None;
+                }
+                self.update_latest_journal(Ok(Some(record)));
+            }
+            Ok(None) => self.update_latest_journal(Ok(None)),
+            Err(error) => self.update_latest_journal(Err(error)),
+        }
+    }
+
+    fn observe_standalone(&mut self, record: StandaloneInstallRecord) {
+        if self.standalone_operation.as_ref().is_some_and(|prior| {
+            prior.operation_id == record.operation_id
+                && prior.result.terminal()
+                && !record.result.terminal()
+        }) {
+            return;
+        }
+        if record.result.terminal() {
+            self.previous_standalone_outcome = Some(record.clone());
+        }
+        if self.standalone_operation.as_ref() != Some(&record) || self.journal_error.is_some() {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.standalone_operation = Some(record);
+        self.journal_error = None;
+        self.journal_error_operation_id = None;
+    }
+
+    fn update_journal(
         &mut self,
         operation_id: &str,
         result: Result<Option<OperationRecord>, String>,
@@ -976,7 +1111,7 @@ impl AppUpdateService {
         }
         reconciled
     }
-    pub(super) fn latest_journal(&mut self, result: Result<Option<OperationRecord>, String>) {
+    fn update_latest_journal(&mut self, result: Result<Option<OperationRecord>, String>) {
         // Startup discovery must not replace a locally owned launch/preparation
         // or an active operation. An unowned terminal startup observation can
         // be superseded by a subsequently observed active operation.
@@ -1047,19 +1182,52 @@ impl AppUpdateService {
             .as_ref()
             .filter(|record| terminal_phase(record.phase))
             .or(self.previous_outcome.as_ref());
-        let history = outcome.map_or_else(String::new, |record| {
+        let mut history = outcome.map_or_else(String::new, |record| {
             format!(
                 "{}: {}",
                 text(locale, Message::AppUpdatePreviousOperation),
                 text(locale, outcome_message(record))
             )
         });
+        if let Some(record) = self.previous_standalone_outcome.as_ref() {
+            let _ = write!(
+                history,
+                " · Standalone install {}: {:?}",
+                record.operation_id, record.result.status
+            );
+        }
         let (mut status, mut status_message, mut detail_message) = if self.journal_error.is_some() {
             (
                 CheckStatus::Failed,
                 Message::AppUpdateOutcomeUnknown,
                 Message::AppUpdateJournalHelp,
             )
+        } else if let Some(record) = self.standalone_operation.as_ref() {
+            if !record.result.terminal() {
+                (
+                    CheckStatus::Checking,
+                    Message::AppUpdateInstalling,
+                    Message::AppUpdateActiveHelp,
+                )
+            } else if record.result.applied {
+                (
+                    CheckStatus::Applied,
+                    Message::AppUpdateApplied,
+                    Message::AppUpdateBlockedHelp,
+                )
+            } else if record.result.status == InstallStatus::InstalledStopped {
+                (
+                    CheckStatus::Installed,
+                    Message::AppUpdateInstalled,
+                    Message::AppUpdateBlockedHelp,
+                )
+            } else {
+                (
+                    CheckStatus::Failed,
+                    Message::AppUpdateOutcomeUnknown,
+                    Message::AppUpdateBlockedHelp,
+                )
+            }
         } else if self.problem.is_some() && !self.check_busy {
             (
                 CheckStatus::Failed,
@@ -1195,6 +1363,28 @@ impl AppUpdateService {
                 append_operation_diagnostics(&mut diagnostics, "Previous operation", record);
             }
         }
+        if let Some(record) = self
+            .standalone_operation
+            .as_ref()
+            .or(self.previous_standalone_outcome.as_ref())
+        {
+            let _ = writeln!(
+                diagnostics,
+                "Standalone install: {} · phase {:?} · installed {} · applied {} · restart {:?}",
+                record.operation_id,
+                record.phase,
+                record.result.installed,
+                record.result.applied,
+                record.result.restart
+            );
+            if let Some(path) = &record.result.retained_bundle {
+                let _ = writeln!(diagnostics, "Retained original bundle: {}", path.display());
+            }
+            if let Some(error) = &record.result.error {
+                let _ = writeln!(diagnostics, "Standalone outcome: {error}");
+            }
+            let _ = writeln!(diagnostics, "Use update-status --operation-id {} for the retained helper's install-status/install-recover commands. Normal update/start commands cannot recover this operation.", record.operation_id);
+        }
         if self.launch_waiting && active.is_none() && self.launching.is_some() {
             let _ = writeln!(
                 diagnostics,
@@ -1221,6 +1411,10 @@ impl AppUpdateService {
                 || self.launch_plan.is_some()
                 || self.prepared_plan.is_some()
                 || active.is_some()
+                || self
+                    .standalone_operation
+                    .as_ref()
+                    .is_some_and(|record| !record.result.terminal())
                 || self.journal_error.is_some(),
             settings_locked: !self.settings_admitted(),
             status,
@@ -1253,6 +1447,29 @@ impl AppUpdateService {
         }
     }
 }
+fn observation_id(observation: &OperationObservation) -> &str {
+    match observation {
+        OperationObservation::Update(record) => &record.operation_id,
+        OperationObservation::StandaloneInstall(record) => &record.operation_id,
+    }
+}
+
+fn standalone_settlement(
+    context: &UpdateContext,
+    record: &StandaloneInstallRecord,
+) -> Result<(), String> {
+    let plan = standalone_install::read_plan(&context.state_dir, &record.operation_id)?;
+    record.validate(&plan)?;
+    if plan.profile.config_dir != context.config_dir || plan.profile.state_dir != context.state_dir
+    {
+        return Err("standalone operation belongs to a different profile".into());
+    }
+    desktop_pet_update_coordinator::migration::verify_standalone_settlement(
+        &plan,
+        record,
+        Some(context),
+    )
+}
 
 // Journal worker only. The helper must have exited, recovered NoSpawn with no
 // applied/installed result, and released *both* reservation scopes. A mere
@@ -1283,7 +1500,9 @@ fn prepared_recovery_proof(
     {
         return Err("prepared operation belongs to a different running instance or source".into());
     }
-    if latest_operation(&context.state_dir)?.as_ref() != Some(&record) {
+    if observe_latest_operation(&context.state_dir)?.as_ref()
+        != Some(&OperationObservation::Update(record.clone()))
+    {
         return Err("prepared operation is no longer the latest journal".into());
     }
     start_allowed(&plan.origin, &context.state_dir, None, None)?;
@@ -1312,8 +1531,23 @@ fn settlement_proof(
         return Err("fresh check source is not the captured running installation".into());
     }
     let _lease = lock_operation(&context.state_dir, operation_id)?;
-    let record = read_operation_observation(&context.state_dir, operation_id)?
+    let observation = observe_operation(&context.state_dir, operation_id)?
         .ok_or("previous operation journal is missing")?;
+    if observe_latest_operation(&context.state_dir)?.as_ref() != Some(&observation) {
+        return Err("previous operation journal changed during admission".into());
+    }
+    let record = match observation {
+        OperationObservation::Update(record) => record,
+        OperationObservation::StandaloneInstall(record) => {
+            standalone_settlement(context, &record)?;
+            if snapshot.origin
+                != *standalone_install::read_plan(&context.state_dir, operation_id)?.origin()
+            {
+                start_allowed(&snapshot.origin, &context.state_dir, None, None)?;
+            }
+            return Ok(SettledOperationProof::StandaloneInstall(record));
+        }
+    };
     let prior_plan = if record.version == UPDATER_PROTOCOL {
         if !settled_terminal(&record) {
             return Err("previous operation is not a reconciled terminal outcome".into());
@@ -1327,16 +1561,16 @@ fn settlement_proof(
     if prior_plan.context.config_dir != context.config_dir {
         return Err("previous operation belongs to a different configuration profile".into());
     }
-    let latest = latest_operation(&context.state_dir)?
-        .ok_or("previous operation is no longer the latest journal")?;
-    if latest != record {
+    if observe_latest_operation(&context.state_dir)?.as_ref()
+        != Some(&OperationObservation::Update(record.clone()))
+    {
         return Err("previous operation journal changed during admission".into());
     }
     start_allowed(&prior_plan.origin, &context.state_dir, None, None)?;
     if snapshot.origin != prior_plan.origin {
         start_allowed(&snapshot.origin, &context.state_dir, None, None)?;
     }
-    Ok(SettledOperationProof(record))
+    Ok(SettledOperationProof::Update(record))
 }
 
 fn settled_terminal(record: &OperationRecord) -> bool {
@@ -1550,6 +1784,160 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn invalid_typed_marker_discovered_during_check_never_reuses_previous_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let state = root.join("state");
+        let config = root.join("config");
+        for path in [&state, &config] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let marker = private_updates(&state)
+            .unwrap()
+            .join("latest-managed-operation.json");
+        let invalid = br#"{"version":1,"kind":"standalone_install","operation_id":"invalid"}"#;
+        desktop_pet_update_coordinator::protocol::write_private_bytes(&marker, invalid, 0o600)
+            .unwrap();
+        let mut context = local_check().plan.unwrap().context;
+        context.config_dir = config;
+        context.state_dir = state;
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        service.context = Some(context.clone());
+        service.checked(Ok(local_check_for_context(context)), None);
+        assert!(service.plan().is_some());
+        service.check_now();
+        match service
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+        {
+            Event::Checked {
+                request_id,
+                policy_generation,
+                result,
+                settled,
+            } => {
+                assert!(result.is_err());
+                assert!(settled.is_none());
+                service.checked_event(request_id, policy_generation, result, settled);
+            }
+            _ => panic!("unexpected update event"),
+        }
+        assert!(service.plan().is_none());
+        assert_eq!(std::fs::read(marker).unwrap(), invalid);
+    }
+
+    fn standalone_observation(status: InstallStatus) -> StandaloneInstallRecord {
+        use desktop_pet_update_coordinator::standalone_install::{
+            InstallRestart, StandaloneInstallPhase, StandaloneInstallResult,
+        };
+        StandaloneInstallRecord {
+            version: 1,
+            operation_id: "a".repeat(32),
+            phase: if status == InstallStatus::Running {
+                StandaloneInstallPhase::Replacing
+            } else {
+                StandaloneInstallPhase::Failed
+            },
+            result: StandaloneInstallResult {
+                version: 1,
+                operation_id: "a".repeat(32),
+                state_dir: "/isolated/state".into(),
+                status,
+                installation: None,
+                installed: false,
+                applied: false,
+                restart: InstallRestart::NotRequested,
+                retained_bundle: None,
+                error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn standalone_observation_is_not_normal_preparation_or_restart_authority() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        service.context = Some(local_check().plan.unwrap().context);
+        let active = standalone_observation(InstallStatus::Running);
+        service.latest_journal(Ok(Some(OperationObservation::StandaloneInstall(
+            active.clone(),
+        ))));
+        assert!(service.journal_error.is_none());
+        assert!(service.operation.is_none());
+        assert!(service.prepared_plan.is_none());
+        assert!(service.plan().is_none());
+        assert!(!service.settings_admitted());
+        assert!(service.begin_check().is_none());
+        let failed = standalone_observation(InstallStatus::Failed);
+        assert!(service
+            .journal(
+                &failed.operation_id,
+                Ok(Some(OperationObservation::StandaloneInstall(
+                    failed.clone()
+                ))),
+                None
+            )
+            .is_none());
+        assert!(service.operation.is_none());
+        assert!(service.prepared_plan.is_none());
+        assert!(!service.settings_admitted());
+        assert!(service.begin_check().is_some());
+        service.check_busy = false;
+        service.checked(Ok(local_check()), None);
+        assert!(
+            !service.settings_admitted(),
+            "terminal phase alone cannot release ownership"
+        );
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::StandaloneInstall(failed)),
+        );
+        assert!(service.settings_admitted());
+        assert!(service.previous_standalone_outcome.is_some());
+        assert!(service.operation.is_none());
+    }
+
+    #[test]
+    fn active_standalone_cannot_be_replaced_by_normal_history_or_normal_recovery() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let active = standalone_observation(InstallStatus::Running);
+        service.latest_journal(Ok(Some(OperationObservation::StandaloneInstall(
+            active.clone(),
+        ))));
+        let normal = failed_record('b');
+        service.latest_journal(Ok(Some(OperationObservation::Update(normal.clone()))));
+        assert_eq!(service.standalone_operation.as_ref(), Some(&active));
+        assert!(service.operation.is_none());
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(normal)),
+        );
+        assert_eq!(service.standalone_operation.as_ref(), Some(&active));
+        assert!(!service.settings_admitted());
+    }
+    #[test]
+    fn terminal_standalone_history_yields_to_new_active_normal_operation() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let prior = standalone_observation(InstallStatus::Failed);
+        service.latest_journal(Ok(Some(OperationObservation::StandaloneInstall(
+            prior.clone(),
+        ))));
+        let mut next = failed_record('b');
+        next.phase = OperationPhase::Installing;
+        service.latest_journal(Ok(Some(OperationObservation::Update(next.clone()))));
+        assert_eq!(service.operation.as_ref(), Some(&next));
+        assert!(service.standalone_operation.is_none());
+        assert_eq!(service.previous_standalone_outcome.as_ref(), Some(&prior));
+        assert_eq!(
+            service.observed_operation_id.as_deref(),
+            Some(next.operation_id.as_str())
+        );
+        assert!(service.begin_check().is_none());
+    }
 
     fn local_check() -> CheckSnapshot {
         let root = PathBuf::from("/isolated/local-source");
@@ -1892,8 +2280,8 @@ mod tests {
         completed.execution_fence = ExecutionFence::ManagerExited;
         completed.installed = true;
         completed.applied = true;
-        service.latest_journal(Ok(Some(completed.clone())));
-        service.checked(Ok(snapshot), Some(SettledOperationProof(completed)));
+        service.update_latest_journal(Ok(Some(completed.clone())));
+        service.checked(Ok(snapshot), Some(SettledOperationProof::Update(completed)));
         service.migration_eligibility(context.clone(), Ok(()));
         service.migration_history_checked(&context, true);
         service
@@ -1907,12 +2295,12 @@ mod tests {
         completed.execution_fence = ExecutionFence::ManagerExited;
         completed.installed = true;
         completed.applied = true;
-        service.latest_journal(Ok(Some(completed.clone())));
+        service.update_latest_journal(Ok(Some(completed.clone())));
         let snapshot = service.snapshot.clone().unwrap();
         service.checked(Ok(snapshot.clone()), None);
         assert!(!service.settings_admitted());
         assert_eq!(service.model(UiLocale::En).primary_action, None);
-        service.checked(Ok(snapshot), Some(SettledOperationProof(completed)));
+        service.checked(Ok(snapshot), Some(SettledOperationProof::Update(completed)));
         assert!(service.settings_admitted());
         assert_eq!(
             service.model(UiLocale::En).primary_action,
@@ -2099,7 +2487,7 @@ mod tests {
                     old_request,
                     old_policy,
                     Ok(snapshot),
-                    Some(SettledOperationProof(history.clone())),
+                    Some(SettledOperationProof::Update(history.clone())),
                 ),
                 None
             );
@@ -2142,7 +2530,7 @@ mod tests {
         assert!(service.launch_result(&plan.operation_id, Ok(())));
         let mut active = failed_record('e');
         active.phase = OperationPhase::Installing;
-        service.journal(&plan.operation_id, Ok(Some(active.clone())), None);
+        service.update_journal(&plan.operation_id, Ok(Some(active.clone())), None);
         service.journal_in_flight = Some(plan.operation_id.clone());
         let history = failed_record('a');
         service.previous_outcome = Some(history.clone());
@@ -2183,7 +2571,7 @@ mod tests {
         assert!(service.plan().is_none());
         let recovered = failed_record('e');
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(recovered.clone())),
                 Some(PreparedRecoveryProof {
@@ -2223,7 +2611,7 @@ mod tests {
         service.observed_operation_id = Some(record.operation_id.clone());
         service.launch_generation = Some(service.consent_generation());
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &record.operation_id,
                 Ok(Some(record.clone())),
                 Some(PreparedRecoveryProof {
@@ -2246,7 +2634,7 @@ mod tests {
         service.prepared_plan = Some(newer.clone());
         service.observed_operation_id = Some(newer.operation_id.clone());
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &record.operation_id,
                 Ok(Some(record.clone())),
                 Some(PreparedRecoveryProof {
@@ -2261,7 +2649,7 @@ mod tests {
         blocked.operation_id = newer.operation_id.clone();
         blocked.phase = OperationPhase::Unknown;
         assert_eq!(
-            service.journal(&newer.operation_id, Ok(Some(blocked)), None),
+            service.update_journal(&newer.operation_id, Ok(Some(blocked)), None),
             None
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&newer));
@@ -2277,14 +2665,14 @@ mod tests {
         service.observed_operation_id = Some(record.operation_id.clone());
         service.prepared_plan = Some(plan.clone());
         assert_eq!(
-            service.journal(&record.operation_id, Ok(Some(record.clone())), None),
+            service.update_journal(&record.operation_id, Ok(Some(record.clone())), None),
             None
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         let mut other_image = plan.clone();
         other_image.context.running.sha256 = "different original".into();
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &record.operation_id,
                 Ok(Some(record.clone())),
                 Some(PreparedRecoveryProof {
@@ -2298,7 +2686,10 @@ mod tests {
         let mut intent = record;
         intent.execution_fence = ExecutionFence::ManagerIntent;
         let operation_id = intent.operation_id.clone();
-        assert_eq!(service.journal(&operation_id, Ok(Some(intent)), None), None);
+        assert_eq!(
+            service.update_journal(&operation_id, Ok(Some(intent)), None),
+            None
+        );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
     }
 
@@ -2306,12 +2697,12 @@ mod tests {
     fn fresh_check_retires_only_the_proven_reconciled_failure_and_exposes_rebuild() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         let prior = failed_record('a');
-        service.latest_journal(Ok(Some(prior.clone())));
+        service.update_latest_journal(Ok(Some(prior.clone())));
         assert!(service.plan().is_none());
         assert_eq!(
             service.checked(
                 Ok(local_check()),
-                Some(SettledOperationProof(prior.clone()))
+                Some(SettledOperationProof::Update(prior.clone()))
             ),
             Some(42)
         );
@@ -2326,9 +2717,9 @@ mod tests {
             service.model(UiLocale::En).action,
             Some(UpdateAction::SourceRebuild)
         );
-        service.latest_journal(Ok(Some(prior.clone())));
+        service.update_latest_journal(Ok(Some(prior.clone())));
         let prior_id = prior.operation_id.clone();
-        service.journal(&prior_id, Ok(Some(prior)), None);
+        service.update_journal(&prior_id, Ok(Some(prior)), None);
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
         assert_eq!(service.model(UiLocale::En).history, history);
         assert!(service.plan().is_some());
@@ -2340,9 +2731,9 @@ mod tests {
         let prior = failed_record('a');
         service.checked(
             Ok(local_check()),
-            Some(SettledOperationProof(prior.clone())),
+            Some(SettledOperationProof::Update(prior.clone())),
         );
-        service.latest_journal(Ok(Some(prior)));
+        service.update_latest_journal(Ok(Some(prior)));
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Local);
         assert_eq!(
             service.plan().map(|plan| &plan.action),
@@ -2356,7 +2747,7 @@ mod tests {
         service.checked(Ok(local_check()), None);
         let mut prior = failed_record('a');
         prior.phase = OperationPhase::Unknown;
-        service.latest_journal(Ok(Some(prior)));
+        service.update_latest_journal(Ok(Some(prior)));
         assert!(service.plan().is_none());
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Failed);
     }
@@ -2367,9 +2758,12 @@ mod tests {
         let mut prior = failed_record('f');
         prior.phase = OperationPhase::UserStopped;
         assert!(settled_terminal(&prior));
-        service.latest_journal(Ok(Some(prior.clone())));
+        service.update_latest_journal(Ok(Some(prior.clone())));
         assert!(service.plan().is_none());
-        service.checked(Ok(local_check()), Some(SettledOperationProof(prior)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(prior)),
+        );
         assert_eq!(
             service.plan().map(|plan| &plan.action),
             Some(&UpdateAction::SourceRebuild)
@@ -2474,7 +2868,7 @@ mod tests {
             write_private_bytes(&result_path, &bytes, 0o600).unwrap();
             let mut blocked = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
             blocked.context = Some(context.clone());
-            blocked.latest_journal(latest_operation(&state));
+            blocked.update_latest_journal(latest_operation(&state));
             assert!(blocked.begin_check().is_none(), "{key}: {invalid}");
             assert!(!blocked.settings_admitted());
             assert!(settlement_proof(&context, &snapshot, &historical.operation_id).is_err());
@@ -2539,7 +2933,7 @@ mod tests {
             assert!(prepared_recovery_proof(&context, &stopped.operation_id, &stopped).is_err());
             let mut blocked = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
             blocked.context = Some(context.clone());
-            blocked.latest_journal(latest_operation(&state));
+            blocked.update_latest_journal(latest_operation(&state));
             blocked.checked(Ok(snapshot.clone()), None);
             assert!(!blocked.settings_admitted());
             assert!(blocked.plan().is_none());
@@ -2549,7 +2943,7 @@ mod tests {
 
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         service.context = Some(context.clone());
-        service.latest_journal(latest_operation(&state));
+        service.update_latest_journal(latest_operation(&state));
         service.reload_journal(historical.operation_id.clone());
         match service
             .receiver
@@ -2562,7 +2956,10 @@ mod tests {
                 prepared_recovery,
             } => {
                 assert!(prepared_recovery.is_none());
-                assert_eq!(result, Ok(Some(historical.clone())));
+                assert_eq!(
+                    result,
+                    Ok(Some(OperationObservation::Update(historical.clone())))
+                );
                 assert!(service
                     .journal(&operation_id, result, prepared_recovery)
                     .is_none());
@@ -2718,7 +3115,7 @@ mod tests {
         let reservation =
             reserve_install(&prior_plan.origin, None, &state_dir, &stopped.operation_id).unwrap();
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
-        service.latest_journal(Ok(Some(stopped.clone())));
+        service.update_latest_journal(Ok(Some(stopped.clone())));
         assert!(!service.settings_admitted());
         assert!(settlement_proof(&context, &snapshot, &stopped.operation_id).is_err());
         service.checked(Ok(snapshot.clone()), None);
@@ -2749,7 +3146,7 @@ mod tests {
         );
         service.change_policy(UpdatePolicy::StableAndBeta, None);
         assert_eq!(service.policy(), UpdatePolicy::StableAndBeta);
-        service.latest_journal(Ok(Some(stopped.clone())));
+        service.update_latest_journal(Ok(Some(stopped.clone())));
         assert!(service.settings_admitted());
         assert_eq!(fs::read(&plan_path).unwrap(), plan_bytes);
         assert_eq!(fs::read(&result_path).unwrap(), result_bytes);
@@ -2759,8 +3156,8 @@ mod tests {
         newer.phase = OperationPhase::Installing;
         newer.execution_fence = ExecutionFence::ManagerIntent;
         let mut newer_service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
-        newer_service.latest_journal(Ok(Some(stopped.clone())));
-        newer_service.latest_journal(Ok(Some(newer.clone())));
+        newer_service.update_latest_journal(Ok(Some(stopped.clone())));
+        newer_service.update_latest_journal(Ok(Some(newer.clone())));
         newer_service.checked(Ok(snapshot), Some(old_proof));
         assert_eq!(newer_service.operation.as_ref(), Some(&newer));
         assert!(!newer_service.settings_admitted());
@@ -2813,7 +3210,7 @@ mod tests {
         assert!(settlement_proof(context, &mismatched, &completed.operation_id).is_err());
         let proof = settlement_proof(context, &snapshot, &completed.operation_id).unwrap();
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableAndBeta, None);
-        service.latest_journal(Ok(Some(completed.clone())));
+        service.update_latest_journal(Ok(Some(completed.clone())));
         assert!(!service.settings_admitted());
         service.checked(Ok(snapshot), Some(proof));
         assert!(service.settings_admitted());
@@ -2831,7 +3228,7 @@ mod tests {
         let mut unknown = failed_record('a');
         unknown.phase = OperationPhase::Unknown;
         assert!(!settled_terminal(&unknown));
-        service.latest_journal(Ok(Some(unknown)));
+        service.update_latest_journal(Ok(Some(unknown)));
         service.checked(Ok(local_check()), None);
         assert!(service.plan().is_none());
 
@@ -2839,12 +3236,12 @@ mod tests {
         active.phase = OperationPhase::Installing;
         active.execution_fence = ExecutionFence::ManagerIntent;
         assert!(!settled_terminal(&active));
-        service.latest_journal(Ok(Some(active)));
+        service.update_latest_journal(Ok(Some(active)));
         service.checked(Ok(local_check()), None);
         assert!(service.plan().is_none());
 
         let failed_with_retained_marker = failed_record('c');
-        service.latest_journal(Ok(Some(failed_with_retained_marker.clone())));
+        service.update_latest_journal(Ok(Some(failed_with_retained_marker.clone())));
         // A failed proof (retained profile/global marker, busy lease or legacy bytes)
         // does not supply a settlement token, even though the journal is terminal.
         service.checked(Ok(local_check()), None);
@@ -2858,15 +3255,15 @@ mod tests {
     fn late_settlement_cannot_retire_a_newer_operation() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         let old = failed_record('a');
-        service.latest_journal(Ok(Some(old.clone())));
+        service.update_latest_journal(Ok(Some(old.clone())));
         let mut current = failed_record('b');
         current.phase = OperationPhase::Installing;
         current.execution_fence = ExecutionFence::ManagerIntent;
-        service.latest_journal(Ok(Some(current.clone())));
+        service.update_latest_journal(Ok(Some(current.clone())));
         assert_eq!(service.previous_outcome.as_ref(), Some(&old));
-        service.latest_journal(Ok(Some(old.clone())));
+        service.update_latest_journal(Ok(Some(old.clone())));
         assert_eq!(service.operation.as_ref(), Some(&current));
-        service.checked(Ok(local_check()), Some(SettledOperationProof(old)));
+        service.checked(Ok(local_check()), Some(SettledOperationProof::Update(old)));
         assert_eq!(service.operation.as_ref(), Some(&current));
         assert_eq!(
             service.observed_operation_id.as_deref(),
@@ -2896,7 +3293,7 @@ mod tests {
     #[test]
     fn unresolved_active_journal_outweighs_a_successful_read_only_check() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, Some(11));
-        service.latest_journal(Err("reserved operation has no valid journal".into()));
+        service.update_latest_journal(Err("reserved operation has no valid journal".into()));
         service.checked(Ok(local_check()), None);
         let model = service.model(UiLocale::En);
         assert_eq!(model.status, CheckStatus::Failed);
@@ -2910,7 +3307,7 @@ mod tests {
     #[test]
     fn installation_during_restart_is_not_reported_as_applied() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
-        service.latest_journal(Ok(Some(OperationRecord {
+        service.update_latest_journal(Ok(Some(OperationRecord {
             version: UPDATER_PROTOCOL,
             execution_fence: ExecutionFence::ManagerExited,
             operation_id: "a".repeat(32),
@@ -2943,13 +3340,13 @@ mod tests {
             applied: true,
             candidate: None,
         };
-        service.latest_journal(Ok(Some(record.clone())));
+        service.update_latest_journal(Ok(Some(record.clone())));
         let revision = service.revision();
         let model = service.model(UiLocale::En);
         assert_eq!(model.status, CheckStatus::NotChecked);
         assert!(!model.busy);
         assert!(model.action.is_none());
-        service.journal(operation_id, Ok(Some(record)), None);
+        service.update_journal(operation_id, Ok(Some(record)), None);
         assert_eq!(service.revision(), revision);
     }
 
@@ -2969,7 +3366,7 @@ mod tests {
             path: PathBuf::from("/isolated/secret/new-app"),
             sha256: "private candidate sha".into(),
         });
-        service.latest_journal(Ok(Some(completed.clone())));
+        service.update_latest_journal(Ok(Some(completed.clone())));
         service.check_busy = true;
         let checking = service.model(UiLocale::Ko);
         assert!(checking.busy);
@@ -2977,7 +3374,10 @@ mod tests {
         assert!(checking.action.is_none());
         let history = checking.history;
 
-        service.checked(Ok(snapshot), Some(SettledOperationProof(completed.clone())));
+        service.checked(
+            Ok(snapshot),
+            Some(SettledOperationProof::Update(completed.clone())),
+        );
         let discovered = service.model(UiLocale::Ko);
         assert!(!discovered.busy);
         assert_eq!(discovered.status, CheckStatus::Local);
@@ -3004,7 +3404,7 @@ mod tests {
         assert!(discovered
             .diagnostics
             .contains("private /isolated/operation/result"));
-        service.latest_journal(Ok(Some(completed)));
+        service.update_latest_journal(Ok(Some(completed)));
         assert!(service.plan().is_some());
         assert_eq!(service.model(UiLocale::Ko).history, history);
 
@@ -3023,14 +3423,17 @@ mod tests {
     fn newer_completed_operation_replaces_retained_history() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         let prior = failed_record('a');
-        service.latest_journal(Ok(Some(prior.clone())));
-        service.checked(Ok(local_check()), Some(SettledOperationProof(prior)));
+        service.update_latest_journal(Ok(Some(prior.clone())));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(prior)),
+        );
         let prior_history = service.model(UiLocale::En).history;
 
         let mut newer = failed_record('b');
         newer.phase = OperationPhase::Starting;
         newer.execution_fence = ExecutionFence::ManagerIntent;
-        service.latest_journal(Ok(Some(newer.clone())));
+        service.update_latest_journal(Ok(Some(newer.clone())));
         let active = service.model(UiLocale::En);
         assert_eq!(active.status, CheckStatus::Checking);
         assert!(active.busy);
@@ -3041,14 +3444,17 @@ mod tests {
         newer.execution_fence = ExecutionFence::ManagerExited;
         newer.installed = true;
         newer.applied = true;
-        service.journal(&newer.operation_id, Ok(Some(newer.clone())), None);
+        service.update_journal(&newer.operation_id, Ok(Some(newer.clone())), None);
         let completed = service.model(UiLocale::En);
         assert_eq!(completed.status, CheckStatus::Local);
         assert!(!completed.busy);
         assert!(completed.action.is_none());
         assert_ne!(completed.history, prior_history);
 
-        service.checked(Ok(local_check()), Some(SettledOperationProof(newer)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(newer)),
+        );
         let retired = service.model(UiLocale::En);
         assert_eq!(retired.status, CheckStatus::Local);
         assert_eq!(retired.action, Some(UpdateAction::SourceRebuild));
@@ -3061,7 +3467,7 @@ mod tests {
         let mut record = failed_record('a');
         record.phase = OperationPhase::Unknown;
         record.detail = "raw /isolated/uncertain".into();
-        service.latest_journal(Ok(Some(record.clone())));
+        service.update_latest_journal(Ok(Some(record.clone())));
         service.checked(Ok(local_check()), None);
         let unknown = service.model(UiLocale::Ko);
         assert_eq!(unknown.status, CheckStatus::Failed);
@@ -3071,7 +3477,7 @@ mod tests {
         assert!(!unknown.detail.contains("/isolated/"));
 
         record.phase = OperationPhase::UserStopped;
-        service.journal(&record.operation_id, Ok(Some(record.clone())), None);
+        service.update_journal(&record.operation_id, Ok(Some(record.clone())), None);
         service.checked(Ok(local_check()), None);
         let stopped = service.model(UiLocale::Ko);
         assert_eq!(stopped.status, CheckStatus::Failed);
@@ -3079,7 +3485,7 @@ mod tests {
         assert!(!stopped.detail.contains("/isolated/"));
 
         record.phase = OperationPhase::Failed;
-        service.journal(&record.operation_id, Ok(Some(record.clone())), None);
+        service.update_journal(&record.operation_id, Ok(Some(record.clone())), None);
         assert_eq!(
             service.operation.as_ref().unwrap().phase,
             OperationPhase::UserStopped
@@ -3100,13 +3506,13 @@ mod tests {
             applied: false,
             candidate: None,
         };
-        service.latest_journal(Ok(Some(record.clone())));
+        service.update_latest_journal(Ok(Some(record.clone())));
         let revision = service.revision();
-        service.journal(operation_id, Ok(Some(record.clone())), None);
+        service.update_journal(operation_id, Ok(Some(record.clone())), None);
         assert_eq!(service.revision(), revision);
         record.phase = OperationPhase::Failed;
         record.detail = "apply failed".into();
-        service.journal(operation_id, Ok(Some(record)), None);
+        service.update_journal(operation_id, Ok(Some(record)), None);
         assert_ne!(service.revision(), revision);
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Failed);
     }
@@ -3126,7 +3532,7 @@ mod tests {
             applied: false,
             candidate: None,
         };
-        service.journal(operation_id, Ok(Some(record.clone())), None);
+        service.update_journal(operation_id, Ok(Some(record.clone())), None);
         let card = service.model(UiLocale::En);
         assert!(card.busy);
         assert_eq!(card.status, CheckStatus::Checking);
@@ -3134,7 +3540,7 @@ mod tests {
         assert!(!card.detail.contains("awaiting original Stop"));
         record.phase = OperationPhase::Failed;
         record.detail = "Stop reply failed".into();
-        service.journal(operation_id, Ok(Some(record)), None);
+        service.update_journal(operation_id, Ok(Some(record)), None);
         let failed = service.model(UiLocale::En);
         assert!(failed.busy); // The accepted preparation still owns its exact plan.
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
@@ -3163,7 +3569,7 @@ mod tests {
     #[test]
     fn failed_before_spawn_retires_only_its_missing_journal_and_fresh_check_admits_apply() {
         let (mut service, plan) = pending_local_launch();
-        service.journal(&plan.operation_id, Ok(None), None);
+        service.update_journal(&plan.operation_id, Ok(None), None);
         assert!(service.plan().is_none());
         assert!(!service.launch_result(
             &plan.operation_id,
@@ -3176,14 +3582,14 @@ mod tests {
             service.model(UiLocale::En).action,
             Some(UpdateAction::SourceRebuild)
         );
-        service.journal(&plan.operation_id, Err("late poll".into()), None);
+        service.update_journal(&plan.operation_id, Err("late poll".into()), None);
         assert_eq!(service.plan(), Some(&plan));
     }
 
     #[test]
     fn failed_after_spawn_keeps_uncertain_ownership_blocked_after_fresh_check() {
         let (mut service, plan) = pending_local_launch();
-        service.journal(&plan.operation_id, Ok(None), None);
+        service.update_journal(&plan.operation_id, Ok(None), None);
         assert!(!service.launch_result(
             &plan.operation_id,
             Err(LaunchFailure::Spawned("ownership reply lost".into())),
@@ -3211,16 +3617,16 @@ mod tests {
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert!(service.launch_plan.is_none());
         let finished = failed_record('e');
-        service.journal(&plan.operation_id, Ok(Some(finished.clone())), None);
+        service.update_journal(&plan.operation_id, Ok(Some(finished.clone())), None);
         service.checked(
             Ok(local_check()),
-            Some(SettledOperationProof(finished.clone())),
+            Some(SettledOperationProof::Update(finished.clone())),
         );
         assert!(!service.settings_admitted());
         let mut wrong = plan.clone();
         wrong.running.sha256 = "another original".into();
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(finished.clone())),
                 Some(PreparedRecoveryProof {
@@ -3232,7 +3638,7 @@ mod tests {
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(finished.clone())),
                 Some(PreparedRecoveryProof {
@@ -3243,7 +3649,10 @@ mod tests {
             Some(plan.context.clone())
         );
         service.recovery_reconciled(&plan.operation_id);
-        service.checked(Ok(local_check()), Some(SettledOperationProof(finished)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(finished)),
+        );
         assert!(service.settings_admitted());
         assert_eq!(service.plan(), Some(&plan));
     }
@@ -3265,7 +3674,7 @@ mod tests {
     #[test]
     fn no_spawn_does_not_hide_an_independent_unverified_journal() {
         let (mut service, plan) = pending_local_launch();
-        service.latest_journal(Err("other operation cannot be verified".into()));
+        service.update_latest_journal(Err("other operation cannot be verified".into()));
         assert!(!service.launch_result(
             &plan.operation_id,
             Err(LaunchFailure::NoSpawn("staging failed".into())),
@@ -3289,7 +3698,7 @@ mod tests {
         unknown.phase = OperationPhase::Unknown;
         assert_eq!(unknown.operation_id, plan.operation_id);
         assert_eq!(
-            service.journal(&plan.operation_id, Ok(Some(unknown.clone())), None),
+            service.update_journal(&plan.operation_id, Ok(Some(unknown.clone())), None),
             None
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
@@ -3299,7 +3708,7 @@ mod tests {
         let mut wrong_plan = plan.clone();
         wrong_plan.context.instance_id = "different original".into();
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(recovered.clone())),
                 Some(PreparedRecoveryProof {
@@ -3312,7 +3721,7 @@ mod tests {
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert!(service.plan().is_none());
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(recovered.clone())),
                 Some(PreparedRecoveryProof {
@@ -3330,7 +3739,7 @@ mod tests {
     fn stale_checked_result_cannot_replace_current_request_or_retire_an_operation() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, Some(19));
         let active = failed_record('a');
-        service.latest_journal(Ok(Some(active.clone())));
+        service.update_latest_journal(Ok(Some(active.clone())));
         service.pending_request = Some(12);
         service.check_busy = true;
         let revision = service.revision();
@@ -3339,7 +3748,7 @@ mod tests {
                 11,
                 0,
                 Ok(local_check()),
-                Some(SettledOperationProof(active.clone()))
+                Some(SettledOperationProof::Update(active.clone()))
             ),
             None
         );
@@ -3367,7 +3776,7 @@ mod tests {
                 0 => service.check_busy = true,
                 1 => service.launching = Some(pending.operation_id.clone()),
                 2 => service.prepared_plan = local_check().plan,
-                _ => service.latest_journal(Ok(Some(pending.clone()))),
+                _ => service.update_latest_journal(Ok(Some(pending.clone()))),
             }
             let before = service.policy();
             service.change_policy(UpdatePolicy::StableAndBeta, Some(29));
@@ -3539,7 +3948,7 @@ mod tests {
         let waiting = service.model(UiLocale::En);
         assert_eq!(waiting.status, CheckStatus::Checking);
         assert!(waiting.diagnostics.contains(&waiting.status_text));
-        service.latest_journal(Ok(Some(failed_record('b'))));
+        service.update_latest_journal(Ok(Some(failed_record('b'))));
         assert_eq!(
             service.observed_operation_id.as_deref(),
             Some(plan.operation_id.as_str())
@@ -3548,7 +3957,7 @@ mod tests {
 
         let mut terminal = failed_record('e');
         terminal.phase = OperationPhase::UserStopped;
-        service.journal(&plan.operation_id, Ok(Some(terminal.clone())), None);
+        service.update_journal(&plan.operation_id, Ok(Some(terminal.clone())), None);
         assert!(service.launch_plan.is_none());
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert!(service.preparing_plan(&plan.operation_id).is_none());
@@ -3558,17 +3967,20 @@ mod tests {
         assert!(!service.launch_waiting);
         let mut old = terminal.clone();
         old.phase = OperationPhase::Preparing;
-        service.journal(&plan.operation_id, Ok(Some(old)), None);
+        service.update_journal(&plan.operation_id, Ok(Some(old)), None);
         assert_eq!(service.operation.as_ref(), Some(&terminal));
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert!(!service.settings_admitted());
         service.checked(
             Ok(local_check()),
-            Some(SettledOperationProof(terminal.clone())),
+            Some(SettledOperationProof::Update(terminal.clone())),
         );
         assert!(!service.settings_admitted());
         service.preparation_cancelled(&plan.operation_id);
-        service.checked(Ok(local_check()), Some(SettledOperationProof(terminal)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(terminal)),
+        );
         assert!(service.settings_admitted());
         assert_eq!(service.plan(), Some(&plan));
     }
@@ -3579,7 +3991,7 @@ mod tests {
         service.launch_waiting(&plan.operation_id);
         let finished = failed_record('e');
         assert_eq!(
-            service.journal(&plan.operation_id, Ok(Some(finished.clone())), None),
+            service.update_journal(&plan.operation_id, Ok(Some(finished.clone())), None),
             None
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
@@ -3587,12 +3999,12 @@ mod tests {
         assert!(service.preparing_plan(&plan.operation_id).is_none());
         service.checked(
             Ok(local_check()),
-            Some(SettledOperationProof(finished.clone())),
+            Some(SettledOperationProof::Update(finished.clone())),
         );
         assert!(!service.settings_admitted());
         assert!(service.plan().is_none());
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(finished.clone())),
                 Some(PreparedRecoveryProof {
@@ -3604,7 +4016,10 @@ mod tests {
         );
         assert!(!service.settings_admitted());
         service.recovery_reconciled(&plan.operation_id);
-        service.checked(Ok(local_check()), Some(SettledOperationProof(finished)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(finished)),
+        );
         assert!(service.settings_admitted());
         assert_eq!(service.plan(), Some(&plan));
     }
@@ -3627,17 +4042,17 @@ mod tests {
         // A late startup discovery of another ID cannot unpin the owned plan.
         let mut other = failed_record('b');
         other.phase = OperationPhase::Installing;
-        service.latest_journal(Ok(Some(other)));
+        service.update_latest_journal(Ok(Some(other)));
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert_eq!(
             service.observed_operation_id.as_deref(),
             Some(plan.operation_id.as_str())
         );
         let finished = failed_record('e');
-        service.journal(&plan.operation_id, Ok(Some(finished.clone())), None);
+        service.update_journal(&plan.operation_id, Ok(Some(finished.clone())), None);
         service.checked(
             Ok(local_check()),
-            Some(SettledOperationProof(finished.clone())),
+            Some(SettledOperationProof::Update(finished.clone())),
         );
         assert!(!service.settings_admitted());
         assert_eq!(
@@ -3645,7 +4060,7 @@ mod tests {
             Some(plan.operation_id.as_str())
         );
         assert_eq!(
-            service.journal(
+            service.update_journal(
                 &plan.operation_id,
                 Ok(Some(finished.clone())),
                 Some(PreparedRecoveryProof {
@@ -3657,7 +4072,10 @@ mod tests {
         );
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         service.recovery_reconciled(&plan.operation_id);
-        service.checked(Ok(local_check()), Some(SettledOperationProof(finished)));
+        service.checked(
+            Ok(local_check()),
+            Some(SettledOperationProof::Update(finished)),
+        );
         assert!(service.settings_admitted());
         assert_eq!(service.plan(), Some(&plan));
     }
@@ -3695,14 +4113,14 @@ mod tests {
         );
         assert!(service.launch_result(&plan.operation_id, Ok(())));
         let finished = failed_record('e');
-        service.journal(&plan.operation_id, Ok(Some(finished.clone())), None);
+        service.update_journal(&plan.operation_id, Ok(Some(finished.clone())), None);
         service.checked(Ok(local_check()), None);
         assert_eq!(service.prepared_plan.as_ref(), Some(&plan));
         assert!(!service.settings_admitted());
         let mut current = local_check();
         current.status = CheckStatus::Current;
         current.plan = None;
-        service.checked(Ok(current), Some(SettledOperationProof(finished)));
+        service.checked(Ok(current), Some(SettledOperationProof::Update(finished)));
         assert!(service.prepared_plan.is_none());
         assert!(service.settings_admitted());
         assert_eq!(service.model(UiLocale::En).status, CheckStatus::Current);
@@ -3728,7 +4146,7 @@ mod tests {
     fn failed_timestamp_commit_preserves_original_schedule_and_does_not_retire_journal() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableAndBeta, Some(19));
         let journal = failed_record('c');
-        service.latest_journal(Ok(Some(journal.clone())));
+        service.update_latest_journal(Ok(Some(journal.clone())));
         service.next_auto_due = Some(500);
         service.scheduled_due_before = Some(Some(90));
         service.pending_request = Some(7);

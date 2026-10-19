@@ -675,6 +675,79 @@ mod mac {
             panel.show(Phase::Preparing, panel.migration_description.as_deref());
             Ok(panel)
         }
+        pub fn for_install(
+            plan: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+        ) -> Result<Self, String> {
+            plan.validate()?;
+            let summary = format!(
+                "Desktop Pet {} → {}\n{}\nConfig: {}\nState: {}\nTern and your work stay running.",
+                plan.original.app_version,
+                plan.candidate_version,
+                plan.original.executable.display(),
+                plan.profile.config_dir.display(),
+                plan.profile.state_dir.display()
+            );
+            Self::new_summary("en", &summary, None)
+        }
+        pub fn confirm_install(
+            &self,
+            plan: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+            recovery: bool,
+        ) -> Result<bool, String> {
+            plan.validate()?;
+            self.activate();
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                let alert = object(object(class("NSAlert"), "alloc"), "init");
+                if alert.is_null() {
+                    return Err("native install consent alert unavailable".into());
+                }
+                send_object(
+                    alert,
+                    "setMessageText:",
+                    string(if recovery {
+                        "Reconcile approved Desktop Pet installation?"
+                    } else {
+                        "Update only Desktop Pet?"
+                    }),
+                );
+                let action = if recovery {
+                    "Recovery only reconciles the original approval. It cannot replay Quit, override a later Stop, or grant new restart permission."
+                } else if plan.running().is_some() {
+                    "Only Desktop Pet will quit and restart with this exact profile. This is a normal Quit, not draft-aware update preparation: save any unsaved Pet edits before continuing. Tern, its windows, terminals and work remain running."
+                } else {
+                    "Desktop Pet is stopped and will remain stopped. Tern, its windows, terminals and work remain running."
+                };
+                send_object(
+                    alert,
+                    "setInformativeText:",
+                    string(&format!(
+                        "{} → {}\n{}\nConfig: {}\nState: {}\n\n{action}",
+                        plan.original.app_version,
+                        plan.candidate_version,
+                        plan.original.executable.display(),
+                        plan.profile.config_dir.display(),
+                        plan.profile.state_dir.display()
+                    )),
+                );
+                send_object(
+                    alert,
+                    "addButtonWithTitle:",
+                    string(if recovery {
+                        "Reconcile"
+                    } else {
+                        "Update Desktop Pet"
+                    }),
+                );
+                send_object(alert, "addButtonWithTitle:", string("Cancel"));
+                let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let response = modal(alert, selector("runModal"));
+                send_void(alert, "release");
+                self.pump();
+                super::migration_confirmation_response(response)
+            }
+        }
         fn new_summary(
             locale: &str,
             summary: &str,
@@ -1144,6 +1217,18 @@ impl Panel {
     }
     pub fn for_migration(_: &str, _: &MigrationPlan) -> Result<Self, String> {
         Err("native migration requires macOS AppKit".into())
+    }
+    pub fn for_install(
+        _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+    ) -> Result<Self, String> {
+        Err("native install requires macOS AppKit".into())
+    }
+    pub fn confirm_install(
+        &self,
+        _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+        _: bool,
+    ) -> Result<bool, String> {
+        Err("native install requires macOS AppKit".into())
     }
     pub fn confirm_migration(&self, _: &MigrationPlan, _: bool) -> Result<bool, String> {
         Err("native migration requires macOS AppKit".into())

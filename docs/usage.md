@@ -112,6 +112,13 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### Updating Standalone without closing Tern
+
+Current source adds a Pet-only transaction to the pinned prebuilt installer; this is not proof of a republished release or completed live-Tern acceptance. For a lower-version **same-owner Standalone** upgrade, the native dialog identifies the exact versions/root/profile and asks permission to restart **only Desktop Pet**. Keep Tern, its windows, terminals and agent jobs open; no plugin reload or Configure/KV rewrite is required. **Save Pet edits first:** the verified public beta.1 bootstrap uses normal Quit, not draft-aware Prepare. Cancel/window failure and conflicting active native profiles stop the operation before any app is stopped. Two Tern windows on one native profile are not a conflict. A stopped profile is installed without starting it; Homebrew/Source ownership and beta preferences are unchanged.
+
+`installed` reports verified disk replacement; `applied` additionally requires the fresh exact-profile instance and UI/control readiness. A failed restart can therefore leave `installed:true, applied:false`. Preserve the operation ID/state-dir and signed helper printed by the installer; use its `install-status` / `install-recover`, not repeated install/manual Stop or normal updater `recover --start`. Status exit 0 means a valid observation, not success. Recovery cannot turn a lost Stop ACK or a later user Stop into restart authority. Old signed bundles and their original sidecars remain in private retained storage with no automatic deletion; do not remove operation evidence or reservation markers. [CLI transaction details](cli.md#pet-only-standalone-installation-transaction-current-source-contract).
+
+
 ## Profiles, connection and migration
 
 New profiles default to Auto. Connection lists registered providers and their actual connections, not installation detection; provider IDs are opaque and capabilities, not source-name prefixes or paths, authorize operations. Auto is simultaneous observation, not provider fallback. Remote sources are read-only; Tern prompts do not permit worktree removal. Submission acceptance is not agent completion.

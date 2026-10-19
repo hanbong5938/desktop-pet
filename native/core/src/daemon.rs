@@ -6,14 +6,14 @@ use crate::preferences::Preferences;
 use crate::state::AppState;
 use crate::ui;
 use crate::Composition;
-use desktop_pet_contracts::{
-    DomainAccess, ObservationSelection, ProfileStore, RuntimePort, OBSERVATION_SELECTION_ENV,
-};
+#[cfg(test)]
+use desktop_pet_contracts::OBSERVATION_SELECTION_ENV;
+use desktop_pet_contracts::{DomainAccess, ObservationSelection, ProfileStore, RuntimePort};
+use desktop_pet_update_coordinator::native_runtime::captured_environment;
 use desktop_pet_update_coordinator::protocol::{register_active, start_allowed, unregister_active};
 use desktop_pet_update_coordinator::{
     detect_origin, executable_identity, InstallOrigin, UpdateContext,
 };
-use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,46 +158,6 @@ impl Drop for ActiveUpdateGuard {
         ) {
             eprintln!("desktop-pet: cannot unregister active installation: {error}");
         }
-    }
-}
-
-pub(crate) fn captured_environment(
-    observation_mode: ObservationSelection,
-    mut lookup: impl FnMut(&str) -> Option<String>,
-) -> Result<BTreeMap<String, String>, String> {
-    #[cfg(desktop_pet_legacy)]
-    {
-        desktop_pet_update_coordinator::legacy_entry::capture_environment(&observation_mode, lookup)
-    }
-    #[cfg(not(desktop_pet_legacy))]
-    {
-        let mut environment = [
-            "HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_STATE_HOME",
-            "TERN_CONFIG_DIR",
-            "TERN_DAEMON_SOCKET",
-            "DESKTOP_PET_CONFIG_DIR",
-            "DESKTOP_PET_STATE_DIR",
-        ]
-        .into_iter()
-        .filter_map(|key| lookup(key).map(|value| (key.to_owned(), value)))
-        .collect::<BTreeMap<_, _>>();
-        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
-            if let Some(value) = environment.get(key) {
-                if value.len() > 4096
-                    || value.contains('\0')
-                    || !std::path::Path::new(value).is_absolute()
-                {
-                    return Err(format!("invalid captured Tern routing variable {key}"));
-                }
-            }
-        }
-        environment.insert(
-            OBSERVATION_SELECTION_ENV.to_owned(),
-            observation_mode.as_str().to_owned(),
-        );
-        Ok(environment)
     }
 }
 

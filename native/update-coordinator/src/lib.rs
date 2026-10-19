@@ -9,6 +9,7 @@ pub mod legacy_codec;
 #[path = "../../../migration/legacy-0.3.16/entry.rs"]
 pub mod legacy_entry;
 pub mod migration;
+pub mod native_runtime;
 #[cfg(desktop_pet_legacy)]
 #[path = "../../../migration/legacy-0.3.16/origin.rs"]
 mod origin;
@@ -17,6 +18,16 @@ mod origin;
 mod processes;
 pub mod protocol;
 pub mod releases;
+pub mod standalone_install;
+
+/// Additive release contract. Historical absence is valid, not authorization.
+pub fn installation_client_contract(value: &serde_json::Value) -> Result<Option<u32>, String> {
+    match value.get("installation_client_contract") {
+        None => Ok(None),
+        Some(value) if value.as_u64() == Some(1) && value.is_u64() => Ok(Some(1)),
+        Some(_) => Err("unsupported installation client contract".into()),
+    }
+}
 
 use desktop_pet_contracts::{ObservationSelection, OBSERVATION_SELECTION_ENV};
 use serde::{Deserialize, Serialize};
@@ -518,12 +529,22 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         &plan.context,
     )?;
     let source_id = executable_identity(&source)?;
-    let bytes = owned_file(&source, 64 * 1024 * 1024)?;
     let base = protocol::private_updates(&plan.context.state_dir)?;
     let target = base.join(format!("helper-{}", plan.operation_id));
-    protocol::write_private_new(&target, &bytes, 0o700)?;
+    stage_verified_helper(&source_id, &target)?;
+    Ok(target)
+}
+
+/// Shared operation-private helper copy. The destination's private parent must
+/// already exist; no app-image parent or replacement root is created here.
+pub fn stage_verified_helper(source: &ExecutableIdentity, target: &Path) -> Result<(), String> {
+    if executable_identity(&source.path)? != *source {
+        return Err("helper source changed before durable copy".into());
+    }
+    let bytes = owned_file(&source.path, 64 * 1024 * 1024)?;
+    protocol::write_private_new(target, &bytes, 0o700)?;
     let verified: Result<(), String> = (|| {
-        if executable_identity(&target)?.sha256 != source_id.sha256 {
+        if executable_identity(target)?.sha256 != source.sha256 {
             return Err("staged helper differs from source".into());
         }
         #[cfg(target_os = "macos")]
@@ -540,10 +561,40 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         Ok(())
     })();
     if verified.is_err() {
-        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(target);
     }
     verified?;
-    Ok(target)
+    Ok(())
+}
+
+pub fn verify_executing_helper(expected: &Path) -> Result<ExecutableIdentity, String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    if fs::canonicalize(&current).map_err(|e| e.to_string())?
+        != fs::canonicalize(expected).map_err(|e| e.to_string())?
+    {
+        return Err("helper must execute from its operation-private staged copy".into());
+    }
+    let metadata = fs::symlink_metadata(expected).map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > 64 * 1024 * 1024
+    {
+        return Err("staged helper is not a bounded private owned file".into());
+    }
+    #[cfg(target_os = "macos")]
+    origin::command_output(
+        Path::new("/usr/bin/codesign"),
+        &[
+            "--verify",
+            "--strict",
+            expected.to_str().ok_or("invalid helper path")?,
+        ],
+        4096,
+        10,
+    )?;
+    executable_identity(expected)
 }
 
 pub fn write_plan(plan: &UpdatePlan) -> Result<PathBuf, String> {

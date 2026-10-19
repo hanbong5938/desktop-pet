@@ -104,6 +104,13 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### 不关闭 Tern 的 Standalone 更新
+
+当前源码为固定 prebuilt 安装器加入 Pet-only transaction；这不代表公开发行已重新发布，也不代表实际 Tern acceptance 已完成。升级较低版本的**同一 Standalone 所有者**时，native 确认窗口展示精确版本、root 和 profile，仅授权**重启 Desktop Pet**。Tern、窗口、终端和 agent 作业保持运行，不要求 plugin reload 或重写 Configure/KV。**请先保存 Pet 编辑内容。** 已验证公开 beta.1 的 bootstrap 使用普通 Quit，而非 draft-aware Prepare。取消、确认窗口失败或不同 active native profile 冲突均在停止任何应用之前拒绝；同一 native profile 的两个 Tern 窗口不算冲突。原本停止的 profile 只安装、不启动，Homebrew/Source 所有权和 beta 设置不变。
+
+`installed` 表示已验证的磁盘替换；`applied` 还要求新的精确 profile 实例及 UI/control ready。因此启动失败后可能是 `installed:true, applied:false`。保留安装器报告的 operation ID、state-dir 和保留的签名 helper，使用其 `install-status` / `install-recover`，不要重复手动 Stop/安装，也不要混用普通 updater 的 `recover --start`。status 退出码 0 只表示观察有效，并非安装成功。丢失的 Stop ACK 或后续 user Stop 不会因恢复同意而变成重启权限。旧 signed bundle 及原始 sidecar 保存在 private storage，当前实现不自动删除；不要手动删除证据或预约 marker。[CLI 合约（英文）](cli.md#pet-only-standalone-installation-transaction-current-source-contract)。
+
+
 ## 配置档、连接与迁移
 
 新配置档默认为 Auto。Connection 显示已注册提供商的实际连接，而非安装检测。提供商 ID 是不透明值，操作权限来自 capability，而非名称前缀或路径。Auto 是同时观察而非回退选择。远程来源只读；Tern 允许回复，不允许删除工作树。接受提交不代表代理完成。

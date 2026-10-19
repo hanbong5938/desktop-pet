@@ -112,6 +112,13 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### Tern을 닫지 않는 Standalone 업데이트
+
+현재 소스는 고정 prebuilt 설치기에 Pet-only transaction을 연결합니다. 공개 릴리스 재게시나 실제 Tern acceptance 완료의 증거는 아닙니다. 낮은 버전의 **동일 Standalone 소유자**를 올릴 때 native 창에서 정확한 버전·root·프로필과 **Desktop Pet만 재시작**하는 동의를 받습니다. Tern·창·터미널·agent 작업은 그대로 유지하며 플러그인 reload나 Configure/KV 재작성으로 해결하지 않습니다. **Pet 편집 내용을 먼저 저장하세요.** 검증된 공개 beta.1 bootstrap은 draft-aware Prepare가 아닌 일반 Quit입니다. Cancel/승인창 생성 실패와 서로 다른 active native profile 충돌은 어떤 앱도 멈추기 전에 종료합니다. 같은 native profile의 Tern 두 창은 충돌이 아닙니다. 원래 stopped인 프로필은 설치만 하고 시작하지 않으며 Homebrew/Source 소유권과 beta 설정도 바꾸지 않습니다.
+
+`installed`는 검증된 디스크 교체이고 `applied`는 새 exact-profile 인스턴스와 UI/control 준비까지 확인한 상태입니다. 재시작 실패 뒤 `installed:true, applied:false`가 남을 수 있습니다. 설치기가 표시한 operation ID·state-dir·보존된 서명 helper를 유지하고 그 helper의 `install-status` / `install-recover`를 사용하세요. 수동 Stop/설치 반복이나 일반 updater의 `recover --start`와 혼용하지 않습니다. status exit 0은 유효한 관찰이지 성공이 아닙니다. Stop ACK 유실이나 추가 사용자 Stop는 복구 동의로 재시작 권한이 되지 않습니다. old signed bundle과 원래 sidecar는 private storage에 보존하며 자동 삭제하지 않습니다. 증거·예약 표식을 임의 삭제하지 마세요. [CLI 계약](cli.md#tern을-유지하는-standalone-설치-transaction-현재-소스-계약).
+
+
 ## 프로필·연결·이전
 
 새 프로필은 Auto입니다. Connection은 등록된 제공자의 실제 연결을 표시하며 설치 여부로 추측하지 않습니다. 제공자 ID는 불투명 값이고 작업 권한은 출처 이름 접두사·경로가 아니라 capability로 결정합니다. Auto는 동시 관찰이지 fallback이 아닙니다. 원격은 읽기 전용이며 Tern은 답장만 지원하고 worktree 제거는 지원하지 않습니다. 접수는 에이전트 완료가 아닙니다.

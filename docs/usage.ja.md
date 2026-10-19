@@ -104,6 +104,13 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### Tern を閉じずに Standalone を更新
+
+現在のソースは固定 prebuilt 導入器に Pet-only transaction を追加します。公開リリースの再配布や実際の Tern acceptance 完了を示すものではありません。低い版の**同じ Standalone 所有者**を更新するとき、native dialog が正確な版・root・profile を示し、**Desktop Pet だけの再起動**を承認します。Tern、ウィンドウ、ターミナル、agent の作業は維持し、plugin reload や Configure/KV の書き換えを要求しません。**Pet の編集内容は先に保存してください。** 検証済み公開 beta.1 の bootstrap は draft-aware Prepare ではなく通常の Quit です。Cancel、承認画面の失敗、異なる active native profile の競合は停止前に拒否します。同じ native profile の Tern 二窓は競合ではありません。停止中の profile は導入だけで起動せず、Homebrew/Source の所有権や beta 設定も変更しません。
+
+`installed` は検証済みディスク交換、`applied` は新しい exact-profile instance と UI/control ready の確認です。再起動失敗なら `installed:true, applied:false` が残り得ます。導入器が示す operation ID、state-dir、保持した署名 helper を保存し、その `install-status` / `install-recover` を使います。手動 Stop/再導入や通常 updater の `recover --start` と混同しないでください。status の exit 0 は観測の成功であり、導入成功ではありません。失われた Stop ACK や後続の user Stop は復旧承認で再起動権限に変わりません。旧 signed bundle と元の sidecar は private storage に保持し、自動削除しません。証拠や予約 marker を削除しないでください。[CLI 契約（英語）](cli.md#pet-only-standalone-installation-transaction-current-source-contract)。
+
+
 ## プロファイル・接続・移行
 
 新規プロファイルは Auto です。Connection は登録されたプロバイダーの実際の接続を示し、インストール有無を接続と扱いません。ID は不透明な値で、権限は名前の接頭辞やパスではなく capability で判断します。Auto は同時観測で、fallback ではありません。リモートは読み取り専用、Tern は返信のみで worktree 削除は不可です。受付はエージェントの完了ではありません。
