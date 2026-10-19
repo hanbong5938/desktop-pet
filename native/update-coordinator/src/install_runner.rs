@@ -293,7 +293,7 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
         return raw(&request, false);
     }
     let desired = InstallOrigin::Standalone {
-        bundle: installation::os_home()?.join("Applications/DesktopPet.app"),
+        bundle: installation::standalone_bundle()?,
     };
     if request.source_root.is_some()
         || original.kind != InstallationKind::Standalone
@@ -1363,7 +1363,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("printf '\\001' >&3; /bin/sleep 0.3; printf finished > \"$1\"")
+            .arg("printf '\\001' >&3; /bin/sleep 0.3; printf finished > \"$1.pending\" && /bin/mv \"$1.pending\" \"$1\"")
             .arg("pet-worker")
             .arg(marker)
             .stdin(Stdio::null())

@@ -77,6 +77,8 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
+**beta.8 候補のパス修正（検証・公開証拠待ち）:** Standalone は実 OS アカウント home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG で変更しません。Brew は検証済み formula prefix の `libexec/DesktopPet.app`、source は正確な checkout の `dist/DesktopPet.app` のままです。通常の導入は旧 Applications owner を自動移動しません。公開 beta.7 と以下の過去の v0.4.8 インストーラーは不変で、再実行しても修復できません。別の Python 3 修復アセットは既定で dry-run、変更は明示的 `--apply`、任意の手動起動は `--apply --start` です。引数なし起動ではなく保存済み Tern KV の元の config/state を使い、元データとバックアップを保全し、Tern や作業を終了・再起動しません。[修復手順](docs/usage.ja.md#beta8-applications-recovery)と [beta.8 ソースノート](docs/releases/v0.4.13-beta.8.md)を参照してください。ソースは公開や実機修復成功の証拠ではありません。
+
 **過去の v0.4.4 新規 Brew 導入証明:** 中立 v0.4.4 formula は tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586` に公開済みです。適格な Brew v0.4.4 新規導入は通過しました（74ファイル / 44.3 MB、内外の再署名5個）。認証済み検査で Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312` を確認しました。導入・検査は中立 config/state・standalone app を作成せず、デーモンも起動しませんでした。明示的な手動 **Start** の後だけ実際の v0.4.4 UI/control ready、PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` に達しました。ルベリアと実際の Settings は **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0** を表示し、その後の明示 Hidden は同じ既定 instance を保持しました。新規導入の証拠であり、v0.4.4 通常更新や managed 移行の完了証明ではありません。導入コマンド:
 
 ```sh

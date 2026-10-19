@@ -1,9 +1,9 @@
 //! Neutral installation ownership. Integration provenance is never install authority.
 use crate::{
-    ensure_absolute, executable_identity, identity, now, owned_file, releases,
-    validate_candidate_for_context, CheckSnapshot, CheckStatus, ExecutableIdentity, InstallOrigin,
-    ReleaseCandidate, ReleaseTarget, UpdateAction, UpdateContext, UpdatePlan, UpdatePolicy,
-    VerifiedInstallation,
+    ensure_absolute, executable_identity, identity, installation::standalone_bundle, now,
+    owned_file, releases, validate_candidate_for_context, CheckSnapshot, CheckStatus,
+    ExecutableIdentity, InstallOrigin, ReleaseCandidate, ReleaseTarget, UpdateAction,
+    UpdateContext, UpdatePlan, UpdatePolicy, VerifiedInstallation,
 };
 use semver::Version;
 use serde_json::Value;
@@ -140,11 +140,6 @@ pub fn validate_standalone_bundle(
         return Err("bundle version differs from approved version".into());
     }
     Ok(app.image)
-}
-
-fn standalone_bundle() -> Result<PathBuf, String> {
-    let home = os_home()?;
-    Ok(home.join("Applications").join(identity::APP_NAME))
 }
 
 fn brew_origin(path: &Path) -> Result<Option<InstallOrigin>, String> {

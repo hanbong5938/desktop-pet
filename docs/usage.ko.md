@@ -70,6 +70,29 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
+**beta.8 후보 경로 수정(검증·게시 대기):** Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG로 바꾸지 않습니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 beta.7과 아래 과거 고정 설치기는 불변이며 재실행으로 복구되지 않습니다.
+
+### beta.8 Applications 복구 후보
+
+일회성 복구는 Rust 앱 기능이 아닌 **별도 Python 3 스크립트**입니다. 소스는 `scripts/repair-applications-install.py`, 게시 예정 자산은 `desktop-pet-repair-applications-v0.4.13-beta.8.py`와 `.sha256`이며 `SHA256SUMS`에도 포함됩니다. [beta.8 노트](releases/v0.4.13-beta.8.md)는 게시 계약이지 게시 완료 증거가 아닙니다. 정확한 beta.8 공개 자산이 준비된 뒤 스크립트 checksum을 확인하고 먼저 dry-run을 읽으세요. 소스 dry-run도 정확한 beta.8 payload가 필요하며 latest/source fallback은 없습니다.
+
+```sh
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
+# 위 apply 대신, 수동 시작까지 원할 때만:
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
+```
+
+원래 config/state **두 경로는 저장된 Tern SDK KV에서 읽습니다**. 인자 없는 앱 실행·기본 프로필 추측·adopt·병합을 하지 마세요. `--tern-kv ABS`로 custom 파일을 지정할 수 있습니다. 기본값은 절대 `TERN_CONFIG_DIR` 또는 실제 home의 `Library/Application Support/Tern` 아래 `plugin-data/tern-desktop-pet/kv.json`입니다. 선택적 `--config-dir ABS --state-dir ABS`는 함께 지정하며 KV 쌍과 정확히 같아야 합니다.
+
+실제 non-root macOS arm64 계정의 검증된 Standalone Applications 설치만 대상이며 Brew/source/custom 경로·이미 존재하는 목적지·위험한 소유권/symlink는 거절합니다. 정확한 beta.8 archive/sidecar/checksum과 서명 closure를 **Stop 전에** 검증합니다. 원본 전체 앱/sidecar·locator·KV bytes·프로필 데이터를 `~/.local/share/desktop-pet/repair-backups`에 manifest와 함께 보존하고 paired helper의 native install로 private 설치를 수행합니다. 새 소유자/image/locator 검증 후 일치하는 KV의 실행 파일 필드만 바꾸며 다른 필드·원본 데이터·default-profile pointer는 유지합니다.
+
+**Pet의 미저장 편집을 먼저 저장하고 적용 중 플러그인 설정을 바꾸지 마세요.** 확인된 정확한 프로필의 Pet만 일반 Stop할 수 있으며 Tern/창/터미널/agent 종료·재시작, plugin reload, Configure/Connect를 요구하지 않습니다. 모르는 active 프로필이나 동시 파일 변경은 거절합니다. `--start` 없이는 stopped입니다. `--start`는 `--apply`와 함께 쓰는 일반 수동 Start이지 updater reservation 권한·race-free 보장이 아닙니다. custom routing에는 실제 Tern 환경을 사용하며 원래 인증된 observation/assets를 알 수 없으면 추측하지 않습니다. 추가 Stop 관측 시 재시작하지 않습니다. 설치 검증과 실제 Tern 재연결은 구분하며 canonical UI/원래 프로필 재시작/실제 작업 유지 수락은 별도 OS 계정/VM의 통합 증거 전 미검증입니다.
+
+변경 후 실패하면 보고된 phase와 old/new/backup 경로를 보존하세요. 변경된 경로/KV 위로 무조건 복원하거나 옛 설치기를 재실행·백업 삭제·인자 없는 시작을 하지 마세요. 완료된 같은 beta 복구는 Stop/install을 반복하지 않습니다. [상세 실패·환경 제약](usage.md#one-time-applications-recovery-beta8-candidate)을 참조하세요.
+
+### 과거 고정 설치 예시
+
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 
 ```sh

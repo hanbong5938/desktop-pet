@@ -70,6 +70,35 @@ Apple Silicon Mac, macOS 13+. Source builds require Rust/Cargo, Bun, Node.js/npm
 
 ## Installation and optional integrations
 
+**Beta.8 candidate path correction (not yet a publication claim):** Standalone uses the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. Brew retains its verified formula prefix’s `libexec/DesktopPet.app`; source retains the exact core checkout’s `dist/DesktopPet.app`. Ordinary installation does not relocate an existing Applications owner. Published beta.7 and the pinned historical installer below remain immutable: rerunning them does not repair the old destination. See the [beta.8 source notes](releases/v0.4.13-beta.8.md) for pending qualification/publication.
+
+### One-time Applications recovery (beta.8 candidate)
+
+This is a **separate, explicitly run Python 3 script**, not a native app repair command, automatic updater or plugin feature. Source: `scripts/repair-applications-install.py`. Planned release artifact: `desktop-pet-repair-applications-v0.4.13-beta.8.py` with its `.sha256` and an entry in `SHA256SUMS`. **Source availability does not prove that the release artifact has been published or qualified.** Use the exact [beta.8 prerelease](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.13-beta.8) only after publication and verify the downloaded script checksum before running it. A source dry-run also requires the exact beta.8 payload assets to be available; there is no latest/source fallback.
+
+For the verified versioned artifact, first inspect a dry-run, then explicitly apply. Restart is a separate choice:
+
+```sh
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
+# Instead of the previous apply command, only if you also want a manual Start:
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
+```
+
+Use `--tern-kv /absolute/path/to/kv.json` for a custom Tern setup. Otherwise the script selects `plugin-data/tern-desktop-pet/kv.json` under absolute `TERN_CONFIG_DIR`, or the OS account home’s `Library/Application Support/Tern`. It derives **both original config/state directories from the saved Tern SDK connection**, not a no-argument app launch or neutral default. Optional `--config-dir ABS --state-dir ABS` must be supplied together and match that saved pair exactly. Do not substitute example profile paths, adopt another default or merge profiles.
+
+Apply is restricted to macOS arm64, the actual non-root OS account and the exactly verified Standalone `~/Applications/DesktopPet.app` plus original sidecar and matching locator. It refuses Brew/source/custom routes, an occupied private destination and unsafe ownership/symlinks. It downloads and verifies the exact beta.8 signed payload/closure **before stopping anything**, backs up the full original app/sidecar, locator, original KV bytes and profile data under `~/.local/share/desktop-pet/repair-backups`, then uses the validated paired helper’s native install primitive for the private destination. Only after verifying the new owner/image/locator may it change the matching saved connection’s **executable field**. Other KV fields, original profile data and the default-profile pointer are preserved; no profile deletion or adoption occurs. Keep the reported backup manifest and paths.
+
+**Save unsaved Pet drafts and do not change plugin settings during apply.** The script may request normal **Desktop Pet-only Stop** on the proven exact profile; it does not terminate/restart Tern, its windows, terminals or agents, force a plugin reload, or require Configure/Connect. Unknown/custom active profiles or observed concurrent file changes fail closed. Tern [rereads changed KV files](https://docs.stencil.so/tern/reference/api-shared.md#ternkv); this is not proof of actual same-window reconnection.
+
+Without `--start`, the repaired app remains stopped. `--start` requires `--apply`, uses the exact saved profile and available authenticated original observation/assets context, and has ordinary manual Start semantics—not native updater reservation authority or a fully race-proof restart transaction. Run from the actual Tern environment when custom routing depends on it; the script cannot reconstruct missing source-specific environment from guesses. An additional observed Stop prevents restart. Verified installation and actual Tern reconnection are reported separately; installed bytes alone do not establish recovery.
+
+The script requires **Python 3.9+** and also accepts explicit `--dry-run` (mutually exclusive with `--apply`). If a mistaken no-argument launch left a second daemon, only kernel argv proof of the exact neutral OS-default pair plus authenticated PID/image status permits stopping that specific daemon; its data is backed up and it is never restarted by this repair. Unknown/custom daemons still refuse before Stop. Original assets located inside the bundle that must be moved also refuse before Stop rather than silently switching assets. After `--start`, verified native readiness without confirmed fresh Tern binding is a distinct **exit 3** result, not full recovery.
+
+If apply fails after mutation, **do not blindly rerun an old installer, restore over changed paths/KV, delete backups or launch with no arguments**. Keep the reported phase/evidence and old/new/backup locations; uncertain state must not restart automatically. A completed same-beta private repair is recognized without repeating Stop/install. Canonical UI, original-profile restart and real Tern/workload-preserving acceptance remain pending integration-owner proof in an owned isolated OS account/VM; fixture or dry-run results are not that proof.
+
+### Historical pinned installation examples
+
 **Historical v0.4.4 fresh Brew proof:** The neutral v0.4.4 formula is public at tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`. A qualified fresh Brew v0.4.4 install passed (74 files / 44.3 MB and five inner/outer re-signatures); authenticated inspection verified the Homebrew-derived image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`. Install/inspection created no neutral config/state or standalone app and did not start a daemon. Only explicit manual **Start** produced actual v0.4.4 UI/control readiness, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`. Rubelia and actual Settings showed **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**; explicit Hidden afterward preserved that default instance. This is fresh-install proof, not a v0.4.4 normal-update or managed-migration result. Installation commands:
 
 ```sh

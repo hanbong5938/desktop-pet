@@ -70,6 +70,29 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
+**beta.8 候选路径修正（验证与发布待定）：**Standalone 使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会移动旧 Applications owner。公开 beta.7 和以下历史固定安装器不可变，重新运行不能修复。
+
+### Beta.8 Applications recovery
+
+修复是**独立 Python 3 脚本**，不是 Rust 应用功能。源码为 `scripts/repair-applications-install.py`；计划发布 `desktop-pet-repair-applications-v0.4.13-beta.8.py` 和 `.sha256`，并收录于 `SHA256SUMS`。[beta.8 说明](releases/v0.4.13-beta.8.md)不是已发布证明。精确 beta.8 公开资产齐备后，先验证脚本 checksum 再查看 dry-run。源码 dry-run 也需要 beta.8 payload，不会 fallback 到 latest/source。
+
+```sh
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
+# 若还希望手动启动，用以下命令替代上一条 apply：
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
+```
+
+原始 config/state **两个路径从保存的 Tern SDK KV 获取**，不用无参数启动、猜测默认值、adopt 或合并。自定义位置使用 `--tern-kv ABS`；默认是绝对 `TERN_CONFIG_DIR` 或实际 home 的 `Library/Application Support/Tern` 下的 `plugin-data/tern-desktop-pet/kv.json`。可选 `--config-dir ABS --state-dir ABS` 必须一起提供且精确匹配 KV。
+
+仅处理实际 non-root macOS arm64 账户的已验证 Standalone Applications owner；拒绝 Brew/source/custom、已占用 private 目标和不安全所有权/symlink。Stop 前验证固定 beta.8 payload 与完整签名 closure；原始完整 app/sidecar、locator、KV bytes 和 profile 数据保存在 `~/.local/share/desktop-pet/repair-backups` 及 manifest 中。通过 paired helper native install 验证新 owner/image/locator 后，仅修改匹配连接的 executable 字段，保留其他 KV 字段、数据与 default-profile pointer。
+
+**先保存 Pet 未保存编辑，应用时不要修改插件设置。** 仅对已证明精确 profile 的 Pet 发普通 Stop，不退出或重启 Tern/窗口/terminal/agent，不要求 plugin reload、Configure/Connect。未知 active profile 或并发文件修改会拒绝。无 `--start` 则保持停止；`--apply --start` 使用原始 profile 和可认证的 observation/assets，属于普通手动 Start，不是 updater reservation 或 race-free 保证。自定义 routing 应继承实际 Tern 环境，不能猜测缺失环境；观察到额外 Stop 就不重启。
+
+安装验证与实际重连分别报告。canonical UI/原始 profile 启动/真实 Tern 与工作保持的验收仍待独立 OS 账户/VM 证据。失败时保留 phase、old/new/backup 路径，不要盲目覆盖已变路径/KV、重跑旧 installer、删除备份或无参数启动。已完成同 beta 修复不会重复 Stop/install。参见[详细限制](usage.md#one-time-applications-recovery-beta8-candidate)。
+
+### 历史固定安装示例
+
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。安装命令：
 
 ```sh

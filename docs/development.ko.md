@@ -68,6 +68,10 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
+**beta.8 후보 설치 계약(검증·게시 대기):** Standalone과 현재 consumer fallback은 `HOME`/XDG가 아닌 실제 OS home의 `.local/share/desktop-pet/libexec/DesktopPet.app`입니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 기존 Applications 소유자를 이동하지 않습니다. 공개 beta.7과 아래 과거 고정 v0.4.7 설치기는 불변이며 재실행으로 복구되지 않습니다. 일회성 복구는 **Rust runtime/route API가 아닌 별도 Python 3 자산**입니다. 기본 dry-run, 명시적 `--apply`, 선택적 `--apply --start`이며 원래 프로필은 저장된 Tern KV의 정확한 두 경로에서 읽습니다. 원본 데이터·백업을 보존하고 Tern/작업을 종료·재시작하지 않습니다. [복구 절차·제약](usage.ko.md#beta8-applications-복구-후보), [beta.8 소스 metadata/자산](releases/v0.4.13-beta.8.md)을 보세요. canonical 복구나 공개 bytes 검증을 주장하지 않습니다.
+
+### 과거 고정 설치 예시
+
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 
 ```sh
@@ -122,7 +126,7 @@ desktop-pet preferences set --observation-host auto
 
 ## Profiles and installation discovery
 
-중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. non-Brew prebuilt는 실제 OS 계정 home의 `Applications/DesktopPet.app`, 승인된 source 설치는 정확한 core의 `dist/DesktopPet.app`입니다. 영구 old-name alias는 정상 탐색 경로가 아닙니다.
+중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. 현재 beta.8 후보 Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`, Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, 승인된 source는 정확한 core의 `dist/DesktopPet.app`입니다. 공개 beta.7과 위 과거 고정 설치기는 옛 Applications 동작을 유지합니다. 영구 old-name alias나 Applications launcher는 현재 소스의 정상 탐색 경로가 아닙니다.
 
 프로필 우선순위는 **명시적 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 중립 XDG 기본값**입니다. 기본값은 `${XDG_CONFIG_HOME:-$HOME/.config}/desktop-pet`, `${XDG_STATE_HOME:-$HOME/.local/state}/desktop-pet`입니다. 기본 config root의 `default-profile.json`은 `{ "version":1, "config_dir":"/absolute/config", "state_dir":"/absolute/state" }`로 두 실제 경로를 원자 기록하며 재귀 profile pointer는 금지합니다. `desktop-pet profile show --json`은 daemon/디렉터리를 만들지 않는 읽기 전용입니다.
 
@@ -134,7 +138,7 @@ desktop-pet profile adopt --config-dir /absolute/config --state-dir /absolute/st
 
 adopt는 pair 선택이지 데이터 복사가 아닙니다. active update/예약, 다른 live daemon, invalid/symlink/nonowned 경로는 변경 전에 실패합니다. 실제 config/state **둘 다** 백업하고 start/status/command/stop에 같은 pair를 사용하세요. core는 `HERDR_PLUGIN_*`를 암묵적 app 기본값으로 해석하지 않습니다. Herdr wrapper만 host 주입 우선순위를 명시 native 인자로 바꾸고 Tern은 검증된 pair를 명시 전달하며 일치하는 중립 환경값을 설정합니다. status/Connection은 실제 실행 파일과 선택 profile을 표시합니다.
 
-공유 locator는 **실제 OS 계정 home**의 `.local/share/desktop-pet/installation.json`이며 `{ "version":1, "executable":"/absolute/path/to/desktop-pet", "kind":"homebrew" }`입니다. kind는 `homebrew|standalone|source`만 허용하고 같은 디렉터리의 install lock 아래 원자 저장합니다. 탐색 순서는 **사용자 명시 절대 실행 파일 → 유효 locator → PATH `desktop-pet` → 실제 `brew --prefix desktop-pet` 실행 파일 → `~/Applications/DesktopPet.app`**입니다. invalid 명시 경로/locator는 fallback하지 않습니다. locator는 권한이 아니며 소유·private regular file, 실제 executable/bundle/signature, capability와 origin을 매번 검증합니다. 실행 이미지/profile 불일치는 몰래 재사용하지 않고 표시합니다. 서명 없는 script·사용자 plugin·버전 문자열은 권한을 얻지 못합니다. 업데이트/migration의 locator 변경은 예약 아래 같은 계약을 따릅니다.
+공유 locator는 **실제 OS 계정 home**의 `.local/share/desktop-pet/installation.json`이며 `{ "version":1, "executable":"/absolute/path/to/desktop-pet", "kind":"homebrew" }`입니다. kind는 `homebrew|standalone|source`만 허용하고 같은 디렉터리의 install lock 아래 원자 저장합니다. 현재 소스의 탐색 순서는 **사용자 명시 절대 실행 파일 → 유효 locator → PATH `desktop-pet` → 실제 `brew --prefix desktop-pet` 실행 파일 → `~/.local/share/desktop-pet/libexec/DesktopPet.app`**입니다. 공개 beta.7/과거 consumer에 이 fallback이 소급 반영되지는 않습니다. invalid 명시 경로/locator는 fallback하지 않습니다. locator는 권한이 아니며 소유·private regular file, 실제 executable/bundle/signature, capability와 origin을 매번 검증합니다. 실행 이미지/profile 불일치는 몰래 재사용하지 않고 표시합니다. 서명 없는 script·사용자 plugin·버전 문자열은 권한을 얻지 못합니다. 업데이트/migration의 locator 변경은 예약 아래 같은 계약을 따릅니다.
 
 새 관찰은 Auto이며 `--host auto|PROVIDER`는 Auto 또는 등록된 불투명 provider를 선택하는 옵션이지 app 변형/고정 열거가 아닙니다. 우선순위는 명시 CLI > `DESKTOP_PET_OBSERVATION_MODE` > 저장 `observation.host` > 새 profile Auto입니다. 구 auto/herdr/tern 선택은 유지하고 `both`→`auto`, host-less→Herdr는 legacy 읽기 이전에만 적용합니다. 새 변경 값으로 `both`를 받지 않습니다. 실제 adapter source 수가 provider 연결 증거이며 control은 private same-UID profile socket입니다. locality/capability만 작업 권한을 결정하고 이름 접두사/경로로 권한을 얻지 못합니다. 공통 설정과 adapter 소유 lifecycle/preferences 키는 같은 atomic profile writer를 사용하고 `exit_with_herdr`/endpoints는 Herdr가 소유합니다.
 

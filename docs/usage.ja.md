@@ -70,6 +70,29 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
+**beta.8 候補のパス修正（検証・公開待ち）:** Standalone は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG に依存しません。Brew は検証済み formula prefix の `libexec/DesktopPet.app`、source は正確な checkout の `dist/DesktopPet.app` のままです。通常導入は旧 Applications owner を移動しません。公開 beta.7 と以下の過去の固定インストーラーは不変で、再実行は修復になりません。
+
+### Beta.8 Applications recovery
+
+修復は Rust アプリ機能ではなく**別の Python 3 スクリプト**です。ソースは `scripts/repair-applications-install.py`、公開予定アセットは `desktop-pet-repair-applications-v0.4.13-beta.8.py` と `.sha256`（`SHA256SUMS` にも収録）です。[beta.8 ノート](releases/v0.4.13-beta.8.md)は公開済みの証拠ではありません。正確な beta.8 公開アセットが揃ってからスクリプト checksum を検証し、最初に dry-run を確認してください。ソース dry-run も beta.8 payload が必要で、latest/source fallback はありません。
+
+```sh
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
+# 上の apply の代わりに、手動起動も希望する場合のみ:
+python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
+```
+
+元の config/state は**保存済み Tern SDK KV の両パス**から取得します。引数なし起動、既定値の推測、adopt、結合はしません。custom は `--tern-kv ABS` を指定します。既定は絶対 `TERN_CONFIG_DIR` または実 home の `Library/Application Support/Tern` 配下の `plugin-data/tern-desktop-pet/kv.json` です。任意の `--config-dir ABS --state-dir ABS` は両方必要で、KV と完全一致しなければ拒否します。
+
+対象は実際の non-root macOS arm64 アカウントの検証済み Standalone Applications owner のみです。Brew/source/custom、既存の private destination、危険な所有権/symlink は拒否します。固定 beta.8 payload と署名 closure を Stop 前に検証し、元の完全な app/sidecar、locator、KV bytes、profile データを `~/.local/share/desktop-pet/repair-backups` に manifest と共に保持します。paired helper の native install 後、新 owner/image/locator の検証が済むまで KV を変えません。変更は一致する executable フィールドだけで、他の KV、データ、default-profile pointer は保全します。
+
+**Pet の未保存編集を先に保存し、適用中はプラグイン設定を変更しないでください。** 証明済み profile の Pet だけを通常 Stop し、Tern/窓/terminal/agent の終了・再起動、plugin reload、Configure/Connect は要求しません。不明な active profile や同時変更は拒否します。`--start` なしでは停止したままです。`--apply --start` は元の profile と取得できた認証済み observation/assets を使う通常の手動 Start で、updater reservation や race-free 保証ではありません。custom routing は実際の Tern 環境を使い、不明な環境を推測しません。追加 Stop を観測すれば再起動しません。
+
+インストールと実際の再接続は別の結果です。canonical UI/元 profile 起動/実 Tern と作業の維持は所有する独立 OS アカウント/VM での証拠待ちです。失敗時は phase と old/new/backup パスを保持し、変更済みパス/KV の無条件上書き、旧 installer 再実行、backup 削除、引数なし起動をしないでください。完了済み同 beta 修復では Stop/install を繰り返しません。[詳細な制約](usage.md#one-time-applications-recovery-beta8-candidate)も参照してください。
+
+### 過去の固定インストール例
+
 **過去の v0.4.4 新規 Brew 導入証明:** 中立 v0.4.4 formula は tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586` に公開済みです。適格な Brew v0.4.4 新規導入は通過しました（74ファイル / 44.3 MB、内外の再署名5個）。認証済み検査で Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312` を確認しました。導入・検査は中立 config/state・standalone app を作成せず、デーモンも起動しませんでした。明示的な手動 **Start** の後だけ実際の v0.4.4 UI/control ready、PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` に達しました。ルベリアと実際の Settings は **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0** を表示し、その後の明示 Hidden は同じ既定 instance を保持しました。新規導入の証拠であり、v0.4.4 通常更新や managed 移行の完了証明ではありません。導入コマンド:
 
 ```sh

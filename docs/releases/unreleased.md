@@ -1,6 +1,25 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
-## Current candidate: v0.4.13-beta.7 / 현재 후보
+## Current candidate: v0.4.13-beta.8 / 현재 후보
+
+The [beta.8 release-body source](v0.4.13-beta.8.md) specifies the private Standalone destination and a **separate one-time Python 3 recovery artifact**, not a new Rust repair/route API. Qualification, final CI, packaging, publication and public-byte validation require integration-owner evidence; this entry does not claim they passed. Published beta.7 and earlier immutable tags/assets/installers/notes remain unchanged. Rerunning an old pinned installer does not repair its Applications destination. Stable latest and migration target remain `0.4.12`; Brew/source ownership and beta Download-not-Apply policy remain unchanged.
+
+Standalone’s candidate destination is the actual OS home’s `.local/share/desktop-pet/libexec/DesktopPet.app`; Brew stays under its verified formula prefix and source under its exact checkout. Ordinary installation does not silently relocate an old Applications owner. Recovery source is `scripts/repair-applications-install.py`; planned separate assets are `desktop-pet-repair-applications-v0.4.13-beta.8.py` and `.sha256`, with a `SHA256SUMS` entry. These supplement the six standard beta assets; they are not installed runtime features or a claim that published assets already exist.
+
+Use [current recovery guidance](../usage.md#one-time-applications-recovery-beta8-candidate): verify the versioned script, dry-run first, explicitly `--apply`, and separately `--apply --start` only for manual Start. Derive both original profile paths from exact saved Tern KV, not a no-argument launch or guessed default; `--tern-kv ABS` supports a custom setup, while optional paired profile arguments must match KV. Download/verify exact beta.8 payload before any Stop, preserve original full app/sidecar, locator, KV and profile backups, and change only the matching connection executable after new-owner verification. Do not merge/delete/adopt profiles, change default-profile selection, restart Tern/windows/terminals/agents or force plugin reload/Configure/Connect. Save Pet drafts and avoid settings changes during apply. Unknown/concurrent state fails closed and preserves evidence. Installation is not proof of runtime readiness or real Tern reconnection; restart is manual, not reservation-backed updater authority.
+
+**Pending acceptance:** actual canonical installation/UI, exact original-profile restart and real same-window Tern/workload-preserving reconnection remain unverified without owned isolated OS-account/VM proof. Dry-run, fixtures, source availability and installed bytes do not establish recovery. No beta.8 counts/digests/provenance or external-machine success is invented here.
+
+**한국어:** beta.8 후보는 private Standalone 목적지와 별도 Python 3 일회성 복구 자산입니다. 공개 beta.7은 불변이며 옛 설치기 재실행으로 복구되지 않습니다. checksum 확인 후 dry-run → 명시적 `--apply`, 선택적 `--apply --start` 순서이며 원래 프로필은 저장된 Tern KV의 정확한 두 경로에서 읽습니다. 원본 데이터·앱·sidecar·locator·KV 백업을 보존하고 Tern/작업은 종료·재시작하지 않습니다. 실제 UI·원래 프로필 재시작·Tern 재연결 및 최종 검사/게시 증거는 아직 주장하지 않습니다.
+
+## Historical source-only private installation location
+
+This correction is **not included in published beta.7** and does not rewrite immutable installers, tags, assets or release notes. Standalone belongs at the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG overrides. Homebrew retains its verified formula prefix’s `libexec/DesktopPet.app`; source retains the exact core checkout’s `dist/DesktopPet.app`. The current Herdr consumer’s standalone fallback uses the private path. Existing Applications installs are not silently relocated, deleted or adopted; old-owner mismatch fails closed with actionable repair guidance, without launching the old app or changing profiles. Use the installer-reported executable and exact existing config/state paths. Historical pinned v0.4.7/v0.4.8 examples retain their original Applications behavior.
+
+
+## Historical candidate source: v0.4.13-beta.7 / 과거 후보 소스
+
+The following beta.7 text preserves its prepublication source account. Beta.7 is now published; its immutable assets do not contain the beta.8 private-location correction or separate recovery script. Earlier candidate/publication wording and test limitations below are historical, not current beta.8 qualification.
 
 The [beta.7 release-body source](v0.4.13-beta.7.md) follows **public beta.5 and the failed beta.6 tag** with a native-only, testing-only prerelease candidate. Publication is authorized for opt-in testing; this source does not claim a beta.7 commit/tag, successful final checks, official CI, packaging, public assets or successful external-machine recovery. Stable latest and migration target remain `0.4.12`; historical release files and tags, including beta.6, remain immutable.
 

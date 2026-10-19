@@ -77,6 +77,8 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
+**beta.8 후보 경로 수정(검증·게시 증거 대기):** Standalone은 `HOME`/XDG가 아닌 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용합니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 beta.7과 아래 과거 v0.4.8 설치기는 불변이며 재실행으로 복구되지 않습니다. 별도 Python 3 복구 자산은 기본 dry-run, 변경은 명시적 `--apply`, 수동 시작은 선택적 `--apply --start`입니다. 인자 없는 실행 대신 저장된 Tern KV의 원래 두 프로필 경로를 사용하고 원본 데이터·백업을 보존하며 Tern/작업을 종료·재시작하지 않습니다. [복구 명령·제약](docs/usage.ko.md#beta8-applications-복구-후보)과 [beta.8 소스 노트](docs/releases/v0.4.13-beta.8.md)를 보세요. 소스는 게시·실제 복구 성공 증거가 아닙니다.
+
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 
 ```sh
