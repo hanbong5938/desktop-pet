@@ -691,7 +691,7 @@ pub(super) fn observe_integrations(
     plan: &MigrationPlan,
     record: &mut MigrationRecord,
 ) -> Result<(), String> {
-    let (observations, reconnected) = integration_observations(plan, record, None);
+    let (observations, reconnected) = integration_observations(plan, record, None, None);
     record.integration_status = observations;
     record.reconnected_profiles = reconnected;
     Ok(())
@@ -700,11 +700,18 @@ fn integration_observations(
     plan: &MigrationPlan,
     record: &MigrationRecord,
     historical_image: Option<&ExecutableIdentity>,
+    selected_override: Option<&LegacyProfile>,
 ) -> (Vec<MigrationIntegrationStatus>, Vec<MigrationProfilePaths>) {
     let mut observations = Vec::new();
     let mut reconnected = Vec::new();
-    for profile in &plan.profiles {
-        let live = committed_profile_image(plan, record, profile).and_then(|image| {
+    for original in &plan.profiles {
+        let profile = selected_override
+            .filter(|selected| {
+                selected.config_dir == original.config_dir
+                    && selected.state_dir == original.state_dir
+            })
+            .unwrap_or(original);
+        let live = committed_profile_image(plan, record, original).and_then(|image| {
             let live = status(profile)?;
             // Fresh migration observes its approved stable target; only a
             // separately authenticated owner upgrade observes the current app.
@@ -1001,14 +1008,12 @@ pub fn observe_for_context(
         &original_record_sha256,
         generation,
     );
-    let mut observed = plan.clone();
-    for profile in &mut observed.profiles {
-        if profile.config_dir == selected.config_dir && profile.state_dir == selected.state_dir {
-            *profile = current.profiles[0].clone();
-        }
-    }
-    let (observations, reconnected) =
-        integration_observations(&observed, &record, Some(&context.running));
+    let (observations, reconnected) = integration_observations(
+        plan,
+        &record,
+        Some(&context.running),
+        Some(&current.profiles[0]),
+    );
     record.integration_status = observations;
     record.reconnected_profiles = reconnected;
     if migration_stop_generation(&context.state_dir)? != generation {
@@ -1791,6 +1796,296 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn observation_fixture(profiles: usize) -> (tempfile::TempDir, MigrationPlan, MigrationRecord) {
+        let (temp, mut plan) = crate::migration::tests::fixture();
+        plan.target.image =
+            executable_identity(&actual_process_image(std::process::id()).unwrap()).unwrap();
+        plan.profiles[0].observation = ObservationSelection::Provider("tern".into());
+        if profiles == 2 {
+            let mut secondary = plan.profiles[0].clone();
+            let root = plan.profiles[0].state_dir.parent().unwrap();
+            secondary.config_dir = root.join("config2");
+            secondary.state_dir = root.join("state2");
+            secondary.control_socket = secondary.state_dir.join("control.sock");
+            ensure_private_directory(&secondary.config_dir).unwrap();
+            ensure_private_directory(&secondary.state_dir.join("updates-v4")).unwrap();
+            plan.profiles.push(secondary);
+            plan.profiles[0].observation = ObservationSelection::Provider("herdr".into());
+            plan.profiles[0].herdr_socket = Some(plan.profiles[0].state_dir.join("herdr.sock"));
+        }
+        let mut record = crate::migration::tests::persist_fixture(&plan);
+        record.phase = MigrationPhase::Complete;
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_profiles = plan
+            .profiles
+            .iter()
+            .map(|profile| MigrationTargetProfile {
+                config_dir: profile.config_dir.clone(),
+                state_dir: profile.state_dir.clone(),
+                pid: Some(std::process::id()),
+                instance_id: Some("ready-target".into()),
+                image: plan.target.image.clone(),
+                native_ready: true,
+                commit_requested: true,
+                committed: true,
+            })
+            .collect();
+        save(&plan, &record).unwrap();
+        (temp, plan, record)
+    }
+
+    fn observation_server(
+        profile: &LegacyProfile,
+        image: &ExecutableIdentity,
+        requests: usize,
+    ) -> thread::JoinHandle<()> {
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(&profile.control_socket).unwrap();
+        fs::set_permissions(&profile.control_socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let response = serde_json::to_vec(&serde_json::json!({
+            "ok":true,"running":true,"shutdown":false,"ready":true,
+            "ui_ready":true,"control_ready":true,
+            "observation_mode":profile.observation.as_str(),
+            "app_version":crate::identity::neutral::VERSION,
+            "updater_protocol":4,"observation_capability":2,"integration_api":1,
+            "instance_id":"ready-target","pid":std::process::id(),
+            "executable_path":image.path,"running_sha256":image.sha256,
+            "config_dir":profile.config_dir,"state_dir":profile.state_dir,
+            "host_connections":{"herdr":0,"tern":1}
+        }))
+        .unwrap();
+        thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                stream.write_all(&response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        })
+    }
+
+    // Well-formed documents that deliberately fail one binding, before signed
+    // delivery verification. They do not claim a successful SDK handover.
+    fn write_invalid_handover(
+        plan: &MigrationPlan,
+        record: &MigrationRecord,
+        profile: &LegacyProfile,
+        stale_instance: bool,
+    ) {
+        let image = &plan.target.image;
+        let target = TernConnection {
+            version: 1,
+            executable: image.path.clone(),
+            config_dir: profile.config_dir.clone(),
+            state_dir: profile.state_dir.clone(),
+        };
+        let generation = migration_stop_generation(&profile.state_dir).unwrap();
+        let challenge = HandoverChallenge {
+            version: 1,
+            handover: Handover {
+                operation_id: plan.operation_id.clone(),
+                plan_path: evidence_path(plan),
+                plan_sha256: record.plan_sha256.clone(),
+                token: plan.token.clone(),
+                consumer_revision: "fixture-revision".into(),
+                target_instance_id: "ready-target".into(),
+            },
+            original: TernConnection {
+                executable: plan.source_image.path.clone(),
+                ..target.clone()
+            },
+            target,
+            current_image: image.clone(),
+            stop_generation: generation,
+            delivery_path: delivery_path_for(plan, &profile.state_dir),
+            delivery_sha256: "a".repeat(64),
+        };
+        let bytes = serde_json::to_vec(&challenge).unwrap();
+        let receipt = HandoverReceipt {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            plan_sha256: record.plan_sha256.clone(),
+            challenge_sha256: if stale_instance {
+                format!("{:x}", Sha256::digest(&bytes))
+            } else {
+                "0".repeat(64)
+            },
+            current_image: image.clone(),
+            config_dir: profile.config_dir.clone(),
+            state_dir: profile.state_dir.clone(),
+            target_instance_id: if stale_instance {
+                "old-target"
+            } else {
+                "ready-target"
+            }
+            .into(),
+            window_id: "fixture-window".into(),
+            stop_generation: generation,
+            binding_epoch: 1,
+            sequence: 1,
+            observation_generation: 1,
+            native_generation: 1,
+            consumer_revision: "fixture-revision".into(),
+            package_sha256: "a".repeat(64),
+        };
+        protocol::write_private_new(
+            &handover_path(plan, &profile.state_dir, image, false),
+            &bytes,
+            0o600,
+        )
+        .unwrap();
+        protocol::write_private_new(
+            &handover_path(plan, &profile.state_dir, image, true),
+            &serde_json::to_vec(&receipt).unwrap(),
+            0o600,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runtime_profile_changes_preserve_authority_and_reject_invalid_handover() {
+        for stale_instance in [true, false] {
+            let (_temp, plan, record) = observation_fixture(1);
+            let mut selected = plan.profiles[0].clone();
+            selected
+                .environment
+                .insert("TERN_RUNTIME".into(), "current".into());
+            selected.stop_generation = 7;
+            selected.tern_reconnect_required = true;
+            selected.control_socket = selected.state_dir.join("runtime.sock");
+            protocol::write_private_new(
+                &selected.state_dir.join("updates-v4/stop-generation.json"),
+                b"7",
+                0o600,
+            )
+            .unwrap();
+            write_invalid_handover(&plan, &record, &selected, stale_instance);
+            let old_plan = fs::read(evidence_path(&plan)).unwrap();
+            let old_journal = fs::read(journal_path(&plan)).unwrap();
+            let server = observation_server(&selected, &plan.target.image, 2);
+            // Reproduce the old consumer path with the same runtime inputs:
+            // embedding them in the authority must fail immutable verification.
+            let mut observed = plan.clone();
+            observed.profiles[0] = selected.clone();
+            let (old_observations, old_reconnected) =
+                integration_observations(&observed, &record, Some(&plan.target.image), None);
+            assert_eq!(old_observations.len(), 1);
+            assert!(!old_observations[0].connected);
+            assert_eq!(
+                old_observations[0].error.as_deref(),
+                Some("migration journal does not match immutable evidence"),
+            );
+            assert!(old_reconnected.is_empty());
+            assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+            assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+            let (observations, reconnected) =
+                integration_observations(&plan, &record, Some(&plan.target.image), Some(&selected));
+            server.join().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].provider, "tern");
+            assert!(!observations[0].connected);
+            assert_eq!(
+                observations[0].error.as_deref(),
+                Some("Tern handover receipt is stale or belongs to another profile/instance/Stop generation"),
+            );
+            assert!(reconnected.is_empty());
+            assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+            assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+            assert!(read_record(&plan).is_ok());
+        }
+    }
+
+    #[test]
+    fn runtime_override_is_selected_by_both_paths_and_keeps_profile_order() {
+        // None matches the second profile; Some matches exactly one path.
+        for mismatched_config in [None, Some(true), Some(false)] {
+            let (_temp, plan, record) = observation_fixture(2);
+            let mut selected = plan.profiles[1].clone();
+            selected.tern_reconnect_required = true;
+            selected
+                .environment
+                .insert("TERN_RUNTIME".into(), "current".into());
+            selected.stop_generation = 3;
+            selected.control_socket = selected.state_dir.join("runtime.sock");
+            if let Some(config) = mismatched_config {
+                if config {
+                    selected.config_dir = plan.profiles[0].config_dir.clone();
+                } else {
+                    selected.state_dir = plan.profiles[0].state_dir.clone();
+                }
+            } else {
+                protocol::write_private_new(
+                    &selected.state_dir.join("updates-v4/stop-generation.json"),
+                    b"3",
+                    0o600,
+                )
+                .unwrap();
+                write_invalid_handover(&plan, &record, &selected, false);
+            }
+            let old_plan = fs::read(evidence_path(&plan)).unwrap();
+            let old_journal = fs::read(journal_path(&plan)).unwrap();
+            let first = observation_server(&plan.profiles[0], &plan.target.image, 1);
+            let second = observation_server(
+                if mismatched_config.is_none() {
+                    &selected
+                } else {
+                    &plan.profiles[1]
+                },
+                &plan.target.image,
+                1,
+            );
+            let (observations, reconnected) =
+                integration_observations(&plan, &record, Some(&plan.target.image), Some(&selected));
+            first.join().unwrap();
+            second.join().unwrap();
+            assert_eq!(observations[0].config_dir, plan.profiles[0].config_dir);
+            assert_eq!(observations[0].state_dir, plan.profiles[0].state_dir);
+            assert_eq!(observations[0].provider, "herdr");
+            assert!(!observations[0].connected);
+            if mismatched_config.is_none() {
+                assert_eq!(observations.len(), 2);
+                assert_eq!(observations[1].config_dir, plan.profiles[1].config_dir);
+                assert_eq!(observations[1].state_dir, plan.profiles[1].state_dir);
+                assert_eq!(observations[1].provider, "tern");
+                assert!(!observations[1].connected);
+                assert_eq!(
+                    observations[1].error.as_deref(),
+                    Some("Tern handover receipt is stale or belongs to another profile/instance/Stop generation"),
+                );
+            } else {
+                // Both originals have Tern reconnect disabled; a half match
+                // must leave only the unchanged primary Herdr observation.
+                assert_eq!(observations.len(), 1);
+            }
+            assert!(reconnected.is_empty());
+            assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+            assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+            assert!(read_record(&plan).is_ok());
+        }
+    }
+
+    #[test]
+    fn runtime_profile_without_reconnect_does_not_invent_tern_completion() {
+        let (_temp, plan, record) = observation_fixture(1);
+        let mut selected = plan.profiles[0].clone();
+        selected
+            .environment
+            .insert("TERN_RUNTIME".into(), "current".into());
+        let old_plan = fs::read(evidence_path(&plan)).unwrap();
+        let old_journal = fs::read(journal_path(&plan)).unwrap();
+        let server = observation_server(&selected, &plan.target.image, 1);
+        let (observations, reconnected) =
+            integration_observations(&plan, &record, Some(&plan.target.image), Some(&selected));
+        server.join().unwrap();
+        assert!(observations.is_empty());
+        assert!(reconnected.is_empty());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+    }
+
     #[test]
     fn integration_observations_honor_provider_selection_without_claiming_reconnection() {
         use std::os::unix::net::UnixListener;
@@ -1850,26 +2145,22 @@ mod tests {
                 stream.write_all(&response).unwrap();
                 stream.write_all(b"\n").unwrap();
             });
-            let (observations, reconnected) = integration_observations(&plan, &record, None);
+            let (observations, reconnected) = integration_observations(&plan, &record, None, None);
             server.join().unwrap();
-            let expected = required_providers
-                .into_iter()
-                .map(|provider| MigrationIntegrationStatus {
-                    config_dir: profile.config_dir.clone(),
-                    state_dir: profile.state_dir.clone(),
-                    provider: provider.into(),
-                    connected: false,
-                    error: Some(if provider == "herdr" {
-                        format!(
-                            "Herdr adapter has not connected to configured socket {}",
-                            profile.herdr_socket.as_ref().unwrap().display()
-                        )
-                    } else {
-                        "missing field `version` at line 1 column 2".into()
-                    }),
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(observations, expected, "selection {selection:?}");
+            assert_eq!(
+                observations
+                    .iter()
+                    .map(|observation| observation.provider.as_str())
+                    .collect::<Vec<_>>(),
+                required_providers,
+                "selection {selection:?}",
+            );
+            assert!(observations.iter().all(|observation| {
+                observation.config_dir == profile.config_dir
+                    && observation.state_dir == profile.state_dir
+                    && !observation.connected
+                    && observation.error.is_some()
+            }));
             assert_eq!(reconnected, Vec::<MigrationProfilePaths>::new());
             assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
             assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);

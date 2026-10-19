@@ -1604,6 +1604,223 @@ mod tests {
         snapshot
     }
 
+    fn admitted_card_service(policy: UpdatePolicy) -> AppUpdateService {
+        // Keep this fixture in memory: startup workers must not inspect a real profile.
+        let mut service = AppUpdateService::new(None, false, policy, None);
+        let context = local_check().plan.unwrap().context;
+        service.context = Some(context.clone());
+        service.migration_history_checked(&context, true);
+        service
+    }
+
+    fn completed_history_model(service: &AppUpdateService, locale: UiLocale) -> UpdateCardModel {
+        let before = service.model(locale);
+        let mut after = before.clone();
+        let operation_id = "c".repeat(32);
+        after.retain_completed_migration(&operation_id, locale);
+        assert!(!after.migration_visible);
+        assert!(!after.migration_available);
+        assert!(after.history.starts_with(&before.history));
+        assert!(after.history[before.history.len()..].contains(&operation_id));
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.status_text, before.status_text);
+        assert_eq!(after.detail, before.detail);
+        assert_eq!(after.action, before.action);
+        assert_eq!(after.primary_action, before.primary_action);
+        assert_eq!(after.release, before.release);
+        assert_eq!(after.download_url, before.download_url);
+        assert_eq!(after.busy, before.busy);
+        assert_eq!(after.settings_locked, before.settings_locked);
+        assert_eq!(after.auto_check, before.auto_check);
+        assert_eq!(after.receive_beta_updates, before.receive_beta_updates);
+        assert_eq!(after.running_version, before.running_version);
+        assert_eq!(after.source, before.source);
+        assert_eq!(after.diagnostics, before.diagnostics);
+        assert_eq!(after.last_checked, before.last_checked);
+        assert_eq!(after.migration_title, before.migration_title);
+        after
+    }
+
+    #[test]
+    fn completed_migration_history_preserves_live_service_states_and_actions() {
+        for locale in [UiLocale::En, UiLocale::Ko] {
+            let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+            service.previous_outcome = Some(failed_record('a'));
+            for status in [
+                CheckStatus::Current,
+                CheckStatus::Available,
+                CheckStatus::Installed,
+            ] {
+                let (request, generation, context) = service.begin_check().unwrap();
+                let checking = completed_history_model(&service, locale);
+                assert_eq!(checking.status, CheckStatus::Checking);
+                assert!(checking.busy);
+                assert!(checking.settings_locked);
+                assert!(checking.action.is_none());
+                assert!(checking.primary_action.is_none());
+
+                let mut snapshot = local_check_for_context(context);
+                snapshot.status = status;
+                if status != CheckStatus::Available {
+                    snapshot.plan = None;
+                }
+                service.checked_event(request, generation, Ok(snapshot), None);
+                let model = completed_history_model(&service, locale);
+                assert_eq!(model.status, status);
+                assert!(!model.busy);
+                assert!(!model.settings_locked);
+                if status == CheckStatus::Available {
+                    assert_eq!(model.action, Some(UpdateAction::SourceRebuild));
+                    assert_eq!(model.primary_action, Some(UpdateCardPrimaryAction::Update));
+                } else {
+                    assert!(model.action.is_none());
+                    assert!(model.primary_action.is_none());
+                }
+            }
+            let (request, generation, _) = service.begin_check().unwrap();
+            service.checked_event(
+                request,
+                generation,
+                Err("check transport failed".into()),
+                None,
+            );
+            let failed = completed_history_model(&service, locale);
+            assert_eq!(failed.status, CheckStatus::Failed);
+            assert!(!failed.busy);
+            assert!(failed.action.is_none());
+            assert!(failed.primary_action.is_none());
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    fn informational_beta_check(context: UpdateContext) -> CheckSnapshot {
+        let mut snapshot = local_check_for_context(context);
+        snapshot.status = CheckStatus::Unsupported;
+        snapshot.policy = UpdatePolicy::StableAndBeta;
+        snapshot.plan = None;
+        let asset = "DesktopPet-v0.4.13-beta.2-macos-arm64.tar.gz";
+        let base = "https://github.com/hanbong5938/desktop-pet/releases/download/v0.4.13-beta.2/";
+        let release = ReleaseCandidate {
+            version: "0.4.13-beta.2".into(),
+            channel: ReleaseChannel::Beta,
+            tag: "v0.4.13-beta.2".into(),
+            release_id: 42,
+            asset_name: asset.into(),
+            archive_url: format!("{base}{asset}"),
+            archive_size: 1234,
+            sha256: "a".repeat(64),
+            checksum_url: format!("{base}{asset}.sha256"),
+        };
+        release.validate().unwrap();
+        snapshot.release = Some(release);
+        snapshot
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn completed_migration_keeps_validated_beta_informational_without_apply() {
+        let mut service = admitted_card_service(UpdatePolicy::StableAndBeta);
+        service.context.as_mut().unwrap().version = "0.4.13-beta.1".into();
+        let (request, generation, context) = service.begin_check().unwrap();
+        let snapshot = informational_beta_check(context);
+        let release = snapshot.release.clone().unwrap();
+        assert!(snapshot.plan.is_none());
+        service.checked_event(request, generation, Ok(snapshot), None);
+        for locale in [UiLocale::En, UiLocale::Ko] {
+            let model = completed_history_model(&service, locale);
+            assert_eq!(model.status, CheckStatus::Unsupported);
+            assert_eq!(model.running_version, "0.4.13-beta.1");
+            assert_eq!(model.release.as_ref(), Some(&release));
+            assert_eq!(model.release.as_ref().unwrap().tag, "v0.4.13-beta.2");
+            assert_eq!(
+                model.download_url.as_deref(),
+                Some(release.archive_url.as_str())
+            );
+            assert!(model.receive_beta_updates);
+            assert!(model.action.is_none());
+            assert!(model.primary_action.is_none());
+            assert!(!model.busy);
+            assert!(!model.settings_locked);
+        }
+        assert!(service.plan().is_none());
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn completed_history_cannot_resurrect_beta_after_error_or_policy_generation_change() {
+        let mut service = admitted_card_service(UpdatePolicy::StableAndBeta);
+        let (request, generation, context) = service.begin_check().unwrap();
+        let beta = informational_beta_check(context);
+        service.checked_event(request, generation, Ok(beta.clone()), None);
+        assert!(completed_history_model(&service, UiLocale::En)
+            .download_url
+            .is_some());
+
+        let assert_hidden = |service: &AppUpdateService, status| {
+            let model = completed_history_model(service, UiLocale::En);
+            assert_eq!(model.status, status);
+            assert!(model.release.is_none());
+            assert!(model.download_url.is_none());
+            assert!(model.action.is_none());
+            assert!(model.primary_action.is_none());
+        };
+        let (request, generation, _) = service.begin_check().unwrap();
+        assert_hidden(&service, CheckStatus::Checking);
+        service.checked_event(request, generation, Err("offline".into()), None);
+        assert_hidden(&service, CheckStatus::Failed);
+
+        let (request, generation, _) = service.begin_check().unwrap();
+        assert_hidden(&service, CheckStatus::Checking);
+        service.checked_event(request, generation, Ok(beta.clone()), None);
+        assert!(completed_history_model(&service, UiLocale::En)
+            .download_url
+            .is_some());
+        service.change_policy(UpdatePolicy::StableOnly, None);
+        assert_hidden(&service, CheckStatus::NotChecked);
+        let (old_request, old_generation, _) = service.begin_check().unwrap();
+        let mut stable = beta.clone();
+        stable.policy = UpdatePolicy::StableOnly;
+        stable.status = CheckStatus::Current;
+        stable.release = None;
+        service.checked_event(old_request, old_generation, Ok(stable.clone()), None);
+        assert_hidden(&service, CheckStatus::Current);
+        service.change_policy(UpdatePolicy::StableAndBeta, None);
+        assert_hidden(&service, CheckStatus::NotChecked);
+        let (request, generation, _) = service.begin_check().unwrap();
+        assert_ne!(old_generation, generation);
+        assert_eq!(
+            service.checked_event(old_request, old_generation, Ok(stable), None),
+            None
+        );
+        assert_hidden(&service, CheckStatus::Checking);
+        service.checked_event(request, generation, Ok(beta), None);
+        assert!(completed_history_model(&service, UiLocale::En)
+            .download_url
+            .is_some());
+    }
+
+    #[test]
+    fn completed_history_cannot_override_invalid_initial_history_admission() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let context = service.context.clone().unwrap();
+        service.migration_history_checked(&context, false);
+        service.set_problem("migration journal does not match immutable evidence".into());
+        let model = completed_history_model(&service, UiLocale::En);
+        assert_eq!(model.status, CheckStatus::Failed);
+        assert!(model.busy);
+        assert!(model.settings_locked);
+        assert!(model.action.is_none());
+        assert!(model.primary_action.is_none());
+        assert!(service.begin_check().is_none());
+        assert!(!service.settings_admitted());
+        service.migration_history_checked(&context, true);
+        assert!(service.begin_check().is_some());
+        assert_eq!(
+            completed_history_model(&service, UiLocale::En).status,
+            CheckStatus::Checking
+        );
+    }
+
     #[test]
     fn unresolved_migration_fences_checks_and_stale_candidates_until_settlement() {
         use desktop_pet_update_coordinator::migration::{MigrationPhase, MigrationRecord};

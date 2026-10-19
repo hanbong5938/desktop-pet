@@ -8752,30 +8752,11 @@ impl Ui {
             );
         }
         let mut model = self.app_update.model(self.locale);
-        let migration_was_primary =
-            model.primary_action == Some(crate::update_card::UpdateCardPrimaryAction::Migrate);
         if let Some(plan) = &self.migration.plan {
             if self.migration.record.as_ref().is_some_and(|record| {
                 record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
             }) {
-                model.migration_visible = false;
-                model.migration_available = false;
-                if migration_was_primary
-                    || !matches!(
-                        model.status,
-                        desktop_pet_update_coordinator::CheckStatus::Available
-                            | desktop_pet_update_coordinator::CheckStatus::Installed
-                    )
-                {
-                    model.status = desktop_pet_update_coordinator::CheckStatus::Applied;
-                    model.status_text = text(self.locale, Message::MigrationRetired).to_owned();
-                    model.detail = model.status_text.clone();
-                }
-                model.history.push_str(&format!(
-                    "\n{} · {}",
-                    plan.operation_id,
-                    text(self.locale, Message::MigrationRetired)
-                ));
+                model.retain_completed_migration(&plan.operation_id, self.locale);
             } else {
                 model.primary_action = None;
                 model.migration_visible = true;

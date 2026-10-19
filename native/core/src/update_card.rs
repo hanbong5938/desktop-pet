@@ -81,6 +81,18 @@ pub(crate) struct UpdateCardModel {
     pub(crate) migration_title: String,
 }
 
+impl UpdateCardModel {
+    pub(crate) fn retain_completed_migration(&mut self, operation_id: &str, locale: UiLocale) {
+        self.migration_visible = false;
+        self.migration_available = false;
+        self.history.push_str(&format!(
+            "\n{} · {}",
+            operation_id,
+            text(locale, Message::MigrationRetired)
+        ));
+    }
+}
+
 pub(crate) struct AppUpdateCard {
     view: Retained<CardView>,
     heading: Retained<NSTextField>,

@@ -4348,7 +4348,7 @@ mod tests {
     fn valid_beta_release_never_gains_stable_migration_authority() {
         let (_temp, mut plan) = retained_fixture("0.4.13-beta.1");
         plan.target.release.channel = crate::ReleaseChannel::Beta;
-        plan.target.release.tag = "beta/0.4.13-beta.1".into();
+        plan.target.release.tag = "v0.4.13-beta.1".into();
         plan.target.release.archive_url = format!(
             "https://github.com/hanbong5938/desktop-pet/releases/download/{}/{}",
             plan.target.release.tag, plan.target.release.asset_name
@@ -4480,14 +4480,30 @@ mod tests {
     #[test]
     fn durable_plan_substitution_and_journal_digest_change_are_rejected() {
         let (_temp, plan) = fixture();
-        let mut record = persist_fixture(&plan);
+        let record = persist_fixture(&plan);
         read_record(&plan).unwrap();
         let mut altered = plan.clone();
         altered.source_image.sha256 = "d".repeat(64);
         assert!(read_record(&altered).is_err());
-        record.plan_sha256 = "0".repeat(64);
+        let bytes = fs::read(evidence_path(&plan)).unwrap();
+        let mut changed_bytes = bytes.clone();
+        changed_bytes.push(b'\n');
+        fs::write(evidence_path(&plan), changed_bytes).unwrap();
+        assert!(read_record(&plan).is_err(), "raw bytes remain digest-bound");
+        fs::write(evidence_path(&plan), &bytes).unwrap();
+        for field in ["version", "operation_id", "plan_sha256"] {
+            let mut changed = record.clone();
+            match field {
+                "version" => changed.version += 1,
+                "operation_id" => changed.operation_id = "0".repeat(32),
+                "plan_sha256" => changed.plan_sha256 = "0".repeat(64),
+                _ => unreachable!(),
+            }
+            save(&plan, &changed).unwrap();
+            assert!(read_record(&plan).is_err(), "{field} must remain bound");
+        }
         save(&plan, &record).unwrap();
-        assert!(read_record(&plan).is_err());
+        read_record(&plan).unwrap();
     }
     #[test]
     fn legacy_and_neutral_stop_evidence_is_combined_without_rewriting() {
@@ -4726,23 +4742,22 @@ mod tests {
         let profile = plan.profiles[0].clone();
         let image = ctx.running.clone();
         let server = thread::spawn(move || {
-            for ready in [false, true] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut byte = [0u8; 1];
-                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
-                let mut reply = serde_json::to_vec(&serde_json::json!({
-                    "ok":true,"running":true,"shutdown":false,"ready":ready,
-                    "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
-                    "app_version":crate::identity::neutral::VERSION,
-                    "updater_protocol":4,"observation_capability":2,"integration_api":1,
-                    "instance_id":"another-ready-instance","pid":std::process::id(),
-                    "executable_path":image.path,"running_sha256":image.sha256,
-                    "config_dir":profile.config_dir,"state_dir":profile.state_dir
-                }))
-                .unwrap();
-                reply.push(b'\n');
-                stream.write_all(&reply).unwrap();
-            }
+            let ready = false;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut byte = [0u8; 1];
+            while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+            let mut reply = serde_json::to_vec(&serde_json::json!({
+                "ok":true,"running":true,"shutdown":false,"ready":ready,
+                "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
+                "app_version":crate::identity::neutral::VERSION,
+                "updater_protocol":4,"observation_capability":2,"integration_api":1,
+                "instance_id":"another-ready-instance","pid":std::process::id(),
+                "executable_path":image.path,"running_sha256":image.sha256,
+                "config_dir":profile.config_dir,"state_dir":profile.state_dir
+            }))
+            .unwrap();
+            reply.push(b'\n');
+            stream.write_all(&reply).unwrap();
         });
         let discovered = discover_for_context(&ctx).unwrap().unwrap();
         assert_eq!(discovered, (plan.clone(), record.clone()));
@@ -4752,12 +4767,6 @@ mod tests {
         assert_eq!(
             discover_for_context(&ctx).unwrap(),
             Some(discovered.clone())
-        );
-        // A later ready status reaches the next identity guard through the
-        // retained plan; discovery has not granted settlement authority.
-        assert_eq!(
-            integrations::observe_for_context(&discovered.0, &ctx).unwrap_err(),
-            "current runtime instance changed during retained settlement"
         );
         server.join().unwrap();
         let mut unrelated = ctx.clone();

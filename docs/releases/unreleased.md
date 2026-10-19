@@ -1,5 +1,18 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Current source: beta discovery and retained migration history
+
+This is an unpublished source repair based on v0.4.13-beta.2, not a new release or a replacement for existing public assets.
+
+- Neutral release discovery and candidate/checksum revalidation use canonical `v{version}` tags, including `v0.4.13-beta.2`. The legacy repository retains `beta/{version}` and its single encoded slash; neutral does not accept that alias. Repository, asset, digest, SemVer and stable-only migration checks remain enforced.
+- Retained integration observations use the original immutable plan/journal as authority and a separately selected runtime profile only for live observation. Config and state paths must both match. Runtime environment, reconnect requirements and Stop generation do not rewrite evidence or bypass signed delivery, current-instance or fresh handover checks.
+- Completed migration remains history only. It hides retired migration controls without replacing the current check/error/status, version, download or executable-update action. An eligible beta remains informational with Download and no Apply; automatic beta installation and a new migration target are not authorized.
+
+현재 미출시 소스 수정입니다. neutral 베타의 정확한 `v` 태그를 인식하고 원본 마이그레이션 증거와 runtime 관찰 프로필을 분리합니다. 완료 이력은 현재 확인·오류 상태를 덮지 않습니다. 베타는 다운로드 안내만 제공하며 설치 권한, 사용자 앱·프로필, 공개 태그·릴리즈는 변경하지 않습니다.
+
+Local proof: the anonymous exact beta.2 catalog changed from zero candidates to `v0.4.13-beta.2`; production candidate revalidation and the anonymously fetched checksum passed. A temporary main-thread AppKit executable reused the real service model, history overlay and native card through Checking → Failed → Current → informational beta → executable stable fixture → busy → idle, in KO/EN at widths 295/420 with options/diagnostics collapsed and expanded (56 captures). Native controls and rendered samples showed beta.1 → beta.2/exact tag, enabled Download and hidden Apply; current/error states remained distinct from completed history. Temporary probe targets, bridges and fixtures were removed. This does not prove the absent user's Tern profile, runtime Check admission on that profile, a successful SDK reconnection or an installed/public binary change.
+
+
 
 **Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](v0.4.12.md).
 
