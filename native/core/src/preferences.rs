@@ -658,15 +658,20 @@ impl Preferences {
         } else {
             read()?
         };
-        self.owner_snapshot.clear();
+        self.owner_snapshot = self.project_owner_snapshot(&saved)?;
+        Ok(())
+    }
+
+    fn project_owner_snapshot(&self, saved: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+        let mut projection = Map::new();
         for extension in &self.extensions {
-            for (key, value) in extension.preference_snapshot(&saved)? {
-                if self.owner_snapshot.insert(key.clone(), value).is_some() {
+            for (key, value) in extension.preference_snapshot(saved)? {
+                if projection.insert(key.clone(), value).is_some() {
                     return Err(format!("duplicate preference owner: {key}"));
                 }
             }
         }
-        Ok(())
+        Ok(projection)
     }
 
     pub(crate) fn postcommit_error(&self) -> Option<&str> {
@@ -944,16 +949,31 @@ impl Preferences {
         if let Some(key) = remaining.keys().next() {
             return Err(format!("unknown preference setting: {key}"));
         }
-        let (_, saved) = candidate.write_atomically_prepared(directory, false, &prepared)?;
+        self.publish_prepared_candidate(candidate, directory, prepared)
+    }
+
+    pub(crate) fn apply_prepared_owner_patch(
+        &mut self,
+        prepared: Box<dyn desktop_pet_contracts::PreparedPreferencePatch>,
+        directory: &Path,
+    ) -> Result<PreferenceSnapshot, String> {
+        self.publish_prepared_candidate(self.candidate(), directory, vec![prepared])
+    }
+
+    fn publish_prepared_candidate(
+        &mut self,
+        mut candidate: Self,
+        directory: &Path,
+        prepared: Vec<Box<dyn desktop_pet_contracts::PreparedPreferencePatch>>,
+    ) -> Result<PreferenceSnapshot, String> {
+        let (_, saved, projection) = candidate.write_atomically_prepared(directory, false, &prepared)?;
+        candidate.owner_snapshot = projection;
         *self = candidate;
         let mut errors = Vec::new();
         for mutation in &prepared {
             if let Err(error) = mutation.committed(&saved) {
                 errors.push(error);
             }
-        }
-        if let Err(error) = self.refresh_owner_snapshot(directory) {
-            errors.push(error);
         }
         if !prepared.is_empty() {
             self.postcommit_error = (!errors.is_empty()).then(|| errors.join("\n"));
@@ -1086,7 +1106,7 @@ impl Preferences {
 
     fn write_atomically(&self, directory: &Path, no_clobber: bool) -> Result<bool, String> {
         self.write_atomically_prepared(directory, no_clobber, &[])
-            .map(|(written, _)| written)
+            .map(|(written, _, _)| written)
     }
 
     fn write_atomically_prepared(
@@ -1094,7 +1114,7 @@ impl Preferences {
         directory: &Path,
         no_clobber: bool,
         prepared: &[Box<dyn desktop_pet_contracts::PreparedPreferencePatch>],
-    ) -> Result<(bool, Map<String, Value>), String> {
+    ) -> Result<(bool, Map<String, Value>, Map<String, Value>), String> {
         let operation = || self.write_atomically_locked(directory, no_clobber, prepared);
         if let Some(store) = &self.profile_store {
             store.with_writer_lock(operation)
@@ -1108,7 +1128,7 @@ impl Preferences {
         directory: &Path,
         no_clobber: bool,
         prepared: &[Box<dyn desktop_pet_contracts::PreparedPreferencePatch>],
-    ) -> Result<(bool, Map<String, Value>), String> {
+    ) -> Result<(bool, Map<String, Value>, Map<String, Value>), String> {
         fs::create_dir_all(directory)
             .map_err(|error| format!("preferences directory cannot be created: {error}"))?;
         set_private_directory(directory)?;
@@ -1187,6 +1207,9 @@ impl Preferences {
         for mutation in prepared {
             mutation.apply(&mut candidate)?;
         }
+        // Projection is pure and must succeed before publication. Return this
+        // exact projection with the saved object; never reread after commit.
+        let projection = self.project_owner_snapshot(&candidate)?;
         let bytes = serde_json::to_vec_pretty(&candidate)
             .map_err(|error| format!("preferences cannot be encoded: {error}"))?;
 
@@ -1217,7 +1240,7 @@ impl Preferences {
             if result {
                 sync_directory(directory);
             }
-            return Ok((result, candidate));
+            return Ok((result, candidate, projection));
         }
 
         if let Err(error) = fs::rename(&temporary, &path) {
@@ -1225,7 +1248,7 @@ impl Preferences {
             return Err(format!("preferences cannot be committed: {error}"));
         }
         sync_directory(directory);
-        Ok((true, candidate))
+        Ok((true, candidate, projection))
     }
 
     pub fn visible(&self) -> bool {
@@ -1628,6 +1651,38 @@ mod tests {
         fn should_exit(&self, _selection: &ObservationSelection, _now: std::time::Instant) -> bool {
             false
         }
+    }
+
+    struct InvalidProjectionPatch;
+    impl desktop_pet_contracts::PreparedPreferencePatch for InvalidProjectionPatch {
+        fn apply(&self, candidate: &mut Map<String, Value>) -> Result<(), String> {
+            candidate.get_mut("observation").unwrap().as_object_mut().unwrap()
+                .insert("remote_selection".into(), serde_json::json!({"targets":[17]}));
+            Ok(())
+        }
+        fn committed(&self, _saved: &Map<String, Value>) -> Result<(), String> {
+            panic!("a failed projection must never publish or run committed");
+        }
+    }
+
+    #[test]
+    fn owner_projection_failure_precedes_atomic_save_and_cache_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let store = desktop_pet_contracts::ProfileStore::acquire(&config, &root.path().join("state")).unwrap();
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(SelectionCommitState::default()));
+        let extension = std::sync::Arc::new(SelectionOwner { store: store.clone(), state: state.clone() });
+        let mut preferences = Preferences::default();
+        preferences.set_integration_extensions(store, vec![extension]);
+        preferences.apply_patch_in_directory(PreferencePatch {
+            language: Some(LanguagePreference::En), ..Default::default()
+        }, &config).unwrap();
+        let before = fs::read(config.join(PREFERENCES_FILE)).unwrap();
+        let snapshot = preferences.snapshot();
+        assert!(preferences.apply_prepared_owner_patch(Box::new(InvalidProjectionPatch), &config).is_err());
+        assert_eq!(fs::read(config.join(PREFERENCES_FILE)).unwrap(), before);
+        assert_eq!(preferences.snapshot(), snapshot);
+        assert_eq!(state.lock().commits, 0);
     }
 
     #[test]

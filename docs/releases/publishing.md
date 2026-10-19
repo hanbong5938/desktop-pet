@@ -59,6 +59,21 @@ Current publication authority is the independent core; historical authorization 
 
 Reviewed Markdown in this repository is canonical; the Wiki is a generated reading view. New app Release bodies and Wiki version pages use the same note frozen by the exact release tag, while current indexes and status use reviewed default-branch documents and the live Release catalog. The [v0.3.6 canonical note](v0.3.6.md) belongs to the verified [published stable Release](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6); the [0.3 publication record](0.3.md) records current asset and consumer proof separately from historical [v0.3.5](v0.3.5.md) evidence. Neither note nor source build alone proves publication.
 
+The core Wiki's default catalog fetch reads the independent Core and historical Herdr Release APIs together. Stable tags are admitted only from their canonical authority (`v0.0.x`–`v0.3.x` from Herdr; `v0.4.0` onward from Core), so integration-tag collisions cannot replace app history. Canonical draft, prerelease and incomplete records remain visibly unshipped; nonstable records retain their source-repository validation, and duplicate catalog tags remain errors. Either API failing or returning malformed data aborts rendering before managed output changes. Explicit `--releases-json` / programmatic catalogs remain strict combined inputs and do not trigger network requests.
+
+Published pages still require the local `TAG:docs/releases/TAG.md` snapshot and link to that tag's release authority. The renderer never fetches or changes tags and never substitutes mutable HEAD for a missing published note; only the existing `v0.1.4`–`v0.1.11` reviewed-backfill exception is retained.
+
+A Core-only clone therefore also needs the existing historical authority's tag
+objects/refs for a full live render; merely fetching both catalogs supplies no
+frozen source. The local review smoke copied those existing refs only into a
+disposable clone, then stopped at published `v0.3.12`: its canonical tag resolves
+to `f05a95a46dee042acf613c8d126d25be597fc824` without
+`docs/releases/v0.3.12.md` (the canonical contents API also returned HTTP 404).
+This is a retained-source prerequisite, not permission to rewrite the tag,
+silently drop its published catalog record, add another backfill exception, or
+use HEAD. Deterministic catalog/frozen-note tests passed; a successful full live
+render is not claimed.
+
 The original documentation/tools-only authorization, v0.2.0 promotion and narrower v0.2.1 patch authorization below are **historical release scopes**, separate from the historical **v0.3.6 stable patch** and actual independent v0.4.2 / corrected Herdr v0.4.1 / bridge v0.3.7 publications. Preserve all existing stable/beta tags, assets and checksums, the separate beta formula, pack v5, bundled `default@0`, artwork/rig overrides/motion/licensing and the independent Herdr/Tern hosts. No new beta release or beta-formula update is implied by this cutover.
 
 ## Authorization and setup record

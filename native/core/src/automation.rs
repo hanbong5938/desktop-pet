@@ -22,6 +22,8 @@ const MAX_ERROR_BYTES: usize = 512;
 const MAX_DOMAIN_PROMPT_BYTES: usize = 512 * 1024;
 const MAX_DOMAIN_REQUEST_BYTES: usize = MAX_DOMAIN_PROMPT_BYTES + 4096;
 const MAX_DOMAIN_OTHER_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_LOCAL_PREFERENCE_REQUEST_BYTES: usize = 256 * 1024 + 4096;
+const MAX_LOCAL_PREFERENCE_RESULT_BYTES: usize = 512 * 1024;
 // Keep the complete bounded settings snapshot, including catalog metadata,
 // queryable after the UI has already committed a successful save.
 const MAX_DOMAIN_RESULT_BYTES: usize = 64 * 1024;
@@ -289,14 +291,18 @@ impl Write for RequestHasher {
 }
 
 fn domain_fingerprint(request: &DomainRequest) -> Result<[u8; 32], String> {
+    domain_fingerprint_with_limit(request, None)
+}
+
+fn domain_fingerprint_with_limit(request: &DomainRequest, limit: Option<usize>) -> Result<[u8; 32], String> {
     let mut writer = RequestHasher {
         hash: Sha256::new(),
         bytes: 0,
-        limit: if matches!(&request.action, DomainAction::SessionPrompt { .. }) {
+        limit: limit.unwrap_or_else(|| if matches!(&request.action, DomainAction::SessionPrompt { .. }) {
             MAX_DOMAIN_REQUEST_BYTES
         } else {
             MAX_DOMAIN_OTHER_REQUEST_BYTES
-        },
+        }),
     };
     serde_json::to_writer(&mut writer, request)
         .map_err(|_| "domain request exceeds limit or cannot be encoded".to_owned())?;
@@ -570,6 +576,7 @@ struct DomainEntry {
     fingerprint: [u8; 32],
     request: Option<DomainRequest>,
     operation: DomainOperation,
+    local_preferences: bool,
 }
 
 pub(crate) type SharedAutomation = Arc<Mutex<AutomationState>>;
@@ -987,6 +994,28 @@ impl AutomationState {
         &mut self,
         request: DomainRequest,
     ) -> Result<DomainOperation, String> {
+        self.submit_domain_with_budget(request, false)
+    }
+
+    pub(crate) fn submit_local_preferences(
+        &mut self,
+        request: DomainRequest,
+    ) -> Result<DomainOperation, String> {
+        if !matches!(&request.action, DomainAction::PreferencesGet {} | DomainAction::PreferencesSet { .. }) {
+            return Err("local preference port accepts only preference actions".into());
+        }
+        self.submit_domain_with_budget(request, true)
+    }
+
+    pub(crate) fn local_preference_result(&self, operation_id: &str) -> bool {
+        self.domain_entries.get(operation_id).is_some_and(|entry| entry.local_preferences)
+    }
+
+    fn submit_domain_with_budget(
+        &mut self,
+        request: DomainRequest,
+        local_preferences: bool,
+    ) -> Result<DomainOperation, String> {
         if request.instance_id != self.instance() {
             return Err("daemon instance changed".into());
         }
@@ -994,12 +1023,16 @@ impl AutomationState {
             return Err("invalid operation ID".into());
         }
         validate_domain_action(&request.action, &request.instance_id)?;
-        let fingerprint = domain_fingerprint(&request)?;
+        let fingerprint = if local_preferences {
+            domain_fingerprint_with_limit(&request, Some(MAX_LOCAL_PREFERENCE_REQUEST_BYTES))?
+        } else {
+            domain_fingerprint(&request)?
+        };
         if self.entries.contains_key(&request.operation_id) {
             return Err("operation ID used for a different request".into());
         }
         if let Some(entry) = self.domain_entries.get(&request.operation_id) {
-            return if entry.fingerprint == fingerprint {
+            return if entry.fingerprint == fingerprint && entry.local_preferences == local_preferences {
                 Ok(entry.operation.clone())
             } else {
                 Err("operation ID used for a different request".into())
@@ -1037,6 +1070,7 @@ impl AutomationState {
                 fingerprint,
                 request: Some(request),
                 operation: operation.clone(),
+                local_preferences,
             },
         );
         Ok(operation)
@@ -1182,7 +1216,7 @@ impl AutomationState {
             let mut writer = RequestHasher {
                 hash: Sha256::new(),
                 bytes: 0,
-                limit: MAX_DOMAIN_RESULT_BYTES,
+                limit: if entry.local_preferences { MAX_LOCAL_PREFERENCE_RESULT_BYTES } else { MAX_DOMAIN_RESULT_BYTES },
             };
             serde_json::to_writer(&mut writer, &result)
                 .map_err(|_| "domain result exceeds limit or cannot be encoded".to_owned())?;
@@ -1890,6 +1924,38 @@ mod tests {
         assert!(state.domain_status("other", "domain-id").is_err());
         assert!(state.domain_status("test", "bad id").is_err());
         assert!(state.domain_status("test", "missing").is_err());
+    }
+
+    #[test]
+    fn local_preference_budget_preserves_large_ingress_without_expanding_wire_limits() {
+        let mut state = AutomationState::with_instance("test".into(), target(), None);
+        let large = serde_json::json!((0..64).map(|index| format!("{index:02}{}", "x".repeat(4080))).collect::<Vec<_>>());
+        let action = DomainAction::PreferencesSet {
+            patch: PreferencePatch {
+                owner: serde_json::Map::from_iter([("observation_machines".into(), large.clone())]),
+                ..Default::default()
+            },
+            expected_revision: Some(0),
+        };
+        assert!(state.submit_domain(domain_request("wire-large", action.clone())).is_err());
+        state.submit_local_preferences(domain_request("local-large", action)).unwrap();
+        assert!(state.local_preference_result("local-large"));
+        assert_eq!(state.drain_domain_requests().len(), 1);
+        state.start_domain_request("local-large").unwrap();
+        let result = serde_json::json!({"revision":1,"persisted":{"observation_machines":large}});
+        state.finish_domain_operation("local-large", DomainOperationState::Applied,
+            true, true, Some(result.clone()), None, None).unwrap();
+        assert_eq!(state.domain_status("test", "local-large").unwrap().result, Some(result.clone()));
+        state.submit_domain(domain_request("wire-get", DomainAction::PreferencesGet {})).unwrap();
+        state.drain_domain_requests();
+        state.start_domain_request("wire-get").unwrap();
+        assert!(state.finish_domain_operation("wire-get", DomainOperationState::Applied,
+            false, false, Some(result), None, None).is_err());
+        assert!(state.submit_local_preferences(prompt("not-preferences", "text".into())).is_err());
+        for index in 0..MAX_QUEUED {
+            state.submit_local_preferences(domain_request(&format!("local-queued-{index}"), DomainAction::PreferencesGet {})).unwrap();
+        }
+        assert!(state.submit_local_preferences(domain_request("overflow", DomainAction::PreferencesGet {})).unwrap_err().contains("inbox"));
     }
 
     #[test]

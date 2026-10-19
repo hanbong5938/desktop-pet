@@ -262,23 +262,135 @@ fn write_replacement(plan: &UpdatePlan, proof: &ReplacementEvidence) -> Result<(
     let bytes = serde_json::to_vec(proof).map_err(|e| e.to_string())?;
     protocol::write_private_bytes(&replacement_path(plan)?, &bytes, 0o600)
 }
-fn replacement_completed(plan: &UpdatePlan, record: &OperationRecord) -> Result<bool, String> {
-    if !matches!(plan.action, coordinator::UpdateAction::StandaloneReplace)
-        || record.execution_fence != ExecutionFence::ManagerExited
-    {
-        return Ok(false);
+fn read_replacement(plan: &UpdatePlan) -> Result<Option<ReplacementEvidence>, String> {
+    let path = replacement_path(plan)?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
     }
-    let proof: ReplacementEvidence = serde_json::from_slice(&coordinator::owned_private_file(
-        &replacement_path(plan)?,
-        8192,
-    )?)
-    .map_err(|e| e.to_string())?;
+    serde_json::from_slice(&coordinator::owned_private_file(&path, 8192)?)
+        .map(Some)
+        .map_err(|error| format!("invalid replacement evidence: {error}"))
+}
+
+fn neutral_source_rebuild(plan: &UpdatePlan) -> bool {
+    !cfg!(desktop_pet_legacy)
+        && matches!(plan.action, coordinator::UpdateAction::SourceRebuild)
+}
+
+fn validate_replacement_binding(
+    plan: &UpdatePlan,
+    proof: &ReplacementEvidence,
+) -> Result<(), String> {
     if proof.version != protocol::UPDATER_PROTOCOL
         || proof.operation_id != plan.operation_id
         || proof.original != plan.running
     {
         return Err("replacement evidence differs from captured operation".into());
     }
+    if neutral_source_rebuild(plan) {
+        let InstallOrigin::Source { root } = &plan.origin else {
+            return Err("source replacement requires the captured Source origin".into());
+        };
+        let staged = source_stage_path(plan)?
+            .join(identity::APP_NAME)
+            .join("Contents/MacOS")
+            .join(identity::BINARY);
+        let installed = root
+            .join("dist")
+            .join(identity::APP_NAME)
+            .join("Contents/MacOS")
+            .join(identity::BINARY);
+        if plan.target.is_some()
+            || proof.staged.path != staged
+            || proof.original.path != installed
+            || proof.installed.as_ref().is_some_and(|image| {
+                image.path != installed || image.sha256 != proof.staged.sha256
+            })
+            || proof.staged.sha256.len() != 64
+            || !proof.staged.sha256.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            })
+        {
+            return Err("source replacement evidence has a foreign stage, target or image".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_replacement(
+    plan: &UpdatePlan,
+    proof: &ReplacementEvidence,
+    installed: &VerifiedInstallation,
+) -> Result<(), String> {
+    validate_replacement_binding(plan, proof)?;
+    if proof.installed.as_ref() != Some(&installed.image)
+        || proof.staged.sha256 != installed.image.sha256
+        || installed.origin != plan.origin
+    {
+        return Err("source installation lacks matching completed replacement evidence".into());
+    }
+    Ok(())
+}
+
+fn require_source_replacement(
+    plan: &UpdatePlan,
+    installed: &VerifiedInstallation,
+) -> Result<(), String> {
+    let proof = read_replacement(plan)?.ok_or("source replacement evidence missing")?;
+    validate_source_replacement(plan, &proof, installed)
+}
+
+enum SourceReplacementState {
+    NotCommitted,
+    Committed(VerifiedInstallation),
+}
+
+fn source_replacement_state(
+    plan: &UpdatePlan,
+    record: &OperationRecord,
+) -> Result<Option<SourceReplacementState>, String> {
+    if !neutral_source_rebuild(plan) {
+        return Ok(None);
+    }
+    let proof = read_replacement(plan)?;
+    if let Some(proof) = &proof {
+        validate_replacement_binding(plan, proof)?;
+    }
+    let Some(proof) = proof.filter(|proof| proof.installed.is_some()) else {
+        if record.candidate.is_some() {
+            return Err("source candidate pin lacks completed replacement evidence".into());
+        }
+        return Ok(Some(SourceReplacementState::NotCommitted));
+    };
+    let installed = coordinator::installed_candidate(plan)?;
+    validate_source_replacement(plan, &proof, &installed)?;
+    Ok(Some(SourceReplacementState::Committed(installed)))
+}
+
+fn observed_candidate<'a>(
+    plan: &UpdatePlan,
+    source: Option<&'a SourceReplacementState>,
+    cache: &'a mut Option<Result<VerifiedInstallation, String>>,
+) -> Result<&'a VerifiedInstallation, String> {
+    match source {
+        Some(SourceReplacementState::Committed(installed)) => Ok(installed),
+        Some(SourceReplacementState::NotCommitted) => {
+            Err("source replacement has not been committed".into())
+        }
+        None => cache.get_or_insert_with(|| candidate(plan)).as_ref().map_err(Clone::clone),
+    }
+}
+
+fn replacement_completed(plan: &UpdatePlan, record: &OperationRecord) -> Result<bool, String> {
+    if !matches!(plan.action, coordinator::UpdateAction::StandaloneReplace)
+        || record.execution_fence != ExecutionFence::ManagerExited
+    {
+        return Ok(false);
+    }
+    let proof = read_replacement(plan)?.ok_or("replacement evidence missing")?;
+    validate_replacement_binding(plan, &proof)?;
     let installed = candidate(plan)?;
     Ok(proof.installed.as_ref() == Some(&installed.image)
         && proof.staged.sha256 == installed.image.sha256)
@@ -329,6 +441,23 @@ fn group_quiescent(group: Option<u32>) -> Result<bool, String> {
 fn manager_quiescent(item: &ManagerEvidence) -> Result<bool, String> {
     let pid = item.pid.ok_or("manager PID identity was never journaled")?;
     Ok(!process_live(pid) && group_quiescent(item.pgid)?)
+}
+
+fn verified_manager_exit(manager: &ManagerEvidence) -> Result<bool, String> {
+    if manager.uid != unsafe { libc::geteuid() }
+        || manager.pid != manager.pgid
+        || manager.program_sha256.len() != 64
+        || manager.started_at_ms == 0
+    {
+        return Err("manager execution identity evidence is incomplete".into());
+    }
+    if manager.state != ManagerState::Exited
+        || !manager.drained
+        || !manager_quiescent(manager)?
+    {
+        return Err("manager or its process group/output has not durably completed; no replay/release".into());
+    }
+    Ok(manager.exit_code == Some(0))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -796,6 +925,9 @@ fn staged_release_path(plan: &UpdatePlan) -> Result<PathBuf, String> {
 }
 fn candidate(plan: &UpdatePlan) -> Result<VerifiedInstallation, String> {
     let installed = coordinator::installed_candidate(plan)?;
+    if neutral_source_rebuild(plan) {
+        require_source_replacement(plan, &installed)?;
+    }
     if plan.target.is_some() {
         let expected: ExecutableIdentity = serde_json::from_slice(
             &coordinator::owned_private_file(&staged_release_path(plan)?, 4096)?,
@@ -2041,12 +2173,23 @@ fn perform(
             .join(identity::APP_NAME);
         let staged =
             coordinator::installation::validate_staged_app(&stage).map_err(|e| (e, true))?;
+        let mut replacement = ReplacementEvidence {
+            version: protocol::UPDATER_PROTOCOL,
+            operation_id: plan.operation_id.clone(),
+            original: plan.running.clone(),
+            staged: staged.image.clone(),
+            installed: None,
+        };
+        step(write_replacement(plan, &replacement), true)?;
         record.execution_fence = ExecutionFence::ManagerIntent;
         step(journal(plan, record), true)?;
         if reservation.user_stop_requested().map_err(|e| (e, true))? {
             return Err(("user stop superseded source replacement".into(), false));
         }
-        coordinator::installation::commit_source_release(plan, &staged).map_err(|e| (e, true))?;
+        let installed = coordinator::installation::commit_source_release(plan, &staged)
+            .map_err(|e| (e, true))?;
+        replacement.installed = Some(installed.image);
+        step(write_replacement(plan, &replacement), true)?;
         record.execution_fence = ExecutionFence::ManagerExited;
         step(journal(plan, record), true)?;
     }
@@ -2134,13 +2277,30 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     if plan.version != protocol::UPDATER_PROTOCOL {
         return Err("unsupported update plan protocol; legacy evidence retained".into());
     }
-    let mut record = protocol::read_operation(&plan.context.state_dir, &plan.operation_id)?
+    let record = protocol::read_operation(&plan.context.state_dir, &plan.operation_id)?
         .ok_or("operation journal missing")?;
     if record.version != protocol::UPDATER_PROTOCOL {
         return Err("unsupported operation journal protocol".into());
     }
+    let source = source_replacement_state(plan, &record)?;
+    let scope = snapshot(plan)?;
+    inspect_record(plan, record, source.as_ref(), &scope, || {
+        protocol::stop_generation(&plan.context.state_dir)
+    })
+}
+
+fn inspect_record(
+    plan: &UpdatePlan,
+    mut record: OperationRecord,
+    source: Option<&SourceReplacementState>,
+    durable_scope: &Option<protocol::ReservationSnapshot>,
+    current_stop_generation: impl Fn() -> Result<u64, String>,
+) -> Result<OperationRecord, String> {
+    if record.version != protocol::UPDATER_PROTOCOL {
+        return Err("unsupported operation journal protocol".into());
+    }
+    let mut candidate_cache = None;
     let durable_image = record.candidate.clone();
-    let durable_scope = snapshot(plan)?;
     let updates = protocol::private_updates(&plan.context.state_dir)?;
     let owner = match read_lifecycle(plan) {
         Ok(owner) => Some(owner),
@@ -2181,6 +2341,10 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     {
         return Ok(record);
     }
+    if source.is_some() {
+        record.installed = false;
+        record.applied = false;
+    }
     if matches!(
         record.phase,
         OperationPhase::Preparing
@@ -2202,12 +2366,12 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
             (None, Some(origin)) => origin != &plan.origin,
             _ => false,
         };
-        if incomplete && historical_original(plan, &record, durable_scope.as_ref()).is_none() {
+        if incomplete && (source.is_some() || historical_original(plan, &record, durable_scope.as_ref()).is_none()) {
             record.phase = OperationPhase::Unknown;
             record.applied = false;
             record.detail = "Durable candidate image/origin pair is incomplete; reservation retained without reconstructing current disk".into();
             if owner.as_ref().is_some_and(|owner| {
-                protocol::stop_generation(&plan.context.state_dir)
+                current_stop_generation()
                     .is_ok_and(|generation| generation != owner.stop_generation)
             }) {
                 record.phase = OperationPhase::UserStopped;
@@ -2217,9 +2381,9 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     }
     if let (Some(image), Some(scope)) = (durable_image.as_ref(), durable_scope.as_ref()) {
         if scope.startup_origin.is_some()
-            && historical_original(plan, &record, durable_scope.as_ref()).is_none()
+            && (source.is_some() || historical_original(plan, &record, durable_scope.as_ref()).is_none())
         {
-            let pair_valid = candidate(plan).and_then(|installed| {
+            let pair_valid = observed_candidate(plan, source, &mut candidate_cache).and_then(|installed| {
                 pin_state(
                     Some(image),
                     Some(scope),
@@ -2233,7 +2397,7 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
                 record.applied = false;
                 record.detail = format!("Durably selected candidate image/origin no longer matches installed evidence: {error}; reservation retained");
                 if owner.as_ref().is_some_and(|owner| {
-                    protocol::stop_generation(&plan.context.state_dir)
+                    current_stop_generation()
                         .is_ok_and(|generation| generation != owner.stop_generation)
                 }) {
                     record.phase = OperationPhase::UserStopped;
@@ -2246,21 +2410,10 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     let mut manager_failed_quiet = false;
     match read_evidence(plan)? {
         Some(manager) if record.execution_fence == ExecutionFence::ManagerExited => {
-            if manager.uid == unsafe { libc::geteuid() }
-                && manager.pid == manager.pgid
-                && manager.started_at_ms != 0
-                && manager.program_sha256.len() == 64
-                && manager.state == ManagerState::Exited
-                && manager.drained
-                && manager_quiescent(&manager).unwrap_or(false)
-            {
-                if manager.exit_code == Some(0) {
-                    manager_safe = true;
-                } else {
-                    manager_failed_quiet = true;
-                }
-            } else {
-                record.detail = format!("Manager PID {:?} PGID {:?}: exit/output/group quiescence not proved; installation reserved, no retry", manager.pid, manager.pgid);
+            match verified_manager_exit(&manager) {
+                Ok(true) => manager_safe = true,
+                Ok(false) => manager_failed_quiet = true,
+                Err(error) => record.detail = format!("{error}; installation reserved, no retry"),
             }
         }
         Some(_) => {
@@ -2284,7 +2437,9 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
         }
         None => {}
     }
-    let restored_running = record.phase == OperationPhase::Failed
+    let restored_running = manager_safe
+        && !matches!(source, Some(SourceReplacementState::Committed(_)))
+        && record.phase == OperationPhase::Failed
         && !record.installed
         && !record.applied
         && owner.as_ref().is_some_and(|owner| {
@@ -2319,12 +2474,12 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     if manager_safe && !restored_running {
         if let Some(owner) = &owner {
             if !process_live(owner.original_pid) {
-                if historical_original(plan, &record, durable_scope.as_ref()).is_some() {
+                if source.is_none() && historical_original(plan, &record, durable_scope.as_ref()).is_some() {
                     record.installed = false;
                     record.applied = false;
                     record.detail = "Historical candidate image retained; independently verified CURRENT signed original image/source is unchanged, NOT an upgrade".into();
                 } else {
-                    match candidate(plan) {
+                    match observed_candidate(plan, source, &mut candidate_cache) {
                         Ok(installed) => {
                             match pin_state(
                                 durable_image.as_ref(),
@@ -2397,7 +2552,10 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
             }
         }
     }
-    if manager_failed_quiet {
+    if manager_failed_quiet && matches!(source, Some(SourceReplacementState::Committed(_))) {
+        record.phase = OperationPhase::Unknown;
+        record.detail = "Completed source receipt conflicts with failed staging manager; reservation retained".into();
+    } else if manager_failed_quiet {
         if let Some(owner) = &owner {
             if stopped(plan, owner.original_pid)?
                 && coordinator::restored_original(plan).is_ok_and(|original| {
@@ -2420,7 +2578,7 @@ pub fn inspect(plan: &UpdatePlan) -> Result<OperationRecord, String> {
     }
     if reserved {
         if let Some(owner) = &owner {
-            if protocol::stop_generation(&plan.context.state_dir)? != owner.stop_generation {
+            if current_stop_generation()? != owner.stop_generation {
                 record.phase = OperationPhase::UserStopped;
                 record.detail = "User stop superseded updater restart; reserved installation requires explicit recovery, never automatic revival".into();
             }
@@ -2438,6 +2596,22 @@ pub fn recover(plan: UpdatePlan, start: bool) -> Result<OperationRecord, String>
     let lease = protocol::lock_operation(&plan.context.state_dir, &plan.operation_id)?;
     recover_locked(plan, start, &lease)
 }
+fn journal_recovery_failure(
+    plan: &UpdatePlan,
+    record: &mut OperationRecord,
+    stopped_by_user: bool,
+    error: &str,
+) -> (OperationPhase, Option<String>) {
+    let phase = if stopped_by_user || record.phase == OperationPhase::UserStopped {
+        OperationPhase::UserStopped
+    } else {
+        OperationPhase::Unknown
+    };
+    record.applied = false;
+    let error = transition(plan, record, phase, format!("Recovery incomplete: {error}. Reservation retained; no automatic retry/rollback")).err();
+    (phase, error)
+}
+
 fn recover_locked(
     plan: UpdatePlan,
     start: bool,
@@ -2448,49 +2622,9 @@ fn recover_locked(
         let durable = protocol::read_operation(&plan.context.state_dir, &plan.operation_id)?
             .ok_or("operation journal missing")?;
         let durable_scope = snapshot(&plan)?;
-        let mut record = inspect(&plan)?;
-        let exact_historical_original =
-            historical_original(&plan, &durable, durable_scope.as_ref()).is_some();
-        // Partial pins cannot be reconstructed from today's registry or bytes.
-        let pin_check: Result<(), String> = (|| {
-            if let Some(scope) = durable_scope.as_ref() {
-                match (durable.candidate.as_ref(), scope.startup_origin.as_ref()) {
-                    (Some(_), None) if !exact_historical_original => {
-                        return Err("candidate image pin lacks a durable origin; recovery cannot reconstruct the missing pair".into());
-                    }
-                    (None, Some(selected)) if selected != &plan.origin => {
-                        return Err("candidate origin pin lacks a durable image; recovery cannot backfill it".into());
-                    }
-                    (Some(image), Some(_)) if !exact_historical_original => {
-                        let installed = candidate(&plan)?;
-                        pin_state(
-                            Some(image),
-                            durable_scope.as_ref(),
-                            &installed,
-                            StartupPurpose::Candidate,
-                            &plan,
-                        )?;
-                    }
-                    _ => {}
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = pin_check {
-            let phase = if record.phase == OperationPhase::UserStopped {
-                OperationPhase::UserStopped
-            } else {
-                OperationPhase::Unknown
-            };
-            transition(
-                &plan,
-                &mut record,
-                phase,
-                format!("Recovery retained incompatible or partial candidate evidence: {error}"),
-            )?;
-            return Err(error);
-        }
+        let mut record = durable.clone();
         if durable_scope.is_none() {
+            record = inspect(&plan)?;
             if matches!(
                 record.phase,
                 OperationPhase::Completed | OperationPhase::Failed | OperationPhase::UserStopped
@@ -2512,6 +2646,35 @@ fn recover_locked(
         let panel = crate::helper_ui::Panel::new(&plan.context.locale, &plan)?;
         panel.show(Phase::Reconciling, None);
         let result: Result<(), String> = (|| {
+            let source = source_replacement_state(&plan, &durable)?;
+            record = inspect_record(&plan, durable.clone(), source.as_ref(), &durable_scope, || {
+                protocol::stop_generation(&plan.context.state_dir)
+            })?;
+            let mut candidate_cache = None;
+            let exact_historical_original = source.is_none()
+                && historical_original(&plan, &durable, durable_scope.as_ref()).is_some();
+            // Validate receipt classification before every historical/partial-pin shortcut.
+            if let Some(scope) = durable_scope.as_ref() {
+                match (durable.candidate.as_ref(), scope.startup_origin.as_ref()) {
+                    (Some(_), None) if !exact_historical_original => {
+                        return Err("candidate image pin lacks a durable origin; recovery cannot reconstruct the missing pair".into());
+                    }
+                    (None, Some(selected)) if selected != &plan.origin => {
+                        return Err("candidate origin pin lacks a durable image; recovery cannot backfill it".into());
+                    }
+                    (Some(image), Some(_)) if !exact_historical_original => {
+                        let installed = observed_candidate(&plan, source.as_ref(), &mut candidate_cache)?;
+                        pin_state(
+                            Some(image),
+                            durable_scope.as_ref(),
+                            installed,
+                            StartupPurpose::Candidate,
+                            &plan,
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
             let owner = read_lifecycle(&plan)?;
             if owner.stop_generation != reservation.stop_generation
                 || coordinator::executable_identity(&owner.helper_image.path)? != owner.helper_image
@@ -2576,20 +2739,10 @@ fn recover_locked(
             }
             let mut manager_failed = false;
             if let Some(manager) = manager {
-                if manager.uid != unsafe { libc::geteuid() }
-                    || manager.pid != manager.pgid
-                    || manager.program_sha256.len() != 64
-                    || manager.started_at_ms == 0
-                {
-                    return Err("manager execution identity evidence is incomplete".into());
-                }
-                if manager.state != ManagerState::Exited
-                    || !manager.drained
-                    || !manager_quiescent(&manager)?
-                {
-                    return Err("manager or its process group/output has not durably completed; no replay/release".into());
-                }
-                manager_failed = manager.exit_code != Some(0);
+                manager_failed = !verified_manager_exit(&manager)?;
+            }
+            if manager_failed && matches!(source, Some(SourceReplacementState::Committed(_))) {
+                return Err("completed source receipt conflicts with failed staging manager; reservation retained".into());
             }
             if no_spawn && !matches!(plan.action, coordinator::UpdateAction::ApplyInstalled) {
                 if !stopped(&plan, owner.original_pid)? {
@@ -2618,7 +2771,8 @@ fn recover_locked(
                     "original daemon process still exists; no other process will be stopped".into(),
                 );
             }
-            let restored_running = record.phase == OperationPhase::Failed
+            let restored_running = !matches!(source, Some(SourceReplacementState::Committed(_)))
+                && record.phase == OperationPhase::Failed
                 && !record.installed
                 && !record.applied
                 && coordinator::restored_original(&plan)
@@ -2645,7 +2799,7 @@ fn recover_locked(
             let installed = if manager_failed || restored_running || exact_historical_original {
                 None
             } else {
-                match candidate(&plan) {
+                match observed_candidate(&plan, source.as_ref(), &mut candidate_cache) {
                     Ok(candidate) => {
                         pin_state(
                             durable.candidate.as_ref(),
@@ -2890,14 +3044,10 @@ fn recover_locked(
             Ok(())
         })();
         if let Err(error) = &result {
-            let stopped_by_user = protocol::stop_generation(&plan.context.state_dir)
-                .is_ok_and(|generation| generation != prepared_generation);
-            let phase = if stopped_by_user || record.phase == OperationPhase::UserStopped {
-                OperationPhase::UserStopped
-            } else {
-                OperationPhase::Unknown
-            };
-            let journal_error = transition(&plan, &mut record, phase, format!("Recovery incomplete: {error}. Reservation retained; no automatic retry/rollback")).err();
+            let (phase, journal_error) =
+                journal_recovery_failure(&plan, &mut record,
+                    protocol::stop_generation(&plan.context.state_dir)
+                        .is_ok_and(|generation| generation != prepared_generation), error);
             if read_lifecycle(&plan)
                 .ok()
                 .is_some_and(|owner| stopped(&plan, owner.original_pid).unwrap_or(false))
@@ -4147,6 +4297,247 @@ mod tests {
         changed = live_status(&plan);
         changed.integration_api = identity::INTEGRATION_API + 1;
         assert!(!status_contract_matches(&changed, &plan.context.version));
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    fn source_fixture(root: &Path) -> (UpdatePlan, ReplacementEvidence) {
+        let mut plan = plan(root);
+        let InstallOrigin::Source { root } = &plan.origin else { unreachable!() };
+        fs::create_dir_all(root.join("native/app")).unwrap();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("native/app/Cargo.toml"),
+            "[package]\nname = 'desktop-pet'\nversion = '0.4.7'\n").unwrap();
+        fs::write(root.join("scripts/install.sh"), "#!/bin/sh\nexit 99\n").unwrap();
+        assert!(Command::new("/usr/bin/git").args(["init", "-q"]).arg(root).status().unwrap().success());
+        assert!(Command::new("/usr/bin/git").arg("-C").arg(root)
+            .args(["remote", "add", "origin", "https://github.com/hanbong5938/desktop-pet"])
+            .status().unwrap().success());
+        let binary = root.join("dist").join(identity::APP_NAME)
+            .join("Contents/MacOS").join(identity::BINARY);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        let capabilities = serde_json::to_string(&identity::capabilities()).unwrap();
+        let literal = serde_json::to_string(&capabilities).unwrap();
+        let program = root.join("fixture.c");
+        fs::write(&program, format!(
+            "#include <stdio.h>\n#include <string.h>\nint main(int n,char**v){{if(n==2&&!strcmp(v[1],\"update-capabilities\")){{puts({literal});return 0;}}if(n==2&&!strcmp(v[1],\"--version\")){{puts(\"{} {}\");return 0;}}return 99;}}\n",
+            identity::BINARY, identity::VERSION)).unwrap();
+        assert!(Command::new("/usr/bin/clang").arg(&program).arg("-o").arg(&binary)
+            .status().unwrap().success());
+        let contents = binary.parent().unwrap().parent().unwrap();
+        fs::write(contents.join("Info.plist"), format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>{}</string><key>CFBundleIdentifier</key><string>test.desktop-pet.source-replacement</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string></dict></plist>",
+            identity::BINARY)).unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"])
+            .arg(contents.parent().unwrap()).status().unwrap().success());
+        plan.running = coordinator::executable_identity(&binary).unwrap();
+        plan.context.running = plan.running.clone();
+        plan.context.executable = binary;
+        plan.context.version = identity::VERSION.into();
+        let staged = source_stage_path(&plan).unwrap().join(identity::APP_NAME)
+            .join("Contents/MacOS").join(identity::BINARY);
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        fs::copy(&plan.running.path, &staged).unwrap();
+        let proof = ReplacementEvidence {
+            version: plan.version,
+            operation_id: plan.operation_id.clone(),
+            original: plan.running.clone(),
+            staged: coordinator::executable_identity(&staged).unwrap(),
+            installed: None,
+        };
+        (plan, proof)
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn source_receipt_classifies_crash_cuts_without_inventing_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let (plan, mut proof) = source_fixture(root.path());
+        let mut state = record(&plan);
+        state.execution_fence = ExecutionFence::ManagerExited;
+        assert!(matches!(source_replacement_state(&plan, &state).unwrap(),
+            Some(SourceReplacementState::NotCommitted)));
+        assert!(candidate(&plan).is_err());
+        write_replacement(&plan, &proof).unwrap();
+        assert!(matches!(source_replacement_state(&plan, &state).unwrap(),
+            Some(SourceReplacementState::NotCommitted)));
+        assert!(candidate(&plan).is_err());
+        assert_eq!(proof.staged.sha256, plan.running.sha256);
+        state.candidate = Some(plan.running.clone());
+        assert!(source_replacement_state(&plan, &state).is_err());
+        state.candidate = None;
+        proof.installed = Some(plan.running.clone());
+        write_replacement(&plan, &proof).unwrap();
+        let source = source_replacement_state(&plan, &state).unwrap();
+        assert!(matches!(&source, Some(SourceReplacementState::Committed(installed))
+            if installed.image == plan.running && installed.origin == plan.origin));
+        assert_eq!(candidate(&plan).unwrap().image, plan.running);
+        state.execution_fence = ExecutionFence::ManagerIntent;
+        let observed = inspect_record(&plan, state.clone(), source.as_ref(), &None, || Ok(0)).unwrap();
+        assert_eq!(observed.phase, OperationPhase::Unknown);
+        assert!(!observed.installed && !observed.applied);
+        assert!(!replacement_completed(&plan, &state).unwrap());
+        state.execution_fence = ExecutionFence::ManagerExited;
+        let observed = inspect_record(&plan, state.clone(), source.as_ref(), &None, || Ok(0)).unwrap();
+        assert_eq!(observed.phase, OperationPhase::Unknown);
+        assert!(!observed.installed && !observed.applied);
+        assert!(observed.detail.contains("Manager exit evidence missing"));
+        let bytes = fs::read(replacement_path(&plan).unwrap()).unwrap();
+        journal(&plan, &state).unwrap();
+        for _ in 0..2 {
+            let source = source_replacement_state(&plan, &state).unwrap();
+            assert!(inspect_record(&plan, state.clone(), source.as_ref(), &None, || Ok(0)).is_ok());
+            assert_eq!(fs::read(replacement_path(&plan).unwrap()).unwrap(), bytes);
+        }
+        proof.installed.as_mut().unwrap().sha256 = "b".repeat(64);
+        write_replacement(&plan, &proof).unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+        assert!(candidate(&plan).is_err());
+        proof.installed = Some(plan.running.clone());
+        write_replacement(&plan, &proof).unwrap();
+        OpenOptions::new().append(true).open(&plan.running.path).unwrap()
+            .write_all(b"changed-after-commit").unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn source_receipt_rejects_unsafe_foreign_and_partial_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let (plan, mut proof) = source_fixture(root.path());
+        let mut state = record(&plan);
+        let path = replacement_path(&plan).unwrap();
+        for bytes in [b"{".as_slice(), &[b' '; 8193]] {
+            protocol::write_private_bytes(&path, bytes, 0o600).unwrap();
+            assert!(source_replacement_state(&plan, &state).is_err());
+        }
+        let mut unknown = serde_json::to_value(&proof).unwrap();
+        unknown["unrecognized"] = serde_json::json!(true);
+        protocol::write_private_bytes(&path, &serde_json::to_vec(&unknown).unwrap(), 0o600).unwrap();
+        assert!(read_replacement(&plan).is_err());
+        proof.version += 1;
+        write_replacement(&plan, &proof).unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+        proof.version = plan.version;
+        proof.original.sha256 = "f".repeat(64);
+        write_replacement(&plan, &proof).unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+        proof.original = plan.running.clone();
+        write_replacement(&plan, &proof).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_replacement(&plan).is_err());
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&proof.staged.path, &path).unwrap();
+        assert!(read_replacement(&plan).is_err());
+        fs::remove_file(&path).unwrap();
+        proof.operation_id = "f".repeat(32);
+        write_replacement(&plan, &proof).unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+        proof.operation_id = plan.operation_id.clone();
+        proof.staged.path = plan.running.path.clone();
+        write_replacement(&plan, &proof).unwrap();
+        assert!(source_replacement_state(&plan, &state).is_err());
+        fs::remove_file(&path).unwrap();
+        state.candidate = Some(ExecutableIdentity {
+            path: plan.running.path.clone(), sha256: "b".repeat(64),
+        });
+        assert!(historical_original_allowed(&plan, &state, None));
+        let journal_path = protocol::write_operation(&plan.context.state_dir, &state).unwrap();
+        let before = fs::read(&journal_path).unwrap();
+        let error = inspect(&plan).unwrap_err();
+        assert!(error.contains("lacks completed replacement evidence"));
+        assert_eq!(fs::read(&journal_path).unwrap(), before);
+        let (phase, failed) = journal_recovery_failure(&plan, &mut state, false, &error);
+        assert_eq!(phase, OperationPhase::Unknown);
+        assert!(failed.is_none());
+        let saved = protocol::read_operation(&plan.context.state_dir, &plan.operation_id).unwrap().unwrap();
+        assert_eq!(saved.phase, OperationPhase::Unknown);
+        assert!(saved.detail.contains(&error));
+        assert!(!saved.applied);
+        let (phase, failed) = journal_recovery_failure(&plan, &mut state, true, &error);
+        assert_eq!(phase, OperationPhase::UserStopped);
+        assert!(failed.is_none());
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn completed_source_receipt_never_overrides_manager_failure_or_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let (plan, mut proof) = source_fixture(root.path());
+        proof.installed = Some(plan.running.clone());
+        write_replacement(&plan, &proof).unwrap();
+        let mut state = record(&plan);
+        state.execution_fence = ExecutionFence::ManagerExited;
+        let mut child = Command::new("/usr/bin/true").process_group(0).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let manager_image = coordinator::executable_identity(Path::new("/usr/bin/true")).unwrap();
+        let mut manager = ManagerEvidence {
+            program: manager_image.path, program_sha256: manager_image.sha256,
+            uid: unsafe { libc::geteuid() }, started_at_ms: 1,
+            pid: Some(pid), pgid: Some(pid), state: ManagerState::Exited,
+            exit_code: Some(0), drained: true,
+        };
+        assert!(verified_manager_exit(&manager).unwrap());
+        let helper = protocol::private_updates(&plan.context.state_dir).unwrap()
+            .join(format!("helper-{}", plan.operation_id));
+        protocol::write_private_bytes(&helper, b"retained helper", 0o700).unwrap();
+        let owner = LifecycleEvidence {
+            original_pid: pid, original_instance_id: plan.context.instance_id.clone(),
+            original_image: plan.running.clone(), original_config_dir: plan.context.config_dir.clone(),
+            original_state_dir: plan.context.state_dir.clone(), original_socket: context_endpoint(&plan),
+            original_assets: None, helper_pid: pid,
+            helper_image: coordinator::executable_identity(&helper).unwrap(), stop_generation: 0,
+        };
+        protocol::write_private_bytes(&lifecycle_path(&plan).unwrap(),
+            &serde_json::to_vec(&owner).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(
+            &plan.context.state_dir.join("desktop-pet.lock"), b"", 0o600,
+        ).unwrap();
+        evidence(&plan, &manager).unwrap();
+        let source = source_replacement_state(&plan, &state).unwrap();
+        let observed = inspect_record(&plan, state.clone(), source.as_ref(), &None, || Ok(0)).unwrap();
+        assert!(observed.installed && !observed.applied);
+        let mut intent = state.clone();
+        intent.execution_fence = ExecutionFence::ManagerIntent;
+        let observed = inspect_record(&plan, intent, source.as_ref(), &None, || Ok(0)).unwrap();
+        assert_eq!(observed.phase, OperationPhase::Unknown);
+        assert!(!observed.installed && !observed.applied);
+        proof.installed = None;
+        write_replacement(&plan, &proof).unwrap();
+        let stage_only = source_replacement_state(&plan, &state).unwrap();
+        let observed = inspect_record(&plan, state.clone(), stage_only.as_ref(), &None, || Ok(0)).unwrap();
+        assert!(!observed.installed && !observed.applied);
+        assert!(observed.detail.contains("original image/source is unchanged"));
+        fs::remove_file(replacement_path(&plan).unwrap()).unwrap();
+        let absent = source_replacement_state(&plan, &state).unwrap();
+        let observed = inspect_record(&plan, state.clone(), absent.as_ref(), &None, || Ok(0)).unwrap();
+        assert!(!observed.installed && !observed.applied);
+        assert!(observed.detail.contains("original image/source is unchanged"));
+        proof.installed = Some(plan.running.clone());
+        write_replacement(&plan, &proof).unwrap();
+        manager.exit_code = Some(1);
+        assert!(!verified_manager_exit(&manager).unwrap());
+        evidence(&plan, &manager).unwrap();
+        let source = source_replacement_state(&plan, &state).unwrap();
+        let observed = inspect_record(&plan, state.clone(), source.as_ref(), &None, || Ok(0)).unwrap();
+        assert_eq!(observed.phase, OperationPhase::Unknown);
+        assert!(observed.detail.contains("failed staging manager"));
+        assert!(!observed.installed && !observed.applied);
+        manager.exit_code = Some(0);
+        manager.drained = false;
+        assert!(verified_manager_exit(&manager).is_err());
+        manager.drained = true;
+        manager.started_at_ms = 0;
+        assert!(verified_manager_exit(&manager).is_err());
+        manager.started_at_ms = 1;
+        manager.pid = Some(std::process::id());
+        manager.pgid = manager.pid;
+        assert!(verified_manager_exit(&manager).is_err());
+        evidence(&plan, &manager).unwrap();
+        let observed = inspect_record(&plan, state, source.as_ref(), &None, || Ok(0)).unwrap();
+        assert!(!observed.installed && !observed.applied);
+        assert!(observed.detail.contains("not durably completed"));
     }
 
     #[test]

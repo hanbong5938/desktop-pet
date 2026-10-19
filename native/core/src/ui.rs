@@ -1,7 +1,7 @@
 #[path = "ui_dialogues.rs"]
 mod automation_dialogues;
 #[path = "ui_preferences.rs"]
-mod automation_preferences;
+pub(crate) mod automation_preferences;
 #[path = "ui_sessions.rs"]
 mod automation_sessions;
 #[path = "ui_worktrees.rs"]
@@ -139,6 +139,13 @@ enum PendingNative {
 }
 
 enum DeferredBridge {
+    Lifecycle {
+        provider: Option<String>,
+        key: String,
+        value: bool,
+        request: Arc<LifecycleRequestState>,
+        sender: mpsc::SyncSender<Result<serde_json::Map<String, serde_json::Value>, String>>,
+    },
     Prepare {
         token: RendererToken,
         assets: Box<ValidatedCharacter>,
@@ -153,6 +160,62 @@ enum DeferredBridge {
     Discard {
         token: RendererToken,
     },
+}
+
+// A timeout can cancel only a queued request. Once execution owns it, the
+// caller must reread rather than infer that persistence did not happen.
+struct LifecycleRequestState {
+    state: std::sync::atomic::AtomicU8,
+    deadline: Instant,
+}
+
+impl LifecycleRequestState {
+    fn begin(&self) -> bool {
+        if Instant::now() >= self.deadline {
+            let _ = self.state.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+            return false;
+        }
+        self.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    fn cancel(&self) -> &'static str {
+        if self.state.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            "lifecycle request timed out before execution; no setting was saved"
+        } else {
+            "lifecycle request execution outcome is unknown; reread settings"
+        }
+    }
+}
+
+static LIFECYCLE_PENDING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+const MAX_LIFECYCLE_PENDING: usize = 32;
+
+fn reserve_lifecycle_slot(pending: &std::sync::atomic::AtomicUsize) -> Result<(), String> {
+    pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        (count < MAX_LIFECYCLE_PENDING).then_some(count + 1)
+    }).map(|_| ()).map_err(|_| "lifecycle owner inbox is busy".to_owned())
+}
+
+pub(crate) fn set_registered_lifecycle_on_main(
+    provider: Option<String>,
+    key: String,
+    value: bool,
+    deadline: Instant,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if Instant::now() >= deadline {
+        return Err("lifecycle request deadline elapsed before enqueue".into());
+    }
+    reserve_lifecycle_slot(&LIFECYCLE_PENDING)?;
+    let request = Arc::new(LifecycleRequestState {
+        state: std::sync::atomic::AtomicU8::new(0), deadline,
+    });
+    let (sender, receiver) = mpsc::sync_channel(1);
+    enqueue_bridge(DeferredBridge::Lifecycle {
+        provider, key, value, request: request.clone(), sender,
+    });
+    receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| request.cancel().to_owned())?
 }
 
 struct StartupSelection {
@@ -3396,6 +3459,17 @@ fn run_bridge(request: DeferredBridge) -> Option<DeferredBridge> {
             return true;
         };
         match request {
+            DeferredBridge::Lifecycle { provider, key, value, request, sender } => {
+                LIFECYCLE_PENDING.fetch_sub(1, Ordering::AcqRel);
+                let result = if !request.begin() {
+                    Err("lifecycle request cancelled before execution".into())
+                } else if let Some(ui) = slot.as_mut() {
+                    ui.apply_registered_lifecycle_setting(provider.as_deref(), &key, value)
+                } else {
+                    Err("native UI is unavailable".into())
+                };
+                let _ = sender.try_send(result);
+            }
             DeferredBridge::Prepare {
                 token,
                 assets,
@@ -13305,42 +13379,36 @@ impl Ui {
         self.reanchor_menu_panel();
     }
 
+    fn apply_registered_lifecycle_setting(
+        &mut self,
+        provider: Option<&str>,
+        key: &str,
+        value: bool,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let (store, extensions, selection) = {
+            let state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+            state.update_mutation_allowed()?;
+            if self.update_frozen.is_some() {
+                return Err("application update is preparing".into());
+            }
+            (state.profile_store().cloned().ok_or("profile store is not available")?,
+             state.lifecycle_extensions().to_vec(), state.observation_mode())
+        };
+        if let Some(prepared) = control::prepare_registered_lifecycle(
+            &store, &extensions, &selection, provider, key, value,
+        )? {
+            self.commit_prepared_owner_patch(prepared)
+                .map_err(|error| format!("{} (committed={}): {}", error.code, error.committed, error.detail))?;
+        }
+        let settings = crate::lifecycle::read_settings(store.config_dir())?;
+        self.shared.lock().map_err(|_| "native state lock is poisoned")?
+            .set_lifecycle_settings(settings);
+        control::lifecycle_values(&store, &extensions, &self.prefs.observation_host())
+    }
+
     fn apply_integration_setting(&mut self, provider: &str, key: &str, value: bool) {
-        let previous_owner = self.prefs.snapshot().owner;
-        let context = self
-            .shared
-            .lock()
-            .map_err(|_| "native state lock is poisoned".to_owned())
-            .and_then(|state| {
-                state.update_mutation_allowed()?;
-                let extension = state
-                    .lifecycle_extensions()
-                    .iter()
-                    .find(|extension| extension.provider() == provider)
-                    .cloned()
-                    .ok_or("integration setting owner is not registered")?;
-                let store = state
-                    .profile_store()
-                    .cloned()
-                    .ok_or("profile store is not available")?;
-                Ok((extension, store))
-            });
-        let result =
-            context.and_then(|(extension, store)| extension.apply_setting(&store, key, value));
-        if let Err(error) = result {
+        if let Err(error) = self.apply_registered_lifecycle_setting(Some(provider), key, value) {
             self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
-        }
-        if let Err(error) = self
-            .prefs
-            .refresh_owner_snapshot(&self.lifecycle_paths.config_dir)
-        {
-            self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
-        }
-        if previous_owner != self.prefs.snapshot().owner {
-            self.preference_revision = self
-                .preference_revision
-                .checked_add(1)
-                .expect("preference revision exhausted");
         }
         self.sync_observation_panel();
         self.refresh();
@@ -13353,14 +13421,11 @@ impl Ui {
 
     fn save_lifecycle_setting(&mut self, key: LifecycleSetting) {
         let value = self.menu_panel.lifecycle_value(key);
-        let extensions = self
-            .shared
-            .lock()
-            .map_err(|_| "native state lock is poisoned".to_owned())
-            .map(|state| state.lifecycle_extensions().to_vec());
-        let result = extensions.and_then(|extensions| {
-            control::set_lifecycle_setting(&self.lifecycle_paths, &extensions, key, value)
-        });
+        let setting = match key {
+            LifecycleSetting::AutoStart => "auto_start",
+        };
+        let result = self.apply_registered_lifecycle_setting(None, setting, value)
+            .and_then(|_| crate::lifecycle::read_settings(&self.lifecycle_paths.config_dir));
         match result {
             Ok(settings) => self.menu_panel.lifecycle_saved(settings),
             Err(error) => {
@@ -14311,6 +14376,89 @@ mod tests {
     use super::*;
     use crate::automation::{test_automation, OperationState, PresentationRequest};
     use crate::composer_layout::BOTTOM_INSET;
+
+    #[test]
+    fn saturated_lifecycle_workers_have_bounded_admission_before_enqueue() {
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(MAX_LIFECYCLE_PENDING + 1));
+        let release = Arc::new(std::sync::Barrier::new(MAX_LIFECYCLE_PENDING + 1));
+        let workers: Vec<_> = (0..MAX_LIFECYCLE_PENDING).map(|_| {
+            let pending = pending.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                reserve_lifecycle_slot(&pending).unwrap();
+                entered.wait();
+                release.wait();
+                pending.fetch_sub(1, Ordering::AcqRel);
+            })
+        }).collect();
+        entered.wait();
+        assert!(reserve_lifecycle_slot(&pending).unwrap_err().contains("busy"));
+        assert_eq!(pending.load(Ordering::Acquire), MAX_LIFECYCLE_PENDING);
+        release.wait();
+        for worker in workers { worker.join().unwrap(); }
+        reserve_lifecycle_slot(&pending).unwrap();
+        assert_eq!(pending.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn borrowed_ui_defers_lifecycle_and_queued_timeout_cancels_late_execution() {
+        let request = Arc::new(LifecycleRequestState {
+            state: std::sync::atomic::AtomicU8::new(0),
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+        let (sender, receiver) = mpsc::sync_channel(1);
+        LIFECYCLE_PENDING.fetch_add(1, Ordering::AcqRel);
+        let deferred = UI.with(|ui| {
+            let _borrow = ui.borrow_mut();
+            run_bridge(DeferredBridge::Lifecycle {
+                provider: None, key: "auto_start".into(), value: false,
+                request: request.clone(), sender,
+            }).expect("a borrowed UI must retain the request")
+        });
+        assert_eq!(request.state.load(Ordering::Acquire), 0);
+        assert!(request.cancel().contains("no setting was saved"));
+        assert!(run_bridge(deferred).is_none());
+        assert!(receiver.recv().unwrap().unwrap_err().contains("cancelled"));
+        assert_eq!(request.state.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn executing_lifecycle_timeout_is_unknown_and_cannot_cancel_or_execute_twice() {
+        let request = Arc::new(LifecycleRequestState {
+            state: std::sync::atomic::AtomicU8::new(0),
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker_request = request.clone();
+        let worker_barrier = barrier.clone();
+        let worker = std::thread::spawn(move || {
+            assert!(worker_request.begin());
+            worker_barrier.wait();
+            worker_barrier.wait();
+            assert_eq!(worker_request.state.load(Ordering::Acquire), 1);
+        });
+        barrier.wait();
+        assert!(request.cancel().contains("unknown"));
+        assert!(!request.begin());
+        barrier.wait();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_bridge_without_ui_returns_explicit_error_without_blocking_sender() {
+        let request = Arc::new(LifecycleRequestState {
+            state: std::sync::atomic::AtomicU8::new(0),
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+        let (sender, receiver) = mpsc::sync_channel(1);
+        LIFECYCLE_PENDING.fetch_add(1, Ordering::AcqRel);
+        assert!(run_bridge(DeferredBridge::Lifecycle {
+            provider: None, key: "auto_start".into(), value: false, request, sender,
+        }).is_none());
+        assert_eq!(receiver.recv().unwrap().unwrap_err(), "native UI is unavailable");
+    }
 
     fn migration_ui_plan() -> desktop_pet_update_coordinator::migration::MigrationPlan {
         use desktop_pet_update_coordinator::migration::{

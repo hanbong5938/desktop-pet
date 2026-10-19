@@ -54,6 +54,8 @@ mod transport_tests;
 mod ui;
 mod update_card;
 mod worktree_confirmation;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 use desktop_pet_contracts::{
     Integration, IntegrationExtensions, ObservationSelection, ProfileStore,

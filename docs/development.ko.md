@@ -117,6 +117,8 @@ desktop-pet preferences set --observation-host auto
 
 프로필 우선순위는 **명시적 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 중립 XDG 기본값**입니다. 기본값은 `${XDG_CONFIG_HOME:-$HOME/.config}/desktop-pet`, `${XDG_STATE_HOME:-$HOME/.local/state}/desktop-pet`입니다. 기본 config root의 `default-profile.json`은 `{ "version":1, "config_dir":"/absolute/config", "state_dir":"/absolute/state" }`로 두 실제 경로를 원자 기록하며 재귀 profile pointer는 금지합니다. `desktop-pet profile show --json`은 daemon/디렉터리를 만들지 않는 읽기 전용입니다.
 
+`bash scripts/run-native.sh --config-dir /absolute/dev-config --state-dir /absolute/dev-state start`는 개발 config/state **둘 다** 대응하는 기본 디렉터리와 물리적으로 달라야 합니다. Bash만 사용하는 비교는 기존 디렉터리와 symlink를 먼저 따라간 뒤 `..`를 처리하므로 아직 없는 leaf를 포함한 별칭도 확인하며 디렉터리를 만들지 않습니다. 빈/상대 경로, CR/LF, 일반 파일 component, dangling/looping symlink와 접근 불가 디렉터리는 거부합니다. 원래 인자를 native 실행 파일에 그대로 전달하므로 비교용 정규화가 더 엄격한 native profile 검증을 우회하지 않습니다. Bundle 서명 및 native 설치/origin 검사도 그대로 필요합니다.
+
 이전은 기존 두 디렉터리를 **그 자리에서 채택**합니다. preferences/lifecycle/characters/menu-bar-icons와 lock/control socket, 구 `updates/` journal/helper를 이동·병합·삭제하지 않습니다. neutral default가 아직 미선택일 때만 legacy base pair를 기록합니다. 다른 pair를 가리키는 기존 default는 유지하고 이전 profile은 명시 경로로 사용하세요. 별도 Tern/beta/custom profile은 분리 상태를 유지합니다. default를 의도적으로 선택하려면:
 
 ```sh

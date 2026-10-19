@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "$ROOT_DIR/scripts/profile-paths.sh"
 binary="$ROOT_DIR/dist/DesktopPet.app/Contents/MacOS/desktop-pet"
 helper="$ROOT_DIR/dist/DesktopPet.app/Contents/MacOS/desktop-pet-update-coordinator"
 fail() { printf 'desktop pet development: %s\n' "$*" >&2; exit 1; }
@@ -24,6 +25,6 @@ done
 default_profile="$(env -u DESKTOP_PET_CONFIG_DIR -u DESKTOP_PET_STATE_DIR "$binary" profile show --json)" || fail 'cannot inspect the default profile'
 default_config="$(/usr/bin/plutil -extract config_dir raw -expect string -o - - <<< "$default_profile")"
 default_state="$(/usr/bin/plutil -extract state_dir raw -expect string -o - - <<< "$default_profile")"
-[[ "$config" != "$default_config" && "$state" != "$default_state" ]] || fail 'development must use separate config and state directories, not the shared default profile'
+require_separate_development_profile "$config" "$state" "$default_config" "$default_state" || exit 1
 "$helper" discover --executable "$binary" --json >/dev/null || fail 'core development image failed native installation/origin validation'
 exec "$binary" "$@"

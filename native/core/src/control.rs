@@ -6,7 +6,7 @@ use crate::automation::{
 use crate::bubble::BubblePlacement;
 use crate::character_service::PackService;
 use crate::character_types::{PackAction, PackListing, PackOperation, PackRequest};
-use crate::lifecycle::{self, LifecycleSetting, LifecycleSettings, Paths};
+use crate::lifecycle::{self, LifecycleSetting, Paths};
 use crate::preferences::Preferences;
 use crate::session_view::{SessionCursor, SessionFilter, SessionPageCursor, SessionPageRequest};
 use crate::socket;
@@ -1149,6 +1149,7 @@ fn dispatch_legacy_registration(
     frame: &[u8],
     command: &str,
     authorized: bool,
+    deadline: Instant,
 ) -> ControlResponse {
     let result: Result<bool, String> = (|| {
         if !authorized {
@@ -1164,7 +1165,8 @@ fn dispatch_legacy_registration(
         if frame.len() + 1 > extension.max_request_bytes() {
             return Err("legacy registration exceeds frame limit".into());
         }
-        let bytes = extension.handle_frame(frame)?;
+        let preferences = crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
+        let bytes = extension.handle_frame(frame, &preferences)?;
         if bytes.len() > extension.max_response_bytes() {
             return Err("legacy registration response exceeds frame limit".into());
         }
@@ -1412,7 +1414,7 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
             ..
         }) => {
             let result =
-                dispatch_legacy_registration(&inner, &frame, &command, verify_peer_uid(&stream));
+                dispatch_legacy_registration(&inner, &frame, &command, verify_peer_uid(&stream), deadline);
             let _ = write_response(&mut stream, &result, deadline);
             return;
         }
@@ -1512,7 +1514,8 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
         if wire_bytes > extension.max_request_bytes() || !verify_peer_uid(&stream) {
             return;
         }
-        match extension.handle_frame(&frame) {
+        let preferences = crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
+        match extension.handle_frame(&frame, &preferences) {
             Ok(bytes)
                 if bytes.len() <= extension.max_response_bytes()
                     && bytes.last() == Some(&b'\n')
@@ -1585,7 +1588,7 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
         if let Some((request, generation)) = claimed_stop {
             if !written {
                 lock_unpoisoned(&inner.shared)
-                    .cancel_update_prepare(&request.operation_id, &request.token);
+                    .abort_update_stop(&request.operation_id, &request.token);
                 ui::wake();
             } else if let Some(generation) = generation {
                 let _lifecycle = lock_unpoisoned(&inner.lifecycle_writes);
@@ -1599,7 +1602,7 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
                     drop(state);
                     ui::wake();
                 } else {
-                    state.cancel_update_prepare(&request.operation_id, &request.token);
+                    state.abort_update_stop(&request.operation_id, &request.token);
                     drop(state);
                     ui::wake();
                 }
@@ -1703,14 +1706,9 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
                 if request.operation == "get" {
                     return lifecycle_values(&profile, &extensions, &selection);
                 }
-                let _guard = lock_unpoisoned(&inner.lifecycle_writes);
-                mutation_admission(&inner)?;
-                let key = request.key.as_deref().ok_or("missing lifecycle key")?;
+                let key = request.key.ok_or("missing lifecycle key")?;
                 let value = request.value.ok_or("missing lifecycle value")?;
-                apply_lifecycle_value(&profile, &extensions, &selection, key, value)?;
-                let settings = lifecycle::read_settings(profile.config_dir())?;
-                lock_unpoisoned(&inner.shared).set_lifecycle_settings(settings);
-                lifecycle_values(&profile, &extensions, &selection)
+                ui::set_registered_lifecycle_on_main(None, key, value, deadline)
             });
         let mut bytes = match serde_json::to_vec(&lifecycle_reply(result)) {
             Ok(bytes) => bytes,
@@ -2565,109 +2563,8 @@ fn dispatch(inner: &ControlInner, command: &str, endpoint: Option<PathBuf>) -> C
     }
 }
 
-fn send_lifecycle_request(
-    path: &Path,
-    request: LifecycleRequest,
-) -> Result<LifecycleSettings, String> {
-    let deadline = Instant::now() + CLIENT_TIMEOUT;
-    let mut stream = connect_private_socket(path, deadline)?;
-    let mut bytes = serde_json::to_vec(&request)
-        .map_err(|error| format!("cannot encode lifecycle request: {error}"))?;
-    bytes.push(b'\n');
-    write_frame(&mut stream, &bytes, deadline)
-        .map_err(|error| format!("cannot send lifecycle request: {error}"))?;
-    let mut frame = [0; MAX_FRAME_BYTES];
-    let length = read_frame(&mut stream, &mut frame, deadline)
-        .map_err(|error| format!("cannot read lifecycle response: {error}"))?;
-    reject_duplicate_json_keys(&frame[..length])?;
-    let reply: LifecycleReply = serde_json::from_slice(&frame[..length])
-        .map_err(|error| format!("invalid lifecycle response: {error}"))?;
-    if reply.kind != "lifecycle" || reply.version != PROTOCOL_VERSION {
-        return Err("invalid lifecycle response protocol".to_owned());
-    }
-    match (reply.ok, reply.settings, reply.error) {
-        (true, Some(settings), None) => serde_json::from_value(Value::Object(settings))
-            .map_err(|e| format!("invalid lifecycle settings: {e}")),
-        (false, None, Some(error)) => Err(error),
-        _ => Err("invalid lifecycle response fields".to_owned()),
-    }
-}
 
-fn lifecycle_request(
-    operation: &str,
-    key: Option<LifecycleSetting>,
-    value: Option<bool>,
-) -> LifecycleRequest {
-    LifecycleRequest {
-        version: PROTOCOL_VERSION,
-        kind: "lifecycle".to_owned(),
-        operation: operation.to_owned(),
-        key: key.map(|key| match key {
-            LifecycleSetting::AutoStart => "auto_start".into(),
-        }),
-        value,
-    }
-}
 
-fn access_lifecycle_settings(
-    paths: &Paths,
-    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
-    change: Option<(LifecycleSetting, bool)>,
-) -> Result<LifecycleSettings, String> {
-    let deadline = Instant::now() + crate::cli::STARTUP_TIMEOUT;
-    let offline_origin = InstallOrigin::Unknown {
-        reason: "offline settings admission".into(),
-    };
-    loop {
-        if change.is_some() {
-            start_allowed(&offline_origin, &paths.state_dir, None, None)?;
-        }
-        if control_socket_is_live(&paths.control_socket, Duration::from_millis(150)) {
-            let request = match change {
-                Some((key, value)) => lifecycle_request("set", Some(key), Some(value)),
-                None => lifecycle_request("get", None, None),
-            };
-            match send_lifecycle_request(&paths.control_socket, request) {
-                Ok(settings) => return Ok(settings),
-                Err(error)
-                    if error == "desktop pet is stopping"
-                        || error == "desktop-pet is shutting down" => {}
-                Err(_)
-                    if !control_socket_is_live(
-                        &paths.control_socket,
-                        Duration::from_millis(100),
-                    ) => {}
-                Err(error) => return Err(error),
-            }
-        } else if let Some(lock) = LifecycleLock::try_acquire(&paths.state_dir)? {
-            if !control_socket_is_live(&paths.control_socket, Duration::from_millis(150))
-                && !lifecycle::startup_pending(&paths.config_dir)?
-            {
-                if change.is_some() {
-                    start_allowed(&offline_origin, &paths.state_dir, None, None)?;
-                }
-                let lock = Arc::new(lock);
-                let settings = match change {
-                    Some((key, value)) => {
-                        let profile = desktop_pet_contracts::ProfileStore::with_lock(
-                            &paths.config_dir,
-                            lock.clone(),
-                        )?
-                        .with_preferences_validator(Preferences::validate_committed_object);
-                        lifecycle::update_setting(&profile, extensions, key, value)?
-                    }
-                    None => lifecycle::read_settings(&paths.config_dir)?,
-                };
-                drop(lock);
-                return Ok(settings);
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err("timed out waiting for desktop-pet lifecycle finalization".to_owned());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
 
 /// Offline counterpart of the common preference transaction. The client must
 /// establish socket absence before calling; recheck under the actual state
@@ -2725,7 +2622,7 @@ pub(crate) fn access_profile_preferences_offline(
     }
 }
 
-fn lifecycle_values(
+pub(crate) fn lifecycle_values(
     profile: &desktop_pet_contracts::ProfileStore,
     extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
     selection: &desktop_pet_contracts::ObservationSelection,
@@ -2746,32 +2643,42 @@ fn lifecycle_values(
     Ok(values)
 }
 
-fn apply_lifecycle_value(
+pub(crate) fn prepare_registered_lifecycle(
     profile: &desktop_pet_contracts::ProfileStore,
     extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
     selection: &desktop_pet_contracts::ObservationSelection,
+    provider: Option<&str>,
     key: &str,
     value: bool,
-) -> Result<(), String> {
-    if key == "auto_start" {
-        return lifecycle::update_setting(profile, extensions, LifecycleSetting::AutoStart, value)
-            .map(|_| ());
-    }
+) -> Result<Option<Box<dyn desktop_pet_contracts::PreparedPreferencePatch>>, String> {
     let mut owner = None;
+    let mut keys = std::collections::BTreeSet::from(["auto_start".to_owned()]);
     for extension in extensions {
-        if extension
-            .settings(profile, selection, "en")?
-            .iter()
-            .any(|setting| setting.key == key)
-        {
-            if owner.replace(extension).is_some() {
+        for setting in extension.settings(profile, selection, "en")? {
+            if !keys.insert(setting.key.clone()) {
                 return Err("duplicate registered lifecycle setting".into());
+            }
+            if setting.key == key {
+                owner = Some(extension);
             }
         }
     }
-    owner
-        .ok_or_else(|| format!("unknown lifecycle setting: {key}"))?
-        .apply_setting(profile, key, value)
+    if key == "auto_start" {
+        if provider.is_some() {
+            return Err("auto_start is owned by core".into());
+        }
+        lifecycle::update_setting(profile, extensions, LifecycleSetting::AutoStart, value)?;
+        return Ok(None);
+    }
+    let owner = owner.ok_or_else(|| format!("unknown lifecycle setting: {key}"))?;
+    if provider.is_some_and(|provider| provider != owner.provider()) {
+        return Err("lifecycle setting belongs to another provider".into());
+    }
+    if let Some(prepared) = owner.prepare_preference_setting(profile, key, value)? {
+        return Ok(Some(prepared));
+    }
+    owner.apply_setting(profile, key, value)?;
+    Ok(None)
 }
 
 pub(crate) fn access_registered_lifecycle(
@@ -2827,27 +2734,23 @@ pub(crate) fn access_registered_lifecycle(
         )?;
     }
     composition.configure_profile(profile.clone())?;
-    let selection = Preferences::load(&paths.config_dir)?.observation_host();
+    let mut preferences = Preferences::load_committed(&paths.config_dir)?;
+    preferences.set_integration_extensions(profile.clone(), composition.extensions.lifecycle.clone());
+    preferences.refresh_owner_snapshot(&paths.config_dir)?;
+    let selection = preferences.observation_host();
     if let Some((key, value)) = change {
-        apply_lifecycle_value(
-            &profile,
-            &composition.extensions.lifecycle,
-            &selection,
-            key,
-            value,
-        )?;
+        if let Some(prepared) = prepare_registered_lifecycle(
+            &profile, &composition.extensions.lifecycle, &selection, None, key, value,
+        )? {
+            preferences.apply_prepared_owner_patch(prepared, &paths.config_dir)?;
+            if let Some(error) = preferences.postcommit_error() {
+                return Err(format!("preference saved but adapter application failed: {error}"));
+            }
+        }
     }
     lifecycle_values(&profile, &composition.extensions.lifecycle, &selection)
 }
 
-pub(crate) fn set_lifecycle_setting(
-    paths: &Paths,
-    extensions: &[Arc<dyn desktop_pet_contracts::LifecycleExtension>],
-    key: LifecycleSetting,
-    value: bool,
-) -> Result<LifecycleSettings, String> {
-    access_lifecycle_settings(paths, extensions, Some((key, value)))
-}
 
 struct BoundedJson {
     bytes: Vec<u8>,
@@ -4216,17 +4119,18 @@ mod tests {
         let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner.clone()];
         let before = profile.read_object_with_presence().unwrap();
 
-        assert!(apply_lifecycle_value(&profile, &[], &selection, key, value).is_err());
-        assert!(apply_lifecycle_value(
+        assert!(prepare_registered_lifecycle(&profile, &[], &selection, None, key, value).is_err());
+        assert!(prepare_registered_lifecycle(
             &profile,
             &extensions,
             &ObservationSelection::Provider("other".into()),
+            None,
             key,
             value,
         )
         .is_err());
         assert!(
-            apply_lifecycle_value(&profile, &extensions, &selection, "unknown_setting", value)
+            prepare_registered_lifecycle(&profile, &extensions, &selection, None, "unknown_setting", value)
                 .is_err()
         );
         let duplicate = Arc::new(SettingOwner {
@@ -4236,13 +4140,15 @@ mod tests {
             vec![owner.clone(), duplicate.clone()];
         assert!(lifecycle_values(&profile, &duplicate_extensions, &selection).is_err());
         assert!(
-            apply_lifecycle_value(&profile, &duplicate_extensions, &selection, key, value).is_err()
+            prepare_registered_lifecycle(&profile, &duplicate_extensions, &selection, None, key, value).is_err()
         );
         assert_eq!(profile.read_object_with_presence().unwrap(), before);
         assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
         assert_eq!(duplicate.calls.load(Ordering::SeqCst), 0);
 
-        apply_lifecycle_value(&profile, &extensions, &selection, key, value).unwrap();
+        assert!(prepare_registered_lifecycle(&profile, &extensions, &selection, Some("other"), key, value).is_err());
+        assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
+        assert!(prepare_registered_lifecycle(&profile, &extensions, &selection, None, key, value).unwrap().is_none());
         assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             lifecycle_values(&profile, &extensions, &selection)

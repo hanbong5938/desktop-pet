@@ -1478,9 +1478,8 @@ pub fn check(c: &UpdateContext, policy: UpdatePolicy) -> Result<CheckSnapshot, S
                     return Ok(snapshot);
                 }
             }
-            snapshot.status = CheckStatus::Local;
-            snapshot.detail = "Local checkout: rebuild only these on-disk sources, without fetching or changing git refs".into();
-            snapshot.plan = Some(new_plan(c, &origin, UpdateAction::SourceRebuild, None)?);
+            snapshot.status = CheckStatus::Current;
+            snapshot.detail = "Verified local legacy bridge ingress; installation is prebuilt-only. Source rebuilding is unsupported; use the separately approved Desktop Pet migration when eligible.".into();
         }
         InstallOrigin::Homebrew {
             brew,
@@ -1823,6 +1822,9 @@ pub fn recheck_plan(plan: &UpdatePlan) -> Result<(), String> {
             }
         }
     }
+    if matches!(plan.action, UpdateAction::SourceRebuild) {
+        return Err("legacy bridge ingress does not support source rebuilding".into());
+    }
     if matches!(plan.action, UpdateAction::ApplyInstalled) {
         if plan.context.running_origin.is_none() {
             return Err("apply requires startup-captured installation ownership".into());
@@ -1849,7 +1851,6 @@ pub fn recheck_plan(plan: &UpdatePlan) -> Result<(), String> {
     match (&plan.origin, &plan.action) {
         (InstallOrigin::Herdr { enabled: true, .. }, UpdateAction::HerdrReinstall)
         | (InstallOrigin::Homebrew { .. }, UpdateAction::HomebrewUpgrade)
-        | (InstallOrigin::Source { .. }, UpdateAction::SourceRebuild)
         | (InstallOrigin::Source { .. }, UpdateAction::ApplyInstalled)
         | (InstallOrigin::Herdr { enabled: true, .. }, UpdateAction::ApplyInstalled)
         | (InstallOrigin::Homebrew { .. }, UpdateAction::ApplyInstalled)
@@ -2165,17 +2166,6 @@ pub fn manager_command(plan: &UpdatePlan) -> Result<Option<ManagerCommand>, Stri
                 environment: environment.into_iter().collect(),
             }))
         }
-        (InstallOrigin::Source { root }, UpdateAction::SourceRebuild) => Ok(Some(ManagerCommand {
-            program: PathBuf::from("/bin/bash"),
-            args: vec![
-                root.join("scripts/install.sh")
-                    .to_string_lossy()
-                    .into_owned(),
-                "--source".into(),
-            ],
-            cwd: c.state_dir.clone(),
-            environment: routing.into_iter().collect(),
-        })),
         (InstallOrigin::Homebrew { brew, formula, .. }, UpdateAction::HomebrewUpgrade) => {
             let installed = if let Some(target) = &plan.target {
                 let details = brew_metadata(brew, formula)?;
@@ -2321,7 +2311,10 @@ mod tests {
             candidate: None,
         };
         let original = serde_json::to_vec(&plan).unwrap();
-        assert!(recheck_plan(&plan).is_ok());
+        assert_eq!(recheck_plan(&plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding");
+        assert_eq!(manager_command(&plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding");
         assert_eq!(serde_json::to_vec(&plan).unwrap(), original);
         assert!(!base.join("missing").exists());
 
@@ -2342,7 +2335,8 @@ mod tests {
         std::os::unix::fs::symlink(&base, &external_alias).unwrap();
         let mut aliased_plan = plan.clone();
         aliased_plan.context.herdr_socket = external_alias.join("missing/parent/herdr.sock");
-        assert!(recheck_plan(&aliased_plan).is_ok());
+        assert_eq!(recheck_plan(&aliased_plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding");
 
         // Files and dangling aliases cannot be treated as absent directories.
         let blocked = base.join("not-a-directory");
@@ -2837,15 +2831,51 @@ mod tests {
                 matches!(detect_origin(&context).unwrap(), InstallOrigin::Source { root } if root == local)
             );
             let snapshot = check(&context, UpdatePolicy::StableOnly).unwrap();
-            assert_eq!(snapshot.status, CheckStatus::Local);
-            assert!(matches!(
-                snapshot.plan,
-                Some(UpdatePlan {
-                    action: UpdateAction::SourceRebuild,
-                    ..
-                })
-            ));
+            assert_eq!(snapshot.status, CheckStatus::Current);
+            assert!(snapshot.plan.is_none());
+            assert_eq!(snapshot.detail, "Verified local legacy bridge ingress; installation is prebuilt-only. Source rebuilding is unsupported; use the separately approved Desktop Pet migration when eligible.");
+            fs::write(local.join("native/Cargo.toml"), b"[package]\nname='looks-buildable'\n").unwrap();
+            let still_prebuilt = check(&context, UpdatePolicy::StableOnly).unwrap();
+            assert_eq!(still_prebuilt.status, CheckStatus::Current);
+            assert!(still_prebuilt.plan.is_none());
+            let origin = detect_origin(&context).unwrap();
+            let stale = new_plan(&context, &origin, UpdateAction::SourceRebuild, None).unwrap();
+            let bytes = serde_json::to_vec(&stale).unwrap();
+            let retained: UpdatePlan = serde_json::from_slice(&bytes).unwrap();
+            assert!(matches!(retained.action, UpdateAction::SourceRebuild));
+            assert_eq!(recheck_plan(&retained).unwrap_err(),
+                "legacy bridge ingress does not support source rebuilding");
+            assert_eq!(manager_command(&retained).unwrap_err(),
+                "legacy bridge ingress does not support source rebuilding");
         }
+
+        // A real, independently verified different installed image remains applicable.
+        let mut captured = context.clone();
+        captured.running_origin = Some(Box::new(InstallOrigin::Source { root: local.clone() }));
+        let capabilities = serde_json::to_string(&crate::identity::capabilities()).unwrap();
+        let literal = serde_json::to_string(&capabilities).unwrap();
+        let program = local.join("candidate.c");
+        fs::write(&program, format!(
+            "#include <stdio.h>\n#include <string.h>\nint main(int n,char**v){{if(n==2&&!strcmp(v[1],\"update-capabilities\")){{puts({literal});return 0;}}if(n==2&&!strcmp(v[1],\"--version\")){{puts(\"Herdr Desktop Pet 0.3.12\");return 0;}}return 99;}}\n"
+        )).unwrap();
+        assert!(Command::new("/usr/bin/clang").arg(&program).arg("-o").arg(&binary)
+            .status().unwrap().success());
+        let contents = binary.parent().unwrap().parent().unwrap();
+        fs::write(contents.join("Info.plist"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>herdr-desktop-pet</string><key>CFBundleIdentifier</key><string>test.desktop-pet.legacy-candidate</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string></dict></plist>"
+        ).unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"])
+            .arg(contents.parent().unwrap()).status().unwrap().success());
+        let installed = executable_identity(&binary).unwrap();
+        assert_ne!(installed.sha256, captured.running.sha256);
+        let applicable = check(&captured, UpdatePolicy::StableOnly).unwrap();
+        assert_eq!(applicable.status, CheckStatus::Installed);
+        let apply = applicable.plan.unwrap();
+        assert!(matches!(apply.action, UpdateAction::ApplyInstalled));
+        assert_eq!(apply.candidate, Some(installed));
+        assert!(recheck_plan(&apply).is_ok());
+        assert!(manager_command(&apply).unwrap().is_none());
 
         // A physically managed checkout cannot become Local just because its registry
         // is absent, regardless of whether an independently selected host binary exists.

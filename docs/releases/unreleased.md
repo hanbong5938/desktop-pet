@@ -14,6 +14,60 @@
 
 **한국어:** 공개 Brew3.10→일반3.11 A′→독립 동의 Core4.7 B→readiness/Commit→실제 Brew retirement와 원래 프로필·캐릭터·대사·이력·무관 프로필 보존을 실제 검증했습니다. 취소·rollback·Stop·Unknown·확정 실패 후 명시적 same-plan Resume도 통과했습니다. 실제 사용자 Mac 승인과 main/Pages 관측은 [정본 원장](v0.4.7.md)에서 구분하며, 과거 실패·태그·자산·helper·journal은 보존합니다.
 
+## Local review corrections (unpublished source)
+
+Temporary update Prepare failure, cancellation, unclaimed expiry and exact-context
+reconciliation restore only the currently selected integrations after the gate
+actually clears. Shutdown, claimed Stop and a remaining migration gate never
+reenable them. Old epochs, bindings and command receipts remain retired; recovery
+does not replay host commands. A failed Stop handoff has a separate exact-claim
+abort path: it thaws preference/UI editing without reactivating retired integrations.
+
+Preference-owned lifecycle toggles, observation ingress and common preference
+patches now use the same serialized owner/CAS transaction. Owner projections are
+validated before atomic publication and returned from the actual saved candidate,
+not reread afterward. Preparation/projection/save failure leaves the revision and
+committed cache unchanged; a postcommit adapter failure retains the saved revision.
+Live adapter access uses the existing operation ledger and the control request's
+absolute deadline, without self-socket RPC, offline fallback or automatic CAS
+retry. Queued lifecycle timeout prevents a later write; executing timeout requires
+a reread and does not assert that nothing was saved.
+
+These are local source changes, not public binaries, release qualification or
+new installation/visual acceptance evidence. The opt-in `test-support` composition
+seam exercises the production domain and owner with real adapters, without
+starting daemon, socket, watcher or AppKit workers.
+
+Local dirty-source verification passed the neutral workspace (Core 653 passed,
+1 ignored; coordinator 89 library/26 helper tests), legacy Core/coordinator
+(652 passed/1 ignored and 105 library/25 helper tests), real Core–Herdr composition
+(8 tests), Herdr (111 tests), Tern (41 tests), and Bun scripts/rig (71 tests).
+Both TypeScript checks and the zero-adapter build passed. Actual app/helper
+capabilities remained neutral 4/2/1 and legacy 3/1/1. Composed builds used one
+local contracts package and the three modified source trees; published Git pins
+and the original lockfiles were not changed.
+
+The private runtime smoke observed Herdr generation 1→2 across Prepare/cancel,
+stale manager-fence rejection, persisted owner writes with stale-CAS rejection,
+and actual Tern CLI/handler frames of 262145 bytes (262144-byte JSON plus one LF)
+and pretty JSON, plus rejection at the shared 64-source capacity. Read-only
+profile/path checks created no profile directories. The existing AppKit composer
+geometry harness passed with rendered images; that is not preference-UI visual
+acceptance. No real installation/crash or user-profile fault injection was run.
+
+The live two-authority Wiki smoke correctly failed closed: published legacy
+`v0.3.12` resolves to `f05a95a46dee042acf613c8d126d25be597fc824`, whose
+`docs/releases/v0.3.12.md` is absent (also HTTP 404 from the canonical tag API).
+Existing historical tag refs were copied only into the disposable source clone;
+neither original tags nor published notes were rewritten, and HEAD was not used
+as a frozen-note substitute. Deterministic default-fetch/frozen-note regressions
+passed, but a successful full live Wiki render remains blocked by that immutable
+source prerequisite.
+
+한국어: 위 결과는 세 작업 소스의 로컬 통합 검증이며 공개 바이너리나 실제 설치
+인수가 아닙니다. 실제 Wiki 렌더는 공개 legacy `v0.3.12` 태그의 고정 문서 부재로
+안전하게 중단됐습니다. 태그 재작성이나 HEAD 대체 없이 이 제한을 유지합니다.
+
 ## Historical source archive / 과거 소스 기록
 
 **Everything below, including headings saying “current”, “unreleased”, “unpublished” or “current verified evidence”, describes its recorded earlier source snapshot, not today's checkout or release qualification.** Preserve old commands, environment names, protocols, test counts, PIDs, digests and limitations as historical evidence; use current README/usage/CLI and the v0.4.7 ledger for present instructions. 아래 모든 “현재/미출시/미병합/검증 완료” 표현은 해당 과거 소스 범위이며 오늘의 소비자 조건·게시 상태·새 실행 증거가 아닙니다.

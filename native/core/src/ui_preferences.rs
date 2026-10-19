@@ -4,10 +4,10 @@ use crate::preferences::{PreferencePatch, PreferenceSnapshot};
 use serde_json::{json, Value};
 
 #[derive(Debug)]
-pub(super) struct PreferenceMutationError {
-    pub(super) code: &'static str,
-    pub(super) detail: String,
-    pub(super) committed: bool,
+pub(crate) struct PreferenceMutationError {
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
+    pub(crate) committed: bool,
 }
 
 impl PreferenceMutationError {
@@ -115,7 +115,75 @@ fn preference_result_fits(value: &Value) -> bool {
     serde_json::to_writer(JsonByteCounter::default(), value).is_ok()
 }
 
+pub(crate) enum PreferenceMutation {
+    Patch(PreferencePatch),
+    Prepared(Box<dyn desktop_pet_contracts::PreparedPreferencePatch>),
+}
+
+pub(crate) struct OwnerCommit {
+    pub(crate) previous: PreferenceSnapshot,
+    pub(crate) target: PreferenceSnapshot,
+    pub(crate) saved: bool,
+}
+
+/// AppKit-free owner transaction shared by the UI and composition fixtures.
+/// Admission is read under the domain guard; callbacks execute without it.
+pub(crate) fn commit_owner_mutation(
+    preferences: &mut Preferences,
+    revision: &mut u64,
+    mutation: PreferenceMutation,
+    expected_revision: Option<u64>,
+    directory: &Path,
+    shared: &Arc<Mutex<AppState>>,
+    observation_native_pending: bool,
+) -> Result<OwnerCommit, PreferenceMutationError> {
+    {
+        let state = shared.lock().map_err(|_| {
+            PreferenceMutationError::new("state_unavailable", "native state lock is poisoned")
+        })?;
+        state.update_mutation_allowed().map_err(|error| {
+            PreferenceMutationError::new("update_preparing", error)
+        })?;
+        if let PreferenceMutation::Patch(patch) = &mutation {
+            if let Some(selection) = &patch.observation_host {
+                if let Some(mut context) = state.update_context().cloned() {
+                    context.set_observation_selection(selection).map_err(|error| {
+                        PreferenceMutationError::new("invalid_preferences", error)
+                    })?;
+                }
+            }
+        }
+    }
+    if expected_revision.is_some_and(|expected| expected != *revision) {
+        return Err(PreferenceMutationError::new("revision_conflict", "preference revision changed"));
+    }
+    let previous = preferences.snapshot();
+    if let PreferenceMutation::Patch(patch) = &mutation {
+        if !patch_changes(patch, &previous)
+            .map_err(|error| PreferenceMutationError::new("invalid_preferences", error))?
+            && !(patch.observation_host.is_some() && observation_native_pending)
+        {
+            return Ok(OwnerCommit { target: previous.clone(), previous, saved: false });
+        }
+    }
+    let target = match mutation {
+        PreferenceMutation::Patch(patch) => preferences.apply_patch(patch, directory),
+        PreferenceMutation::Prepared(prepared) =>
+            preferences.apply_prepared_owner_patch(prepared, directory),
+    }.map_err(|error| PreferenceMutationError::new("persist_failed", error))?;
+    *revision = revision.checked_add(1).expect("preference revision exhausted");
+    Ok(OwnerCommit { previous, target, saved: true })
+}
+
 impl Ui {
+    fn preference_result_for(&self, id: &str) -> Value {
+        if lock_automation(&self.automation).local_preference_result(id) {
+            json!({"revision": self.preference_revision, "persisted": self.prefs.snapshot()})
+        } else {
+            self.preference_result()
+        }
+    }
+
     pub(super) fn preference_result(&self) -> Value {
         let desired = self.prefs.snapshot();
         let mut effective = desired.clone();
@@ -177,71 +245,48 @@ impl Ui {
         patch: PreferencePatch,
         expected_revision: Option<u64>,
     ) -> Result<PreferenceSnapshot, PreferenceMutationError> {
-        self.commit_preference_candidate(patch, expected_revision)
+        self.commit_preference_candidate(PreferenceMutation::Patch(patch), expected_revision)
     }
 
     pub(super) fn commit_gui_observation_patch(
         &mut self,
         patch: PreferencePatch,
     ) -> Result<PreferenceSnapshot, PreferenceMutationError> {
-        self.commit_preference_candidate(patch, None)
+        self.commit_preference_candidate(PreferenceMutation::Patch(patch), None)
+    }
+
+    pub(super) fn commit_prepared_owner_patch(
+        &mut self,
+        prepared: Box<dyn desktop_pet_contracts::PreparedPreferencePatch>,
+    ) -> Result<PreferenceSnapshot, PreferenceMutationError> {
+        self.commit_preference_candidate(PreferenceMutation::Prepared(prepared), None)
     }
 
     fn commit_preference_candidate(
         &mut self,
-        patch: PreferencePatch,
+        mutation: PreferenceMutation,
         expected_revision: Option<u64>,
     ) -> Result<PreferenceSnapshot, PreferenceMutationError> {
-        if self.update_frozen.is_some()
-            || self
-                .shared
-                .lock()
-                .map_or(true, |state| state.update_mutation_allowed().is_err())
-        {
+        if self.update_frozen.is_some() {
             return Err(PreferenceMutationError::new(
                 "update_preparing",
                 "application update is preparing; retry preference changes after it finishes",
             ));
         }
-        if expected_revision.is_some_and(|revision| revision != self.preference_revision) {
-            return Err(PreferenceMutationError::new(
-                "revision_conflict",
-                "preference revision changed",
-            ));
+        let pending = self.preference_update_pending();
+        let commit = commit_owner_mutation(
+            &mut self.prefs,
+            &mut self.preference_revision,
+            mutation,
+            expected_revision,
+            &self.lifecycle_paths.config_dir,
+            &self.shared,
+            pending,
+        )?;
+        let OwnerCommit { previous, target, saved } = commit;
+        if !saved {
+            return Ok(target);
         }
-        if let Some(selection) = &patch.observation_host {
-            if let Some(mut context) = self
-                .shared
-                .lock()
-                .map_err(|_| {
-                    PreferenceMutationError::new(
-                        "state_unavailable",
-                        "native state lock is poisoned",
-                    )
-                })?
-                .update_context()
-                .cloned()
-            {
-                context
-                    .set_observation_selection(selection)
-                    .map_err(|error| PreferenceMutationError::new("invalid_preferences", error))?;
-            }
-        }
-        let previous = self.prefs.snapshot();
-        if !patch_changes(&patch, &previous)
-            .map_err(|error| PreferenceMutationError::new("invalid_preferences", error))?
-            && !(patch.observation_host.is_some() && self.preference_update_pending())
-        {
-            return Ok(previous);
-        }
-        let target = self
-            .prefs
-            .apply_patch(patch, &self.lifecycle_paths.config_dir)
-            .map_err(|error| PreferenceMutationError::new("persist_failed", error))?;
-        self.preference_revision = self
-            .preference_revision
-            .checked_add(1)
-            .expect("preference revision exhausted");
         let error = self
             .apply_committed_preferences(&previous, &target)
             .err()
@@ -340,7 +385,7 @@ impl Ui {
                 state,
                 true,
                 state == DomainOperationState::Applied && native_applied,
-                Some(self.preference_result()),
+                Some(self.preference_result_for(&entry.operation_id)),
                 None,
                 None,
             );
@@ -409,7 +454,7 @@ impl Ui {
             }
             match request.action {
                 DomainAction::PreferencesGet {} => {
-                    let result = self.preference_result();
+                    let result = self.preference_result_for(&id);
                     self.finish_preference_request(
                         &id,
                         DomainOperationState::Applied,
@@ -428,7 +473,7 @@ impl Ui {
                     match self.commit_preference_patch(patch, expected_revision) {
                         Ok(target) => {
                             if self.preference_native_applied(&target, &submitted) {
-                                let result = self.preference_result();
+                                let result = self.preference_result_for(&id);
                                 self.finish_preference_request(
                                     &id,
                                     DomainOperationState::Applied,
@@ -452,7 +497,7 @@ impl Ui {
                                     DomainOperationState::Pending,
                                     true,
                                     false,
-                                    Some(self.preference_result()),
+                                    Some(self.preference_result_for(&id)),
                                     None,
                                     None,
                                 );
@@ -474,7 +519,7 @@ impl Ui {
                                 DomainOperationState::Failed,
                                 error.committed,
                                 false,
-                                Some(self.preference_result()),
+                                Some(self.preference_result_for(&id)),
                                 Some(error.code.to_owned()),
                                 Some(error.detail),
                             );
@@ -522,9 +567,10 @@ impl Ui {
         mut error_code: Option<String>,
         mut error: Option<String>,
     ) {
+        let local = lock_automation(&self.automation).local_preference_result(id);
         if result
             .as_ref()
-            .is_some_and(|value| !preference_result_fits(value))
+            .is_some_and(|value| !local && !preference_result_fits(value))
         {
             if committed {
                 if let Some(value) = result.as_mut() {
@@ -582,6 +628,69 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestPrepared {
+        fail_apply: bool,
+        fail_committed: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl desktop_pet_contracts::PreparedPreferencePatch for TestPrepared {
+        fn apply(&self, candidate: &mut serde_json::Map<String, Value>) -> Result<(), String> {
+            if self.fail_apply { return Err("preparation rejected candidate".into()); }
+            candidate.insert("owner_test".into(), json!(true));
+            Ok(())
+        }
+        fn committed(&self, _saved: &serde_json::Map<String, Value>) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_committed { Err("adapter live apply failed".into()) } else { Ok(()) }
+        }
+    }
+
+    #[test]
+    fn production_owner_transaction_forces_prepared_writes_and_fences_stale_cas() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(AppState::new()));
+        let mut preferences = Preferences::default();
+        let mut revision = 0;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let apply = |preferences: &mut Preferences, revision: &mut u64, fail_apply, fail_committed| {
+            let expected = *revision;
+            commit_owner_mutation(preferences, revision, PreferenceMutation::Prepared(Box::new(TestPrepared {
+                fail_apply, fail_committed, calls: calls.clone(),
+            })), Some(expected), root.path(), &shared, false)
+        };
+        assert!(apply(&mut preferences, &mut revision, true, false).is_err());
+        assert_eq!(revision, 0);
+        assert!(!root.path().join("preferences.json").exists());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(apply(&mut preferences, &mut revision, false, false).unwrap().saved);
+        assert_eq!(revision, 1);
+        assert!(apply(&mut preferences, &mut revision, false, false).unwrap().saved);
+        assert_eq!(revision, 2);
+        let before = std::fs::read(root.path().join("preferences.json")).unwrap();
+        let error = commit_owner_mutation(&mut preferences, &mut revision,
+            PreferenceMutation::Patch(PreferencePatch { language: Some(LanguagePreference::Ko), ..Default::default() }),
+            Some(1), root.path(), &shared, false).err().unwrap();
+        assert_eq!(error.code, "revision_conflict");
+        assert_eq!(std::fs::read(root.path().join("preferences.json")).unwrap(), before);
+        assert!(apply(&mut preferences, &mut revision, false, true).unwrap().saved);
+        assert_eq!(revision, 3);
+        assert_eq!(preferences.postcommit_error(), Some("adapter live apply failed"));
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        let blocked = root.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let error = commit_owner_mutation(&mut preferences, &mut revision,
+            PreferenceMutation::Patch(PreferencePatch { language: Some(LanguagePreference::Ko), ..Default::default() }),
+            Some(3), &blocked, &shared, false).err().unwrap();
+        assert!(!error.committed);
+        assert_eq!(revision, 3);
+        assert_eq!(std::fs::read(root.path().join("preferences.json")).unwrap(), before);
+        shared.lock().unwrap().set_migration_gate("migration".into(), "token".into()).unwrap();
+        assert!(apply(&mut preferences, &mut revision, false, false).is_err());
+        shared.lock().unwrap().request_shutdown();
+        assert!(apply(&mut preferences, &mut revision, false, false).is_err());
+        assert_eq!(revision, 3);
+    }
 
     #[test]
     fn pending_settings_track_only_requested_fields() {

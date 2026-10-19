@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fromMarkdown } from "mdast-util-from-markdown";
-import { CORE_REPOSITORY, requiredAssetNames, releaseHeading, type ReleaseRecord } from "./release-docs";
+import { CORE_REPOSITORY, LEGACY_REPOSITORY, requiredAssetNames, releaseHeading, releaseRepository, type ReleaseRecord } from "./release-docs";
 import { generateWiki, publicationState, requirePublishedRelease, type WikiOptions } from "./wiki-docs";
 
 const repository = "hanbong5938/herdr-desktop-pet";
@@ -596,5 +596,174 @@ describe("Wiki projection", () => {
     const denied = spawnSync(process.execPath, [...args, "--require-release", "v0.2.0"], { encoding: "utf8" });
     expect(denied.status).not.toBe(0);
     expect(denied.stderr).toContain("not a complete public");
+  });
+});
+
+describe("default Wiki release authorities", () => {
+  test("fetches both authorities together, ignores cross-authority collisions and freezes local tag notes", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    delete options.releases;
+    const tags = ["v0.4.7", "v0.3.6", "v0.4.6", "v0.3.5", "v0.4.5"];
+    for (const tag of tags) await note(options.root, tag, `Frozen ${tag} evidence.`);
+    commitFixture(options.root);
+    for (const tag of tags) git(options.root, "tag", tag);
+    for (const tag of tags) await note(options.root, tag, `Mutable HEAD text for ${tag}.`);
+    commitFixture(options.root);
+    const records = tags.map((tag) => release(tag, {
+      html_url: `https://github.com/${releaseRepository(tag)}/releases/tag/${tag}`,
+      ...(tag === "v0.4.6" ? { assets: [] } : {}),
+      ...(tag === "v0.3.5" ? { draft: true } : {}),
+      ...(tag === "v0.4.5" ? { prerelease: true } : {}),
+    }));
+    const requests: string[] = [];
+    let unblock!: () => void;
+    const bothRequested = new Promise<void>((resolve) => { unblock = resolve; });
+    const implementation: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      requests.push(url);
+      if (requests.length === 2) unblock();
+      await bothRequested;
+      const authority = url.includes(`/repos/${CORE_REPOSITORY}/`) ? CORE_REPOSITORY : LEGACY_REPOSITORY;
+      return Response.json([
+        ...records.filter((record) => releaseRepository(record.tag_name) === authority),
+        // The other product's stable tag must not overwrite the canonical record.
+        release(authority === CORE_REPOSITORY ? "v0.3.6" : "v0.4.7", {
+          html_url: `https://github.com/${authority}/releases/tag/${authority === CORE_REPOSITORY ? "v0.3.6" : "v0.4.7"}`,
+          draft: true,
+        }),
+      ]);
+    }, { preconnect: globalThis.fetch.preconnect });
+    const mock = spyOn(globalThis, "fetch").mockImplementation(implementation);
+    try {
+      await generateWiki(options);
+      expect(requests.sort()).toEqual([CORE_REPOSITORY, LEGACY_REPOSITORY].map((authority) => `https://api.github.com/repos/${authority}/releases?per_page=100&page=1`).sort());
+      const status = await readFile(join(options.output, "Release-Status.md"), "utf8");
+      for (const [tag, state] of [["v0.4.7", "Published"], ["v0.3.6", "Published"], ["v0.4.6", "Partial release"], ["v0.3.5", "Draft"], ["v0.4.5", "Prerelease"]]) {
+        const row = status.split("\n").find((line) => line.includes(tag!));
+        expect(row).toContain(state!);
+      }
+      for (const tag of ["v0.4.7", "v0.3.6"]) {
+        const page = await readFile(join(options.output, `Release-${tag}.md`), "utf8");
+        expect(page).toContain(`Frozen ${tag} evidence.`);
+        expect(page).not.toContain("Mutable HEAD");
+        expect(page).toContain(`https://github.com/${releaseRepository(tag)}/blob/${tag}/docs/releases/${tag}.md`);
+      }
+    } finally { mock.mockRestore(); }
+  });
+
+  test("explicit arrays and JSON are strict combined catalogs and never fetch", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    await generateWiki(options);
+    const before = await readFile(join(options.output, "Release-Status.md"));
+    const mock = spyOn(globalThis, "fetch").mockRejectedValue(new Error("Explicit input must not fetch"));
+    try {
+      options.releases = [release("v0.4.7")];
+      await expect(generateWiki(options)).rejects.toThrow("canonical authority");
+      expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(before);
+      const record = release("v0.4.7", { html_url: `https://github.com/${CORE_REPOSITORY}/releases/tag/v0.4.7`, draft: true });
+      options.releases = [record, record];
+      await expect(generateWiki(options)).rejects.toThrow("Duplicate release catalog tag");
+      expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(before);
+      delete options.releases;
+      options.releasesJson = join(dirname(options.root), "releases.json");
+      await writeFile(options.releasesJson, JSON.stringify([release("v0.4.7")]));
+      await expect(generateWiki(options)).rejects.toThrow("canonical authority");
+      expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(before);
+      await writeFile(options.releasesJson, JSON.stringify([record]));
+      await generateWiki(options);
+      expect(mock).not.toHaveBeenCalled();
+    } finally { mock.mockRestore(); }
+  });
+
+  test("either authority failure or malformed response leaves every output byte unchanged", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    await generateWiki(options);
+    const names = await readdir(options.output);
+    const before = await Promise.all(names.map((name) => readFile(join(options.output, name))));
+    delete options.releases;
+    for (const authority of [CORE_REPOSITORY, LEGACY_REPOSITORY]) {
+      for (const failure of ["http", "json", "shape"]) {
+        const implementation: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (!url.includes(`/repos/${authority}/`)) return Response.json([]);
+          if (failure === "http") return new Response("unavailable", { status: 503 });
+          if (failure === "json") return new Response("{");
+          return Response.json([{ tag_name: "v0.4.7" }]);
+        }, { preconnect: globalThis.fetch.preconnect });
+        const mock = spyOn(globalThis, "fetch").mockImplementation(implementation);
+        try {
+          await expect(generateWiki(options)).rejects.toThrow();
+          expect(await readdir(options.output)).toEqual(names);
+          expect(await Promise.all(names.map((name) => readFile(join(options.output, name))))).toEqual(before);
+        } finally { mock.mockRestore(); }
+      }
+    }
+  });
+
+  test("canonical duplicate records and missing frozen notes fail without changing output", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    await generateWiki(options);
+    const names = await readdir(options.output);
+    const before = await Promise.all(names.map((name) => readFile(join(options.output, name))));
+    delete options.releases;
+    const record = release("v0.4.7", { html_url: `https://github.com/${CORE_REPOSITORY}/releases/tag/v0.4.7` });
+    let duplicate = true;
+    const implementation: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return Response.json(url.includes(`/repos/${CORE_REPOSITORY}/`) ? (duplicate ? [record, record] : [record]) : []);
+    }, { preconnect: globalThis.fetch.preconnect });
+    const mock = spyOn(globalThis, "fetch").mockImplementation(implementation);
+    try {
+      await expect(generateWiki(options)).rejects.toThrow("Duplicate release catalog tag");
+      duplicate = false;
+      await note(options.root, "v0.4.7", "Mutable HEAD must not substitute for an absent tag.");
+      commitFixture(options.root);
+      await expect(generateWiki(options)).rejects.toThrow("missing its frozen note");
+      expect(await readdir(options.output)).toEqual(names);
+      expect(await Promise.all(names.map((name) => readFile(join(options.output, name))))).toEqual(before);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("non-core invocations retain single-authority fetching", async () => {
+    const options = await fixture();
+    delete options.releases;
+    const mock = spyOn(globalThis, "fetch").mockResolvedValue(Response.json([]));
+    try {
+      await generateWiki(options);
+      expect(mock).toHaveBeenCalledTimes(1);
+      expect(mock.mock.calls[0]![0]).toBe(`https://api.github.com/repos/${repository}/releases?per_page=100&page=1`);
+    } finally { mock.mockRestore(); }
+  });
+
+  test("nonstable records retain source-authority URL validation and global duplicate rejection", async () => {
+    const options = await fixture();
+    options.repository = CORE_REPOSITORY;
+    delete options.releases;
+    let mode: "valid" | "foreign" | "duplicate" = "valid";
+    const implementation: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const authority = url.includes(`/repos/${CORE_REPOSITORY}/`) ? CORE_REPOSITORY : LEGACY_REPOSITORY;
+      const tag = mode === "duplicate" ? "v0.4.0-rc.1" : authority === CORE_REPOSITORY ? "v0.4.0-rc.1" : "v0.3.0-beta.1";
+      return Response.json([{
+        tag_name: tag,
+        html_url: `https://github.com/${mode === "foreign" && authority === LEGACY_REPOSITORY ? CORE_REPOSITORY : authority}/releases/tag/${tag}`,
+        published_at: null, draft: false, prerelease: true, assets: [],
+      }]);
+    }, { preconnect: globalThis.fetch.preconnect });
+    const mock = spyOn(globalThis, "fetch").mockImplementation(implementation);
+    try {
+      await generateWiki(options);
+      const before = await readFile(join(options.output, "Release-Status.md"));
+      mode = "foreign";
+      await expect(generateWiki(options)).rejects.toThrow("canonical authority");
+      expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(before);
+      mode = "duplicate";
+      await expect(generateWiki(options)).rejects.toThrow("Duplicate release catalog tag");
+      expect(await readFile(join(options.output, "Release-Status.md"))).toEqual(before);
+    } finally { mock.mockRestore(); }
   });
 });

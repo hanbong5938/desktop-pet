@@ -18,6 +18,97 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// A request-scoped in-process port. All operations share the transport's
+/// original absolute deadline and the UI's existing operation ledger.
+pub(crate) struct LivePreferences {
+    shared: Arc<std::sync::Mutex<crate::state::AppState>>,
+    deadline: Instant,
+}
+
+impl LivePreferences {
+    pub(crate) fn new(
+        shared: Arc<std::sync::Mutex<crate::state::AppState>>,
+        deadline: Instant,
+    ) -> Self {
+        Self { shared, deadline }
+    }
+
+    fn submit(&self, action: DomainAction) -> Result<(crate::automation::SharedAutomation, String, String), String> {
+        availability_timeout(self.deadline, CLIENT_TIMEOUT)?;
+        let ledger = {
+            let state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+            if !state.is_ui_ready() || state.scene().shutdown {
+                return Err("desktop pet UI is not ready".into());
+            }
+            if matches!(&action, DomainAction::PreferencesSet { .. }) {
+                state.update_mutation_allowed()?;
+            }
+            state.automation().ok_or("automation owner is unavailable")?
+        };
+        let id = crate::cli::new_operation_id();
+        let instance = {
+            let mut owner = crate::automation::lock_automation(&ledger);
+            let instance = owner.instance().to_owned();
+            owner.submit_local_preferences(DomainRequest {
+                instance_id: instance.clone(), operation_id: id.clone(), action,
+            })?;
+            instance
+        };
+        crate::ui::wake();
+        Ok((ledger, instance, id))
+    }
+
+    fn observe(&self, ledger: &crate::automation::SharedAutomation, instance: &str, id: &str)
+        -> Result<DomainOperation, String>
+    {
+        loop {
+            let operation = crate::automation::lock_automation(ledger).domain_status(instance, id)?;
+            if operation.state.terminal() {
+                return Ok(operation);
+            }
+            availability_timeout(self.deadline, CLIENT_TIMEOUT)?;
+            thread::sleep(Duration::from_millis(5).min(self.deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    fn read_revision(&self) -> Result<(Map<String, Value>, u64), String> {
+        let (ledger, instance, id) = self.submit(DomainAction::PreferencesGet {})?;
+        let operation = self.observe(&ledger, &instance, &id)?;
+        if operation.state != DomainOperationState::Applied {
+            return Err(operation.error.unwrap_or_else(|| "preference read failed".into()));
+        }
+        let saved = availability_from_result(operation.result.as_ref(), "persisted")?;
+        let revision = operation.result.as_ref().and_then(|result| result.get("revision"))
+            .and_then(Value::as_u64).ok_or("preference revision is missing")?;
+        Ok((saved, revision))
+    }
+}
+
+impl PreferenceAccess for LivePreferences {
+    fn read(&self) -> Result<Map<String, Value>, String> {
+        self.read_revision().map(|(saved, _)| saved)
+    }
+
+    fn apply(&self, patch: Map<String, Value>) -> Result<PreferenceCommit, String> {
+        if patch.is_empty() {
+            return Err("preference patch must contain at least one setting".into());
+        }
+        let (_, revision) = self.read_revision()?;
+        let fields = patch.keys().cloned().collect::<Vec<_>>();
+        let (ledger, instance, id) = self.submit(DomainAction::PreferencesSet {
+            patch: serde_json::from_value(Value::Object(patch))
+                .map_err(|error| format!("invalid preference patch: {error}"))?,
+            expected_revision: Some(revision),
+        })?;
+        match self.observe(&ledger, &instance, &id) {
+            Ok(operation) => availability_set_outcome(operation, &instance, &id, &fields),
+            Err(_) => Ok(PreferenceCommit::Uncertain {
+                instance_id: instance, operation_id: id, current: None,
+            }),
+        }
+    }
+}
+
 pub(crate) struct ProfilePreferences {
     paths: Paths,
     extensions: Vec<Arc<dyn LifecycleExtension>>,

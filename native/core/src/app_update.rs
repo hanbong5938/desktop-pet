@@ -1256,28 +1256,28 @@ fn settlement_proof(
     let _lease = lock_operation(&context.state_dir, operation_id)?;
     let record = read_operation_observation(&context.state_dir, operation_id)?
         .ok_or("previous operation journal is missing")?;
-    let prior_plan = if record.version == UPDATER_PROTOCOL {
+    if record.version == UPDATER_PROTOCOL {
         if !settled_terminal(&record) {
             return Err("previous operation is not a reconciled terminal outcome".into());
         }
-        read_plan(&context.state_dir, operation_id)?
+        let prior_plan = read_plan(&context.state_dir, operation_id)?;
+        if prior_plan.context.config_dir != context.config_dir {
+            return Err("previous operation belongs to a different configuration profile".into());
+        }
+        start_allowed(&prior_plan.origin, &context.state_dir, None, None)?;
     } else {
-        // This only retires a read-only observation after a fresh check. It does
-        // not reconcile prepared work or grant the old plan execution authority.
-        historical_operation_plan(&context.state_dir, &record)?
-    };
-    if prior_plan.context.config_dir != context.config_dir {
-        return Err("previous operation belongs to a different configuration profile".into());
+        let scope = historical_operation_plan(&context.state_dir, &record)?;
+        if scope.config_dir != context.config_dir {
+            return Err("previous operation belongs to a different configuration profile".into());
+        }
+        desktop_pet_update_coordinator::protocol::historical_scope_settled(&scope)?;
     }
     let latest = latest_operation(&context.state_dir)?
         .ok_or("previous operation is no longer the latest journal")?;
     if latest != record {
         return Err("previous operation journal changed during admission".into());
     }
-    start_allowed(&prior_plan.origin, &context.state_dir, None, None)?;
-    if snapshot.origin != prior_plan.origin {
-        start_allowed(&snapshot.origin, &context.state_dir, None, None)?;
-    }
+    start_allowed(&snapshot.origin, &context.state_dir, None, None)?;
     Ok(SettledOperationProof(record))
 }
 
@@ -2243,7 +2243,7 @@ mod tests {
         assert!(recheck_plan(&historical_plan).is_err());
         assert!(prepared_recovery_proof(&context, &historical.operation_id, &historical).is_err());
         let proof = settlement_proof(&context, &snapshot, &historical.operation_id).unwrap();
-        service.checked_event(request_id, policy_generation, Ok(snapshot), Some(proof));
+        service.checked_event(request_id, policy_generation, Ok(snapshot.clone()), Some(proof));
         assert!(service.settings_admitted());
         assert_eq!(service.previous_outcome.as_ref(), Some(&historical));
         service.migration_eligibility(context.clone(), Ok(()));
@@ -2256,6 +2256,35 @@ mod tests {
         assert_eq!(fs::read(&result_path).unwrap(), result_bytes);
         assert_eq!(fs::read(&latest_path).unwrap(), latest_bytes);
         assert!(write_operation(&state, &historical).is_err());
+        // The historical result schema has no action. A no-manager completion
+        // becomes UI settlement evidence only with its exact retained ApplyInstalled plan.
+        let mut managerless = historical.clone();
+        managerless.execution_fence = ExecutionFence::NoSpawn;
+        let mut applied_plan = historical_plan.clone();
+        applied_plan.action = UpdateAction::ApplyInstalled;
+        applied_plan.target = None;
+        applied_plan.candidate = managerless.candidate.clone();
+        let applied_bytes = serde_json::to_vec(&applied_plan).unwrap();
+        let managerless_bytes = serde_json::to_vec(&managerless).unwrap();
+        write_private_bytes(&plan_path, &applied_bytes, 0o600).unwrap();
+        write_private_bytes(&result_path, &managerless_bytes, 0o600).unwrap();
+        let mut observed = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        observed.context = Some(context.clone());
+        observed.latest_journal(latest_operation(&state));
+        let (request, generation, _) = observed.begin_check().unwrap();
+        let proof = settlement_proof(&context, &snapshot, &managerless.operation_id).unwrap();
+        observed.checked_event(request, generation, Ok(snapshot.clone()), Some(proof));
+        observed.migration_eligibility(context.clone(), Ok(()));
+        observed.migration_history_checked(&context, true);
+        assert!(observed.settings_admitted());
+        assert_eq!(observed.model(UiLocale::En).primary_action, Some(UpdateCardPrimaryAction::Migrate));
+        assert!(read_plan(&state, &managerless.operation_id).is_err());
+        assert!(prepared_recovery_proof(&context, &managerless.operation_id, &managerless).is_err());
+        assert_eq!(fs::read(&plan_path).unwrap(), applied_bytes);
+        assert_eq!(fs::read(&result_path).unwrap(), managerless_bytes);
+        assert_eq!(fs::read(&latest_path).unwrap(), latest_bytes);
+        write_private_bytes(&plan_path, &plan_bytes, 0o600).unwrap();
+        write_private_bytes(&result_path, &result_bytes, 0o600).unwrap();
         let mut fresh = failed_record('e');
         fresh.phase = OperationPhase::Preparing;
         write_operation(&state, &fresh).unwrap();

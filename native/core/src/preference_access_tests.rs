@@ -5,7 +5,6 @@ use crate::automation::lock_automation;
 use crate::preferences::{PreferencePatch, Preferences};
 use crate::state::AppState;
 use std::fs::Permissions;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -495,6 +494,7 @@ fn invalid_pre_submit_replies_remain_closed_after_socket_disappears() {
     }
 }
 
+#[test]
 fn deadline_expiring_during_set_encoding_sends_no_bytes() {
     struct DelayedSet {
         request: AutomationRequestEnvelope,
@@ -800,4 +800,109 @@ fn committed_set_uses_final_visible_snapshot_and_missing_fields_stay_uncertain()
             current: None,
         },
     );
+}
+
+#[test]
+fn in_process_port_retains_exact_submitted_identity_after_absolute_deadline_without_replay() {
+    use crate::automation::{new_automation, PresentationTarget};
+    use crate::ui::automation_preferences::{commit_owner_mutation, PreferenceMutation};
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let store = desktop_pet_contracts::ProfileStore::acquire(&config, &root.path().join("state")).unwrap();
+    let mut preferences = Preferences::default();
+    preferences.set_integration_extensions(store, vec![]);
+    preferences.apply_patch(PreferencePatch {
+        show_status_indicators: Some(true), ..Default::default()
+    }, &config).unwrap();
+    let mut revision = 0;
+    let mut state = AppState::new();
+    state.set_ui_ready();
+    let ledger = new_automation(PresentationTarget::from_scene(&state.scene()), None).unwrap();
+    state.set_automation(ledger.clone());
+    let shared = Arc::new(std::sync::Mutex::new(state));
+    let port = LivePreferences::new(shared.clone(), Instant::now() + Duration::from_secs(1));
+    let started = Arc::new(std::sync::Barrier::new(2));
+    let worker_started = started.clone();
+    let worker = thread::spawn(move || {
+        worker_started.wait();
+        port.apply(flag_patch(false))
+    });
+    started.wait();
+    let take = || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut requests = lock_automation(&ledger).drain_domain_requests();
+            if let Some(request) = requests.pop() {
+                assert!(requests.is_empty());
+                return request;
+            }
+            assert!(Instant::now() < deadline, "preference request was not submitted");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let get = take();
+    assert!(matches!(get.action, DomainAction::PreferencesGet {}));
+    lock_automation(&ledger).start_domain_request(&get.operation_id).unwrap();
+    lock_automation(&ledger).finish_domain_operation(
+        &get.operation_id, DomainOperationState::Applied, false, false,
+        Some(serde_json::json!({"revision":revision,"persisted":preferences.snapshot()})),
+        None, None,
+    ).unwrap();
+    let set = take();
+    lock_automation(&ledger).start_domain_request(&set.operation_id).unwrap();
+    let outcome = worker.join().unwrap().unwrap();
+    let PreferenceCommit::Uncertain { instance_id, operation_id, current } = outcome else {
+        panic!("a submitted, uncompleted mutation must remain uncertain");
+    };
+    assert_eq!(operation_id, set.operation_id);
+    assert_eq!(instance_id, set.instance_id);
+    assert!(current.is_none());
+    assert!(lock_automation(&ledger).drain_domain_requests().is_empty());
+    let DomainAction::PreferencesSet { patch, expected_revision } = set.action else {
+        panic!("expected the single CAS mutation");
+    };
+    let commit = commit_owner_mutation(
+        &mut preferences, &mut revision, PreferenceMutation::Patch(patch),
+        expected_revision, &config, &shared, false,
+    ).unwrap();
+    assert!(commit.saved);
+    assert_eq!(revision, 1);
+    assert!(!saved_flag(&config).unwrap());
+    // Persistence happened after the caller timed out. A missing AppKit owner
+    // is an honest postcommit failure, not an invented native-application proof.
+    lock_automation(&ledger).finish_domain_operation(
+        &operation_id, DomainOperationState::Failed, true, false,
+        Some(serde_json::json!({"revision":revision,"persisted":commit.target})),
+        Some("native_apply_failed".into()), Some("headless fixture has no AppKit UI".into()),
+    ).unwrap();
+    let observed = lock_automation(&ledger).domain_status(&instance_id, &operation_id).unwrap();
+    assert!(matches!(availability_set_outcome(observed, &instance_id, &operation_id,
+        &["show_status_indicators".into()]).unwrap(), PreferenceCommit::Committed(_)));
+    let stale = commit_owner_mutation(
+        &mut preferences, &mut revision,
+        PreferenceMutation::Patch(PreferencePatch { show_status_indicators: Some(true), ..Default::default() }),
+        Some(0), &config, &shared, false,
+    ).err().unwrap();
+    assert_eq!(stale.code, "revision_conflict");
+    assert_eq!(revision, 1);
+}
+
+#[test]
+fn in_process_port_expired_or_gated_admission_never_submits_a_mutation() {
+    use crate::automation::{new_automation, PresentationTarget};
+    let mut state = AppState::new();
+    state.set_ui_ready();
+    let ledger = new_automation(PresentationTarget::from_scene(&state.scene()), None).unwrap();
+    state.set_automation(ledger.clone());
+    let shared = Arc::new(std::sync::Mutex::new(state));
+    let expired = LivePreferences::new(shared.clone(), Instant::now());
+    assert!(expired.apply(flag_patch(false)).is_err());
+    assert!(lock_automation(&ledger).drain_domain_requests().is_empty());
+    shared.lock().unwrap().set_migration_gate("migration".into(), "token".into()).unwrap();
+    let port = LivePreferences::new(shared, Instant::now() + Duration::from_secs(1));
+    assert!(port.submit(DomainAction::PreferencesSet {
+        patch: PreferencePatch { show_status_indicators: Some(false), ..Default::default() },
+        expected_revision: Some(0),
+    }).is_err());
+    assert!(lock_automation(&ledger).drain_domain_requests().is_empty());
 }

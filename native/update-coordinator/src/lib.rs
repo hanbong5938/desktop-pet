@@ -118,6 +118,16 @@ pub struct VerifiedInstallation {
     pub origin: InstallOrigin,
 }
 
+/// Observation-only ownership evidence. This cannot authorize execution or recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalOperationScope {
+    pub operation_id: String,
+    pub version: u32,
+    pub config_dir: PathBuf,
+    pub state_dir: PathBuf,
+    pub roots: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstallOrigin {

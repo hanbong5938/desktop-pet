@@ -349,6 +349,21 @@ impl AppState {
         self.retire_integrations();
     }
 
+    pub(crate) fn restore_selected_integrations_if_ungated(&mut self) {
+        if self.shutdown || self.updater_stopping || self.pending_update.is_some()
+            || self.migration_gate.is_some()
+        {
+            return;
+        }
+        let integrations = Arc::clone(&self.integrations);
+        for integration in integrations.iter() {
+            integration.set_enabled(
+                self.observation.host.includes_provider(integration.id()),
+                self,
+            );
+        }
+    }
+
     pub(crate) fn set_migration_gate(
         &mut self,
         operation_id: String,
@@ -387,13 +402,7 @@ impl AppState {
         }
         self.migration_gate = None;
         self.pending_migration_plan = None;
-        let integrations = Arc::clone(&self.integrations);
-        for integration in integrations.iter() {
-            integration.set_enabled(
-                self.observation.host.includes_provider(integration.id()),
-                self,
-            );
-        }
+        self.restore_selected_integrations_if_ungated();
         Ok(())
     }
 
@@ -505,6 +514,7 @@ impl AppState {
         } else {
             self.pending_update = None;
             self.pending_migration_plan = None;
+            self.restore_selected_integrations_if_ungated();
         }
         success && delivered
     }
@@ -528,6 +538,7 @@ impl AppState {
             return false;
         }
         self.pending_update = None;
+        self.restore_selected_integrations_if_ungated();
         true
     }
 
@@ -535,7 +546,7 @@ impl AppState {
         if self
             .pending_update
             .as_ref()
-            .is_some_and(|p| p.matches(operation_id, token))
+            .is_some_and(|p| p.matches(operation_id, token) && !p.stop_claimed)
         {
             let pending = self.pending_update.take().expect("matched pending update");
             if let Some(reply) = pending.reply {
@@ -545,6 +556,7 @@ impl AppState {
                 self.cancelled_updates
                     .push_back(pending.request.operation_id);
             }
+            self.restore_selected_integrations_if_ungated();
         }
         if self
             .pending_migration_plan
@@ -581,6 +593,27 @@ impl AppState {
             .expect("matched prepared update")
             .stop_claimed = true;
         Ok(())
+    }
+
+    /// The Stop reply writer alone may retire a failed handoff. Release the
+    /// preference/UI freeze, but never reenable integrations after a Stop claim:
+    /// the command/epoch authority retired by preparation stays retired.
+    pub(crate) fn abort_update_stop(&mut self, operation_id: &str, token: &str) -> bool {
+        if self.shutdown || self.updater_stopping
+            || !self.pending_update.as_ref().is_some_and(|pending| {
+                pending.matches(operation_id, token) && pending.prepared && pending.stop_claimed
+            })
+        {
+            return false;
+        }
+        let pending = self.pending_update.take().expect("matched Stop claim");
+        if self.pending_migration_plan.as_ref().is_some_and(|plan| {
+            plan.operation_id == operation_id && plan.token == token
+        }) {
+            self.pending_migration_plan = None;
+        }
+        self.cancelled_updates.push_back(pending.request.operation_id);
+        true
     }
 
     /// Only a fully written reply may commit a matching Stop. An ordinary Quit
@@ -625,7 +658,16 @@ impl AppState {
                 self.cancelled_updates
                     .push_back(pending.request.operation_id);
             }
+            self.restore_selected_integrations_if_ungated();
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn expire_update_prepare_for_test(&mut self) {
+        if let Some(pending) = self.pending_update.as_mut() {
+            pending.expires = Instant::now();
+        }
+        self.expire_update_prepare();
     }
 
     /// Return the last watcher aggregate without allocating or walking source
@@ -1992,6 +2034,10 @@ pub(crate) mod tests {
         state.claim_update_stop("failed-reply", "token").unwrap();
         assert!(!state.scene().shutdown);
         state.cancel_update_prepare("failed-reply", "token");
+        assert!(state.update_mutation_allowed().is_err());
+        assert!(!state.abort_update_stop("failed-reply", "wrong"));
+        assert!(state.abort_update_stop("failed-reply", "token"));
+        assert_eq!(state.take_cancelled_update_prepare().as_deref(), Some("failed-reply"));
         assert!(state.update_mutation_allowed().is_ok());
         assert!(!state.updater_stopping());
         assert!(state.commit_update_stop("failed-reply", "token").is_err());
@@ -2006,6 +2052,7 @@ pub(crate) mod tests {
         state.claim_update_stop("user-quit", "token").unwrap();
         state.request_shutdown();
         assert!(state.scene().shutdown && !state.updater_stopping());
+        assert!(!state.abort_update_stop("user-quit", "token"));
         assert!(state.commit_update_stop("user-quit", "token").is_err());
     }
 

@@ -19,12 +19,19 @@ pub struct ProfilePaths {
 /// both byte limits (including the transport terminator) and never truncates a
 /// response. The adapter owns wire schemas, validation-before-mutation, and
 /// serialization. handle_frame is outside the domain lock; an adapter obtains
-/// its RuntimePort transaction itself. There is no new IPC server here.
+/// its RuntimePort transaction itself. The supplied preference port submits to
+/// the same live UI owner/CAS ledger, sharing this frame's absolute deadline.
+/// Never retain it, replay uncertain writes, or open an alternate writer.
+/// There is no new IPC server here.
 pub trait ControlExtension: Send + Sync {
     fn kind(&self) -> &'static str;
     fn max_request_bytes(&self) -> usize;
     fn max_response_bytes(&self) -> usize;
-    fn handle_frame(&self, frame: &[u8]) -> Result<Vec<u8>, String>;
+    fn handle_frame(
+        &self,
+        frame: &[u8],
+        preferences: &dyn PreferenceAccess,
+    ) -> Result<Vec<u8>, String>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,6 +171,22 @@ pub trait LifecycleExtension: Send + Sync {
         selection: &ObservationSelection,
         locale: &str,
     ) -> Result<Vec<LifecycleSettingView>, String>;
+    /// Prepares a preference-owned lifecycle setting for the common serialized
+    /// owner transaction. None denotes a lifecycle-only setting. Preparation
+    /// must not persist or mutate live policy; apply/committed obey the same
+    /// pure-transform and post-publication contracts as preference patches.
+    fn prepare_preference_setting(
+        &self,
+        _store: &ProfileStore,
+        _key: &str,
+        _value: bool,
+    ) -> Result<Option<Box<dyn PreparedPreferencePatch>>, String> {
+        Ok(None)
+    }
+
+    /// Lifecycle-only persistence (for example an exit policy). Preference-owned
+    /// settings must instead return Some from prepare_preference_setting; core
+    /// does not invoke this method for a prepared preference mutation.
     fn apply_setting(&self, store: &ProfileStore, key: &str, value: bool) -> Result<(), String>;
     /// Returns only real adapter actions. Core may copy copy_text, but must
     /// never interpret it as executable host behavior.

@@ -317,38 +317,173 @@ fn historical_identity(identity: &crate::ExecutableIdentity) -> Result<(), Strin
     Ok(())
 }
 
-fn historical_terminal(record: &OperationRecord) -> Result<(), String> {
+fn historical_terminal_shape(record: &OperationRecord) -> Result<(), String> {
     if !(1..UPDATER_PROTOCOL).contains(&record.version)
         || record.version > 3
         || record.detail.len() > 8192
         || record.applied && !record.installed
         || record.execution_fence == ExecutionFence::ManagerIntent
-        || record.installed && record.execution_fence != ExecutionFence::ManagerExited
         || !match record.phase {
             OperationPhase::Completed => record.installed && record.applied,
             OperationPhase::Failed | OperationPhase::UserStopped => !record.applied,
             _ => false,
         }
     {
-        return Err(
-            "historical operation is unresolved; retain its matching helper and evidence".into(),
-        );
+        return Err("historical operation is unresolved; retain its matching helper and evidence".into());
     }
-    if let Some(candidate) = record.candidate.as_ref() {
+    validate_operation_id(&record.operation_id)?;
+    if let Some(candidate) = &record.candidate {
         historical_identity(candidate)?;
     }
     Ok(())
 }
 
-/// Read-only historical scope, never a plan accepted by `read_plan` or a runner.
-/// No image is opened: an old keg/checkout may legitimately no longer exist.
+// Deliberately separate from executable DTOs: a neutral helper can observe legacy
+// vocabulary without gaining an executable legacy origin or weakening its decoder.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum HistoricalOrigin {
+    Local { root: PathBuf },
+    Source { root: PathBuf },
+    Herdr {
+        host: PathBuf, host_config_dir: PathBuf, checkout_root: PathBuf,
+        plugin_root: PathBuf, source: String, requested_ref: Option<String>,
+        resolved_commit: Option<String>, enabled: bool,
+    },
+    Standalone { bundle: PathBuf },
+    Homebrew { brew: PathBuf, prefix: PathBuf, cellar_formula_root: PathBuf,
+        formula: String, locator: PathBuf },
+    Manual { locator: PathBuf },
+    Unknown { reason: String },
+}
+// Retained fields are intentionally decoded even when only ownership is observed.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoricalContext {
+    executable: PathBuf,
+    version: String,
+    instance_id: String,
+    config_dir: PathBuf,
+    state_dir: PathBuf,
+    host_plugin_config_dir: Option<PathBuf>,
+    herdr_socket: Option<PathBuf>,
+    running: crate::ExecutableIdentity,
+    running_origin: Option<Box<HistoricalOrigin>>,
+    assets_override: Option<PathBuf>,
+    environment: std::collections::BTreeMap<String, String>,
+    locale: String,
+}
+#[derive(Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum HistoricalAction {
+    HerdrReinstall, HomebrewUpgrade, LocalRebuild, SourceRebuild,
+    StandaloneReplace, ApplyInstalled,
+}
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoricalTarget {
+    policy: crate::UpdatePolicy,
+    release: crate::ReleaseCandidate,
+    origin: HistoricalOrigin,
+    resolved_commit: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoricalEnvelope {
+    version: u32,
+    operation_id: String,
+    context: HistoricalContext,
+    origin: HistoricalOrigin,
+    action: HistoricalAction,
+    running: crate::ExecutableIdentity,
+    candidate: Option<crate::ExecutableIdentity>,
+    target: Option<HistoricalTarget>,
+}
+
+fn decode_historical_scope(
+    updates: &Path,
+    state_dir: &Path,
+    record: &OperationRecord,
+    managerless: bool,
+) -> Result<crate::HistoricalOperationScope, String> {
+    historical_terminal_shape(record)?;
+    check_dir(state_dir, false)?;
+    check_dir(updates, false)?;
+    let plan: HistoricalEnvelope = serde_json::from_slice(&owned_private_file(
+        &updates.join(format!("{}.plan.json", record.operation_id)), 65536,
+    )?).map_err(|e| e.to_string())?;
+    if plan.version != record.version
+        || plan.operation_id != record.operation_id
+        || plan.context.state_dir != state_dir
+        || plan.context.executable != plan.running.path
+        || plan.running != plan.context.running
+        || plan.context.instance_id.is_empty()
+        || plan.context.instance_id.len() > 128
+        || plan.context.instance_id.contains('\0')
+        || plan.context.running_origin.as_deref().is_some_and(|origin| origin != &plan.origin)
+    {
+        return Err("historical plan scope or identity mismatch".into());
+    }
+    ensure_absolute(&plan.context.config_dir)?;
+    ensure_absolute(&plan.context.executable)?;
+    historical_identity(&plan.running)?;
+    if let Some(value) = plan.context.environment.get("HERDR_PET_OBSERVATION_MODE") {
+        desktop_pet_contracts::ObservationSelection::migrate_legacy_input(Some(value.as_str()))?;
+    }
+    if let Some(value) = plan.context.environment.get(crate::OBSERVATION_SELECTION_ENV) {
+        value.parse::<desktop_pet_contracts::ObservationSelection>()?;
+    }
+    if let Some(candidate) = &plan.candidate {
+        historical_identity(candidate)?;
+    }
+    let mut roots = Vec::new();
+    for origin in std::iter::once(&plan.origin).chain(plan.target.as_ref().map(|target| &target.origin)) {
+        let value = serde_json::to_value(origin).map_err(|e| e.to_string())?;
+        roots.push(evidence_root(&value)?.ok_or("historical origin has no physical root")?);
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    if managerless && (record.execution_fence != ExecutionFence::NoSpawn
+        || record.phase != OperationPhase::Completed
+        || !record.installed || !record.applied
+        || plan.action != HistoricalAction::ApplyInstalled
+        || plan.target.is_some()
+        || plan.candidate.is_none()
+        || plan.candidate != record.candidate
+        || plan.candidate.as_ref().is_some_and(|candidate| candidate.sha256 == plan.running.sha256))
+    {
+        return Err("historical managerless outcome lacks exact ApplyInstalled evidence".into());
+    }
+    Ok(crate::HistoricalOperationScope {
+        operation_id: plan.operation_id,
+        version: plan.version,
+        config_dir: plan.context.config_dir,
+        state_dir: plan.context.state_dir,
+        roots,
+    })
+}
+
+fn historical_managerless_scope(
+    updates: &Path, state_dir: &Path, record: &OperationRecord,
+) -> Result<crate::HistoricalOperationScope, String> {
+    decode_historical_scope(updates, state_dir, record, true)
+}
+
+fn historical_terminal_in(updates: &Path, state: &Path, record: &OperationRecord) -> Result<(), String> {
+    historical_terminal_shape(record)?;
+    if record.installed && record.execution_fence != ExecutionFence::ManagerExited {
+        historical_managerless_scope(updates, state, record)?;
+    }
+    Ok(())
+}
+
+/// Read-only historical scope; never opens or revalidates a retired image.
 pub fn historical_operation_plan(
     state_dir: &Path,
     record: &OperationRecord,
-) -> Result<crate::UpdatePlan, String> {
-    historical_terminal(record)?;
-    validate_operation_id(&record.operation_id)?;
-    check_dir(state_dir, false)?;
+) -> Result<crate::HistoricalOperationScope, String> {
     let updates = state_dir.join(UPDATES_DIR);
     check_dir(&updates, false)?;
     let marker = updates.join("profile.reservation.json");
@@ -356,35 +491,22 @@ pub fn historical_operation_plan(
         owned_private_file(&marker, 16384)?;
         return Err("historical operation still has a reservation; retain matching helper".into());
     }
-    let data = owned_private_file(
-        &updates.join(format!("{}.plan.json", record.operation_id)),
-        65536,
-    )?;
-    let plan: crate::UpdatePlan = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-    if plan.version != record.version
-        || plan.operation_id != record.operation_id
-        || plan.context.state_dir != state_dir
-        || plan.running != plan.context.running
-        || plan.context.instance_id.is_empty()
-        || plan.context.instance_id.len() > 128
-        || plan
-            .context
-            .running_origin
-            .as_deref()
-            .is_some_and(|origin| origin != &plan.origin)
-    {
-        return Err("historical plan scope or identity mismatch".into());
+    decode_historical_scope(&updates, state_dir, record,
+        record.installed && record.execution_fence != ExecutionFence::ManagerExited)
+}
+
+/// Historical settlement checks ownership, not whether a current daemon is live.
+pub fn historical_scope_settled(scope: &crate::HistoricalOperationScope) -> Result<(), String> {
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    historical_scope_settled_at(&global, scope)
+}
+fn historical_scope_settled_at(global: &Path, scope: &crate::HistoricalOperationScope) -> Result<(), String> {
+    reject_profile_reservations(&scope.state_dir, false)?;
+    for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
+        reject_reservation_evidence(&namespace, &scope.roots, Some(&scope.state_dir))?;
     }
-    ensure_absolute(&plan.context.config_dir)?;
-    ensure_absolute(&plan.context.executable)?;
-    ensure_absolute(crate::physical_install_root(&plan.origin)?)?;
-    ensure_absolute(crate::physical_install_root(plan.target_origin())?)?;
-    historical_identity(&plan.running)?;
-    if let Some(candidate) = plan.candidate.as_ref() {
-        historical_identity(candidate)?;
-    }
-    plan.context.observation_mode()?;
-    Ok(plan)
+    Ok(())
 }
 
 /// Presentation/admission evidence only. The original version and bytes stay intact;
@@ -818,7 +940,7 @@ fn reject_profile_reservations(state: &Path, old_only: bool) -> Result<(), Strin
                 validate_operation_id(&id)?;
                 let record = read_operation_in(&updates, &id)?
                     .ok_or("legacy journal locator has no durable outcome")?;
-                historical_terminal(&record)?;
+                historical_terminal_in(&updates, state, &record)?;
             }
         }
     }
@@ -1289,16 +1411,17 @@ fn migration_profile_checks(scope: &MigrationScope) -> Result<(), String> {
     Ok(())
 }
 
+fn migration_source_root<'a>(
+    scope: &'a MigrationScope, profile: &MigrationProfile,
+) -> Result<&'a PathBuf, String> {
+    scope.roots.iter().filter(|root| profile.image.path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or_else(|| "source image is outside migration roots".into())
+}
 fn migration_source_roots(scope: &MigrationScope) -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::new();
     for profile in &scope.profiles {
-        let root = scope
-            .roots
-            .iter()
-            .filter(|root| profile.image.path.starts_with(root))
-            .max_by_key(|root| root.components().count())
-            .ok_or("source image is outside migration roots")?;
-        roots.push(root.clone());
+        roots.push(migration_source_root(scope, profile)?.clone());
     }
     roots.sort_unstable();
     roots.dedup();
@@ -1655,7 +1778,10 @@ fn verify_migration_target_locked(
     if !registered {
         return Err("target instance has no exact active registration".into());
     }
-    migration_start_registry_checks(global, &scope, Some((pid, startup.image.clone())))?;
+    if migration_startup_purpose(&scope, startup)? != MigrationStartupPurpose::Target {
+        return Err("source restoration cannot authorize target commit".into());
+    }
+    migration_start_registry_checks(global, &scope, MigrationStartupPurpose::Target, Some((pid, startup.image.clone())))?;
     Ok(scope)
 }
 
@@ -1745,6 +1871,11 @@ pub fn verify_legacy_migration_abort(
     validate_operation_id(operation)?;
     let global = global_updates()?;
     let _gates = lock_gates(&global)?;
+    verify_legacy_migration_abort_locked(&global, state, pid, instance, operation, token)
+}
+fn verify_legacy_migration_abort_locked(
+    global: &Path, state: &Path, pid: u32, instance: &str, operation: &str, token: &str,
+) -> Result<(), String> {
     let scope = migration_scopes(&global)?
         .into_iter()
         .find(|scope| scope.operation_id == operation && scope.owner_token == token)
@@ -1815,15 +1946,80 @@ pub fn lock_migration_operation(
     Ok(OperationLease { _file: file })
 }
 
+/// Serializes post-retirement receipts without recreating migration scope.
+pub struct MigrationReconnectLease<'a> {
+    _file: FileLock,
+    global: PathBuf,
+    plan: &'a crate::migration::MigrationPlan,
+}
+pub fn lock_migration_reconnect(
+    plan: &crate::migration::MigrationPlan,
+) -> Result<MigrationReconnectLease<'_>, String> {
+    lock_migration_reconnect_at(global_updates()?, plan)
+}
+pub(crate) fn lock_migration_reconnect_at(
+    global: PathBuf, plan: &crate::migration::MigrationPlan,
+) -> Result<MigrationReconnectLease<'_>, String> {
+    validate_operation_id(&plan.operation_id)?;
+    let _gates = lock_gates(&global)?;
+    let state = &plan.profiles.first().ok_or("migration has no profiles")?.state_dir;
+    let updates = state.join("updates-v4");
+    check_dir(&updates, false)?;
+    let file = lock_with_mode(
+        &updates.join(format!("{}.operation.lock", plan.operation_id)),
+        libc::LOCK_EX | libc::LOCK_NB,
+    )?;
+    migration_reconnect_checks(&global, plan)?;
+    Ok(MigrationReconnectLease { _file: file, global, plan })
+}
+fn migration_reconnect_checks(
+    global: &Path, plan: &crate::migration::MigrationPlan,
+) -> Result<crate::migration::MigrationRecord, String> {
+    use crate::migration::MigrationPhase;
+    crate::migration::validate_plan(plan)?;
+    let record = crate::migration::read_record(plan)?;
+    if !matches!(record.phase, MigrationPhase::AwaitingReconnect | MigrationPhase::Complete)
+        || !record.native_ready || !record.target_committed || !plan.tern_reconnect_required
+    {
+        return Err("migration is not ready for external Tern reconnect".into());
+    }
+    let roots = vec![plan.source_origin.root().to_path_buf(),
+        crate::physical_install_root(&plan.target.origin)?.to_path_buf()];
+    for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
+        for state in plan.profiles.iter().map(|profile| &profile.state_dir)
+            .chain(plan.readonly_target_profiles.iter().map(|profile| &profile.state_dir))
+        {
+            reject_reservation_evidence(&namespace, &roots, Some(state))?;
+            reject_profile_reservations(state, false)?;
+        }
+    }
+    Ok(record)
+}
+impl MigrationReconnectLease<'_> {
+    /// Callback only publishes receipts/journal; no socket/lifecycle/gate reentry.
+    pub fn with_completion<T>(
+        &self,
+        write: impl FnOnce(&mut crate::migration::MigrationRecord) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gates = lock_gates(&self.global)?;
+        let mut fresh = migration_reconnect_checks(&self.global, self.plan)?;
+        write(&mut fresh)
+    }
+}
+
 pub fn load_migration_reservation(
     operation_id: &str,
     token: &str,
+) -> Result<MigrationReservation, String> {
+    load_migration_reservation_at(global_updates()?, operation_id, token)
+}
+pub(crate) fn load_migration_reservation_at(
+    global: PathBuf, operation_id: &str, token: &str,
 ) -> Result<MigrationReservation, String> {
     validate_operation_id(operation_id)?;
     if !valid_token(token) {
         return Err("invalid migration ownership token".into());
     }
-    let global = global_updates()?;
     let _gates = lock_gates(&global)?;
     let reservation = MigrationReservation {
         global: global.clone(),
@@ -1834,6 +2030,12 @@ pub fn load_migration_reservation(
     Ok(reservation)
 }
 impl MigrationReservation {
+    pub(crate) fn verify_source_abort(&self, state: &Path, pid: u32, instance: &str) -> Result<(), String> {
+        let _gates = lock_gates(&self.global)?;
+        verify_legacy_migration_abort_locked(
+            &self.global, state, pid, instance, &self.operation_id, &self.owner_token,
+        )
+    }
     /// Serialize pointer CAS/adoption/rollback with ordinary profile adoption.
     /// The callback must not reenter protocol gates or perform lifecycle/control I/O.
     pub fn with_pointer_mutation<T>(
@@ -1909,6 +2111,15 @@ impl MigrationReservation {
         }
         Ok(false)
     }
+    pub fn authorize_source_restore(
+        &self, origin: &InstallOrigin, state: &Path,
+    ) -> Result<(u64, String), String> {
+        let _gates = lock_gates(&self.global)?;
+        let scope = self.scope()?;
+        let image = scope.profiles.iter().find(|profile| profile.state_dir == state)
+            .ok_or("source restore profile is outside migration")?.image.clone();
+        self.authorize_start_locked(scope, origin, &image, state, MigrationStartupPurpose::SourceRestore)
+    }
     pub fn authorize_start(
         &self,
         origin: &InstallOrigin,
@@ -1916,16 +2127,32 @@ impl MigrationReservation {
         state: &Path,
     ) -> Result<(u64, String), String> {
         let _gates = lock_gates(&self.global)?;
-        let mut scope = self.scope()?;
+        self.authorize_start_locked(self.scope()?, origin, image, state, MigrationStartupPurpose::Target)
+    }
+    fn authorize_start_locked(
+        &self, mut scope: MigrationScope, origin: &InstallOrigin,
+        image: &crate::ExecutableIdentity, state: &Path, purpose: MigrationStartupPurpose,
+    ) -> Result<(u64, String), String> {
         migration_profile_checks(&scope)?;
         readonly_target_profile_checks(&scope)?;
         let root = crate::physical_install_root(origin)?.to_path_buf();
         if !scope.roots.contains(&root)
             || !image.path.starts_with(&root)
             || crate::executable_identity(&image.path)? != *image
-            || scope.profiles.iter().any(|profile| live(profile.pid))
+            || purpose == MigrationStartupPurpose::Target
+                && scope.profiles.iter().any(|profile| live(profile.pid))
         {
             return Err("migration start requires exact verified image and stopped sources".into());
+        }
+        let selected = scope.profiles.iter().find(|profile| profile.state_dir == state)
+            .ok_or("startup profile is outside migration")?;
+        if purpose == MigrationStartupPurpose::SourceRestore
+            && (selected.image != *image || live(selected.pid)
+                || migration_source_root(&scope, selected)? != &root)
+            || purpose == MigrationStartupPurpose::Target
+                && !migration_target_root(&scope, &root)?
+        {
+            return Err("startup image/root does not match its migration purpose".into());
         }
         if let Some(target) = scope
             .readonly_target_profiles
@@ -1936,7 +2163,10 @@ impl MigrationReservation {
                 return Err("migration may only reuse the pinned live target image".into());
             }
         }
-        migration_start_registry_checks(&self.global, &scope, None)?;
+        migration_start_registry_checks(&self.global, &scope, purpose, None)?;
+        // Even cached grants cannot bypass another daemon's lifecycle ownership.
+        let lifecycle = desktop_pet_contracts::LifecycleLock::try_acquire(state)?
+            .ok_or("startup profile is still owned by a live daemon")?;
         let expected = scope
             .profiles
             .iter()
@@ -1948,9 +2178,6 @@ impl MigrationReservation {
         }) {
             return Ok((expected, existing.token.clone()));
         }
-        // Changing target to rollback is legal only after the previous image stops.
-        let lifecycle = desktop_pet_contracts::LifecycleLock::try_acquire(state)?
-            .ok_or("startup profile is still owned by a live daemon")?;
         let token = new_token()?;
         scope.startups.retain(|startup| startup.state_dir != state);
         scope.startups.push(MigrationStartup {
@@ -2049,6 +2276,11 @@ fn migration_start_for(
             })
             .cloned()
             .ok_or("installation is reserved by migration; startup is not authorized")?;
+        if migration_startup_purpose(&scope, &startup)? == MigrationStartupPurpose::SourceRestore
+            && scope.profiles.iter().any(|profile| profile.state_dir == state && live(profile.pid))
+        {
+            return Err("captured source PID is still live; source restore is forbidden".into());
+        }
         if combined_generation(state)? != startup.stop_generation
             || crate::executable_identity(&startup.image.path)? != startup.image
         {
@@ -2072,9 +2304,42 @@ fn reject_migration_for_origins(
     reject_migration_scopes(global, &roots, Some(state), None)
 }
 
+fn migration_target_root(scope: &MigrationScope, root: &Path) -> Result<bool, String> {
+    if !scope.roots.iter().any(|stored| stored == root) {
+        return Ok(false);
+    }
+    for profile in &scope.profiles {
+        let source = migration_source_root(scope, profile)?;
+        if source.starts_with(root) || root.starts_with(source) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationStartupPurpose { Target, SourceRestore }
+fn migration_startup_purpose(
+    scope: &MigrationScope, startup: &MigrationStartup,
+) -> Result<MigrationStartupPurpose, String> {
+    let selected = scope.profiles.iter().find(|profile| profile.state_dir == startup.state_dir)
+        .ok_or("startup profile is outside migration")?;
+    if startup.image == selected.image {
+        if migration_source_root(scope, selected)? != &startup.root {
+            return Err("source restore grant has a foreign root".into());
+        }
+        Ok(MigrationStartupPurpose::SourceRestore)
+    } else if migration_target_root(scope, &startup.root)?
+        && startup.image.path.starts_with(&startup.root)
+    {
+        Ok(MigrationStartupPurpose::Target)
+    } else {
+        Err("migration startup does not name a disjoint target".into())
+    }
+}
 fn migration_start_registry_checks(
     global: &Path,
     scope: &MigrationScope,
+    purpose: MigrationStartupPurpose,
     registering: Option<(u32, crate::ExecutableIdentity)>,
 ) -> Result<(), String> {
     let mut authorized = Vec::new();
@@ -2082,15 +2347,28 @@ fn migration_start_registry_checks(
         authorized.push(registering);
     }
     readonly_target_profile_checks(scope)?;
+    if purpose == MigrationStartupPurpose::SourceRestore {
+        migration_profile_checks(scope)?;
+    }
     for profile in &scope.profiles {
         reject_profile_reservations(&profile.state_dir, false)?;
         if combined_generation(&profile.state_dir)? != profile.stop_generation {
             return Err("user stop superseded migration startup".into());
         }
+        if live(profile.pid) {
+            if purpose != MigrationStartupPurpose::SourceRestore
+                || !cleanup_instance_registered(global, &profile.state_dir, profile.pid, &profile.instance_id)?
+            {
+                return Err("live source lacks exact captured registration or forbids target startup".into());
+            }
+            verify_process_identity(profile.pid, &profile.image)?;
+            authorized.push((profile.pid, profile.image.clone()));
+        }
     }
     let keys = root_registry_keys(&scope.roots);
     for namespace in std::iter::once(global.to_path_buf()).chain(compatibility_global(global)?) {
         for profile in scope.profiles.iter().chain(&scope.readonly_target_profiles) {
+            reject_migration_scopes(&namespace, &scope.roots, Some(&profile.state_dir), Some(&scope.operation_id))?;
             reject_normal_reservation_evidence(&namespace, &scope.roots, Some(&profile.state_dir))?;
         }
         for path in registry_files(&namespace, ".active.json")? {
@@ -2116,22 +2394,29 @@ fn migration_start_registry_checks(
                 {
                     continue;
                 }
-                if let Some(profile) = scope.readonly_target_profiles.iter().find(|profile| {
-                    profile.state_dir == entry.state_dir
-                        && profile.pid == entry.pid
+                let image = if let Some(profile) = scope.readonly_target_profiles.iter().find(|profile| {
+                    profile.state_dir == entry.state_dir && profile.pid == entry.pid
                         && profile.instance_id == entry.instance_id
                 }) {
-                    authorized.push((entry.pid, profile.image.clone()));
+                    &profile.image
+                } else if let Some(profile) = scope.profiles.iter().find(|profile| {
+                    profile.state_dir == entry.state_dir && profile.pid == entry.pid
+                        && profile.instance_id == entry.instance_id
+                }) {
+                    if purpose != MigrationStartupPurpose::SourceRestore {
+                        return Err("live source forbids target startup".into());
+                    }
+                    &profile.image
                 } else {
-                    let startup = scope
-                        .startups
-                        .iter()
-                        .find(|startup| startup.state_dir == entry.state_dir)
-                        .ok_or(
-                            "unapproved live source or new target user during migration startup",
-                        )?;
-                    authorized.push((entry.pid, startup.image.clone()));
-                }
+                    let startup = scope.startups.iter().find(|startup| startup.state_dir == entry.state_dir)
+                        .ok_or("unapproved live migration user")?;
+                    if migration_startup_purpose(scope, startup)? != purpose {
+                        return Err("live source/target conflicts with migration startup purpose".into());
+                    }
+                    &startup.image
+                };
+                verify_process_identity(entry.pid, image)?;
+                authorized.push((entry.pid, image.clone()));
             }
         }
     }
@@ -2401,7 +2686,7 @@ pub fn start_allowed(
         updater_token,
     )
 }
-fn start_allowed_at(
+pub(crate) fn start_allowed_at(
     global: &Path,
     origin: &InstallOrigin,
     state_dir: &Path,
@@ -2442,13 +2727,14 @@ fn start_allowed_locked(
         expected_generation,
         updater_token,
     )? {
+        let purpose = migration_startup_purpose(&scope, &startup)?;
         let current = std::env::current_exe().map_err(|e| e.to_string())?;
         let registering = if crate::executable_identity(&current)? == startup.image {
             Some((std::process::id(), startup.image))
         } else {
             None
         };
-        migration_start_registry_checks(global, &scope, registering)?;
+        migration_start_registry_checks(global, &scope, purpose, registering)?;
         return Ok(());
     }
     reject_old_evidence(global, Some(origin), None, Some(state_dir), true)?;
@@ -2559,7 +2845,7 @@ pub fn register_active(
         updater_token,
     )
 }
-fn register_active_at(
+pub(crate) fn register_active_at(
     global: &Path,
     origin: &InstallOrigin,
     state_dir: &Path,
@@ -2601,7 +2887,8 @@ fn register_active_at(
         expected_generation,
         updater_token,
     )? {
-        migration_start_registry_checks(global, &scope, Some((pid, startup.image)))?;
+        let purpose = migration_startup_purpose(&scope, &startup)?;
+        migration_start_registry_checks(global, &scope, purpose, Some((pid, startup.image)))?;
     }
     let key = installation_key(origin)?;
     let mut entries = active(global, &key)?;
@@ -4515,5 +4802,210 @@ mod tests {
         assert!(start_allowed_at(&global, &origin, &state, None, None).is_err());
         assert!(record_user_stop_at(&global, &state).is_err());
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn managerless_history_requires_the_exact_namespace_apply_installed_plan() {
+        let (_dir, global, state, origin) = fixture();
+        let updates = state.join("updates");
+        check_dir(&updates, true).unwrap();
+        let operation = "f".repeat(32);
+        let root = crate::physical_install_root(&origin).unwrap();
+        let running = crate::ExecutableIdentity { path: root.join("old-keg/pet"), sha256: "a".repeat(64) };
+        let candidate = crate::ExecutableIdentity { path: root.join("new-keg/pet"), sha256: "b".repeat(64) };
+        let record = OperationRecord { version: 2, operation_id: operation.clone(),
+            phase: OperationPhase::Completed, execution_fence: ExecutionFence::NoSpawn,
+            installed: true, applied: true, candidate: Some(candidate.clone()), detail: "historical".into() };
+        let local = serde_json::json!({"kind":"local","root":root});
+        let plan = serde_json::json!({
+            "version":2,"operation_id":operation,"origin":local,"action":{"kind":"apply_installed"},
+            "running":running,"candidate":candidate,"target":null,
+            "context":{"executable":running.path,"version":"0.3.4","instance_id":"old-instance",
+                "config_dir":state,"state_dir":state,"host_plugin_config_dir":null,
+                "herdr_socket":state.join("old.sock"),"running":running,"running_origin":local,
+                "assets_override":null,"environment":{},"locale":"en"}
+        });
+        let plan_path = updates.join(format!("{operation}.plan.json"));
+        let result_path = updates.join(format!("{operation}.result.json"));
+        let latest_path = updates.join("latest-operation.json");
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        write_private_new(&result_path, &serde_json::to_vec(&record).unwrap(), 0o600).unwrap();
+        write_private_new(&latest_path, &serde_json::to_vec(&operation).unwrap(), 0o600).unwrap();
+        assert!(reject_profile_reservations(&state, true).is_err());
+        write_private_new(&plan_path, &bytes, 0o600).unwrap();
+        let scope = historical_managerless_scope(&updates, &state, &record).unwrap();
+        assert_eq!(scope.roots, vec![root.to_path_buf()]);
+        reject_profile_reservations(&state, true).unwrap();
+        historical_scope_settled_at(&global, &scope).unwrap();
+        let registry = active_path(&global, &installation_key(&origin).unwrap());
+        write_private_bytes(&registry, &serde_json::to_vec(&vec![ActiveProfile {
+            state_dir: state.clone(), pid: std::process::id(), instance_id: "current-daemon".into()
+        }]).unwrap(), 0o600).unwrap();
+        historical_scope_settled_at(&global, &scope).unwrap();
+        fs::remove_file(registry).unwrap();
+        let old = old_global(&global).unwrap().unwrap();
+        let reservation = old.join("retained.reservation.json");
+        write_private_bytes(&reservation, &serde_json::to_vec(&serde_json::json!({
+            "version":2,"source":{"kind":"local","root":root},"state_dir":state
+        })).unwrap(), 0o600).unwrap();
+        assert!(historical_scope_settled_at(&global, &scope).is_err());
+        fs::remove_file(reservation).unwrap();
+        let migration = MigrationScope {
+            version:4, operation_id:"d".repeat(32), roots:vec![root.to_path_buf()],
+            profiles:vec![MigrationProfile { pid:i32::MAX as u32, instance_id:"captured".into(),
+                state_dir:state.clone(),config_dir:state.clone(),image:running.clone(),stop_generation:0 }],
+            readonly_target_profiles:Vec::new(),owner_token:"e".repeat(64),startups:Vec::new()
+        };
+        let migration_path = migration_path(&migration_global(&global).unwrap(), &migration.operation_id);
+        write_private_bytes(&migration_path, &serde_json::to_vec(&migration).unwrap(), 0o600).unwrap();
+        assert!(historical_scope_settled_at(&global, &scope).is_err());
+        fs::remove_file(migration_path).unwrap();
+        assert!(!state.join("updates-v4").exists());
+        assert_eq!(fs::read(&plan_path).unwrap(), bytes);
+
+        // A same-ID plan in the current namespace must never rescue old evidence.
+        let current = state.join("updates-v4");
+        check_dir(&current, true).unwrap();
+        write_private_new(&current.join(format!("{operation}.plan.json")), &bytes, 0o600).unwrap();
+        assert!(crate::read_plan(&state, &operation).is_err());
+        for pointer in ["/action/kind", "/operation_id", "/context/state_dir",
+            "/context/running/sha256", "/candidate/sha256", "/context/instance_id"] {
+            let mut invalid = plan.clone();
+            *invalid.pointer_mut(pointer).unwrap() = serde_json::json!(match pointer {
+                "/action/kind" => "local_rebuild", "/operation_id" => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "/context/state_dir" => "/different", "/context/instance_id" => "",
+                _ => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            });
+            write_private_bytes(&plan_path, &serde_json::to_vec(&invalid).unwrap(), 0o600).unwrap();
+            assert!(reject_profile_reservations(&state, true).is_err(), "{pointer}");
+        }
+        for invalid in [
+            { let mut value = plan.clone(); value["extra"] = serde_json::json!(true); value },
+            { let mut value = plan.clone(); value["context"]["extra"] = serde_json::json!(true); value },
+            { let mut value = plan.clone(); value["origin"]["extra"] = serde_json::json!(true); value },
+            { let mut value = plan.clone(); value["candidate"] = serde_json::Value::Null; value },
+            { let mut value = plan.clone(); value["target"] = serde_json::json!({}); value },
+            { let mut value = plan.clone(); value["candidate"]["sha256"] = serde_json::json!("a".repeat(64)); value },
+        ] {
+            write_private_bytes(&plan_path, &serde_json::to_vec(&invalid).unwrap(), 0o600).unwrap();
+            assert!(reject_profile_reservations(&state, true).is_err());
+        }
+        let mut targeted = plan.clone();
+        targeted["target"] = serde_json::json!({
+            "policy":"stable_only","origin":local,"resolved_commit":null,
+            "release":{"version":"0.3.5","channel":"stable","tag":"v0.3.5","release_id":1,
+                "asset_name":"old.tar.gz","archive_url":"https://example.invalid/archive","archive_size":1,
+                "sha256":"c".repeat(64),"checksum_url":"https://example.invalid/checksum"}
+        });
+        write_private_bytes(&plan_path, &serde_json::to_vec(&targeted).unwrap(), 0o600).unwrap();
+        assert!(historical_managerless_scope(&updates, &state, &record).is_err());
+        write_private_bytes(&plan_path, &bytes, 0o600).unwrap();
+        let mut intent = record.clone();
+        intent.execution_fence = ExecutionFence::ManagerIntent;
+        assert!(historical_terminal_in(&updates, &state, &intent).is_err());
+        fs::set_permissions(&plan_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(historical_managerless_scope(&updates, &state, &record).is_err());
+        fs::set_permissions(&plan_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_file(&plan_path).unwrap();
+        symlink(current.join(format!("{operation}.plan.json")), &plan_path).unwrap();
+        assert!(historical_managerless_scope(&updates, &state, &record).is_err());
+        fs::remove_file(&plan_path).unwrap();
+        write_private_new(&plan_path, b"{", 0o600).unwrap();
+        assert!(historical_managerless_scope(&updates, &state, &record).is_err());
+        write_private_bytes(&plan_path, &vec![b' '; 65537], 0o600).unwrap();
+        assert!(historical_managerless_scope(&updates, &state, &record).is_err());
+        write_private_bytes(&plan_path, &bytes, 0o600).unwrap();
+        // Homebrew's new keg need not share the old executable path.
+        let mut brew = plan.clone();
+        let brew_origin = serde_json::json!({"kind":"homebrew","brew":"/opt/homebrew/bin/brew",
+            "prefix":"/opt/homebrew","cellar_formula_root":root,"formula":"herdr-desktop-pet","locator":root.join("locator")});
+        brew["origin"] = brew_origin.clone();
+        brew["context"]["running_origin"] = brew_origin;
+        write_private_bytes(&plan_path, &serde_json::to_vec(&brew).unwrap(), 0o600).unwrap();
+        historical_managerless_scope(&updates, &state, &record).unwrap();
+        let mut herdr = plan.clone();
+        let herdr_origin = serde_json::json!({"kind":"herdr","host":"/host","host_config_dir":"/config",
+            "checkout_root":root,"plugin_root":"/plugin","source":"repo","requested_ref":null,
+            "resolved_commit":null,"enabled":true});
+        herdr["origin"] = herdr_origin.clone();
+        herdr["context"]["running_origin"] = herdr_origin;
+        write_private_bytes(&plan_path, &serde_json::to_vec(&herdr).unwrap(), 0o600).unwrap();
+        historical_managerless_scope(&updates, &state, &record).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn source_restore_grants_allow_authenticated_survivors_but_never_target_commit() {
+        let (_dir, global, state, _) = fixture();
+        let image = crate::executable_identity(&std::env::current_exe().unwrap()).unwrap();
+        let root = image.path.parent().unwrap().to_path_buf();
+        let target_root = state.parent().unwrap().join("target");
+        let other = state.parent().unwrap().join("survivor");
+        check_dir(&other, true).unwrap();
+        let profile = MigrationProfile { pid: i32::MAX as u32, instance_id: "stopped".into(),
+            state_dir: state.clone(), config_dir: state.clone(), image: image.clone(), stop_generation: 0 };
+        let survivor = MigrationProfile { pid: std::process::id(), instance_id: "survivor".into(),
+            state_dir: other.clone(), config_dir: other.clone(), image: image.clone(), stop_generation: 0 };
+        let mut scope = MigrationScope { version: 4, operation_id: "e".repeat(32),
+            roots: vec![root.clone(), target_root], profiles: vec![profile, survivor.clone()],
+            readonly_target_profiles: Vec::new(), owner_token: "a".repeat(64), startups: Vec::new() };
+        scope.roots.sort_unstable();
+        let namespace = migration_global(&global).unwrap();
+        write_private_new(&migration_path(&namespace, &scope.operation_id),
+            &serde_json::to_vec(&scope).unwrap(), 0o600).unwrap();
+        let origin = InstallOrigin::Source { root };
+        let registry = active_path(&global, &installation_key(&origin).unwrap());
+        write_private_bytes(&registry, &serde_json::to_vec(&vec![ActiveProfile {
+            state_dir: other.clone(), pid: survivor.pid, instance_id: survivor.instance_id.clone()
+        }]).unwrap(), 0o600).unwrap();
+        let reservation = MigrationReservation { global: global.clone(),
+            operation_id: scope.operation_id.clone(), owner_token: scope.owner_token.clone() };
+        let grant = reservation.authorize_source_restore(&origin, &state).unwrap();
+        assert!(reservation.authorize_start(&origin, &image, &state).is_err());
+        let lifecycle = desktop_pet_contracts::LifecycleLock::try_acquire(&state).unwrap().unwrap();
+        assert!(reservation.authorize_source_restore(&origin, &state).is_err());
+        drop(lifecycle);
+        assert_eq!(reservation.authorize_source_restore(&origin, &state).unwrap(), grant);
+        scope = reservation.scope().unwrap();
+        let startup = scope.startups.iter().find(|startup| startup.state_dir == state).unwrap();
+        assert_eq!(migration_startup_purpose(&scope, startup).unwrap(), MigrationStartupPurpose::SourceRestore);
+        assert!(migration_start_registry_checks(&global, &scope, MigrationStartupPurpose::Target, None).is_err());
+        // Even after every captured PID has exited, a new source PID admitted
+        // by a source grant must still exclude all target startup consumers.
+        let mut restored_scope = scope.clone();
+        restored_scope.profiles[1].pid = i32::MAX as u32 - 1;
+        restored_scope.startups.push(MigrationStartup {
+            root: crate::physical_install_root(&origin).unwrap().to_path_buf(),
+            image: image.clone(), state_dir: other.clone(), stop_generation: 0, token: new_token().unwrap(),
+        });
+        migration_start_registry_checks(&global, &restored_scope, MigrationStartupPurpose::SourceRestore, None).unwrap();
+        assert!(migration_start_registry_checks(&global, &restored_scope, MigrationStartupPurpose::Target, None).is_err());
+        let mut foreign_profile = restored_scope.startups[0].clone();
+        foreign_profile.state_dir = other.clone();
+        let mut different_source = restored_scope.clone();
+        different_source.profiles[1].image.sha256 = "f".repeat(64);
+        assert!(migration_startup_purpose(&different_source, &foreign_profile).is_err());
+        write_private_bytes(&registry, &serde_json::to_vec(&vec![
+            ActiveProfile { state_dir: other.clone(), pid: survivor.pid, instance_id: survivor.instance_id.clone() },
+            ActiveProfile { state_dir: state.clone(), pid: std::process::id(), instance_id: "restored".into() },
+        ]).unwrap(), 0o600).unwrap();
+        let error = verify_migration_target_locked(&global, &state, std::process::id(),
+            "restored", &scope.operation_id, &scope.owner_token).unwrap_err();
+        assert!(error.contains("source restoration"));
+        // Same PID under a foreign instance cannot impersonate the captured survivor.
+        write_private_bytes(&registry, &serde_json::to_vec(&vec![ActiveProfile {
+            state_dir: other.clone(), pid: survivor.pid, instance_id: "reused-instance".into()
+        }]).unwrap(), 0o600).unwrap();
+        assert!(reservation.authorize_source_restore(&origin, &state).is_err());
+        fs::remove_file(&registry).unwrap();
+        // A root census alone is not registration authority.
+        assert!(reservation.authorize_source_restore(&origin, &state).is_err());
+        write_private_bytes(&registry, &serde_json::to_vec(&vec![ActiveProfile {
+            state_dir: other.clone(), pid: survivor.pid, instance_id: survivor.instance_id.clone()
+        }]).unwrap(), 0o600).unwrap();
+        record_user_stop_at(&global, &other).unwrap();
+        assert!(reservation.authorize_source_restore(&origin, &state).is_err());
+        assert!(start_allowed_at(&global, &origin, &state, Some(grant.0), Some(&grant.1)).is_err());
     }
 }

@@ -154,6 +154,31 @@ function validateCatalog(value: unknown, repository: string): ReleaseRecord[] {
   }
   return records;
 }
+
+function releasesFromAuthority(records: ReleaseRecord[], repository: string): ReleaseRecord[] {
+  return records.filter((record) => {
+    try { return releaseRepository(record.tag_name) === repository; }
+    catch { return true; } // Preserve the existing validation of nonstable records.
+  });
+}
+
+async function fetchWikiCatalog(repository: string, token?: string): Promise<ReleaseRecord[]> {
+  if (repository !== CORE_REPOSITORY) return validateCatalog(await fetchReleases(repository, token), repository);
+  const [core, legacy] = await Promise.all([
+    fetchReleases(CORE_REPOSITORY, token),
+    fetchReleases(LEGACY_REPOSITORY, token),
+  ]);
+  const records = [
+    ...validateCatalog(releasesFromAuthority(core, CORE_REPOSITORY), CORE_REPOSITORY),
+    ...validateCatalog(releasesFromAuthority(legacy, LEGACY_REPOSITORY), LEGACY_REPOSITORY),
+  ];
+  const tags = new Set<string>();
+  for (const record of records) {
+    if (tags.has(record.tag_name)) throw new Error(`Duplicate release catalog tag: ${record.tag_name}`);
+    tags.add(record.tag_name);
+  }
+  return records;
+}
 async function scanSources(root: string): Promise<Map<string, string>> {
   const sources = new Map<string, string>();
   for (const directory of ["docs/releases", "docs/migrations"]) {
@@ -223,9 +248,9 @@ export async function generateWiki(options: WikiOptions): Promise<string[]> {
   const head = git(root, ["rev-parse", "--verify", "HEAD^{commit}"])!.trim();
   git(root, ["rev-parse", "--verify", `${options.sourceRef}^{commit}`]);
   if (options.releases && options.releasesJson) throw new Error("Choose only one release catalog input");
-  const catalog = validateCatalog(options.releases ?? (options.releasesJson
-    ? JSON.parse(await readFile(options.releasesJson, "utf8"))
-    : await fetchReleases(options.repository, process.env.GITHUB_TOKEN)), options.repository);
+  const catalog = options.releases ? validateCatalog(options.releases, options.repository)
+    : options.releasesJson ? validateCatalog(JSON.parse(await readFile(options.releasesJson, "utf8")), options.repository)
+    : await fetchWikiCatalog(options.repository, process.env.GITHUB_TOKEN);
   if (options.requireRelease) requirePublishedRelease(options.requireRelease, catalog);
   const sources = await scanSources(root);
   const records = new Map<string, ReleaseRecord>();
