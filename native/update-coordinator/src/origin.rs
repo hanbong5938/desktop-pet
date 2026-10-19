@@ -359,11 +359,10 @@ pub fn check(c: &UpdateContext, policy: UpdatePolicy) -> Result<CheckSnapshot, S
         return Ok(view);
     }
     if let Some(release) = &view.release {
-        // Beta is informational until a distinct maintained installation is approved.
-        if release.channel != crate::ReleaseChannel::Stable {
-            view.detail =
-                "Beta release is informational; the approved neutral installation remains stable"
-                    .into();
+        if matches!(origin, InstallOrigin::Homebrew { .. })
+            && release.channel != crate::ReleaseChannel::Stable
+        {
+            view.detail = "Homebrew updates require an approved stable release".into();
             return Ok(view);
         }
         let action = match origin {
@@ -418,8 +417,7 @@ pub fn validate_plan_target(plan: &UpdatePlan) -> Result<(), String> {
     }
     match (&plan.origin, &plan.action) {
         (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace)
-            if *bundle == standalone_bundle()?
-                && target.release.channel == crate::ReleaseChannel::Stable =>
+            if *bundle == standalone_bundle()? =>
         {
             Ok(())
         }
@@ -1065,6 +1063,75 @@ mod tests {
             bundle: standalone_bundle().unwrap(),
         };
         let plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
+        assert!(validate_plan_target(&plan).is_err());
+    }
+
+    #[test]
+    fn standalone_beta_target_requires_opt_in_and_exact_owner_and_release() {
+        let mut c = context();
+        c.version = "0.4.13-beta.7".into();
+        let origin = InstallOrigin::Standalone {
+            bundle: standalone_bundle().unwrap(),
+        };
+        let mut plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
+        let version = "0.4.13-beta.9";
+        let tag = format!("{}{version}", if identity::LEGACY { "beta/" } else { "v" });
+        let asset_name = format!("{}-v{version}-macos-arm64.tar.gz", identity::ARCHIVE_PREFIX);
+        let archive_url = format!("{}{tag}/{asset_name}", identity::RELEASE_DOWNLOAD);
+        plan.target = Some(ReleaseTarget {
+            policy: UpdatePolicy::StableAndBeta,
+            release: ReleaseCandidate {
+                version: version.into(),
+                channel: crate::ReleaseChannel::Beta,
+                tag,
+                release_id: 17,
+                asset_name,
+                checksum_url: format!("{archive_url}.sha256"),
+                archive_url,
+                archive_size: 123,
+                sha256: "a".repeat(64),
+            },
+            origin: origin.clone(),
+            resolved_commit: None,
+        });
+        validate_plan_target(&plan).unwrap();
+        let approved = plan.clone();
+        plan.target.as_mut().unwrap().policy = UpdatePolicy::StableOnly;
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().release.channel = crate::ReleaseChannel::Stable;
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().release.archive_url =
+            "https://github.com/attacker/repo/releases/download/v0.4.13-beta.9/archive".into();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().origin = InstallOrigin::Standalone {
+            bundle: "/tmp/other-owner/DesktopPet.app".into(),
+        };
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.origin = InstallOrigin::Standalone {
+            bundle: "/tmp/other-owner/DesktopPet.app".into(),
+        };
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.candidate = Some(c.running.clone());
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.context.version = version.into();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved;
+        plan.origin = InstallOrigin::Homebrew {
+            brew: "/opt/homebrew/bin/brew".into(),
+            prefix: "/opt/homebrew".into(),
+            cellar_formula_root: "/opt/homebrew/Cellar/desktop-pet".into(),
+            formula: format!("{OFFICIAL_TAP}{STABLE_FORMULA}"),
+            locator: "/opt/homebrew/bin/desktop-pet".into(),
+        };
+        plan.action = UpdateAction::HomebrewUpgrade;
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
         assert!(validate_plan_target(&plan).is_err());
     }
 

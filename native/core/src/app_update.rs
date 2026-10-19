@@ -384,7 +384,7 @@ impl AppUpdateService {
     pub(super) fn consent_matches(&self, plan: &UpdatePlan, generation: (u64, u64)) -> bool {
         self.consent_generation() == generation && self.plan() == Some(plan)
     }
-    pub(super) fn download_url(&self) -> Option<&str> {
+    pub(super) fn download_url(&self) -> Option<String> {
         if self.check_busy
             || self.launching.is_some()
             || self.prepared_plan.is_some()
@@ -405,7 +405,11 @@ impl AppUpdateService {
         }
         let release = snapshot.release.as_ref()?;
         release.validate().ok()?;
-        Some(&release.archive_url)
+        Some(format!(
+            "https://github.com/{}/releases/tag/{}",
+            desktop_pet_update_coordinator::identity::REPOSITORY,
+            release.tag
+        ))
     }
 
     pub(super) fn checked_event(
@@ -1436,7 +1440,7 @@ impl AppUpdateService {
             migration_visible: desktop_pet_update_coordinator::identity::LEGACY,
             migration_available,
             migration_title: text(locale, Message::MigrationTitle).to_owned(),
-            download_url: self.download_url().map(str::to_owned),
+            download_url: self.download_url(),
             release: self
                 .snapshot
                 .as_ref()
@@ -2081,9 +2085,12 @@ mod tests {
     }
 
     #[cfg(not(desktop_pet_legacy))]
-    fn informational_beta_check(context: UpdateContext) -> CheckSnapshot {
+    fn manual_beta_check(context: UpdateContext) -> CheckSnapshot {
         let mut snapshot = local_check_for_context(context);
         snapshot.status = CheckStatus::Unsupported;
+        snapshot.origin = InstallOrigin::Manual {
+            locator: "/isolated/manual/DesktopPet.app/Contents/MacOS/desktop-pet".into(),
+        };
         snapshot.policy = UpdatePolicy::StableAndBeta;
         snapshot.plan = None;
         let asset = "DesktopPet-v0.4.13-beta.2-macos-arm64.tar.gz";
@@ -2106,11 +2113,11 @@ mod tests {
 
     #[cfg(not(desktop_pet_legacy))]
     #[test]
-    fn completed_migration_keeps_validated_beta_informational_without_apply() {
+    fn completed_migration_does_not_authorize_manual_installation_updates() {
         let mut service = admitted_card_service(UpdatePolicy::StableAndBeta);
         service.context.as_mut().unwrap().version = "0.4.13-beta.1".into();
         let (request, generation, context) = service.begin_check().unwrap();
-        let snapshot = informational_beta_check(context);
+        let snapshot = manual_beta_check(context);
         let release = snapshot.release.clone().unwrap();
         assert!(snapshot.plan.is_none());
         service.checked_event(request, generation, Ok(snapshot), None);
@@ -2120,10 +2127,6 @@ mod tests {
             assert_eq!(model.running_version, "0.4.13-beta.1");
             assert_eq!(model.release.as_ref(), Some(&release));
             assert_eq!(model.release.as_ref().unwrap().tag, "v0.4.13-beta.2");
-            assert_eq!(
-                model.download_url.as_deref(),
-                Some(release.archive_url.as_str())
-            );
             assert!(model.receive_beta_updates);
             assert!(model.action.is_none());
             assert!(model.primary_action.is_none());
@@ -2138,7 +2141,7 @@ mod tests {
     fn completed_history_cannot_resurrect_beta_after_error_or_policy_generation_change() {
         let mut service = admitted_card_service(UpdatePolicy::StableAndBeta);
         let (request, generation, context) = service.begin_check().unwrap();
-        let beta = informational_beta_check(context);
+        let beta = manual_beta_check(context);
         service.checked_event(request, generation, Ok(beta.clone()), None);
         assert!(completed_history_model(&service, UiLocale::En)
             .download_url

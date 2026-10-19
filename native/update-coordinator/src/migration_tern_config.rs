@@ -170,8 +170,7 @@ fn capture(
             &profile.control_socket,
             &serde_json::json!({"version":1,"kind":"tern-migration-evidence"}),
         )?;
-        let binding: TernBindingEvidence =
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let binding = decode_tern_binding_evidence(&bytes)?;
         if binding.version != 1
             || binding.kind != "tern-migration-evidence"
             || !binding.fresh
@@ -367,6 +366,104 @@ pub(super) fn verify_canonical_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn short_command_capture_surfaces_backend_error_and_requires_binding_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        for (response, accepted, backend_error) in [
+            (
+                serde_json::json!({"version":1,"type":"error","ok":false,
+                "alpha_passthrough":false,"error":"migration evidence command unavailable"}),
+                false,
+                true,
+            ),
+            (
+                serde_json::json!({"version":1,"type":"status","ok":true,
+                "alpha_passthrough":false,"error":null}),
+                false,
+                false,
+            ),
+            (
+                serde_json::json!({"version":1,"kind":"tern-migration-evidence",
+                "instance_id":"source-instance","window_id":"original-window",
+                "binding_epoch":1,"sequence":2,"local_host":"local",
+                "observation_generation":1,"native_generation":1,"fresh":true}),
+                true,
+                false,
+            ),
+        ] {
+            let (_temp, mut plan) = crate::migration::tests::fixture();
+            plan.source_image =
+                executable_identity(&actual_process_image(std::process::id()).unwrap()).unwrap();
+            plan.profiles[0].pid = std::process::id();
+            let root = plan.profiles[0].state_dir.join("isolated-tern");
+            plan.profiles[0].environment.insert(
+                "TERN_CONFIG_DIR".into(),
+                root.to_string_lossy().into_owned(),
+            );
+            let configuration = fixture_configuration(&plan);
+            let saved = TernConnection {
+                executable: "herdr-desktop-pet".into(),
+                ..configuration.connection
+            };
+            let bytes = serde_json::to_vec(&serde_json::json!({"connection":saved})).unwrap();
+            protocol::write_private_bytes(&configuration.path, &bytes, 0o600).unwrap();
+            let profile = &plan.profiles[0];
+            let live = serde_json::json!({
+                "ok":true,"running":true,"shutdown":false,"ready":true,
+                "ui_ready":true,"control_ready":true,"app_version":"0.3.16",
+                "updater_protocol":3,"observation_capability":1,"integration_api":1,
+                "observation_mode":"auto","instance_id":profile.instance_id,"pid":profile.pid,
+                "executable_path":plan.source_image.path,"running_sha256":plan.source_image.sha256,
+                "config_dir":profile.config_dir,"state_dir":profile.state_dir
+            });
+            let listener = UnixListener::bind(&profile.control_socket).unwrap();
+            fs::set_permissions(&profile.control_socket, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let server = thread::spawn(move || {
+                for (reply, expected) in [(live, "status"), (response, "tern-migration-evidence")] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {
+                        request.push(byte[0]);
+                    }
+                    let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                    assert_eq!(
+                        request
+                            .get("command")
+                            .or_else(|| request.get("kind"))
+                            .unwrap(),
+                        expected,
+                    );
+                    stream
+                        .write_all(&serde_json::to_vec(&reply).unwrap())
+                        .unwrap();
+                    stream.write_all(b"\n").unwrap();
+                    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+                }
+            });
+            let result = capture(&plan, profile, None, None, None);
+            assert_eq!(result.is_ok(), accepted);
+            if backend_error {
+                assert_eq!(
+                    result.err().unwrap(),
+                    "migration evidence command unavailable"
+                );
+            } else if accepted {
+                let captured = result.unwrap().unwrap();
+                assert_eq!(captured.bound_source, plan.source_image);
+                assert!(captured.source_binding_sha256.is_some());
+            }
+            server.join().unwrap();
+            assert_eq!(fs::read(&configuration.path).unwrap(), bytes);
+        }
+    }
+
     #[test]
     fn ambient_tern_environment_without_saved_profile_does_not_install_or_require_tern() {
         let (_temp, mut plan) = crate::migration::tests::fixture();

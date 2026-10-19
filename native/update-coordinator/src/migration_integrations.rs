@@ -1707,12 +1707,11 @@ fn fresh_binding(
     instance: &str,
     window: &str,
 ) -> Result<TernBindingEvidence, String> {
-    let binding: TernBindingEvidence = serde_json::from_slice(&exchange_timeout(
+    let binding = decode_tern_binding_evidence(&exchange_timeout(
         &profile.control_socket,
         &serde_json::json!({"version":1,"kind":"tern-migration-evidence","window_id":window}),
         Duration::from_millis(750),
-    )?)
-    .map_err(|e| e.to_string())?;
+    )?)?;
     if binding.version != 1
         || binding.kind != "tern-migration-evidence"
         || !binding.fresh
@@ -2785,6 +2784,70 @@ mod tests {
         let mut changed = original;
         changed["self_attested_revision"] = serde_json::json!("c".repeat(40));
         assert!(parse(changed).is_err());
+    }
+    #[test]
+    fn current_binding_surfaces_control_errors_and_requires_exact_evidence() {
+        use std::os::unix::net::UnixListener;
+        let exact = serde_json::json!({
+            "version":1,"kind":"tern-migration-evidence","instance_id":"target-instance",
+            "window_id":"actual-window","binding_epoch":1,"sequence":2,"local_host":"local",
+            "observation_generation":1,"native_generation":1,"fresh":true
+        });
+        let mut unknown = exact.clone();
+        unknown["alpha_passthrough"] = serde_json::json!(false);
+        let mut incomplete = exact.clone();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("native_generation");
+        for (response, accepted, backend_error) in [
+            (
+                serde_json::json!({"version":1,"type":"error","ok":false,
+                "alpha_passthrough":false,"error":"migration evidence command unavailable"}),
+                false,
+                true,
+            ),
+            (
+                serde_json::json!({"version":1,"type":"error","ok":false,
+                "alpha_passthrough":false,"error":null}),
+                false,
+                false,
+            ),
+            (
+                serde_json::json!({"version":1,"type":"status","ok":true,
+                "alpha_passthrough":false,"error":null}),
+                false,
+                false,
+            ),
+            (unknown, false, false),
+            (incomplete, false, false),
+            (exact, true, false),
+        ] {
+            let (_temp, plan) = crate::migration::tests::fixture();
+            let profile = &plan.profiles[0];
+            let listener = UnixListener::bind(&profile.control_socket).unwrap();
+            fs::set_permissions(&profile.control_socket, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                stream
+                    .write_all(&serde_json::to_vec(&response).unwrap())
+                    .unwrap();
+                stream.write_all(b"\n").unwrap();
+                assert_eq!(stream.read(&mut byte).unwrap(), 0);
+            });
+            let result = fresh_binding(profile, "target-instance", "actual-window");
+            assert_eq!(result.is_ok(), accepted);
+            if backend_error {
+                assert_eq!(
+                    result.err().unwrap(),
+                    "migration evidence command unavailable"
+                );
+            }
+            server.join().unwrap();
+        }
     }
     #[test]
     fn handover_binding_selects_exact_window_and_rejects_stale_or_wrong_instance() {

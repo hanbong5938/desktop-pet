@@ -268,10 +268,14 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 应用内更新
 
+**未发布修正：**已验证的 private Standalone 安装启用测试版更新并另行明确同意原生更新后，可以安装更新的官方测试版。仅稳定版策略仍拒绝测试版，Homebrew 仍限稳定版公式。此修正不会追溯修改已发布 beta.7/beta.9 的更新代码，也不会自动修复旧 Applications 所有者、原配置或 Tern 连接。
+
+应用内更新不可用时，请保留现有设置和角色。**打开官方安装说明**会打开已验证版本的官方页面，不会只下载没有说明的压缩包或自动执行安装器。请按实际安装方式操作，不要删除配置、重跑旧安装器或猜测默认路径。Tern 控制错误现在显示实际后端诊断，而非 `alpha_passthrough` 模式错误；普通状态／错误响应绝不作为 fresh binding 证据。
+
 **设置 → 应用更新**显示相互独立的自动检查（默认开）和**接收 beta 更新**（默认关）、**立即检查**、运行版本/来源、按策略的最后成功检查时间及明确的来源相关操作。仅稳定版选官方稳定发行；加入 beta 后选合格稳定/beta 中最高 SemVer，同基础版本的正式版优于 beta，退出 beta 不降级。应用打开时自动检查最多每日一次，稳定/含 beta 各有时间戳。改变 beta 策略使原候选失效，仅自动检查开启时按新策略检查。开关和检查不会安装/重启、刷新 Brew 元数据或修改 Git；执行操作需额外原生同意。 检查不改变 lifecycle、安装、运行 image 或所选 profile，但成功检查可写入 `preferences.json` 的策略相关 timestamp 缓存（`last_update_check` / `last_beta_update_check`），并非字节级只读。
 
 - **Standalone：**验证固定中立 release、stage，并在 native installation admission 下原子替换实际账户 home 的应用。共享 locator 提供发现依据，不从 host manifest/socket 父目录推测。可复用已验证所有者；live profile/reservation 阻止危险替换。常规中立更新不调用 Herdr plugin manager；旧所有者 retirement 仅属于原始批准的[迁移路径](migrations/desktop-pet.md)。
-- **Homebrew：**保留捕获的管理器/前缀，明确指定目标公式/版本。物理替换范围为跨 keg 的公式 **Cellar 子树**，非整个前缀。确认合格的稳定 ↔ beta 转换占用两处物理安装根，验证刷新的目标元数据并安装/升级目标，不暗中卸载原公式。检查仅读取缓存元数据。
+- **Homebrew：**保留捕获的管理器／前缀和已批准的稳定版公式／版本。物理替换范围为跨 keg 的公式 **Cellar 子树**，非整个前缀。不通过此公式安装测试版，也不自动转换渠道或接管其他安装所有者。检查仅读取缓存元数据。
 - **本地检出：**明确重建磁盘上当前文件，不执行 Git pull/reset/引用变化；重建结果可执行文件相同也可接受，但替换实例必须确实就绪。
 - **已验证的外部安装：**已签名且兼容 protocol-4 的已安装包可提供**应用已安装更新**而不再运行安装器；即使策略仅稳定版，已明确接受的合格安装 beta 也可如此。手动/未知来源不暗中改标为 Herdr 或 Homebrew。
 

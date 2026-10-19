@@ -9570,7 +9570,7 @@ impl Ui {
         let Some(url) = self.app_update.download_url() else {
             return;
         };
-        let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) else {
+        let Some(url) = NSURL::URLWithString(&NSString::from_str(&url)) else {
             return;
         };
         NSWorkspace::sharedWorkspace().openURL(&url);

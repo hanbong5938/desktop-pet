@@ -2095,8 +2095,10 @@ fn standalone_release(plan: &UpdatePlan) -> Result<&crate::ReleaseCandidate, Str
         .as_ref()
         .ok_or("standalone replacement lacks approved release")?;
     target.release.validate()?;
-    if target.release.channel != ReleaseChannel::Stable || target.origin != plan.origin {
-        return Err("standalone replacement must preserve owner and stable channel".into());
+    if !target.policy.allows_version(&target.release.version)? || target.origin != plan.origin {
+        return Err(
+            "standalone replacement must preserve owner and authorized release policy".into(),
+        );
     }
     if target.release.archive_size > MAX_ARCHIVE {
         return Err("standalone archive exceeds bound".into());
@@ -2152,8 +2154,8 @@ pub fn stage_standalone_release(plan: &UpdatePlan) -> Result<StagedApp, String> 
 
 fn stage_release(release: &crate::ReleaseCandidate, directory: &Path) -> Result<StagedApp, String> {
     release.validate_neutral()?;
-    if release.channel != ReleaseChannel::Stable || release.archive_size > MAX_ARCHIVE {
-        return Err("public native staging requires a bounded stable release".into());
+    if release.archive_size > MAX_ARCHIVE {
+        return Err("public native staging requires a bounded approved release".into());
     }
     if exists(directory)? {
         return load_release_stage(release, directory);

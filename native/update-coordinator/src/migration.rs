@@ -3751,6 +3751,23 @@ struct TernBindingEvidence {
     native_generation: u64,
     fresh: bool,
 }
+fn decode_tern_binding_evidence(bytes: &[u8]) -> Result<TernBindingEvidence, String> {
+    let response: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if let Some(error) = response.get("error").and_then(|value| value.as_str()) {
+        if !error.trim().is_empty() {
+            return Err(error.into());
+        }
+    }
+    if response.get("ok").and_then(|value| value.as_bool()) == Some(false)
+        || response.get("type").and_then(|value| value.as_str()) == Some("error")
+        || response.get("error").is_some_and(|value| !value.is_null())
+    {
+        return Err(
+            "Tern migration binding evidence is unsupported or the backend returned an error envelope without a diagnostic".into(),
+        );
+    }
+    serde_json::from_value(response).map_err(|e| e.to_string())
+}
 fn verify_all_committed_targets(
     plan: &MigrationPlan,
     record: &MigrationRecord,
