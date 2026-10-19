@@ -1557,17 +1557,20 @@ pub(crate) fn display_status_label(locale: UiLocale, status: DisplayStatus) -> &
 }
 
 pub(crate) fn status_indicator_summary(locale: UiLocale, summary: SessionStatusSummary) -> String {
+    let label = display_status_label(locale, summary.status);
     if summary.count == 0 {
-        return display_status_label(locale, summary.status).to_owned();
+        if summary.total == 0 {
+            return label.to_owned();
+        }
+        return match locale {
+            UiLocale::Ko => format!("{label} · 전체 {}개", summary.total),
+            UiLocale::En => format!("{label} · Total: {}", summary.total),
+            UiLocale::ZhHans => format!("{label} · 共 {} 个", summary.total),
+            UiLocale::Ja => format!("{label} · 全体 {} 件", summary.total),
+        };
     }
     match locale {
-        UiLocale::Ko => {
-            format!(
-                "작업 {}개 · {}",
-                summary.count,
-                display_status_label(locale, summary.status)
-            )
-        }
+        UiLocale::Ko => format!("{label} {}개 · 전체 {}개", summary.count, summary.total),
         UiLocale::En => {
             let noun = if summary.count == 1 { "task" } else { "tasks" };
             let state = match summary.status {
@@ -1582,17 +1585,18 @@ pub(crate) fn status_indicator_summary(locale: UiLocale, summary: SessionStatusS
                 DisplayStatus::Unknown => "unknown",
                 DisplayStatus::Offline => "offline",
             };
-            format!("{} {noun} {state}", summary.count)
+            format!(
+                "{} {noun} {state} · Total: {}",
+                summary.count, summary.total
+            )
         }
         UiLocale::ZhHans => format!(
-            "{} 个任务 · {}",
-            summary.count,
-            display_status_label(locale, summary.status)
+            "{} 个任务 · {label} · 共 {} 个",
+            summary.count, summary.total
         ),
         UiLocale::Ja => format!(
-            "タスク {} 件 · {}",
-            summary.count,
-            display_status_label(locale, summary.status)
+            "タスク {} 件 · {label} · 全体 {} 件",
+            summary.count, summary.total
         ),
     }
 }
@@ -1623,11 +1627,15 @@ pub(crate) fn disconnected_sources(locale: UiLocale, count: usize) -> String {
 }
 
 pub(crate) fn session_list_summary(locale: UiLocale, matched: usize, omitted: usize) -> String {
-    match locale {
-        UiLocale::Ko => format!("일치: {matched}개\n제외: {omitted}개"),
-        UiLocale::En => format!("Matched: {matched}\nOmitted: {omitted}"),
-        UiLocale::ZhHans => format!("匹配：{matched}\n已排除：{omitted}"),
-        UiLocale::Ja => format!("一致：{matched} 件\n除外：{omitted} 件"),
+    match (locale, omitted) {
+        (UiLocale::Ko, 0) => format!("일치: {matched}개"),
+        (UiLocale::En, 0) => format!("Matched: {matched}"),
+        (UiLocale::ZhHans, 0) => format!("匹配：{matched}"),
+        (UiLocale::Ja, 0) => format!("一致：{matched} 件"),
+        (UiLocale::Ko, _) => format!("일치: {matched}개 · 미표시: {omitted}개"),
+        (UiLocale::En, _) => format!("Matched: {matched} · Not shown: {omitted}"),
+        (UiLocale::ZhHans, _) => format!("匹配：{matched} · 未显示：{omitted}"),
+        (UiLocale::Ja, _) => format!("一致：{matched} 件 · 未表示：{omitted} 件"),
     }
 }
 

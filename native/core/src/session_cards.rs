@@ -34,7 +34,7 @@ const SEARCH_HEIGHT: f64 = 24.0;
 const POPUP_HEIGHT: f64 = 24.0;
 const TOOLBAR_GAP: f64 = 6.0;
 const POPUP_GAP: f64 = 8.0;
-const SUMMARY_HEIGHT: f64 = 40.0;
+const SUMMARY_HEIGHT: f64 = 18.0;
 const HEADER_HEIGHT: f64 =
     SEARCH_HEIGHT + TOOLBAR_GAP + POPUP_HEIGHT + TOOLBAR_GAP + SUMMARY_HEIGHT;
 const SESSION_SORTS: [SessionSort; 3] = [
@@ -1528,8 +1528,14 @@ impl SessionCardsInner {
     }
 
     fn update_summary(&self, snapshot: &SessionSnapshot, visible_rows: bool) {
-        let summary = session_list_summary(self.locale, snapshot.matched, snapshot.omitted);
-        self.summary.setStringValue(&NSString::from_str(&summary));
+        let summary = NSString::from_str(&session_list_summary(
+            self.locale,
+            snapshot.matched,
+            snapshot.omitted,
+        ));
+        self.summary.setStringValue(&summary);
+        self.summary.setToolTip(Some(&summary));
+        set_accessibility_label(&self.summary, &summary);
 
         let empty_text = session_empty(self.locale, snapshot.total, snapshot.matched);
         self.empty.setStringValue(&NSString::from_str(empty_text));
@@ -1778,9 +1784,19 @@ impl SessionCards {
                 let _: () = msg_send![&*root.ivars().search, setDelegate: Some(&*root)];
             }
             root.restore_options();
-            let summary = label(&session_list_summary(locale, 0, 0), 10.0, mtm);
+            let summary_text = session_list_summary(locale, 0, 0);
+            let summary = label(&summary_text, 10.0, mtm);
+            let summary_text = NSString::from_str(&summary_text);
             summary.setAlignment(NSTextAlignment::Right);
             summary.setTextColor(Some(&palette_color(palette.muted, 1.0)));
+            summary.setUsesSingleLineMode(true);
+            summary.setMaximumNumberOfLines(1);
+            summary.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            if let Some(cell) = summary.cell() {
+                cell.setWraps(false);
+            }
+            summary.setToolTip(Some(&summary_text));
+            set_accessibility_label(&summary, &summary_text);
 
             let empty = label(session_empty(locale, 0, 0), 11.0, mtm);
             empty.setAlignment(NSTextAlignment::Center);

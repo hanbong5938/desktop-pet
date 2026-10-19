@@ -396,9 +396,10 @@ fn expanded_heights(
         + (cards_need - cards_share).min((surplus - cards_share - message_share).max(0.0));
     let message_extra = message_share
         + (message_need - message_share).min((surplus - cards_extra - message_share).max(0.0));
+    let message = message_floor + message_extra;
     ExpandedHeights {
-        cards: cards_floor + cards_extra,
-        message: message_floor + message_extra,
+        cards: (remaining - message).max(0.0),
+        message,
     }
 }
 
@@ -12132,6 +12133,11 @@ impl Ui {
                 .setTextColor(Some(&semantic_color(self.status_summary.status, surface)));
             self.status_label
                 .setStringValue(&NSString::from_str(&self.status_text));
+            self.status_label
+                .setToolTip(Some(&NSString::from_str(&self.status_text)));
+            if let Some(cell) = self.status_label.cell() {
+                set_accessibility_cell_text(&cell, &self.status_text, Some(&self.status_text));
+            }
         }
         set_attributed_field_text(
             &self.bubble,
@@ -17605,6 +17611,127 @@ mod tests {
     }
 
     #[test]
+    fn expanded_surplus_fills_cards_viewport_without_separating_toolbar() {
+        let spacing = ExpandedSpacing {
+            inset: BUBBLE_VERTICAL_INSET,
+            gap: BUBBLE_CONTENT_GAP,
+        };
+        for (body, expected_cards) in [(389.0, 283.0), (544.0, 438.0)] {
+            let slots = expanded_heights(body, 283.0, 40.0, 145.0, true, spacing);
+            assert!(close(slots.cards, expected_cards));
+            assert!(close(slots.message, 40.0));
+            let cards_bottom = spacing.inset + BUBBLE_CONTROL_HEIGHT + spacing.gap;
+            let content_top = body - spacing.inset;
+            let message_top = expanded_message_top(
+                content_top - STATUS_ROW_HEIGHT,
+                content_top,
+                true,
+                true,
+                spacing,
+            );
+            assert!(close(
+                message_top - slots.message - (cards_bottom + slots.cards),
+                4.0,
+            ));
+        }
+
+        for reply_height in [
+            0.0,
+            COMPOSER_READONLY_HEIGHT,
+            INPUT_ORIGIN_Y + 30.0 + BOTTOM_INSET,
+            INPUT_ORIGIN_Y + 50.0 + BOTTOM_INSET,
+        ] {
+            let minimum = minimum_selectable_height() + reply_height;
+            for show_status in [false, true] {
+                for message in [0.0, 18.0, 210.5] {
+                    for cards in [minimum - 25.0, minimum, minimum + 200.25] {
+                        let floor = expanded_height_budget(
+                            cards,
+                            minimum,
+                            show_status,
+                            message > 0.0,
+                            spacing,
+                        );
+                        let natural = floor
+                            - cards.min(minimum)
+                            - if message > 0.0 {
+                                BUBBLE_LINE_HEIGHT
+                            } else {
+                                0.0
+                            }
+                            + cards
+                            + message;
+                        for body in [0.0, floor - 1.0, floor, natural, natural + 155.0] {
+                            let live_spacing =
+                                expanded_spacing(body, cards, minimum, show_status, message > 0.0);
+                            let chrome = expanded_height_budget(
+                                cards,
+                                minimum,
+                                show_status,
+                                message > 0.0,
+                                live_spacing,
+                            ) - cards.min(minimum)
+                                - if message > 0.0 {
+                                    BUBBLE_LINE_HEIGHT
+                                } else {
+                                    0.0
+                                };
+                            let remaining = (body - chrome).max(0.0);
+                            let slots = expanded_heights(
+                                body,
+                                cards,
+                                message,
+                                minimum,
+                                show_status,
+                                live_spacing,
+                            );
+                            assert!(slots.cards.is_finite() && slots.message.is_finite());
+                            assert!(slots.cards >= 0.0);
+                            assert!(slots.message >= 0.0 && slots.message <= message + 1e-9);
+                            assert!(close(slots.cards + slots.message, remaining));
+                            let cards_floor = cards.min(minimum).min(remaining);
+                            assert!(slots.cards + 1e-9 >= cards_floor);
+                            if remaining <= cards.min(minimum) {
+                                assert!(close(slots.cards, remaining));
+                                assert!(close(slots.message, 0.0));
+                            } else if message > 0.0 {
+                                assert!(
+                                    slots.message + 1e-9
+                                        >= message
+                                            .min(BUBBLE_LINE_HEIGHT)
+                                            .min(remaining - cards_floor)
+                                );
+                            }
+                            if cards + message <= remaining + 1e-9 {
+                                assert!(slots.cards + 1e-9 >= cards);
+                                assert!(close(slots.message, message));
+                            }
+                            if body >= chrome && message > 0.0 {
+                                let cards_bottom =
+                                    live_spacing.inset + BUBBLE_CONTROL_HEIGHT + live_spacing.gap;
+                                let content_top = body - live_spacing.inset;
+                                let status_bottom =
+                                    content_top - if show_status { STATUS_ROW_HEIGHT } else { 0.0 };
+                                let message_top = expanded_message_top(
+                                    status_bottom,
+                                    content_top,
+                                    show_status,
+                                    true,
+                                    live_spacing,
+                                );
+                                assert!(close(
+                                    message_top - slots.message - (cards_bottom + slots.cards),
+                                    live_spacing.gap,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn expanded_natural_heights_share_one_screen_budget() {
         let minimum = minimum_selectable_height();
         for show_status in [false, true] {
@@ -17672,10 +17799,9 @@ mod tests {
             530.0
         );
         assert!(expanded_auto_height(230.0, 206.0, 300.0, 400.0, minimum, true) <= 206.0);
-        // A saved manual request bypasses the automatic 530pt ceiling; allocation
-        // also leaves surplus blank rather than stretching either document.
+        // A saved manual request bypasses the automatic 530pt ceiling.
         let manual = expanded_heights(850.0, 300.0, 400.0, minimum, true, spacing);
-        assert!(close(manual.cards, 300.0));
+        assert!(close(manual.cards, 384.0));
         assert!(close(manual.message, 400.0));
     }
 
