@@ -120,13 +120,86 @@ pub fn os_home() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Canonical standalone owner, rooted in the actual OS account home, never HOME or XDG.
+/// Fresh standalone destination, rooted in the actual OS account home, never HOME or XDG.
 pub fn standalone_bundle() -> Result<PathBuf, String> {
-    let mut path = os_home()?;
+    Ok(private_standalone_bundle_in(&os_home()?))
+}
+
+fn private_standalone_bundle_in(home: &Path) -> PathBuf {
+    let mut private = home.to_path_buf();
     for (name, _) in INSTALLATION_DIRECTORIES {
-        path.push(name);
+        private.push(name);
     }
-    Ok(path.join("DesktopPet.app"))
+    private.push("DesktopPet.app");
+    private
+}
+
+fn standalone_bundles_in(home: &Path) -> [PathBuf; 2] {
+    [
+        private_standalone_bundle_in(home),
+        home.join("Applications/DesktopPet.app"),
+    ]
+}
+
+pub(crate) fn standalone_bundles() -> Result<[PathBuf; 2], String> {
+    Ok(standalone_bundles_in(&os_home()?))
+}
+
+// The historical owner is upgrade-only: neither its parent nor its bundle may be created here.
+fn standalone_owner_parent_in(
+    home: &Path,
+    bundle: &Path,
+    create_private: bool,
+) -> Result<Option<PathBuf>, String> {
+    let [private, original] = standalone_bundles_in(home);
+    let parent = if bundle == private {
+        owned_directory_tree(home, &INSTALLATION_DIRECTORIES, create_private)?
+    } else if bundle == original {
+        physical_directory(home, false)?;
+        let parent = home.join("Applications");
+        physical_directory(&parent, false)?;
+        physical_directory(bundle, false)?;
+        Some(parent)
+    } else {
+        return Err("standalone owner is outside the two supported OS-home locations".into());
+    };
+    if exists(bundle)? {
+        physical_directory(bundle, false)?;
+    }
+    Ok(parent)
+}
+
+pub(crate) fn validate_standalone_owner(bundle: &Path) -> Result<(), String> {
+    standalone_owner_parent_in(&os_home()?, bundle, false).map(|_| ())
+}
+
+fn standalone_candidate_in(home: &Path) -> Result<Option<PathBuf>, String> {
+    let [private, original] = standalone_bundles_in(home);
+    match (exists(&private)?, exists(&original)?) {
+        (true, true) => Err(
+            "multiple standalone owners exist; select an explicit executable or verified locator"
+                .into(),
+        ),
+        (true, false) => Ok(Some(private)),
+        (false, true) => Ok(Some(original)),
+        (false, false) => Ok(None),
+    }
+}
+
+fn standalone_origin_in(
+    home: &Path,
+    current: Option<&InstallationRecord>,
+) -> Result<InstallOrigin, String> {
+    if let Some(current) = current.filter(|c| c.kind == InstallationKind::Standalone) {
+        if let InstallOrigin::Standalone { bundle } = &current.origin {
+            standalone_owner_parent_in(home, bundle, false)?;
+            return Ok(current.origin.clone());
+        }
+        return Err("standalone record differs from actual installation owner".into());
+    }
+    Ok(InstallOrigin::Standalone {
+        bundle: private_standalone_bundle_in(home),
+    })
 }
 
 pub fn locator_path() -> Result<PathBuf, String> {
@@ -905,10 +978,7 @@ fn inspect_neutral(executable: &Path) -> Result<InstallationRecord, String> {
         InstallOrigin::Standalone { bundle: selected } if selected == &app.bundle => {
             InstallationKind::Standalone
         }
-        _ => return Err(format!(
-            "executable has no supported verified installation owner; standalone installs must use {}. Existing installation preserved; no automatic move or adoption. Repair the locator only after an explicit installation-owner transition",
-            standalone_bundle()?.display()
-        )),
+        _ => return Err("executable has no supported verified installation owner".into()),
     };
     if executable_identity(&canonical)? != app.image {
         return Err("installation changed during origin verification".into());
@@ -937,8 +1007,8 @@ fn path_candidates(name: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Exact priority: explicit, private locator, PATH image, captured Brew prefix, OS-home app.
-/// Invalid explicit/locator selections fail closed rather than silently selecting another owner.
+/// Exact priority: explicit, private locator, PATH image, captured Brew prefix, OS-home apps.
+/// Invalid explicit/locator selections and ambiguous standalone fallback owners fail closed.
 pub fn discover(explicit: Option<&Path>) -> Result<Option<InstallationRecord>, String> {
     require_neutral()?;
     #[cfg(not(desktop_pet_legacy))]
@@ -959,18 +1029,19 @@ fn discover_neutral(explicit: Option<&Path>) -> Result<Option<InstallationRecord
     }
     if let Some(locator) = read_locator()? {
         if locator.kind == InstallationKind::Standalone {
-            let bundle = standalone_bundle()?;
+            let bundle = locator
+                .executable
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .ok_or("invalid standalone locator bundle")?;
+            validate_standalone_owner(bundle)?;
             if locator.executable != bundle.join("Contents/MacOS/desktop-pet") {
-                return Err(format!(
-                    "installation locator names a standalone owner outside the canonical destination {}. Existing installation preserved; no automatic move or adoption. An explicit installation-owner transition and locator repair are required before installing",
-                    bundle.display()
-                ));
+                return Err("invalid standalone locator executable layout".into());
             }
         }
-        let current = inspect_neutral(&locator.executable).map_err(|e| format!(
-            "invalid installation locator target: {e}. Standalone destination: {}. Existing installation preserved; no automatic move or adoption. Repair the locator only after an explicit installation-owner transition",
-            standalone_bundle().map_or_else(|error| error, |path| path.display().to_string())
-        ))?;
+        let current = inspect_neutral(&locator.executable)
+            .map_err(|e| format!("invalid installation locator target: {e}"))?;
         if current.kind != locator.kind {
             return Err("locator kind differs from actual installation owner".into());
         }
@@ -1041,9 +1112,8 @@ fn discover_neutral(explicit: Option<&Path>) -> Result<Option<InstallationRecord
             }
         }
     }
-    let candidate = standalone_bundle()?.join("Contents/MacOS/desktop-pet");
-    if exists(&candidate)? {
-        return inspect_neutral(&candidate).map(Some);
+    if let Some(bundle) = standalone_candidate_in(&os_home()?)? {
+        return inspect_neutral(&bundle.join("Contents/MacOS/desktop-pet")).map(Some);
     }
     Ok(None)
 }
@@ -1055,13 +1125,16 @@ pub fn install_request(path: &Path) -> Result<InstallationRecord, String> {
 }
 
 #[cfg(not(desktop_pet_legacy))]
-fn desired_origin(request: &InstallRequest) -> Result<InstallOrigin, String> {
+fn desired_origin(
+    request: &InstallRequest,
+    current: Option<&InstallationRecord>,
+) -> Result<InstallOrigin, String> {
     if request.version != 1 {
         return Err("unsupported install request version".into());
     }
     ensure_absolute(&request.staged_app)?;
     match (&request.kind, &request.source_root) {
-        (InstallationKind::Standalone, None) => Ok(InstallOrigin::Standalone { bundle: standalone_bundle()? }),
+        (InstallationKind::Standalone, None) => standalone_origin_in(&os_home()?, current),
         (InstallationKind::Source, Some(root)) => {
             origin::validate_source_root(root)?;
             if !request.staged_app.starts_with(root.join("dist")) { return Err("source stage must remain inside its exact core root/dist".into()); }
@@ -1074,14 +1147,8 @@ fn desired_origin(request: &InstallRequest) -> Result<InstallOrigin, String> {
 fn bundle_for_origin(origin: &InstallOrigin) -> Result<PathBuf, String> {
     match origin {
         InstallOrigin::Standalone { bundle } => {
-            let canonical = standalone_bundle()?;
-            if bundle != &canonical {
-                return Err(format!(
-                    "standalone owner is not the canonical destination {}. Existing installation preserved; no automatic move or adoption. An explicit installation-owner transition is required",
-                    canonical.display()
-                ));
-            }
-            Ok(canonical)
+            validate_standalone_owner(bundle)?;
+            Ok(bundle.clone())
         }
         InstallOrigin::Source { root } => Ok(root.join("dist/DesktopPet.app")),
         _ => Err("only source or standalone bundles can be atomically installed".into()),
@@ -1131,12 +1198,14 @@ pub fn install(request: &InstallRequest) -> Result<InstallationRecord, String> {
 
 #[cfg(not(desktop_pet_legacy))]
 fn install_neutral(request: &InstallRequest) -> Result<InstallationRecord, String> {
-    let desired = desired_origin(request)?;
+    let initial = desired_origin(request, None)?;
     let staged = validate_staged_app(&request.staged_app)?;
-    check_source_revision(&staged, &desired)?;
+    check_source_revision(&staged, &initial)?;
     let mut admission = protocol::admit_installation_reuse(|| {
+        let current = discover(None)?;
+        let desired = desired_origin(request, current.as_ref())?;
         let mut roots = vec![physical_install_root(&desired)?.to_path_buf()];
-        if let Some(current) = discover(None)? {
+        if let Some(current) = current {
             roots.push(physical_install_root(&current.origin)?.to_path_buf());
         }
         Ok(roots)
@@ -1153,6 +1222,11 @@ fn install_neutral(request: &InstallRequest) -> Result<InstallationRecord, Strin
             _lock = install_lock()?;
             current = discover(None)?;
         }
+    }
+    // Selection is authoritative only after both the admission fences and installation lock.
+    let desired = desired_origin(request, current.as_ref())?;
+    if !admission.holds_root(physical_install_root(&desired)?) {
+        return Err("desired installation owner changed outside the fenced roots".into());
     }
     if let Some(current) = &current {
         if !admission.holds_root(physical_install_root(&current.origin)?) {
@@ -1778,13 +1852,13 @@ pub fn replace_standalone_coordinated(
     intent_path: &Path,
 ) -> Result<RetainedReplacement, String> {
     protocol::validate_operation_id(operation_id)?;
-    let desired = InstallOrigin::Standalone {
-        bundle: standalone_bundle()?,
-    };
-    if current.kind != InstallationKind::Standalone || current.origin != desired {
+    if current.kind != InstallationKind::Standalone
+        || !matches!(current.origin, InstallOrigin::Standalone { .. })
+    {
         return Err("coordinated replacement requires the same standalone owner".into());
     }
     let _lock = install_lock()?;
+    bundle_for_origin(&current.origin)?;
     let selected = discover(None)?;
     if selected
         .as_ref()
@@ -1838,10 +1912,10 @@ fn replace_bundle_inner(
     let target = bundle_for_origin(desired)?;
     let parent = target.parent().ok_or("bundle has no parent")?;
     if matches!(desired, InstallOrigin::Standalone { .. }) {
-        let directory = owned_directory_tree(&os_home()?, &INSTALLATION_DIRECTORIES, true)?
+        let directory = standalone_owner_parent_in(&os_home()?, &target, true)?
             .ok_or("missing standalone installation directory")?;
         if directory != parent {
-            return Err("standalone installation parent differs from canonical owner".into());
+            return Err("standalone installation parent differs from selected owner".into());
         }
     } else {
         create_directory(parent, false)?;
@@ -3004,6 +3078,7 @@ mod replacement_boundary_tests {
     fn executable(bundle: &Path, bytes: &[u8]) -> PathBuf {
         let directory = bundle.join("Contents/MacOS");
         fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(bundle, fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.join("desktop-pet");
         fs::write(&path, bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -3013,7 +3088,9 @@ mod replacement_boundary_tests {
 
     fn fixture() -> (tempfile::TempDir, ReplacementIntent) {
         let temporary = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(temporary.path()).unwrap();
+        let home = fs::canonicalize(temporary.path()).unwrap();
+        let root = home.join("Applications");
+        create_directory(&root, false).unwrap();
         let target = root.join("DesktopPet.app");
         let work = temporary_directory(&root, ".desktop-pet-install").unwrap();
         let prepared = work.join("DesktopPet.app");
@@ -3075,6 +3152,15 @@ mod replacement_boundary_tests {
         // a simulated exchange result or an assertion about implementation text.
         for boundary in 0..5 {
             let (_temporary, intent) = fixture();
+            let home = fs::canonicalize(_temporary.path()).unwrap();
+            assert_eq!(
+                standalone_owner_parent_in(&home, &intent.target, true).unwrap(),
+                intent.target.parent().map(Path::to_path_buf)
+            );
+            assert_eq!(
+                standalone_origin_in(&home, intent.original.as_ref()).unwrap(),
+                intent.origin
+            );
             if boundary >= 1 {
                 atomic_owned_file(&sidecar_path(&intent.target), &intent.candidate_sidecar)
                     .unwrap();
@@ -3134,6 +3220,15 @@ mod replacement_boundary_tests {
             // Reconciliation is idempotent and does not retire the retained old closure.
             reconcile_replacement_metadata(&intent, swapped).unwrap();
             assert!(expected_old.join("Contents/resource").is_file());
+            assert_eq!(
+                standalone_owner_parent_in(&home, &intent.target, true).unwrap(),
+                intent.target.parent().map(Path::to_path_buf)
+            );
+            assert_eq!(
+                standalone_origin_in(&home, intent.original.as_ref()).unwrap(),
+                intent.origin
+            );
+            assert!(!home.join(".local").exists());
         }
     }
 
@@ -3315,6 +3410,146 @@ mod installation_directory_tests {
                 mode
             );
             assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        }
+    }
+
+    fn selected(bundle: PathBuf) -> InstallationRecord {
+        let executable = bundle.join("Contents/MacOS/desktop-pet");
+        InstallationRecord {
+            version: 1,
+            executable: executable.clone(),
+            kind: InstallationKind::Standalone,
+            app_version: "0.4.13-beta.7".into(),
+            protocol: 4,
+            observation_mode: 2,
+            integration_api: 1,
+            origin: InstallOrigin::Standalone { bundle },
+            image: ExecutableIdentity {
+                path: executable,
+                sha256: "a".repeat(64),
+            },
+        }
+    }
+
+    #[test]
+    fn standalone_selection_retains_exact_original_but_defaults_to_private() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temporary.path()).unwrap();
+        let [private, original] = standalone_bundles_in(&home);
+        assert_eq!(standalone_candidate_in(&home).unwrap(), None);
+        assert_eq!(
+            standalone_origin_in(&home, None).unwrap(),
+            InstallOrigin::Standalone {
+                bundle: private.clone()
+            }
+        );
+        assert_eq!(
+            standalone_bundle().unwrap(),
+            os_home()
+                .unwrap()
+                .join(".local/share/desktop-pet/libexec/DesktopPet.app")
+        );
+        assert!(standalone_owner_parent_in(&home, &original, true).is_err());
+        assert!(!home.join("Applications").exists());
+        create_directory(&home.join("Applications"), false).unwrap();
+        assert!(standalone_owner_parent_in(&home, &original, true).is_err());
+        assert!(!original.exists());
+        create_directory(&original, false).unwrap();
+        fs::set_permissions(home.join("Applications"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o755)).unwrap();
+        let current = selected(original.clone());
+        assert_eq!(
+            standalone_candidate_in(&home).unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(
+            standalone_origin_in(&home, Some(&current)).unwrap(),
+            current.origin
+        );
+        assert_eq!(
+            standalone_owner_parent_in(&home, &original, true).unwrap(),
+            Some(home.join("Applications"))
+        );
+        assert!(!home.join(".local").exists());
+        let parent = standalone_owner_parent_in(&home, &private, true)
+            .unwrap()
+            .unwrap();
+        create_directory(&private, false).unwrap();
+        assert!(standalone_candidate_in(&home).is_err());
+        // An already selected owner remains exact even when fallback discovery is ambiguous.
+        assert_eq!(
+            standalone_origin_in(&home, Some(&current)).unwrap(),
+            current.origin
+        );
+        let private_owner = selected(private.clone());
+        assert_eq!(
+            standalone_origin_in(&home, Some(&private_owner)).unwrap(),
+            private_owner.origin
+        );
+        fs::remove_dir(&original).unwrap();
+        assert_eq!(standalone_candidate_in(&home).unwrap(), Some(private));
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn standalone_selection_rejects_other_homes_custom_system_and_mismatched_owners() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temporary.path()).unwrap();
+        for bundle in [
+            home.join("DesktopPet.app"),
+            home.join("custom/DesktopPet.app"),
+            home.join("Applications/Other.app"),
+            home.join("another-home/Applications/DesktopPet.app"),
+            PathBuf::from("/Applications/DesktopPet.app"),
+            PathBuf::from("Applications/DesktopPet.app"),
+        ] {
+            assert!(standalone_owner_parent_in(&home, &bundle, true).is_err());
+            assert!(standalone_origin_in(&home, Some(&selected(bundle))).is_err());
+        }
+        let mut mismatch = selected(standalone_bundles_in(&home)[0].clone());
+        mismatch.origin = InstallOrigin::Source { root: home.clone() };
+        assert!(standalone_origin_in(&home, Some(&mismatch)).is_err());
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn original_owner_rejects_symlinked_or_writable_parent_and_bundle_without_repair() {
+        for at_bundle in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(temporary.path()).unwrap();
+            let original = standalone_bundles_in(&home)[1].clone();
+            let applications = home.join("Applications");
+            let external = home.join("external");
+            create_directory(&external, false).unwrap();
+            let link = if at_bundle {
+                create_directory(&applications, false).unwrap();
+                original.clone()
+            } else {
+                applications.clone()
+            };
+            symlink(&external, &link).unwrap();
+            assert!(standalone_owner_parent_in(&home, &original, true).is_err());
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
+            fs::remove_file(&link).unwrap();
+            if !at_bundle {
+                create_directory(&applications, false).unwrap();
+            }
+            create_directory(&original, false).unwrap();
+            let unsafe_directory = if at_bundle { &original } else { &applications };
+            fs::set_permissions(unsafe_directory, fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(standalone_owner_parent_in(&home, &original, true).is_err());
+            assert_eq!(
+                fs::metadata(unsafe_directory).unwrap().permissions().mode() & 0o777,
+                0o777
+            );
+            assert!(!home.join(".local").exists());
         }
     }
 }

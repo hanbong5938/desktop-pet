@@ -70,17 +70,17 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-**현재 소스의 private 설치 경로:** Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG로 바꾸지 않습니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 설치기·동결 노트는 각 버전의 기록이며 옛 설치기 재실행으로 잘못된 목적지가 복구되지 않습니다.
+**현재 beta.11 소유자 정책:** 새 Standalone 설치는 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG와 무관합니다. 완전히 검증된 기존 원래 OS-home `Applications/DesktopPet.app`은 이동하지 않고 **그 자리에서 업데이트**합니다. Applications 신규 설치·임의 home/custom/system 경로·symlink 우회 인수는 허용하지 않습니다. Brew/source 소유자는 유지하며 과거 설치기·동결 노트는 역사적 범위를 유지합니다.
 
-### 일회성 Applications 복구
+### 기존 Applications 소유자: 명시적 beta.11 bootstrap
 
-일회성 복구는 **Bash로 비공개 제공**하며 배포 제품 기능·native 복구 명령·자동 updater·플러그인 기능이 아닙니다. 이전 공개 Python 복구 스크립트와 checksum 자산은 철회됐습니다. 과거 beta.8 릴리스 노트와 보존된 과거 checksum manifest는 당시 게시 기록이며 현재 지원 다운로드·실행 절차가 아닙니다. 새 릴리스·버전 변경은 없습니다.
+Beta.10은 기존 Applications 소유자 문제를 **해결하지 못했습니다**. 배포된 beta.7 checker는 스스로 코드를 바꿀 수 없으므로 명시적 beta.11 설치기 bootstrap 한 번이 필요합니다. beta.11이 실제 게시된 뒤 [beta.11 릴리스 노트](releases/v0.4.13-beta.11.md#explicit-bootstrap-from-beta7-or-another-old-version)의 다운로드·checksum 검증·명시적 Bash 실행 명령을 따르세요. 옛 설치기를 재실행하지 마세요. 철회한 Python 복구 스크립트는 계속 철회 상태입니다.
 
-문제가 있는 설치에 비공개 제공된 Bash 절차를 사용하고 **저장된 Tern SDK KV의 원래 config/state 쌍**을 유지하세요. 인자 없는 앱 실행·기본 프로필 추측·adopt·병합·예시 경로 대입을 하지 마세요. 원본 전체 앱/sidecar·locator·KV bytes·프로필 데이터·백업을 보존하고 변경 전에 실제 owner/image와 private 목적지를 검증하세요. Brew/source/custom 경로를 몰래 인수하지 않습니다.
+원래 실행 경로·저장된 Tern SDK KV의 정확한 config/state 쌍·locator·KV bytes·캐릭터·프로필 데이터를 보존합니다. 인자 없는 앱 시작·기본값 추측·프로필 adopt/병합·Configure/Connect를 하지 마세요. 서명된 이전 앱과 transaction backup도 보존합니다.
 
-**Pet의 미저장 편집을 먼저 저장하세요.** 검증된 정확한 Pet 프로필만 중지할 수 있으며 Tern/창/터미널/agent와 작업은 계속 실행해야 합니다. 재연결 실패를 감추기 위한 plugin reload·Configure/Connect는 하지 마세요. 수동 Start는 원래 프로필과 검증된 context를 쓰는 별도의 명시적 선택이지 updater reservation 권한이 아닙니다. 추가 사용자 Stop은 재시작을 막아야 합니다.
+**Pet의 미저장 편집을 먼저 저장하세요.** 별도의 명시적 native 동의와 version/signature/owner/client-contract/reservation/profile 검증은 그대로 필요합니다. 사용자 **Stop**이 우선하여 재시작을 막습니다. Tern·창·터미널·agent·작업은 계속 실행하며 Tern 재시작·plugin reload는 하지 않습니다.
 
-설치·native readiness·실제 같은 Tern 창 재연결은 별개 결과입니다. 소스·fixture·dry-run은 문제가 있는 Mac의 복구 성공 증거가 아닙니다. 불확실하면 근거와 old/new/backup 경로를 보존하고 옛 설치기 재실행·변경된 경로/KV 덮어쓰기·백업 삭제·인자 없는 시작을 하지 마세요.
+설치·native readiness·실제 같은 Tern 창 연속성은 별개입니다. 최종 beta.11 검증과 해당 사용자 수락은 **대기 중**이며 실제 관찰 전에는 beta.7 업그레이드·복구 성공을 주장하지 않습니다. 실패 시 근거·백업을 보존하고 KV 덮어쓰기·재연결로 실패 숨기기를 하지 마세요.
 
 ### 과거 고정 설치 예시
 
@@ -280,7 +280,7 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 현재 소스에서 업데이트 옵션은 처음에 접혀 있습니다.
 
-**미출시 수정:** 검증된 private Standalone 설치에서는 **베타 업데이트 받기**를 켠 뒤 별도 네이티브 업데이트 동의로 더 최신 공식 베타를 설치할 수 있습니다. 안정판 전용 정책은 베타 설치를 거절하고 Homebrew는 안정판 포뮬러만 유지합니다. 이미 배포된 beta.7/beta.9의 업데이트 코드가 소급 변경되거나 옛 Applications 설치·원래 프로필·Tern 연동이 자동 복구되는 것은 아닙니다.
+**Beta.11 수정:** 검증된 private Standalone과 정확한 기존 원래 OS-home Applications 소유자가 같은 명시적 동의·서명 업데이트 transaction을 사용하며 Applications는 그 자리에서 갱신합니다. **베타 업데이트 받기**와 별도 native 동의가 필요하고 안정판 전용·Homebrew 제한은 유지합니다. beta.7 코드는 스스로 바뀌지 않으므로 실제 게시 후 위의 검증된 beta.11 설치기로 한 번 bootstrap하세요. 경로/config/state/KV는 그대로이며 Tern 재시작·reload는 없습니다. 최종 검증·실제 사용자 성공은 대기 중입니다.
 
 앱 내 업데이트를 사용할 수 없어도 기존 설정과 캐릭터를 삭제하지 마세요. **공식 설치 안내 열기**는 검증된 릴리스의 공식 페이지를 엽니다. 설명 없는 압축파일 다운로드나 설치기 자동 실행이 아닙니다. 실제 설치 소유자에 맞는 절차를 사용하고 프로필 삭제·옛 설치기 재실행·추측한 기본 경로로 시작하지 마세요. Tern 제어 오류는 이제 `alpha_passthrough` 스키마 오류가 아닌 실제 백엔드 원인을 보여줍니다. 일반 상태·오류 응답은 fresh binding 증명으로 인정하지 않습니다.
 

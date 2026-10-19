@@ -36,8 +36,8 @@ try {
 const packageVersion = typeof packageJson.version === "string"
   ? packageJson.version
   : fail("package version must be a semantic version");
-if (packageVersion !== "0.4.13-beta.10") {
-  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.13-beta.10 core revision");
+if (packageVersion !== "0.4.13-beta.11") {
+  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.13-beta.11 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");

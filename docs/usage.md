@@ -70,17 +70,17 @@ Apple Silicon Mac, macOS 13+. Source builds require Rust/Cargo, Bun, Node.js/npm
 
 ## Installation and optional integrations
 
-**Current-source private installation path:** Standalone uses the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. Brew retains its verified formula prefix’s `libexec/DesktopPet.app`; source retains the exact core checkout’s `dist/DesktopPet.app`. Ordinary installation does not relocate an existing Applications owner. Published installers and frozen release notes retain their original version scope; rerunning an old installer does not repair its Applications destination.
+**Current beta.11 owner policy:** Fresh Standalone installation uses the actual OS account home's `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. A fully validated existing original OS-home `Applications/DesktopPet.app` is preserved and upgraded **in place**, not relocated. No new Applications installation or arbitrary home/custom/system/symlink takeover is allowed. Brew and source retain their owners. Frozen older installers and release notes keep their historical scope.
 
-### One-time Applications recovery
+### Existing Applications owner: explicit beta.11 bootstrap
 
-One-time recovery is provided **privately as Bash**, not as a distributed product feature, native repair command, automatic updater or plugin feature. The previously published Python recovery script and its checksum asset have been withdrawn. Historical beta.8 release notes and the retained historical checksum manifest describe the original publication, not a supported download or current recovery procedure. This withdrawal does not introduce a release or version bump.
+Beta.10 did **not** fix the existing Applications owner. The old beta.7 checker cannot modify its own published code: one explicit beta.11 installer bootstrap is necessary. After beta.11 is actually published, follow the checksum-verified download and explicit Bash commands in the [beta.11 release notes](releases/v0.4.13-beta.11.md#explicit-bootstrap-from-beta7-or-another-old-version). Do not rerun an old installer. The withdrawn Python recovery script remains withdrawn.
 
-Use the privately supplied Bash procedure for the affected installation, with the **exact original config/state pair from saved Tern SDK KV**. Do not launch the app without arguments, guess a default, adopt or merge profiles, or substitute example paths. Preserve the full original app/sidecar, locator, KV bytes, profile data and backups. Verify the actual owner/image and intended private destination before changing anything; Brew/source/custom routes must not be silently taken over.
+Preserve the original executable path, exact original config/state pair from saved Tern SDK KV, locator, KV bytes, characters and profile data. Do not launch the app without arguments, guess defaults, adopt/merge profiles, or use Configure/Connect. The signed previous app and transaction backup remain retained.
 
-**Save unsaved Pet edits first.** Recovery may stop only the verified Desktop Pet profile; Tern, its windows, terminals and agents must keep running. Do not force a plugin reload or use Configure/Connect to conceal a failed reconnection. A manual Start is a separate explicit choice using the original profile and verified context, not updater reservation authority. An additional user Stop must prevent restart.
+**Save unsaved Pet edits first.** Replacement still requires separate explicit native consent and all version, signature, owner, client-contract, reservation and profile guards. User **Stop** wins and prevents restart. Tern, its windows, terminals, agents and work stay running: no Tern restart or plugin reload.
 
-Installation, native readiness and actual same-window Tern reconnection are separate outcomes. Source code, fixtures and dry-runs do not prove recovery on the affected Mac. If anything is uncertain, preserve the reported evidence and old/new/backup paths; do not blindly rerun an old installer, overwrite changed paths/KV, delete backups or launch with no arguments.
+Installation, native readiness and actual same-window Tern continuity are separate outcomes. Final beta.11 gates and affected-user acceptance are **pending**; no successful beta.7 upgrade or user recovery is claimed until observed. Preserve evidence and backups on failure; do not overwrite KV or conceal failure by reconnecting.
 
 ### Historical pinned installation examples
 
@@ -278,7 +278,7 @@ Native `settings get`, `settings set auto_start off`, and `settings set exit_wit
 
 In current source, update options start collapsed.
 
-**Unreleased correction:** verified private Standalone installations can install a newer official beta after **Receive beta updates** is enabled and a separate native update consent is given. Stable-only policy still rejects beta targets; Homebrew remains stable-formula-only. This does not retrofit the updater in published beta.7/beta.9, relocate an old Applications owner, change the original profile or repair Tern automatically.
+**Beta.11 correction:** verified private Standalone and exact existing original OS-home Applications owners support the same consented signed update transaction; Applications upgrades stay in place. Enable **Receive beta updates** for newer official betas and give separate native consent. Stable-only and Homebrew stable-formula restrictions remain. Published beta.7 code cannot self-modify; use the explicit verified beta.11 installer bootstrap above once published. Path/config/state/KV remain unchanged; Tern is not restarted or reloaded. Final gates and actual affected-user success remain pending.
 
 If in-app update is unavailable, keep existing settings and characters. **Open official install instructions** opens the validated release's official page, not an unexplained archive or an automatically executed installer. Follow the procedure for the actual installation owner; do not delete profiles, rerun an old installer or start with guessed/default paths. A Tern control error is now shown as its actual backend diagnostic rather than an `alpha_passthrough` schema error; ordinary status/error responses never count as fresh binding evidence.
 

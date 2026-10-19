@@ -292,12 +292,9 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
     if request.kind != InstallationKind::Standalone {
         return raw(&request, false);
     }
-    let desired = InstallOrigin::Standalone {
-        bundle: installation::standalone_bundle()?,
-    };
     if request.source_root.is_some()
         || original.kind != InstallationKind::Standalone
-        || original.origin != desired
+        || !matches!(original.origin, InstallOrigin::Standalone { .. })
     {
         return Err("healthy installation belongs to another owner; explicit manager transition is required".into());
     }

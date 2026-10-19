@@ -4751,6 +4751,7 @@ mod tests {
         ctx.running_origin = Some(Box::new(plan.target.origin.clone()));
         ctx.instance_id = "current-runtime".into();
         let listener = UnixListener::bind(&plan.profiles[0].control_socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         fs::set_permissions(
             &plan.profiles[0].control_socket,
             fs::Permissions::from_mode(0o600),
@@ -4761,7 +4762,21 @@ mod tests {
         let server = thread::spawn(move || {
             let ready = false;
             for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "retained readiness request did not arrive"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("retained readiness accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();

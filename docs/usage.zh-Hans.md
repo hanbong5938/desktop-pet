@@ -70,17 +70,17 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-**当前源码的 private 安装路径：**Standalone 使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会移动旧 Applications owner。公开安装器与冻结说明保留各自版本范围；重跑旧安装器不能修复错误目标。
+**当前 beta.11 所有者策略：**全新 Standalone 安装使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 影响。完全验证的原有 OS-home `Applications/DesktopPet.app` **原位升级**，不迁移。禁止新增 Applications 安装或接管任意 home/custom/system 路径及 symlink 绕过。Brew/source 保留所有者，旧安装器与冻结记录保留历史范围。
 
-### One-time Applications recovery
+### 现有 Applications 所有者：明确 beta.11 bootstrap
 
-一次性恢复以 **Bash 私下提供**，不是分发的产品功能、native 修复命令、自动 updater 或插件功能。此前公开的 Python 恢复脚本及 checksum 资产已撤回。历史 beta.8 发行说明与保留的历史 checksum manifest 记录原始发布，不是当前支持的下载或恢复步骤。没有新版本发布或版本号变更。
+Beta.10 **没有修复**现有 Applications 所有者问题。已发布 beta.7 checker 无法自行修改代码，必须明确执行一次 beta.11 安装器 bootstrap。beta.11 实际发布后，请按 [beta.11 发行说明](releases/v0.4.13-beta.11.md#explicit-bootstrap-from-beta7-or-another-old-version)下载、验证 checksum，再明确执行 Bash 命令。不要重跑旧安装器。已撤回 Python 恢复脚本仍保持撤回。
 
-针对受影响的安装使用私下提供的 Bash 步骤，保留**已保存 Tern SDK KV 的原始 config/state 两个路径**。不要无参数启动、猜测默认值、adopt、合并或代入示例路径。保留原始完整 app/sidecar、locator、KV bytes、profile 数据及备份；修改前验证实际 owner/image 和 private 目标。不得暗中接管 Brew/source/custom 路径。
+保留原执行路径、已保存 Tern SDK KV 的精确 config/state 对、locator、KV bytes、角色和 profile 数据。不要无参数启动、猜测默认值、adopt/合并配置或使用 Configure/Connect。保留签名旧 app 和 transaction backup。
 
-**先保存 Pet 未保存的编辑。** 只能停止已验证精确 profile 的 Pet；Tern/窗口/terminal/agent 与工作应继续运行。不要用 plugin reload 或 Configure/Connect 掩盖重连失败。手动 Start 是使用原始 profile 和已验证 context 的单独明确选择，不是 updater reservation 权限。额外用户 Stop 必须阻止重启。
+**先保存 Pet 未保存编辑。** 仍需单独明确 native 同意及全部 version/signature/owner/client-contract/reservation/profile 检查。用户 **Stop** 优先并阻止重启。Tern、窗口、terminal、agent 与工作继续运行；不重启 Tern 或 reload 插件。
 
-安装、native readiness 与实际同一 Tern 窗口重连是不同结果。源码、fixture 和 dry-run 不能证明受影响 Mac 恢复成功。不确定时保留证据与 old/new/backup 路径；不要盲目重跑旧 installer、覆盖已变路径/KV、删除备份或无参数启动。
+安装、native readiness 和实际同一 Tern 窗口连续性是不同结果。最终 beta.11 验证与受影响用户验收仍**待完成**，实际观察前不声称 beta.7 升级或恢复成功。失败时保留证据与备份，不覆盖 KV 或用重新连接掩盖失败。
 
 ### 历史固定安装示例
 
@@ -268,7 +268,7 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 应用内更新
 
-**未发布修正：**已验证的 private Standalone 安装启用测试版更新并另行明确同意原生更新后，可以安装更新的官方测试版。仅稳定版策略仍拒绝测试版，Homebrew 仍限稳定版公式。此修正不会追溯修改已发布 beta.7/beta.9 的更新代码，也不会自动修复旧 Applications 所有者、原配置或 Tern 连接。
+**Beta.11 修正：**已验证 private Standalone 与精确原有 OS-home Applications 所有者使用同一明确同意的签名更新 transaction，Applications 原位升级。仍需开启测试版更新并另行 native 同意，稳定版及 Homebrew 限制不变。beta.7 代码不能自行修改，实际发布后须执行上述已验证 beta.11 安装器 bootstrap。路径/config/state/KV 不变，不重启或 reload Tern。最终验证与真实用户成功仍待完成。
 
 应用内更新不可用时，请保留现有设置和角色。**打开官方安装说明**会打开已验证版本的官方页面，不会只下载没有说明的压缩包或自动执行安装器。请按实际安装方式操作，不要删除配置、重跑旧安装器或猜测默认路径。Tern 控制错误现在显示实际后端诊断，而非 `alpha_passthrough` 模式错误；普通状态／错误响应绝不作为 fresh binding 证据。
 

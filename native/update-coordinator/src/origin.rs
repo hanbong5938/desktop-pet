@@ -1,9 +1,9 @@
 //! Neutral installation ownership. Integration provenance is never install authority.
 use crate::{
-    ensure_absolute, executable_identity, identity, installation::standalone_bundle, now,
-    owned_file, releases, validate_candidate_for_context, CheckSnapshot, CheckStatus,
-    ExecutableIdentity, InstallOrigin, ReleaseCandidate, ReleaseTarget, UpdateAction,
-    UpdateContext, UpdatePlan, UpdatePolicy, VerifiedInstallation,
+    ensure_absolute, executable_identity, identity, now, owned_file, releases,
+    validate_candidate_for_context, CheckSnapshot, CheckStatus, ExecutableIdentity, InstallOrigin,
+    ReleaseCandidate, ReleaseTarget, UpdateAction, UpdateContext, UpdatePlan, UpdatePolicy,
+    VerifiedInstallation,
 };
 use semver::Version;
 use serde_json::Value;
@@ -206,8 +206,11 @@ pub(crate) fn origin_for_executable(
     if let Some(origin) = brew_origin(&path)? {
         return Ok(origin);
     }
-    let bundle = standalone_bundle()?;
-    if app_binary(&bundle) == path && normalized(&bundle)? == bundle {
+    for bundle in crate::installation::standalone_bundles()? {
+        if app_binary(&bundle) != path {
+            continue;
+        }
+        crate::installation::validate_standalone_owner(&bundle)?;
         let fresh;
         let proof = match validated {
             Some(app) if app.bundle == bundle => app,
@@ -416,10 +419,8 @@ pub fn validate_plan_target(plan: &UpdatePlan) -> Result<(), String> {
         return Err("release target changes policy, manager, physical root or precedence".into());
     }
     match (&plan.origin, &plan.action) {
-        (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace)
-            if *bundle == standalone_bundle()? =>
-        {
-            Ok(())
+        (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace) => {
+            crate::installation::validate_standalone_owner(bundle)
         }
         (InstallOrigin::Homebrew { formula, .. }, UpdateAction::HomebrewUpgrade)
             if *formula == format!("{OFFICIAL_TAP}{STABLE_FORMULA}")
@@ -1060,7 +1061,7 @@ mod tests {
     fn standalone_installation_requires_an_approved_exact_target() {
         let c = context();
         let origin = InstallOrigin::Standalone {
-            bundle: standalone_bundle().unwrap(),
+            bundle: crate::installation::standalone_bundle().unwrap(),
         };
         let plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
         assert!(validate_plan_target(&plan).is_err());
@@ -1071,7 +1072,7 @@ mod tests {
         let mut c = context();
         c.version = "0.4.13-beta.7".into();
         let origin = InstallOrigin::Standalone {
-            bundle: standalone_bundle().unwrap(),
+            bundle: crate::installation::standalone_bundle().unwrap(),
         };
         let mut plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
         let version = "0.4.13-beta.9";
@@ -1110,6 +1111,29 @@ mod tests {
             bundle: "/tmp/other-owner/DesktopPet.app".into(),
         };
         assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        let original = InstallOrigin::Standalone {
+            bundle: crate::installation::os_home()
+                .unwrap()
+                .join("Applications/DesktopPet.app"),
+        };
+        plan.target.as_mut().unwrap().origin = original.clone();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.origin = original;
+        assert!(validate_plan_target(&plan).is_err());
+        for forbidden in [
+            "/Applications/DesktopPet.app",
+            "/tmp/other-home/Applications/DesktopPet.app",
+            "/tmp/custom/DesktopPet.app",
+        ] {
+            plan = approved.clone();
+            plan.origin = InstallOrigin::Standalone {
+                bundle: forbidden.into(),
+            };
+            plan.target.as_mut().unwrap().origin = plan.origin.clone();
+            assert!(validate_plan_target(&plan).is_err());
+        }
         plan = approved.clone();
         plan.origin = InstallOrigin::Standalone {
             bundle: "/tmp/other-owner/DesktopPet.app".into(),
