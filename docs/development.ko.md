@@ -1,5 +1,20 @@
 # Desktop Pet
 
+## rig CPU 및 숨김 host 검사
+
+beta.9의 rig 변경은 표시 60 Hz를 유지하고 active-hidden의 지속적인 surface 작업만 중단합니다. 후보 준비·명시적 preview·일회성 모델/복구 준비는 허용하고 말풍선/provider는 독립적으로 동작합니다. Hair powers는 Float 양자화와 논리 quota를 유지하며 순증가 payload 상한은 모델당 640 KiB입니다(array/allocator 제외).
+
+수정 전 실제 소스 바이트를 보존하세요. CPU runner는 양쪽에 동일한 현재 production consumer·생성 limits·컴파일러·SDK·release flags를 사용합니다. 모든 정점/alpha/hit bit pattern의 정확한 일치와 의미/자원 회귀를 검사하고 12쌍 교대 벤치마크·checksum·생성 시간·별도 process RSS를 기록합니다. 기준선이 없으면 회귀만 검사하고 성능 개선을 주장하지 않습니다.
+
+```sh
+node scripts/check-rig-deformation.mjs --baseline-source "$BASELINE_SOURCE" --output "$WORK/rig-cpu"
+node scripts/check-rig-host-visibility.mjs --source "$PWD" \
+  --runtime "$PWD/native/target/neutral/rig-native/release" \
+  --assets "$PWD/assets/rubelia-default" --expect hidden-stopped --output "$WORK/rig-host"
+```
+
+runtime을 먼저 빌드합니다. 절대 경로와 새/빈 출력 디렉터리만 허용합니다. host runner는 서명 worker/resources를 복사하고 실제 AppKit/Metal로 초기 준비·동기화한 숨김 경합·재표시·preview·복구·취소·catalog 전환을 검사합니다. `--expect existing-hidden-render`와 `--source "$BASELINE_SOURCE"`로 옛 동작을 재현합니다. GUI/Metal/drawable 실패는 skip-success가 아니라 명시적 실패입니다. `RIG_HOST_VISIBILITY_CHECKS` 계측은 shipping binary에 없습니다. [beta.9 범위와 검증 한계](releases/v0.4.13-beta.9.md)를 참고하세요.
+
 
 **현재 후속판: Core v0.4.12 / genuine bridge v0.3.16 — 아직 검증·공개되지 않았습니다.** Core v0.4.11은 release `414563938`, 공개 시각 `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`으로 공개되었고 6개 공개 자산을 독립 검증했습니다. 별도 Wiki 작업은 `WIKI_PUBLISH_TOKEN`이 없었습니다. Genuine bridge v0.3.15 CI `38855045701`은 성공했지만 태그·릴리스는 공개되지 않았습니다. 공개 출처 검증은 과거 이관 복구 수락 검증이 아닙니다. See [current successor ledger](releases/v0.4.12.md).
 

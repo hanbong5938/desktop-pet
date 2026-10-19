@@ -3,7 +3,7 @@ name: Release Desktop Pet
 on:
   push:
     tags:
-      - "v0.4.13-beta.8"
+      - "v0.4.13-beta.9"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.13-beta.8'
+    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.13-beta.9'
     runs-on: macos-15
     permissions:
       contents: write
@@ -54,7 +54,7 @@ jobs:
           version="${tag#v}"
           # This approved self-contained installer is pinned, never a mutable
           # latest script or a host manifest-derived app version.
-          [[ "$tag" == v0.4.13-beta.8 && "$version" == 0.4.13-beta.8 ]]
+          [[ "$tag" == v0.4.13-beta.9 && "$version" == 0.4.13-beta.9 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
@@ -77,6 +77,7 @@ jobs:
           set -euo pipefail
           bun run check
           bun test scripts/release-docs.test.ts scripts/wiki-docs.test.ts tools/repair-hair-pockets.test.ts web/rig
+          node scripts/check-rig-deformation.mjs --output "$RUNNER_TEMP/rig-deformation"
           cargo fmt --check --all --manifest-path native/Cargo.toml
           cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml
           bun run build:native

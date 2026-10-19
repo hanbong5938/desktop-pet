@@ -1,5 +1,20 @@
 # Desktop Pet
 
+## Rig CPU and hidden-host checks
+
+The beta.9 rig change keeps visible scheduling at 60 Hz and stops continuous active-hidden surface work. Candidate bootstrap, explicit previews and one-time model/recovery preparation remain available; bubble/provider work is independent. Hair powers preserve Float quantization and logical strand admission, with at most 640 KiB net additional payload/model excluding array/allocator overhead.
+
+Preserve actual baseline source bytes before editing. The CPU runner uses the same current production consumer, generated limits, compiler, SDK and release flags for baseline/candidate; it requires exact vertex/alpha/hit bit patterns, checks semantic/resource regressions, and records 12 alternating paired benchmarks, checksums, construction time and separate process RSS. Without a baseline it runs regressions only and makes no performance claim.
+
+```sh
+node scripts/check-rig-deformation.mjs --baseline-source "$BASELINE_SOURCE" --output "$WORK/rig-cpu"
+node scripts/check-rig-host-visibility.mjs --source "$PWD" \
+  --runtime "$PWD/native/target/neutral/rig-native/release" \
+  --assets "$PWD/assets/rubelia-default" --expect hidden-stopped --output "$WORK/rig-host"
+```
+
+Build the runtime first. Paths must be absolute and outputs new/empty. The host runner copies the signed worker/resources and uses actual AppKit/Metal for bootstrap, synchronized hide races, resume, preview, recovery, cancellation and catalog switching. `--expect existing-hidden-render` with `--source "$BASELINE_SOURCE"` reproduces the old path. GUI/Metal/drawable failure is an explicit failure, not a skipped pass. `RIG_HOST_VISIBILITY_CHECKS` probes are absent from shipping binaries. See [beta.9 scope and evidence limits](releases/v0.4.13-beta.9.md).
+
 
 **Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](releases/v0.4.12.md).
 

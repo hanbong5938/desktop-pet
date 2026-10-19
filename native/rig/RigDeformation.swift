@@ -284,8 +284,7 @@ private func rigMouthShape(_ expression: String, _ profile: RigMouthMorphProfile
     }
 }
 
-private func rigDeformMouthPoint(_ x: Double, _ y: Double, _ expression: String, _ mouthOpen: Double, _ mouthForm: Double, _ profile: RigMouthMorphProfile) -> (Double, Double) {
-    let shape = rigMouthShape(expression, profile)
+private func rigDeformMouthPoint(_ x: Double, _ y: Double, _ shape: RigMouthShape, _ isOpen: Bool, _ mouthOpen: Double, _ mouthForm: Double, _ profile: RigMouthMorphProfile) -> (Double, Double) {
     let angle = profile.angleDeg * Double.pi / 180
     let cosine = cos(angle)
     let sine = sin(angle)
@@ -307,7 +306,7 @@ private func rigDeformMouthPoint(_ x: Double, _ y: Double, _ expression: String,
     let sourceTop = rigSample(shape.upper, t)
     let sourceBottom = rigSample(shape.lower, t)
     let mappedV: Double
-    if expression != "open" && sourceBottom - sourceTop < 0.1 {
+    if !isOpen && sourceBottom - sourceTop < 0.1 {
         mappedV = v - sourceTop + (targetTop + targetBottom) / 2
     } else if v <= sourceTop {
         mappedV = v - sourceTop + targetTop
@@ -356,7 +355,7 @@ private final class RigMeshState {
     let tuning: RigHairTuning
     var parentIndex = -1
     var strandWeights: [Float] = []
-    var strandU: [Float] = []
+    var hairPowers: [Double] = []
     var bangWeights: [Float] = []
     var springs: [RigStrandSpring] = []
     var lastDeformedGeneration = -1
@@ -738,31 +737,60 @@ final class RigDeformer {
         let chestRX = (anchors.face.x1 - anchors.face.x0) * 0.6
         let chestRY = (anchors.face.y1 - anchors.face.y0) * 0.45
 
+        let isLeft = layer.side == "L"
+        let isBody = layer.group == "body"
+        let isClosedEye = state.baseName == "eye_close"
+        let isIris = state.baseName == "irides"
+        let isEyebrow = state.baseName == "eyebrow"
+        let isFace = state.baseName == "face"
+        let isNeck = state.baseName == "neck"
+        let isTopwear = state.baseName == "topwear"
+        let isHandwear = state.baseName == "handwear"
+        let hasMouthExpression = layer.mouthExpression != nil
+        let scalesMouth = state.baseName == "mouth_open" || state.baseName == "mouth_close" || hasMouthExpression
+        let opensEye = layer.fade == "eyeOpen"
+        let closesEye = layer.fade == "eyeClose"
+        let opensLegacyMouth = layer.fade == "mouthOpen" && !hasMouthExpression
+        let movesClosedMouth = layer.fade == "mouthClose" || hasMouthExpression
+        let frontHair = state.baseName == "front hair" && layer.hairAttachment == nil
+        let stride = frontHair ? 3 : 2
+        let hasBangMotion = !state.bangWeights.isEmpty && !state.hairPowers.isEmpty
+        let hasStrandMotion = !state.springs.isEmpty && !state.strandWeights.isEmpty && !state.hairPowers.isEmpty
+        let tuning = state.tuning
+        let initialHeadWeight = isHead ? 1.0 : (isBody ? 0.16 : 0)
+        let breath = isBody ? frame.breath * 2 : frame.breathHead * 1.6
+        let preparedMouth: (shape: RigMouthShape, isOpen: Bool, profile: RigMouthMorphProfile)?
+        if let expression = layer.mouthExpression, let morph = anchors.mouth.morph {
+            preparedMouth = (rigMouthShape(expression, morph), expression == "open", morph)
+        } else {
+            preparedMouth = nil
+        }
+
         for vertex in mesh.base.indices {
             let basePoint = mesh.base[vertex]
             var x = Double(basePoint.x)
             var y = Double(basePoint.y)
-            if let eyeAnchor, state.baseName == "eye_close" {
+            if let eyeAnchor, isClosedEye {
                 if let blink = eyeAnchor.blink {
                     let aligned = rigAlignClosedEye(x, y, blink)
                     x = aligned.0; y = aligned.1
                 }
-                let scale = layer.side == "L" ? values.eyeScaleL : values.eyeScaleR
+                let scale = isLeft ? values.eyeScaleL : values.eyeScaleR
                 let cx = eyeAnchor.blink?.closedTarget.cx ?? (eyeAnchor.x0 + eyeAnchor.x1) / 2
                 let cy = eyeAnchor.blink?.closedTarget.cy ?? (eyeAnchor.y0 + eyeAnchor.y1) / 2
                 x = cx + (x - cx) * scale
                 y = cy + (y - cy) * scale
             }
-            if let expression = layer.mouthExpression, let morph = anchors.mouth.morph {
-                let point = rigDeformMouthPoint(x, y, expression, values.mouthOpen, values.mouthForm, morph)
+            if let mouth = preparedMouth {
+                let point = rigDeformMouthPoint(x, y, mouth.shape, mouth.isOpen, values.mouthOpen, values.mouthForm, mouth.profile)
                 x = point.0; y = point.1
             }
-            if state.baseName == "mouth_open" || state.baseName == "mouth_close" || layer.mouthExpression != nil {
+            if scalesMouth {
                 x = anchors.mouth.cx + (x - anchors.mouth.cx) * values.mouthScale
                 y = anchors.mouth.cy + (y - anchors.mouth.cy) * values.mouthScale
             }
-            if layer.fade == "eyeOpen", let eyeAnchor {
-                if state.baseName == "irides" {
+            if opensEye, let eyeAnchor {
+                if isIris {
                     let gaze: (Double, Double)
                     if let blink = eyeAnchor.blink {
                         gaze = rigEyeFrameOffset(values.eyeX * 11 * faceScale, values.eyeY * 6 * faceScale, blink)
@@ -782,7 +810,7 @@ final class RigDeformer {
                     y = eyeAnchor.closeY + (y - eyeAnchor.closeY) * (1 - 0.85 * (1 - eyeOpen))
                 }
             }
-            if layer.fade == "eyeClose", let eyeAnchor {
+            if closesEye, let eyeAnchor {
                 let offset = -eyeOpen * 3 + values.eyeCY * 14 * faceScale
                 if let blink = eyeAnchor.blink {
                     let shifted = rigEyeFrameOffset(0, offset, blink)
@@ -790,22 +818,22 @@ final class RigDeformer {
                 } else {
                     y += offset
                 }
-                let angle = values.eyeCAng * 0.3 * (layer.side == "L" ? 1 : -1)
+                let angle = values.eyeCAng * 0.3 * (isLeft ? 1 : -1)
                 let rotated = rigRotate(x, y, eyeAnchor.blink?.closedTarget.cx ?? layerCenterX, eyeAnchor.blink?.closedTarget.cy ?? layerCenterY, angle)
                 x = rotated.0; y = rotated.1
             }
-            if state.baseName == "eyebrow" {
+            if isEyebrow {
                 y += (-values.brow * 9 + (1 - eyeOpen) * 3.5) * faceScale
-                let angle = (layer.side == "L" ? values.browAngL + values.browAngSym : values.browAngR - values.browAngSym) * 0.3
+                let angle = (isLeft ? values.browAngL + values.browAngSym : values.browAngR - values.browAngSym) * 0.3
                 let rotated = rigRotate(x, y, layerCenterX, layerCenterY, angle)
                 x = rotated.0; y = rotated.1
             }
-            if layer.fade == "mouthOpen", layer.mouthExpression == nil {
+            if opensLegacyMouth {
                 y = anchors.mouth.y0 + (y - anchors.mouth.y0) * (0.5 + 0.5 * values.mouthOpen)
                 let curve = pow(abs(x - anchors.mouth.cx) / (mouthHalfWidth + 4), 1.5)
                 y -= values.mouthForm * 6 * faceScale * (curve - 0.35)
             }
-            if layer.fade == "mouthClose" || layer.mouthExpression != nil {
+            if movesClosedMouth {
                 if let morph = anchors.mouth.morph {
                     let shifted = rigMouthFrameOffset(0, values.mouthCY * 14 * faceScale, morph)
                     x += shifted.0; y += shifted.1
@@ -815,20 +843,20 @@ final class RigDeformer {
                 let rotated = rigRotate(x, y, anchors.mouth.cx, anchors.mouth.cy, values.mouthCAng * 0.35)
                 x = rotated.0; y = rotated.1
             }
-            if state.baseName == "face", y > anchors.mouth.cy {
+            if isFace, y > anchors.mouth.cy {
                 let aperture = anchors.mouth.morph != nil
                     ? rigMouthMorphWeights(values.mouthOpen, values.mouthForm, nil).aperture
                     : values.mouthOpen
                 y += aperture * 6 * faceScale * rigSmooth((y - anchors.mouth.cy) / (anchors.face.y1 - anchors.mouth.cy))
             }
 
-            var headWeight = isHead ? 1.0 : (layer.group == "body" ? 0.16 : 0)
+            var headWeight = initialHeadWeight
             let contactWeight = rigHeadFollowWeight(Double(basePoint.x), Double(basePoint.y), layer.headFollow)
             let depth = layer.depth + (1 - layer.depth) * contactWeight
             if let attachment = layer.hairAttachment {
                 headWeight = 1 - 0.84 * rigSmooth((y - attachment.rootY) / max(1, attachment.bodyY - attachment.rootY))
             }
-            if state.baseName == "neck" {
+            if isNeck {
                 headWeight = 0.55 * rigSmooth((anchors.neckBottom - y) / max(1, anchors.neckBottom - anchors.neckTop))
             }
             headWeight += (1 - headWeight) * contactWeight
@@ -840,33 +868,28 @@ final class RigDeformer {
                 x += headWeight * faceScale * (values.angleX * (14 + 40 * (depth - 1)) + values.angleX * (anchors.neckPivot.cy - y) * 0.028)
                 y += headWeight * faceScale * (-values.angleY * (9 + 30 * (depth - 1)) - values.angleY * (depth - 1) * (y - anchors.face.cy) * 0.05)
             }
-            let breath = layer.group == "body" ? frame.breath * 2 : frame.breathHead * 1.6
             y -= (breath + (frame.breathHead * 1.6 - breath) * contactWeight) * faceScale
-            if state.baseName == "topwear", y < chestCY {
+            if isTopwear, y < chestCY {
                 y -= (1 - contactWeight) * frame.breath * 2.2 * faceScale * rigSmooth((chestCY - y) / (chestRY * 2))
             }
-            if state.baseName == "topwear" {
+            if isTopwear {
                 x = anchors.neckPivot.cx + (x - anchors.neckPivot.cx) * (1 + (1 - contactWeight) * frame.breath * 0.003)
                 let gx = (x - chestCX) / chestRX
                 let gy = (y - (chestCY + values.bustY * 70 * faceScale)) / chestRY
                 y += (1 - contactWeight) * bounce.dx * values.bust * exp(-gx * gx - gy * gy)
             }
-            if state.baseName == "handwear" {
+            if isHandwear {
                 let weight = rigSmooth((y - layer.y) / layer.h * 1.15)
                 y += -values.armY * 30 * faceScale * weight + values.armPos * 40 * faceScale
                 x += values.armY * 6 * faceScale * weight * (x < anchors.neckPivot.cx ? 1 : -1)
             }
-            if !state.bangWeights.isEmpty && !state.strandU.isEmpty {
-                let amount = pow(Double(state.strandU[vertex]), 1.4) * 22 * faceScale
+            if hasBangMotion {
+                let amount = state.hairPowers[vertex * stride + 2] * 22 * faceScale
                 x += (values.bangL * Double(state.bangWeights[vertex * 3]) + values.bangC * Double(state.bangWeights[vertex * 3 + 1]) + values.bangR * Double(state.bangWeights[vertex * 3 + 2])) * amount
             }
-            if !state.springs.isEmpty && !state.strandWeights.isEmpty && !state.strandU.isEmpty {
-                let frontHair = state.baseName == "front hair" && layer.hairAttachment == nil
-                let tuning = state.tuning
-                let strandU = Double(state.strandU[vertex])
-                let u = frontHair ? min(1, strandU * 1.35) : strandU
-                let amplitude = rigRootWeightedAmount(u, tuning.rootLock, frontHair ? 1.8 : 2.1) * tuning.amplitude * (frontHair ? values.fhAmp : values.physAmp)
-                let softMix = rigClamp(pow(u, 1.2) * (frontHair ? values.fhSoft : values.soft), 0, 1)
+            if hasStrandMotion {
+                let amplitude = state.hairPowers[vertex * stride] * tuning.amplitude * (frontHair ? values.fhAmp : values.physAmp)
+                let softMix = rigClamp(state.hairPowers[vertex * stride + 1] * (frontHair ? values.fhSoft : values.soft), 0, 1)
                 var offset = 0.0
                 for strand in state.springs.indices {
                     let weight = Double(state.strandWeights[vertex * state.springs.count + strand])
@@ -1028,7 +1051,13 @@ final class RigDeformer {
         }
         let sigma = spacing * 0.6
         state.strandWeights = [Float](repeating: 0, count: cacheCounts.weightEntries)
-        state.strandU = [Float](repeating: 0, count: cacheCounts.strandUEntries)
+        let frontHair = state.baseName == "front hair" && mesh.layer.hairAttachment == nil
+        let stride = frontHair ? 3 : 2
+        let powerEntries = try RigDeformer.checkedProduct(
+            vertexCount, stride, 1,
+            label: "layer \(mesh.layer.name) hair coefficient entries"
+        )
+        state.hairPowers = [Double](repeating: 0, count: powerEntries)
         state.springs.reserveCapacity(strands.count)
         for index in strands.indices {
             state.springs.append(RigStrandSpring(stiff: RigSpringAxis(x: 0, v: 0, dx: 0), soft: RigSpringAxis(x: 0, v: 0, dx: 0), phase: Double(index) * 1.37 + mesh.layer.z))
@@ -1059,7 +1088,12 @@ final class RigDeformer {
                 rootY = strands[0].rootY
                 tipY = strands[0].tipY
             }
-            state.strandU[vertex] = Float(rigClamp((y - rootY) / max(1, tipY - rootY), 0, 1))
+            let strandU = Double(Float(rigClamp((y - rootY) / max(1, tipY - rootY), 0, 1)))
+            let u = frontHair ? min(1, strandU * 1.35) : strandU
+            let offset = vertex * stride
+            state.hairPowers[offset] = rigRootWeightedAmount(u, state.tuning.rootLock, frontHair ? 1.8 : 2.1)
+            state.hairPowers[offset + 1] = pow(u, 1.2)
+            if frontHair { state.hairPowers[offset + 2] = pow(strandU, 1.4) }
         }
 
         if cacheCounts.bangEntries > 0 {
@@ -1081,12 +1115,12 @@ final class RigDeformer {
     private static func strandCacheEntryCounts(
         layer: RigLayer,
         vertexCount: Int
-    ) throws -> (weightEntries: Int, strandUEntries: Int, bangEntries: Int, totalEntries: Int) {
+    ) throws -> (weightEntries: Int, profileEntries: Int, bangEntries: Int, totalEntries: Int) {
         guard vertexCount >= 0 else {
             throw RigNativeError.invalid("deformation layer \(layer.name) strand cache vertex count is negative")
         }
         guard let strands = layer.strands, !strands.isEmpty else {
-            return (weightEntries: 0, strandUEntries: 0, bangEntries: 0, totalEntries: 0)
+            return (weightEntries: 0, profileEntries: 0, bangEntries: 0, totalEntries: 0)
         }
         let weightEntries = try RigDeformer.checkedProduct(
             vertexCount,
@@ -1094,7 +1128,8 @@ final class RigDeformer {
             1,
             label: "layer \(layer.name) strand weight entries"
         )
-        let strandUEntries = vertexCount
+        // Compatibility admission slots, not the physical Double coefficient count.
+        let profileEntries = vertexCount
         let bangEntries: Int
         if rigBaseName(layer.deformationSource ?? layer.name) == "front hair" && layer.hairAttachment == nil {
             bangEntries = try RigDeformer.checkedProduct(
@@ -1108,7 +1143,7 @@ final class RigDeformer {
         }
         var totalEntries = try RigDeformer.checkedAdd(
             weightEntries,
-            strandUEntries,
+            profileEntries,
             label: "layer \(layer.name) strand cache entries"
         )
         totalEntries = try RigDeformer.checkedAdd(
@@ -1118,7 +1153,7 @@ final class RigDeformer {
         )
         return (
             weightEntries: weightEntries,
-            strandUEntries: strandUEntries,
+            profileEntries: profileEntries,
             bangEntries: bangEntries,
             totalEntries: totalEntries
         )

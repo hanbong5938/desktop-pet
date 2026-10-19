@@ -1,5 +1,11 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Rig CPU and hidden rendering — beta.9 / rig CPU·숨김 렌더 beta.9
+
+The separately authorized [beta.9 candidate](v0.4.13-beta.9.md) adds mesh-level classification and immutable hair powers while retaining exact arithmetic/physics, existing quotas and visible 60 Hz scheduling. Active-hidden hosts stop continuous surface work; current-intent resume, inactive candidate preparation, previews and recovery remain available. Stable/migration target `0.4.12`, beta Download-only policy, private Standalone destination and existing owners remain unchanged. The new CPU/real-host consumers and evidence boundaries are documented in [development checks](../development.md#rig-cpu-and-hidden-host-checks). No installed-user update, physical GUI acceptance or successful personal recovery follows from source/CI/publication alone.
+
+별도 승인된 beta.9는 정점별 반복 계산과 숨김 렌더를 줄이며 60 Hz·물리·수치·quota를 유지합니다. 철회한 개인 Python 복구 스크립트는 다시 배포하지 않습니다. 안정판·기존 소유권·프로필과 플러그인은 바꾸지 않으며 실제 메뉴/화면/물리 클릭 검증은 잠긴 GUI 세션 때문에 별도로 미검증입니다.
+
 ## Current withdrawal and private recovery / 현재 철회·비공개 복구
 
 The previously published Python recovery script and its checksum asset have been withdrawn from beta.8, and the current source/publication workflow no longer distributes them. The six native/installer assets are unchanged; the retained `SHA256SUMS` bytes are historical and do not restore the withdrawn download. The [frozen beta.8 release notes](v0.4.13-beta.8.md) preserve the original publication record, not current recovery instructions or a promise to republish the script. No new release, tag or version bump is introduced.
