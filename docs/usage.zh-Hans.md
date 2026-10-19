@@ -70,26 +70,17 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-**beta.8 候选路径修正（验证与发布待定）：**Standalone 使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会移动旧 Applications owner。公开 beta.7 和以下历史固定安装器不可变，重新运行不能修复。
+**当前源码的 private 安装路径：**Standalone 使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会移动旧 Applications owner。公开安装器与冻结说明保留各自版本范围；重跑旧安装器不能修复错误目标。
 
-### Beta.8 Applications recovery
+### One-time Applications recovery
 
-修复是**独立 Python 3 脚本**，不是 Rust 应用功能。源码为 `scripts/repair-applications-install.py`；计划发布 `desktop-pet-repair-applications-v0.4.13-beta.8.py` 和 `.sha256`，并收录于 `SHA256SUMS`。[beta.8 说明](releases/v0.4.13-beta.8.md)不是已发布证明。精确 beta.8 公开资产齐备后，先验证脚本 checksum 再查看 dry-run。源码 dry-run 也需要 beta.8 payload，不会 fallback 到 latest/source。
+一次性恢复以 **Bash 私下提供**，不是分发的产品功能、native 修复命令、自动 updater 或插件功能。此前公开的 Python 恢复脚本及 checksum 资产已撤回。历史 beta.8 发行说明与保留的历史 checksum manifest 记录原始发布，不是当前支持的下载或恢复步骤。没有新版本发布或版本号变更。
 
-```sh
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
-# 若还希望手动启动，用以下命令替代上一条 apply：
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
-```
+针对受影响的安装使用私下提供的 Bash 步骤，保留**已保存 Tern SDK KV 的原始 config/state 两个路径**。不要无参数启动、猜测默认值、adopt、合并或代入示例路径。保留原始完整 app/sidecar、locator、KV bytes、profile 数据及备份；修改前验证实际 owner/image 和 private 目标。不得暗中接管 Brew/source/custom 路径。
 
-原始 config/state **两个路径从保存的 Tern SDK KV 获取**，不用无参数启动、猜测默认值、adopt 或合并。自定义位置使用 `--tern-kv ABS`；默认是绝对 `TERN_CONFIG_DIR` 或实际 home 的 `Library/Application Support/Tern` 下的 `plugin-data/tern-desktop-pet/kv.json`。可选 `--config-dir ABS --state-dir ABS` 必须一起提供且精确匹配 KV。
+**先保存 Pet 未保存的编辑。** 只能停止已验证精确 profile 的 Pet；Tern/窗口/terminal/agent 与工作应继续运行。不要用 plugin reload 或 Configure/Connect 掩盖重连失败。手动 Start 是使用原始 profile 和已验证 context 的单独明确选择，不是 updater reservation 权限。额外用户 Stop 必须阻止重启。
 
-仅处理实际 non-root macOS arm64 账户的已验证 Standalone Applications owner；拒绝 Brew/source/custom、已占用 private 目标和不安全所有权/symlink。Stop 前验证固定 beta.8 payload 与完整签名 closure；原始完整 app/sidecar、locator、KV bytes 和 profile 数据保存在 `~/.local/share/desktop-pet/repair-backups` 及 manifest 中。通过 paired helper native install 验证新 owner/image/locator 后，仅修改匹配连接的 executable 字段，保留其他 KV 字段、数据与 default-profile pointer。
-
-**先保存 Pet 未保存编辑，应用时不要修改插件设置。** 仅对已证明精确 profile 的 Pet 发普通 Stop，不退出或重启 Tern/窗口/terminal/agent，不要求 plugin reload、Configure/Connect。未知 active profile 或并发文件修改会拒绝。无 `--start` 则保持停止；`--apply --start` 使用原始 profile 和可认证的 observation/assets，属于普通手动 Start，不是 updater reservation 或 race-free 保证。自定义 routing 应继承实际 Tern 环境，不能猜测缺失环境；观察到额外 Stop 就不重启。
-
-安装验证与实际重连分别报告。canonical UI/原始 profile 启动/真实 Tern 与工作保持的验收仍待独立 OS 账户/VM 证据。失败时保留 phase、old/new/backup 路径，不要盲目覆盖已变路径/KV、重跑旧 installer、删除备份或无参数启动。已完成同 beta 修复不会重复 Stop/install。参见[详细限制](usage.md#one-time-applications-recovery-beta8-candidate)。
+安装、native readiness 与实际同一 Tern 窗口重连是不同结果。源码、fixture 和 dry-run 不能证明受影响 Mac 恢复成功。不确定时保留证据与 old/new/backup 路径；不要盲目重跑旧 installer、覆盖已变路径/KV、删除备份或无参数启动。
 
 ### 历史固定安装示例
 

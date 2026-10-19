@@ -70,26 +70,17 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-**beta.8 후보 경로 수정(검증·게시 대기):** Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG로 바꾸지 않습니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 beta.7과 아래 과거 고정 설치기는 불변이며 재실행으로 복구되지 않습니다.
+**현재 소스의 private 설치 경로:** Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG로 바꾸지 않습니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 설치기·동결 노트는 각 버전의 기록이며 옛 설치기 재실행으로 잘못된 목적지가 복구되지 않습니다.
 
-### beta.8 Applications 복구 후보
+### 일회성 Applications 복구
 
-일회성 복구는 Rust 앱 기능이 아닌 **별도 Python 3 스크립트**입니다. 소스는 `scripts/repair-applications-install.py`, 게시 예정 자산은 `desktop-pet-repair-applications-v0.4.13-beta.8.py`와 `.sha256`이며 `SHA256SUMS`에도 포함됩니다. [beta.8 노트](releases/v0.4.13-beta.8.md)는 게시 계약이지 게시 완료 증거가 아닙니다. 정확한 beta.8 공개 자산이 준비된 뒤 스크립트 checksum을 확인하고 먼저 dry-run을 읽으세요. 소스 dry-run도 정확한 beta.8 payload가 필요하며 latest/source fallback은 없습니다.
+일회성 복구는 **Bash로 비공개 제공**하며 배포 제품 기능·native 복구 명령·자동 updater·플러그인 기능이 아닙니다. 이전 공개 Python 복구 스크립트와 checksum 자산은 철회됐습니다. 과거 beta.8 릴리스 노트와 보존된 과거 checksum manifest는 당시 게시 기록이며 현재 지원 다운로드·실행 절차가 아닙니다. 새 릴리스·버전 변경은 없습니다.
 
-```sh
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
-# 위 apply 대신, 수동 시작까지 원할 때만:
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
-```
+문제가 있는 설치에 비공개 제공된 Bash 절차를 사용하고 **저장된 Tern SDK KV의 원래 config/state 쌍**을 유지하세요. 인자 없는 앱 실행·기본 프로필 추측·adopt·병합·예시 경로 대입을 하지 마세요. 원본 전체 앱/sidecar·locator·KV bytes·프로필 데이터·백업을 보존하고 변경 전에 실제 owner/image와 private 목적지를 검증하세요. Brew/source/custom 경로를 몰래 인수하지 않습니다.
 
-원래 config/state **두 경로는 저장된 Tern SDK KV에서 읽습니다**. 인자 없는 앱 실행·기본 프로필 추측·adopt·병합을 하지 마세요. `--tern-kv ABS`로 custom 파일을 지정할 수 있습니다. 기본값은 절대 `TERN_CONFIG_DIR` 또는 실제 home의 `Library/Application Support/Tern` 아래 `plugin-data/tern-desktop-pet/kv.json`입니다. 선택적 `--config-dir ABS --state-dir ABS`는 함께 지정하며 KV 쌍과 정확히 같아야 합니다.
+**Pet의 미저장 편집을 먼저 저장하세요.** 검증된 정확한 Pet 프로필만 중지할 수 있으며 Tern/창/터미널/agent와 작업은 계속 실행해야 합니다. 재연결 실패를 감추기 위한 plugin reload·Configure/Connect는 하지 마세요. 수동 Start는 원래 프로필과 검증된 context를 쓰는 별도의 명시적 선택이지 updater reservation 권한이 아닙니다. 추가 사용자 Stop은 재시작을 막아야 합니다.
 
-실제 non-root macOS arm64 계정의 검증된 Standalone Applications 설치만 대상이며 Brew/source/custom 경로·이미 존재하는 목적지·위험한 소유권/symlink는 거절합니다. 정확한 beta.8 archive/sidecar/checksum과 서명 closure를 **Stop 전에** 검증합니다. 원본 전체 앱/sidecar·locator·KV bytes·프로필 데이터를 `~/.local/share/desktop-pet/repair-backups`에 manifest와 함께 보존하고 paired helper의 native install로 private 설치를 수행합니다. 새 소유자/image/locator 검증 후 일치하는 KV의 실행 파일 필드만 바꾸며 다른 필드·원본 데이터·default-profile pointer는 유지합니다.
-
-**Pet의 미저장 편집을 먼저 저장하고 적용 중 플러그인 설정을 바꾸지 마세요.** 확인된 정확한 프로필의 Pet만 일반 Stop할 수 있으며 Tern/창/터미널/agent 종료·재시작, plugin reload, Configure/Connect를 요구하지 않습니다. 모르는 active 프로필이나 동시 파일 변경은 거절합니다. `--start` 없이는 stopped입니다. `--start`는 `--apply`와 함께 쓰는 일반 수동 Start이지 updater reservation 권한·race-free 보장이 아닙니다. custom routing에는 실제 Tern 환경을 사용하며 원래 인증된 observation/assets를 알 수 없으면 추측하지 않습니다. 추가 Stop 관측 시 재시작하지 않습니다. 설치 검증과 실제 Tern 재연결은 구분하며 canonical UI/원래 프로필 재시작/실제 작업 유지 수락은 별도 OS 계정/VM의 통합 증거 전 미검증입니다.
-
-변경 후 실패하면 보고된 phase와 old/new/backup 경로를 보존하세요. 변경된 경로/KV 위로 무조건 복원하거나 옛 설치기를 재실행·백업 삭제·인자 없는 시작을 하지 마세요. 완료된 같은 beta 복구는 Stop/install을 반복하지 않습니다. [상세 실패·환경 제약](usage.md#one-time-applications-recovery-beta8-candidate)을 참조하세요.
+설치·native readiness·실제 같은 Tern 창 재연결은 별개 결과입니다. 소스·fixture·dry-run은 문제가 있는 Mac의 복구 성공 증거가 아닙니다. 불확실하면 근거와 old/new/backup 경로를 보존하고 옛 설치기 재실행·변경된 경로/KV 덮어쓰기·백업 삭제·인자 없는 시작을 하지 마세요.
 
 ### 과거 고정 설치 예시
 

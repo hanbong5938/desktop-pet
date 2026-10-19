@@ -62,7 +62,6 @@ jobs:
             echo "DESKTOP_PET_VERSION=$version"
             echo "DESKTOP_PET_ASSET_NAME=DesktopPet-v${version}-macos-arm64.tar.gz"
             echo "DESKTOP_PET_INSTALLER_NAME=desktop-pet-install-v${version}.sh"
-            echo "DESKTOP_PET_REPAIR_NAME=desktop-pet-repair-applications-v${version}.py"
           } >> "$GITHUB_ENV"
 
       - name: Install stable Rust and arm64 target
@@ -78,7 +77,6 @@ jobs:
           set -euo pipefail
           bun run check
           bun test scripts/release-docs.test.ts scripts/wiki-docs.test.ts tools/repair-hair-pockets.test.ts web/rig
-          python3 -m unittest discover -s scripts -p 'test_repair_applications_install.py'
           cargo fmt --check --all --manifest-path native/Cargo.toml
           cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml
           bun run build:native
@@ -122,26 +120,22 @@ jobs:
           "$scratch/bin/desktop-pet" pack export default --config-dir "$scratch/config" --state-dir "$scratch/state" --output "$scratch/default.herdrchar"
           test -s "$scratch/default.herdrchar"
 
-      - name: Create immutable app, installer and one-time recovery assets
+      - name: Create six immutable app and installer assets
         shell: bash
         run: |
           set -euo pipefail
           asset="$DESKTOP_PET_ASSET_NAME"
           sidecar="DesktopPet-v${DESKTOP_PET_VERSION}-rig-native.json"
           installer="$DESKTOP_PET_INSTALLER_NAME"
-          repair="$DESKTOP_PET_REPAIR_NAME"
           COPYFILE_DISABLE=1 tar --no-xattrs -czf "$asset" -C dist DesktopPet.app
           cp dist/DesktopPet.app.rig-native.json "$sidecar"
           cp scripts/install.sh "$installer"
           chmod 755 "$installer"
-          cp scripts/repair-applications-install.py "$repair"
-          chmod 755 "$repair"
           shasum -a 256 "$asset" > "$asset.sha256"
           shasum -a 256 "$installer" > "$installer.sha256"
-          shasum -a 256 "$repair" > "$repair.sha256"
-          shasum -a 256 "$asset" "$sidecar" "$installer" "$repair" > SHA256SUMS
+          shasum -a 256 "$asset" "$sidecar" "$installer" > SHA256SUMS
           shasum -a 256 -c SHA256SUMS
-          for output in "$asset" "$asset.sha256" SHA256SUMS "$sidecar" "$installer" "$installer.sha256" "$repair" "$repair.sha256"; do test -s "$output"; done
+          for output in "$asset" "$asset.sha256" SHA256SUMS "$sidecar" "$installer" "$installer.sha256"; do test -s "$output"; done
           # Verify the signed deployed bytes, not merely pre-signing rig inputs.
           node --input-type=module <<'NODE'
           import {readFile,readdir} from 'node:fs/promises';
@@ -175,8 +169,6 @@ jobs:
             DesktopPet-v${{ env.DESKTOP_PET_VERSION }}-rig-native.json
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}.sha256
-            ${{ env.DESKTOP_PET_REPAIR_NAME }}
-            ${{ env.DESKTOP_PET_REPAIR_NAME }}.sha256
 
   wiki_sync:
     if: ${{ !contains(github.ref_name, '-') }}

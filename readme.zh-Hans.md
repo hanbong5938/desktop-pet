@@ -77,7 +77,7 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-**beta.8 候选路径修正（验证与发布证据待定）：**Standalone 使用实际 OS 账户 home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会自动移动旧 Applications owner。公开 beta.7 与以下历史 v0.4.8 安装器保持不可变，重新运行不能修复。独立 Python 3 修复资产默认 dry-run，仅显式 `--apply` 修改，选择 `--apply --start` 才手动启动。从保存的 Tern KV 获取原始 config/state，而非无参数启动；保留原始数据和备份，不退出或重启 Tern/工作。参见[修复指引](docs/usage.zh-Hans.md#beta8-applications-recovery)及 [beta.8 源码说明](docs/releases/v0.4.13-beta.8.md)。源码不等于已发布资产或实际恢复证明。
+**当前源码的 private 安装路径：**Standalone 使用实际 OS 账户 home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会自动移动旧 Applications owner。公开安装器与冻结发行说明保留各自版本范围；重跑旧安装器不能修复错误目标。一次性恢复以 **Bash 私下提供**，不是分发的产品功能、native 修复命令、updater 或插件功能。保留已保存 Tern KV 的原始 config/state 对、原始数据与备份，让 Tern 和工作继续运行。参见[私下恢复指引](docs/usage.zh-Hans.md#one-time-applications-recovery)。此前公开的 Python 恢复资产已撤回，历史 beta.8 说明不是当前操作指引。没有新版本发布或版本号变更。
 
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。安装命令：
 

@@ -70,26 +70,17 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-**beta.8 候補のパス修正（検証・公開待ち）:** Standalone は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG に依存しません。Brew は検証済み formula prefix の `libexec/DesktopPet.app`、source は正確な checkout の `dist/DesktopPet.app` のままです。通常導入は旧 Applications owner を移動しません。公開 beta.7 と以下の過去の固定インストーラーは不変で、再実行は修復になりません。
+**現行ソースの private 導入先:** Standalone は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG に依存しません。Brew は検証済み formula prefix の `libexec/DesktopPet.app`、source は正確な checkout の `dist/DesktopPet.app` のままです。通常導入は旧 Applications owner を移動しません。公開インストーラーと凍結ノートは各版の記録で、旧インストーラーの再実行は誤った導入先の修復になりません。
 
-### Beta.8 Applications recovery
+### One-time Applications recovery
 
-修復は Rust アプリ機能ではなく**別の Python 3 スクリプト**です。ソースは `scripts/repair-applications-install.py`、公開予定アセットは `desktop-pet-repair-applications-v0.4.13-beta.8.py` と `.sha256`（`SHA256SUMS` にも収録）です。[beta.8 ノート](releases/v0.4.13-beta.8.md)は公開済みの証拠ではありません。正確な beta.8 公開アセットが揃ってからスクリプト checksum を検証し、最初に dry-run を確認してください。ソース dry-run も beta.8 payload が必要で、latest/source fallback はありません。
+一回限りの修復は **Bash として非公開で提供**し、配布製品機能・native 修復コマンド・自動 updater・プラグイン機能ではありません。以前公開した Python 修復スクリプトと checksum アセットは撤回済みです。過去の beta.8 リリースノートと保持された過去の checksum manifest は当時の公開記録で、現行のダウンロードや手順ではありません。新リリースやバージョン変更はありません。
 
-```sh
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply
-# 上の apply の代わりに、手動起動も希望する場合のみ:
-python3 desktop-pet-repair-applications-v0.4.13-beta.8.py --apply --start
-```
+対象インストールに非公開で提供された Bash 手順を使い、**保存済み Tern SDK KV の元の config/state の両パス**を保持してください。引数なし起動、既定値の推測、adopt、結合、例示パスへの置換はしません。元の完全な app/sidecar、locator、KV bytes、profile データとバックアップを保持し、変更前に実際の owner/image と private 導入先を検証します。Brew/source/custom を黙って引き継ぎません。
 
-元の config/state は**保存済み Tern SDK KV の両パス**から取得します。引数なし起動、既定値の推測、adopt、結合はしません。custom は `--tern-kv ABS` を指定します。既定は絶対 `TERN_CONFIG_DIR` または実 home の `Library/Application Support/Tern` 配下の `plugin-data/tern-desktop-pet/kv.json` です。任意の `--config-dir ABS --state-dir ABS` は両方必要で、KV と完全一致しなければ拒否します。
+**Pet の未保存編集を先に保存してください。** 停止できるのは検証済みの正確な Pet profile だけで、Tern/窓/terminal/agent と作業は継続します。再接続の失敗を plugin reload や Configure/Connect で隠さないでください。手動 Start は元の profile と検証済み context を使う別の明示的な選択で、updater reservation 権限ではありません。追加のユーザー Stop は再起動を禁止します。
 
-対象は実際の non-root macOS arm64 アカウントの検証済み Standalone Applications owner のみです。Brew/source/custom、既存の private destination、危険な所有権/symlink は拒否します。固定 beta.8 payload と署名 closure を Stop 前に検証し、元の完全な app/sidecar、locator、KV bytes、profile データを `~/.local/share/desktop-pet/repair-backups` に manifest と共に保持します。paired helper の native install 後、新 owner/image/locator の検証が済むまで KV を変えません。変更は一致する executable フィールドだけで、他の KV、データ、default-profile pointer は保全します。
-
-**Pet の未保存編集を先に保存し、適用中はプラグイン設定を変更しないでください。** 証明済み profile の Pet だけを通常 Stop し、Tern/窓/terminal/agent の終了・再起動、plugin reload、Configure/Connect は要求しません。不明な active profile や同時変更は拒否します。`--start` なしでは停止したままです。`--apply --start` は元の profile と取得できた認証済み observation/assets を使う通常の手動 Start で、updater reservation や race-free 保証ではありません。custom routing は実際の Tern 環境を使い、不明な環境を推測しません。追加 Stop を観測すれば再起動しません。
-
-インストールと実際の再接続は別の結果です。canonical UI/元 profile 起動/実 Tern と作業の維持は所有する独立 OS アカウント/VM での証拠待ちです。失敗時は phase と old/new/backup パスを保持し、変更済みパス/KV の無条件上書き、旧 installer 再実行、backup 削除、引数なし起動をしないでください。完了済み同 beta 修復では Stop/install を繰り返しません。[詳細な制約](usage.md#one-time-applications-recovery-beta8-candidate)も参照してください。
+導入、native readiness、実際の同じ Tern 窓への再接続は別の結果です。ソース、fixture、dry-run は対象 Mac の修復成功を証明しません。不確実なら証拠と old/new/backup パスを保持し、旧 installer の再実行、変更済みパス/KV の上書き、backup 削除、引数なし起動はしないでください。
 
 ### 過去の固定インストール例
 

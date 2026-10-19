@@ -68,7 +68,7 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
-**beta.8 후보 설치 계약(검증·게시 대기):** Standalone과 현재 consumer fallback은 `HOME`/XDG가 아닌 실제 OS home의 `.local/share/desktop-pet/libexec/DesktopPet.app`입니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 기존 Applications 소유자를 이동하지 않습니다. 공개 beta.7과 아래 과거 고정 v0.4.7 설치기는 불변이며 재실행으로 복구되지 않습니다. 일회성 복구는 **Rust runtime/route API가 아닌 별도 Python 3 자산**입니다. 기본 dry-run, 명시적 `--apply`, 선택적 `--apply --start`이며 원래 프로필은 저장된 Tern KV의 정확한 두 경로에서 읽습니다. 원본 데이터·백업을 보존하고 Tern/작업을 종료·재시작하지 않습니다. [복구 절차·제약](usage.ko.md#beta8-applications-복구-후보), [beta.8 소스 metadata/자산](releases/v0.4.13-beta.8.md)을 보세요. canonical 복구나 공개 bytes 검증을 주장하지 않습니다.
+**현재 소스 설치 계약:** Standalone과 현재 consumer fallback은 `HOME`/XDG가 아닌 실제 OS home의 `.local/share/desktop-pet/libexec/DesktopPet.app`입니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 기존 Applications 소유자를 이동하지 않습니다. 공개 설치기·동결 노트는 각 버전의 기록이며 옛 설치기 재실행으로 잘못된 목적지가 복구되지 않습니다. 일회성 복구는 **Bash로 비공개 제공**하며 배포 제품 기능·Rust runtime/route API가 아닙니다. 저장된 Tern KV의 정확한 원래 프로필과 원본 데이터·백업·실행 중 Tern 작업을 보존하세요. [비공개 복구 안내](usage.ko.md#일회성-applications-복구)를 보세요. 이전 공개 Python 복구 자산은 철회됐으며 동결 beta.8 노트는 과거 기록이지 현재 실행 안내가 아닙니다. 새 릴리스·버전 변경은 없습니다.
 
 ### 과거 고정 설치 예시
 
@@ -126,7 +126,7 @@ desktop-pet preferences set --observation-host auto
 
 ## Profiles and installation discovery
 
-중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. 현재 beta.8 후보 Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`, Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, 승인된 source는 정확한 core의 `dist/DesktopPet.app`입니다. 공개 beta.7과 위 과거 고정 설치기는 옛 Applications 동작을 유지합니다. 영구 old-name alias나 Applications launcher는 현재 소스의 정상 탐색 경로가 아닙니다.
+중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. 현재 소스의 Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`, Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, 승인된 source는 정확한 core의 `dist/DesktopPet.app`입니다. 공개 beta.7과 위 과거 고정 설치기는 옛 Applications 동작을 유지합니다. 영구 old-name alias나 Applications launcher는 현재 소스의 정상 탐색 경로가 아닙니다.
 
 프로필 우선순위는 **명시적 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 중립 XDG 기본값**입니다. 기본값은 `${XDG_CONFIG_HOME:-$HOME/.config}/desktop-pet`, `${XDG_STATE_HOME:-$HOME/.local/state}/desktop-pet`입니다. 기본 config root의 `default-profile.json`은 `{ "version":1, "config_dir":"/absolute/config", "state_dir":"/absolute/state" }`로 두 실제 경로를 원자 기록하며 재귀 profile pointer는 금지합니다. `desktop-pet profile show --json`은 daemon/디렉터리를 만들지 않는 읽기 전용입니다.
 
