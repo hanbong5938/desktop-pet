@@ -1,5 +1,15 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Current candidate: v0.4.13-beta.4 / 현재 후보
+
+The [beta.4 release-body source](v0.4.13-beta.4.md) follows published beta.3 and preserves its discovery/history corrections. Its only new functional change pins the bundled Tern consumer and native adapter to immutable `7276c1b658a1728883d90207119df31bce118170` (plugin `0.2.1`): migration-route/handover authority gets 60,000 ms; ordinary setup remains 10,000 ms and exchange 2,600 ms. Verification, errors, retries, signatures, Stop and receipt authority are unchanged. Product `0.4.13-beta.4`, contracts `0.1.0`, bridge `0.3.16`, and protocol 4 / observation 2 / API 1 / handover 1 retain their boundaries; stable/migration target `0.4.12` and beta Download-not-Apply policy do not change.
+
+This is opt-in experimental source delivery, **not proven recovery or a publication claim**. Prior beta.2-based TS/Bun 65/native/AppKit, working-copy adapter 42, controlled Tern 0.9.4 old 199/200 versus corrected 200/200, deadline regressions, and ad-hoc staging are not final beta.4 evidence. Actual packaged cold-load/reload, automatic handover/receipt, real authority wall times, 120-second exchange and external-PC recovery remain unverified/blocked. Ad-hoc signing is not notarization. Existing stable/beta assets and notes stay immutable; no stable/main, Homebrew or wiki rollout is included. Final beta.4 gates are recorded only after actual execution.
+
+공개 beta.3의 탐색·이력 수정을 유지하며 불변 Tern deadline 수정만 번들에 반영하는 선택형 실험 후보입니다. 이전 소스 회귀·staging은 최종 beta.4 검증이나 실제 복구 성공이 아닙니다. 실제 cold-load/reload·handover·receipt·호출 시간·120초 exchange·외부 PC 복구는 미검증이며 안정판/마이그레이션 대상과 Download 전용 베타 정책은 그대로입니다.
+
+The earlier “current/unpublished” entries below retain their original source-snapshot scope, including beta.3's discovery/history evidence; they are not the current beta.4 publication or qualification state.
+
 ## Current source: beta discovery and retained migration history
 
 This is an unpublished source repair based on v0.4.13-beta.2, not a new release or a replacement for existing public assets.
