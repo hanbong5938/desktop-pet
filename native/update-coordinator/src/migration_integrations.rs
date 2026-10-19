@@ -1839,10 +1839,11 @@ mod tests {
         profile: &LegacyProfile,
         image: &ExecutableIdentity,
         requests: usize,
-    ) -> thread::JoinHandle<()> {
+    ) -> (thread::JoinHandle<()>, LiveStatus) {
         use std::os::unix::net::UnixListener;
 
         let listener = UnixListener::bind(&profile.control_socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         fs::set_permissions(&profile.control_socket, fs::Permissions::from_mode(0o600)).unwrap();
         let response = serde_json::to_vec(&serde_json::json!({
             "ok":true,"running":true,"shutdown":false,"ready":true,
@@ -1856,15 +1857,54 @@ mod tests {
             "host_connections":{"herdr":0,"tern":1}
         }))
         .unwrap();
-        thread::spawn(move || {
-            for _ in 0..requests {
-                let (mut stream, _) = listener.accept().unwrap();
+        let server = thread::spawn(move || {
+            // One positive status probe precedes the observation requests.
+            for _ in 0..=requests {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "status request was not received");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("status fixture accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut byte = [0u8; 1];
-                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                let mut request = Vec::new();
+                loop {
+                    stream.read_exact(&mut byte).unwrap();
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    request.push(byte[0]);
+                    assert!(request.len() < MAX_FRAME);
+                }
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&request).unwrap(),
+                    serde_json::json!({"version":1,"command":"status"}),
+                );
                 stream.write_all(&response).unwrap();
                 stream.write_all(b"\n").unwrap();
+                // Keep the peer alive until the client consumes the frame and
+                // closes. Darwin rejects timeout sockopts on a shutdown socket;
+                // peer teardown must not race the authority checks under test.
+                assert_eq!(stream.read(&mut byte).unwrap(), 0);
             }
-        })
+        });
+        let live = status(profile).unwrap();
+        verify_neutral_profile(image, crate::identity::neutral::VERSION, profile, &live).unwrap();
+        assert_eq!(live.observation_mode, profile.observation.as_str());
+        assert_eq!(live.instance_id, "ready-target");
+        (server, live)
     }
 
     // Well-formed documents that deliberately fail one binding, before signed
@@ -1945,6 +1985,35 @@ mod tests {
         .unwrap();
     }
 
+    fn invalid_handover_error(
+        plan: &MigrationPlan,
+        profile: &LegacyProfile,
+        live: &LiveStatus,
+    ) -> String {
+        let error = verify_confirmed_handover(plan, profile, live).unwrap_err();
+        let path = handover_path(plan, &profile.state_dir, &plan.target.image, true);
+        let bytes = fs::read(&path).unwrap();
+        let mut receipt: HandoverReceipt = serde_json::from_slice(&bytes).unwrap();
+        let challenge = fs::read(handover_path(
+            plan,
+            &profile.state_dir,
+            &plan.target.image,
+            false,
+        ))
+        .unwrap();
+        receipt.target_instance_id = live.instance_id.clone();
+        receipt.challenge_sha256 = format!("{:x}", Sha256::digest(&challenge));
+        protocol::write_private_bytes(&path, &serde_json::to_vec(&receipt).unwrap(), 0o600)
+            .unwrap();
+        // Repair only the deliberately invalid binding. This control must reach
+        // the missing signed delivery instead; otherwise an unrelated file or
+        // transport failure could masquerade as the intended authority rejection.
+        let delivery_error = verify_confirmed_handover(plan, profile, live).unwrap_err();
+        protocol::write_private_bytes(&path, &bytes, 0o600).unwrap();
+        assert_ne!(error, delivery_error);
+        error
+    }
+
     #[test]
     fn runtime_profile_changes_preserve_authority_and_reject_invalid_handover() {
         for stale_instance in [true, false] {
@@ -1965,18 +2034,26 @@ mod tests {
             write_invalid_handover(&plan, &record, &selected, stale_instance);
             let old_plan = fs::read(evidence_path(&plan)).unwrap();
             let old_journal = fs::read(journal_path(&plan)).unwrap();
-            let server = observation_server(&selected, &plan.target.image, 2);
+            let (server, live) = observation_server(&selected, &plan.target.image, 2);
+            let handover_error = invalid_handover_error(&plan, &selected, &live);
+            let receipt_path = handover_path(&plan, &selected.state_dir, &plan.target.image, true);
+            let old_receipt = fs::read(&receipt_path).unwrap();
+            let challenge_path =
+                handover_path(&plan, &selected.state_dir, &plan.target.image, false);
+            let old_challenge = fs::read(&challenge_path).unwrap();
             // Reproduce the old consumer path with the same runtime inputs:
             // embedding them in the authority must fail immutable verification.
             let mut observed = plan.clone();
             observed.profiles[0] = selected.clone();
+            assert!(read_record(&plan).is_ok());
+            let invalid_plan_error = read_record(&observed).err().unwrap();
             let (old_observations, old_reconnected) =
                 integration_observations(&observed, &record, Some(&plan.target.image), None);
             assert_eq!(old_observations.len(), 1);
             assert!(!old_observations[0].connected);
             assert_eq!(
-                old_observations[0].error.as_deref(),
-                Some("migration journal does not match immutable evidence"),
+                old_observations[0].error.as_ref(),
+                Some(&invalid_plan_error),
             );
             assert!(old_reconnected.is_empty());
             assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
@@ -1987,13 +2064,12 @@ mod tests {
             assert_eq!(observations.len(), 1);
             assert_eq!(observations[0].provider, "tern");
             assert!(!observations[0].connected);
-            assert_eq!(
-                observations[0].error.as_deref(),
-                Some("Tern handover receipt is stale or belongs to another profile/instance/Stop generation"),
-            );
+            assert_eq!(observations[0].error.as_ref(), Some(&handover_error),);
             assert!(reconnected.is_empty());
             assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
             assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+            assert_eq!(fs::read(&receipt_path).unwrap(), old_receipt);
+            assert_eq!(fs::read(&challenge_path).unwrap(), old_challenge);
             assert!(read_record(&plan).is_ok());
         }
     }
@@ -2027,8 +2103,8 @@ mod tests {
             }
             let old_plan = fs::read(evidence_path(&plan)).unwrap();
             let old_journal = fs::read(journal_path(&plan)).unwrap();
-            let first = observation_server(&plan.profiles[0], &plan.target.image, 1);
-            let second = observation_server(
+            let (first, _) = observation_server(&plan.profiles[0], &plan.target.image, 1);
+            let (second, live) = observation_server(
                 if mismatched_config.is_none() {
                     &selected
                 } else {
@@ -2037,6 +2113,9 @@ mod tests {
                 &plan.target.image,
                 1,
             );
+            let handover_error = mismatched_config
+                .is_none()
+                .then(|| invalid_handover_error(&plan, &selected, &live));
             let (observations, reconnected) =
                 integration_observations(&plan, &record, Some(&plan.target.image), Some(&selected));
             first.join().unwrap();
@@ -2051,10 +2130,7 @@ mod tests {
                 assert_eq!(observations[1].state_dir, plan.profiles[1].state_dir);
                 assert_eq!(observations[1].provider, "tern");
                 assert!(!observations[1].connected);
-                assert_eq!(
-                    observations[1].error.as_deref(),
-                    Some("Tern handover receipt is stale or belongs to another profile/instance/Stop generation"),
-                );
+                assert_eq!(observations[1].error.as_ref(), handover_error.as_ref(),);
             } else {
                 // Both originals have Tern reconnect disabled; a half match
                 // must leave only the unchanged primary Herdr observation.
@@ -2076,7 +2152,7 @@ mod tests {
             .insert("TERN_RUNTIME".into(), "current".into());
         let old_plan = fs::read(evidence_path(&plan)).unwrap();
         let old_journal = fs::read(journal_path(&plan)).unwrap();
-        let server = observation_server(&selected, &plan.target.image, 1);
+        let (server, _) = observation_server(&selected, &plan.target.image, 1);
         let (observations, reconnected) =
             integration_observations(&plan, &record, Some(&plan.target.image), Some(&selected));
         server.join().unwrap();

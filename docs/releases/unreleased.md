@@ -1,6 +1,20 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
-## Current candidate: v0.4.13-beta.4 / 현재 후보
+## Current candidate: v0.4.13-beta.5 / 현재 후보
+
+The [beta.5 release-body source](v0.4.13-beta.5.md) follows published beta.3 and the immutable **failed beta.4 tag**, not a published beta.4 release. Official [beta.4 CI 39188725938](https://github.com/hanbong5938/desktop-pet/actions/runs/39188725938), job `117856587412`, stopped before packaging/publication: coordinator **139 passed / 1 failed**, with `Invalid argument (os error 22)` instead of the stale/mismatched-handover rejection at `migration_integrations.rs:1990`. No beta.4 binaries/assets were created. Preserve its tag, notes and failure; beta.5 is a successor, not a same-tag retry.
+
+Beta.5 retains beta.3's discovery/history corrections and consumer/adapter pin `7276c1b658a1728883d90207119df31bce118170` (plugin `0.2.1`). Migration-route/handover authority remains 60,000 ms; ordinary setup stays 10,000 ms and exchange 2,600 ms. Production approval, immutable evidence, profile/instance/image identity, signatures, Stop, fresh binding and receipt authority are not weakened. Product `0.4.13-beta.5`, contracts `0.1.0`, bridge `0.3.16`, protocol 4 / observation 2 / API 1 / handover 1, stable/migration target `0.4.12`, and beta Download-not-Apply policy retain their boundaries.
+
+The beta.5 regression-only hardening keeps the observation peer alive until client EOF and proves actual status/current runtime before behavioral authority-rejection assertions, without production transport changes. An independent Darwin 27 reproduction found a fixture close/timeout-reset race consistent with the CI `EINVAL`; the exact CI syscall remains untraced, so this is not a confirmed production-root-cause claim. 테스트 fixture 수명과 실제 관찰·거절 검사를 강화하며 production 코드·deadline·권한은 그대로입니다. 별도 재현은 CI 오류와 일치하지만 CI syscall을 추적한 확정 원인 주장은 아닙니다.
+
+Prior beta.4 local arm64 results (652 Core passed / 1 ignored, 140 coordinator, 23 helper and AppKit), Bun 65, and ad-hoc stage-only packaging are **prior-only**, not final beta.5 validation or official tagged-source/public-asset evidence. Earlier controlled Tern results do not measure real authority wall times. Actual packaged cold-load/reload, automatic handover with same-window/instance receipt and original profile preservation, real authority wall times, 120-second exchange, and external-PC recovery remain unverified/blocked. Ad-hoc signing is not notarization. The six version-pinned assets are a prerelease/non-latest publication contract, not a current publication claim. No stable/main, Homebrew or wiki rollout is included.
+
+beta.5는 공개 beta.3 및 **패키징·게시 전에 CI가 실패한 불변 beta.4 태그**를 잇는 새 실험 후보이며 beta.4 공개나 동일 태그 재시도를 뜻하지 않습니다. consumer `7276c1b658a1728883d90207119df31bce118170`과 좁은 60초 권한 조회 수정은 계승하되 일반 timeout·production 승인·서명·Stop·fresh binding·receipt 검증을 완화하지 않습니다. 이전 beta.4 로컬 suite/staging과 부분 CI 통과는 최종 beta.5 검증이 아닙니다. 실제 cold-load/reload·handover·동일 창 receipt·프로필 보존·실제 호출 시간·120초 exchange·외부 PC 복구는 미검증이며 기존 태그·자산·노트를 보존하고 안정판/Homebrew/wiki를 배포하지 않습니다.
+
+The beta.4 entry and earlier “current/unpublished” source snapshots below are historical records, not current beta.5 qualification or publication claims.
+
+## Historical candidate: v0.4.13-beta.4 / 과거 후보
 
 The [beta.4 release-body source](v0.4.13-beta.4.md) follows published beta.3 and preserves its discovery/history corrections. Its only new functional change pins the bundled Tern consumer and native adapter to immutable `7276c1b658a1728883d90207119df31bce118170` (plugin `0.2.1`): migration-route/handover authority gets 60,000 ms; ordinary setup remains 10,000 ms and exchange 2,600 ms. Verification, errors, retries, signatures, Stop and receipt authority are unchanged. Product `0.4.13-beta.4`, contracts `0.1.0`, bridge `0.3.16`, and protocol 4 / observation 2 / API 1 / handover 1 retain their boundaries; stable/migration target `0.4.12` and beta Download-not-Apply policy do not change.
 
