@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet"
-version = "0.4.13-beta.6"
+version = "0.4.13-beta.7"
 dependencies = [
  "desktop-pet-core",
  "desktop-pet-herdr",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-core"
-version = "0.4.13-beta.6"
+version = "0.4.13-beta.7"
 dependencies = [
  "block2",
  "desktop-pet-contracts",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-update-coordinator"
-version = "0.4.13-beta.6"
+version = "0.4.13-beta.7"
 dependencies = [
  "desktop-pet-contracts",
  "libc",

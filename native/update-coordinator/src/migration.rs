@@ -4743,27 +4743,46 @@ mod tests {
         let image = ctx.running.clone();
         let server = thread::spawn(move || {
             let ready = false;
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut byte = [0u8; 1];
-            while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
-            let mut reply = serde_json::to_vec(&serde_json::json!({
-                "ok":true,"running":true,"shutdown":false,"ready":ready,
-                "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
-                "app_version":crate::identity::neutral::VERSION,
-                "updater_protocol":4,"observation_capability":2,"integration_api":1,
-                "instance_id":"another-ready-instance","pid":std::process::id(),
-                "executable_path":image.path,"running_sha256":image.sha256,
-                "config_dir":profile.config_dir,"state_dir":profile.state_dir
-            }))
-            .unwrap();
-            reply.push(b'\n');
-            stream.write_all(&reply).unwrap();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                let mut reply = serde_json::to_vec(&serde_json::json!({
+                    "ok":true,"running":true,"shutdown":false,"ready":ready,
+                    "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
+                    "app_version":crate::identity::neutral::VERSION,
+                    "updater_protocol":4,"observation_capability":2,"integration_api":1,
+                    "instance_id":"current-runtime","pid":std::process::id(),
+                    "executable_path":image.path,"running_sha256":image.sha256,
+                    "config_dir":profile.config_dir,"state_dir":profile.state_dir
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                stream.write_all(&reply).unwrap();
+                // Keep the authenticated peer alive until the client has finished
+                // reading and closed its socket; a close race is not readiness.
+                let mut remaining = [0u8; 1];
+                assert_eq!(stream.read(&mut remaining).unwrap(), 0);
+            }
         });
         let discovered = discover_for_context(&ctx).unwrap().unwrap();
         assert_eq!(discovered, (plan.clone(), record.clone()));
+        let live = status(&plan.profiles[0]).unwrap();
+        assert_eq!(live.pid, std::process::id());
+        assert_eq!(live.instance_id, ctx.instance_id);
+        assert_eq!(live.executable_path, ctx.running.path);
+        assert_eq!(live.running_sha256, ctx.running.sha256);
+        assert_eq!(live.config_dir, ctx.config_dir);
+        assert_eq!(live.state_dir, ctx.state_dir);
+        assert!(live.ok && live.running && live.control_ready);
+        assert!(!live.ready && !live.ui_ready && !live.shutdown);
+        assert_eq!(actual_process_image(live.pid).unwrap(), ctx.running.path);
         // The old startup lookup consumed readiness before it returned the
         // plan, leaving the UI with no operation to observe on later ticks.
-        assert!(latest_for_context(&ctx).unwrap_err().contains("readiness"));
+        assert!(latest_for_context(&ctx).is_err());
         assert_eq!(
             discover_for_context(&ctx).unwrap(),
             Some(discovered.clone())
