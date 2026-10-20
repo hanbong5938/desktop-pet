@@ -3018,7 +3018,7 @@ mod tests {
         };
         let context = coordinator::UpdateContext {
             executable: image.path.clone(),
-            version: coordinator::identity::VERSION.into(),
+            version: "0.4.16".into(),
             instance_id: "approved-source".into(),
             config_dir: state.clone(),
             state_dir: state.clone(),
@@ -3037,7 +3037,7 @@ mod tests {
                 version: 1,
                 executable: image.path.clone(),
                 kind: InstallationKind::Standalone,
-                app_version: coordinator::identity::VERSION.into(),
+                app_version: "0.4.16".into(),
                 protocol: 4,
                 observation_mode: 2,
                 integration_api: 1,
@@ -3064,7 +3064,7 @@ mod tests {
                 sha256: image.sha256.clone(),
             },
             candidate_bundle,
-            candidate_version: coordinator::identity::VERSION.into(),
+            candidate_version: "0.4.16".into(),
             helper_image: ExecutableIdentity {
                 path: state.join("helper"),
                 sha256: "b".repeat(64),

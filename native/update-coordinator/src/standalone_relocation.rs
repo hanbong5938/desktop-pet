@@ -138,9 +138,17 @@ struct ParentFixtureAccess {
     global: std::path::PathBuf,
     home: crate::InstallOrigin,
     app: crate::installation::ValidatedApp,
+    compiled_version: &'static str,
 }
 
 impl ParentAccess {
+    fn compiled_version(&self) -> &str {
+        #[cfg(test)]
+        if let Some(fixture) = &self.fixture {
+            return fixture.compiled_version;
+        }
+        crate::identity::VERSION
+    }
     fn home(&self) -> Result<crate::InstallOrigin, String> {
         #[cfg(test)]
         if let Some(fixture) = &self.fixture {
@@ -309,7 +317,7 @@ fn parent_plan_with(
         || plan.running.path != context.running.path
         || context.executable != context.running.path
         || !eligible_versions(&plan.context.version, &target.release.version)
-        || target.release.version != crate::identity::VERSION
+        || target.release.version != access.compiled_version()
         || context.version != target.release.version
         || !target.policy.allows_version(&target.release.version)?
     {
@@ -640,6 +648,7 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         const ID: &str = "0123456789abcdef0123456789abcdef";
+        const STABLE_VERSION: &str = "0.4.16";
 
         struct Fixture {
             _directory: tempfile::TempDir,
@@ -683,7 +692,7 @@ mod tests {
                 };
                 let context = UpdateContext {
                     executable: executable.clone(),
-                    version: crate::identity::VERSION.into(),
+                    version: STABLE_VERSION.into(),
                     instance_id: "fresh-stable-instance".into(),
                     config_dir: config,
                     state_dir: state,
@@ -700,12 +709,12 @@ mod tests {
                 let asset = format!(
                     "{}-v{}-macos-arm64.tar.gz",
                     crate::identity::neutral::ARCHIVE_PREFIX,
-                    crate::identity::VERSION
+                    STABLE_VERSION
                 );
                 let url = format!(
                     "{}v{}/{asset}",
                     crate::identity::neutral::RELEASE_DOWNLOAD,
-                    crate::identity::VERSION
+                    STABLE_VERSION
                 );
                 let plan = UpdatePlan {
                     version: protocol::UPDATER_PROTOCOL,
@@ -718,9 +727,9 @@ mod tests {
                     target: Some(crate::ReleaseTarget {
                         policy: crate::UpdatePolicy::StableOnly,
                         release: crate::ReleaseCandidate {
-                            version: crate::identity::VERSION.into(),
+                            version: STABLE_VERSION.into(),
                             channel: crate::ReleaseChannel::Stable,
-                            tag: format!("v{}", crate::identity::VERSION),
+                            tag: format!("v{STABLE_VERSION}"),
                             release_id: 7,
                             asset_name: asset,
                             archive_url: url.clone(),
@@ -734,12 +743,13 @@ mod tests {
                 };
                 let access = ParentAccess {
                     fixture: Some(ParentFixtureAccess {
+                        compiled_version: STABLE_VERSION,
                         global: global.clone(),
                         home: home.clone(),
                         app: crate::installation::ValidatedApp {
                             bundle,
                             image,
-                            version: crate::identity::VERSION.into(),
+                            version: STABLE_VERSION.into(),
                             installation_client_contract: Some(1),
                         },
                     }),
@@ -932,12 +942,7 @@ mod tests {
                 "https://example.invalid/forged.tar.gz".into();
             fixture.write_plan();
             assert!(parent_plan_with(&fixture.context, ID, &fixture.access).is_err());
-            for previous in [
-                crate::identity::VERSION,
-                "999.0.0",
-                "0.4.13-rc.1",
-                "0.4.12+local",
-            ] {
+            for previous in [STABLE_VERSION, "999.0.0", "0.4.13-rc.1", "0.4.12+local"] {
                 fixture.plan = approved.clone();
                 fixture.plan.context.version = previous.into();
                 fixture.write_plan();
