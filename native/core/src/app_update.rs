@@ -1924,6 +1924,40 @@ impl AppUpdateService {
             } else {
                 String::new()
             },
+            relocation_summary: if matches!(status, CheckStatus::Failed | CheckStatus::Checking)
+                || self.check_busy
+                || self.launching.is_some()
+                || self.launch_plan.is_some()
+                || self.prepared_plan.is_some()
+                || active.is_some()
+                || relocation_unresolved
+            {
+                String::new()
+            } else if self.at_relocation_home() {
+                text(
+                    locale,
+                    if self.relocation_waiting {
+                        Message::RelocationWaiting
+                    } else if self.relocation_busy {
+                        Message::RelocationPreparing
+                    } else {
+                        Message::RelocationReady
+                    },
+                )
+                .to_owned()
+            } else if let Some(observation) = relocation_tern {
+                text(
+                    locale,
+                    if observation.pending {
+                        Message::RelocationTernPending
+                    } else {
+                        Message::RelocationComplete
+                    },
+                )
+                .to_owned()
+            } else {
+                String::new()
+            },
             relocation_detail: if self.at_relocation_home()
                 && active.is_none()
                 && !relocation_unresolved
@@ -3199,6 +3233,8 @@ mod tests {
         assert_eq!(after.running_version, before.running_version);
         assert_eq!(after.source, before.source);
         assert_eq!(after.diagnostics, before.diagnostics);
+        assert_eq!(after.relocation_summary, before.relocation_summary);
+        assert_eq!(after.relocation_detail, before.relocation_detail);
         assert_eq!(after.last_checked, before.last_checked);
         assert_eq!(after.migration_title, before.migration_title);
         after
@@ -5491,6 +5527,55 @@ mod tests {
         assert!(service.receiver.try_recv().is_err());
     }
 
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn relocation_summary_preserves_waiting_preparing_and_operation_priority() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let home = desktop_pet_update_coordinator::installation::os_home().unwrap();
+        service.context.as_mut().unwrap().running_origin =
+            Some(Box::new(InstallOrigin::Standalone {
+                bundle: home.join("Applications/DesktopPet.app"),
+            }));
+        for locale in [UiLocale::Ko, UiLocale::En, UiLocale::Ja, UiLocale::ZhHans] {
+            for (waiting, busy, expected) in [
+                (false, false, Message::RelocationReady),
+                (false, true, Message::RelocationPreparing),
+                (true, false, Message::RelocationWaiting),
+                (true, true, Message::RelocationWaiting),
+            ] {
+                service.relocation_waiting = waiting;
+                service.relocation_busy = busy;
+                let model = service.model(locale);
+                assert_eq!(model.relocation_summary, text(locale, expected));
+                assert_eq!(
+                    completed_history_model(&service, locale).relocation_summary,
+                    model.relocation_summary
+                );
+            }
+            service.problem = Some("SETTINGS_RAW_SERVICE_ERROR".into());
+            assert_eq!(service.model(locale).status, CheckStatus::Failed);
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.problem = None;
+            service.check_busy = true;
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.check_busy = false;
+            service.launching = Some("a".repeat(32));
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.launching = None;
+            let mut active = failed_record('a');
+            active.phase = OperationPhase::Starting;
+            service.operation = Some(active);
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.operation = None;
+            service.standalone_operation = Some(standalone_observation(InstallStatus::Running));
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.standalone_operation = None;
+            service.journal_error = Some("SETTINGS_RAW_JOURNAL_ERROR".into());
+            assert!(service.model(locale).relocation_summary.is_empty());
+            service.journal_error = None;
+        }
+    }
+
     #[test]
     fn native_success_remains_success_when_tern_is_pending_then_counts_fresh_windows() {
         let mut service = admitted_card_service(UpdatePolicy::StableOnly);
@@ -5513,6 +5598,10 @@ mod tests {
         assert_eq!(service.standalone_operation.as_ref(), Some(&record));
         assert!(service.problem.is_none());
         let pending = service.model(UiLocale::Ko);
+        assert_eq!(
+            pending.relocation_summary,
+            text(UiLocale::Ko, Message::RelocationTernPending)
+        );
         assert!(pending
             .relocation_detail
             .contains(text(UiLocale::Ko, Message::RelocationComplete)));
@@ -5530,6 +5619,25 @@ mod tests {
             }),
         );
         let confirmed = service.model(UiLocale::Ko);
+        assert_eq!(
+            confirmed.relocation_summary,
+            text(UiLocale::Ko, Message::RelocationComplete)
+        );
+        service.check_busy = true;
+        assert!(service.model(UiLocale::Ko).relocation_summary.is_empty());
+        service.check_busy = false;
+        service.launching = Some("f".repeat(32));
+        assert!(service.model(UiLocale::Ko).relocation_summary.is_empty());
+        service.launching = None;
+        let mut active = failed_record('f');
+        active.phase = OperationPhase::Starting;
+        service.operation = Some(active);
+        assert!(service.model(UiLocale::Ko).relocation_summary.is_empty());
+        service.operation = None;
+        service.journal_error = Some("SETTINGS_RAW_JOURNAL_ERROR".into());
+        assert_eq!(service.model(UiLocale::Ko).status, CheckStatus::Failed);
+        assert!(service.model(UiLocale::Ko).relocation_summary.is_empty());
+        service.journal_error = None;
         assert!(confirmed
             .relocation_detail
             .contains(&text(UiLocale::Ko, Message::RelocationTernWindows).replace("{}", "2")));

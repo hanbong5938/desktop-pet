@@ -1,5 +1,36 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Source settings simplification
+
+The basic native panel now uses Appearance / Connections / App tabs and one retained nonmodal window with six directly opened detail topics. Diagnostics, paths, provider controls, color fields, menu-bar options and update policy/history no longer occupy the basic documents. Storage schemas and separate update/migration/relocation approvals are unchanged.
+
+Observed locally: core and full workspace Cargo gates, TypeScript check, neutral release build and ad-hoc packaging passed. A disposable main-thread AppKit checkout exercised production views across six topics and four locales at 480×420, basic visible/AX raw-marker exclusion, frozen model refresh preserving disabled eligibility, profile clearing and empty-provider presentation. The isolated development profile exercised all direct topics on one retained window, persistence across application deactivation, invalid/empty/mixed-case color drafts and UTF-16 selection across close/reopen, external theme conflict, disabled stale Apply, rebase, reset, native picker Cancel without saving/reopening the basic panel, and Japanese CLI plus English/Chinese/Korean native locale changes. Only that development profile was stopped.
+
+Not certified: actual KO/JA IME shortcuts, uninterrupted native Undo/focus continuity, VoiceOver speech and successful/invalid PNG picker imports. Foreground focus/input changed during keyboard automation; an attempted valid-file selection did not establish a saved custom icon. These observations are not updater installation, migration, real Tern connection, official signing or notarization evidence. The installed user app and default profile were not replaced or stopped.
+
+### Focused editing and frozen navigation correction
+
+The detail window now dispatches only Cmd-A/C/X/V/Z and Cmd-Shift-Z to its actual same-window focused text editor; frozen/readonly mutations are consumed without invoking actions or Undo. Scrollers retain their existing enabled state across freeze and model refresh. Runtime reproduction also showed that disabling an actively edited `NSTextField` ends editing and clears native Undo. Its private color-field subclass therefore reports disabled without that destructive setter while retaining a readonly editor; inactive fields keep the ordinary enabled-state snapshot/restore path.
+
+Fresh correction evidence, separate from the earlier observations above: an immutable snapshot preserved all 13 existing changed files, including the eight Rust cutover files. The identical disposable production-view fixture reported **22 failures out of 48 proof rows before correction, then 48/48 passing after correction**. Both `performKeyEquivalent:` and `keyDown:` exercised native insertion, selected-text copy/cut/paste, single-edit Undo/Redo, focus isolation, refresh/rebase continuity, frozen selection reentry/click/typing, frozen model refresh and thawed history. Both readonly diagnostic topics copied their current contents. Actual queued Legacy and Overlay thumb drags reached the final sentinel in 120-row documents while frozen and after frozen refresh; wheel input was checked separately. Initially disabled scrollers and newly disabled provider actions stayed disabled. Clipboard restoration required unchanged fixture ownership and preserved all original item types.
+
+Fresh core and full workspace Cargo gates, `bun run check`, neutral release build and ad-hoc packaging passed. A separate source checkout without smoke bridges passed launcher signature/origin validation and ran an isolated profile through start/status/settings. External `dusty_rose` and `ja` commits reported committed/native-applied, with matching desired/persisted/effective values. Only that profile was stopped afterward. Checkout/archive and cached rig resource permission failures were corrected in disposable inputs before signed repackaging; the canonical source origin was restored in that checkout. No installer, release, real updater/migration operation, installed-user process or default-profile mutation was performed.
+
+Some locked-session cached-view PNGs contain rendering artifacts; they are not clean visual-acceptance evidence. Native text/selection/Undo identities, enabled states and scroll geometry were measured independently.
+
+The packaged app remained behind a locked macOS session (`CGSSessionScreenIsLocked=1`, frontmost `com.apple.loginwindow`); no global input was sent. Each real-app scenario remains explicitly blocked rather than inheriting fixture or earlier-session results:
+
+| Real-app scenario | Current correction verification |
+| --- | --- |
+| 1. Three basic-tab captures / information density | **Blocked**; production-view captures are fixture evidence only. |
+| 2. Six direct openers / retained-window lifetime | **Blocked**; packaged `settings` command succeeded, not six-button interaction. |
+| 3. Draft / selection / Undo across topic and close/reopen | **Blocked**; native fixture editing/history passed, not packaged interaction. |
+| 4. External conflict / actual KO and JA IME | **Blocked**; isolated CLI commits passed, not draft conflict or real composition. |
+| 5. Icon picker Cancel / valid PNG / invalid PNG persistence | **Blocked**; no new picker outcome is certified. |
+| 6. Long diagnostics / copy / empty states / locale | **Blocked**; fixture copy/scroll/empty/four-locale checks passed separately. |
+| 7. Detail-only refresh / freeze navigation / mutation admission | **Blocked**; production-view freeze passed, not real daemon mutation rejection. |
+| 8. Four-locale keyboard / small-screen access / VoiceOver speech | **Blocked**; 480×420 fixture layout/AX checks are not physical keyboard or speech proof. |
+
 ## Stable 0.4.16 correction: isolated helper HOME
 
 The [0.4.16 correction](v0.4.16.md) restores only the trusted OS-account HOME after clearing the detached install helper's environment. The affected operation failed its metadata query before ownership ACK or installation; its matching helper settled the unowned preparation without replay, installation or restart. Existing source/profile and Tern work are preserved; actual recovery remains a separate observation.

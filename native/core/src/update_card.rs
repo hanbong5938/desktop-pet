@@ -4,7 +4,7 @@ use desktop_pet_update_coordinator::{CheckStatus, ReleaseCandidate, UpdateAction
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlSize,
+    NSBezelStyle, NSBezierPath, NSButton, NSButtonType, NSColor, NSControlSize,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSLineBreakMode, NSSwitch, NSTextField,
     NSView,
 };
@@ -83,6 +83,7 @@ pub(crate) struct UpdateCardModel {
     pub(crate) relocation_available: bool,
     pub(crate) relocation_title: String,
     pub(crate) relocation_detail: String,
+    pub(crate) relocation_summary: String,
 }
 
 impl UpdateCardModel {
@@ -99,153 +100,149 @@ impl UpdateCardModel {
 
 pub(crate) struct AppUpdateCard {
     view: Retained<CardView>,
+    settings_view: Retained<CardView>,
+    details_view: Retained<CardView>,
     heading: Retained<NSTextField>,
     auto_label: Retained<NSTextField>,
     auto_help: Retained<NSTextField>,
     auto_switch: Retained<NSSwitch>,
-    options_toggle: Retained<NSButton>,
-    options_expanded: bool,
     beta_summary: Retained<NSTextField>,
     beta_label: Retained<NSTextField>,
     beta_help: Retained<NSTextField>,
     beta_switch: Retained<NSSwitch>,
-    first_separator: Retained<NSBox>,
     status_icon: Retained<NSTextField>,
     status: Retained<NSTextField>,
-    detail: Retained<NSTextField>,
     running: Retained<NSTextField>,
     source: Retained<NSTextField>,
+    release: Retained<NSTextField>,
+    detail: Retained<NSTextField>,
+    relocation_detail: Retained<NSTextField>,
     history: Retained<NSTextField>,
-    diagnostics_toggle: Retained<NSButton>,
     diagnostics: Retained<NSTextField>,
-    diagnostics_expanded: bool,
-    second_separator: Retained<NSBox>,
     check: Retained<NSButton>,
     apply: Retained<NSButton>,
     download: Retained<NSButton>,
     migration: Retained<NSButton>,
-    third_separator: Retained<NSBox>,
     last_checked: Retained<NSTextField>,
     locale: UiLocale,
-    // Keep the last presented data so language switches re-render the entire card.
+    // All three surfaces are projected from the final (including migration overlay) model.
     model: Option<UpdateCardModel>,
+}
+
+fn basic_status(model: &UpdateCardModel) -> &str {
+    if model.relocation_summary.is_empty() {
+        &model.status_text
+    } else {
+        &model.relocation_summary
+    }
 }
 
 impl AppUpdateCard {
     pub(crate) fn new(locale: UiLocale, target: &MenuTarget, mtm: MainThreadMarker) -> Self {
         let view = CardView::new(mtm);
-        unsafe {
-            let _: () = msg_send![&*view, setAccessibilityElement: false];
+        let settings_view = CardView::new(mtm);
+        let details_view = CardView::new(mtm);
+        for root in [&view, &settings_view, &details_view] {
+            unsafe {
+                let _: () = msg_send![&**root, setAccessibilityElement: false];
+            }
         }
         let heading = label(12.5, true, false, mtm);
         let auto_label = label(12.0, true, false, mtm);
         let auto_help = label(10.5, false, true, mtm);
-        let auto_switch: Retained<NSSwitch> = unsafe {
-            msg_send![NSSwitch::alloc(mtm), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(46.0, 30.0))]
+        let make_switch = |action| {
+            let switch: Retained<NSSwitch> = unsafe {
+                msg_send![NSSwitch::alloc(mtm), initWithFrame: rect(0.0, 0.0, 46.0, 30.0)]
+            };
+            switch.setControlSize(NSControlSize::Small);
+            switch.setRefusesFirstResponder(false);
+            unsafe {
+                switch.setTarget(Some(target));
+                switch.setAction(Some(action));
+            }
+            switch
         };
-        auto_switch.setControlSize(NSControlSize::Small);
-        auto_switch.setRefusesFirstResponder(false);
-        unsafe {
-            auto_switch.setTarget(Some(target));
-            auto_switch.setAction(Some(sel!(toggleUpdateAutoCheck:)));
-        }
-        let options_toggle = button(target, sel!(toggleUpdateOptions:), mtm);
+        let auto_switch = make_switch(sel!(toggleUpdateAutoCheck:));
         let beta_summary = label(10.5, false, true, mtm);
         let beta_label = label(12.0, true, false, mtm);
         let beta_help = label(10.5, false, true, mtm);
-        let beta_switch: Retained<NSSwitch> = unsafe {
-            msg_send![NSSwitch::alloc(mtm), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(46.0, 30.0))]
-        };
-        beta_switch.setControlSize(NSControlSize::Small);
-        beta_switch.setRefusesFirstResponder(false);
-        unsafe {
-            beta_switch.setTarget(Some(target));
-            beta_switch.setAction(Some(sel!(toggleUpdateBeta:)));
-        }
-        let first_separator = separator(mtm);
+        let beta_switch = make_switch(sel!(toggleUpdateBeta:));
         let status_icon = label(13.0, true, false, mtm);
         unsafe {
             let _: () = msg_send![&*status_icon, setAccessibilityElement: false];
         }
         let status = label(11.5, true, false, mtm);
-        let detail = label(10.5, false, true, mtm);
         let running = label(10.5, false, true, mtm);
-        let source = label(10.5, false, true, mtm);
-        let history = label(10.0, false, true, mtm);
-        history.setHidden(true);
-        let diagnostics_toggle = button(target, sel!(toggleUpdateDiagnostics:), mtm);
-        diagnostics_toggle.setHidden(true);
-        let diagnostics = label(10.0, false, true, mtm);
-        diagnostics.setSelectable(true);
-        diagnostics.setRefusesFirstResponder(false);
-        diagnostics.setLineBreakMode(NSLineBreakMode::ByCharWrapping);
-        diagnostics.setHidden(true);
-        let second_separator = separator(mtm);
+        let source = diagnostic_label(10.5, mtm);
+        let release = diagnostic_label(10.5, mtm);
+        let detail = diagnostic_label(10.5, mtm);
+        let relocation_detail = diagnostic_label(10.5, mtm);
+        let history = diagnostic_label(10.0, mtm);
+        let diagnostics = diagnostic_label(10.0, mtm);
+        let last_checked = diagnostic_label(10.0, mtm);
         let check = button(target, sel!(checkAppUpdate:), mtm);
         let apply = button(target, sel!(applyAppUpdate:), mtm);
         let download = button(target, sel!(downloadAppUpdate:), mtm);
-        download.setHidden(true);
         let migration = button(target, sel!(migrateLegacyInstallation:), mtm);
-        migration.setHidden(true);
-        let third_separator = separator(mtm);
-        let last_checked = label(10.0, false, true, mtm);
         for child in [
             &*heading as &NSView,
-            &*auto_label,
-            &*auto_help,
-            &*auto_switch,
-            &*options_toggle,
-            &*beta_summary,
-            &*first_separator,
-            &*beta_label,
-            &*beta_help,
-            &*beta_switch,
+            &*running,
             &*status_icon,
             &*status,
-            &*detail,
-            &*running,
-            &*source,
-            &*history,
-            &*diagnostics_toggle,
-            &*diagnostics,
-            &*second_separator,
+            &*beta_summary,
             &*check,
             &*apply,
             &*download,
             &*migration,
-            &*third_separator,
-            &*last_checked,
         ] {
             view.addSubview(child);
         }
+        for child in [
+            &*auto_label as &NSView,
+            &*auto_help,
+            &*auto_switch,
+            &*beta_label,
+            &*beta_help,
+            &*beta_switch,
+        ] {
+            settings_view.addSubview(child);
+        }
+        for child in [
+            &*source as &NSView,
+            &*release,
+            &*last_checked,
+            &*detail,
+            &*relocation_detail,
+            &*history,
+            &*diagnostics,
+        ] {
+            details_view.addSubview(child);
+        }
         let mut card = Self {
             view,
+            settings_view,
+            details_view,
             heading,
             auto_label,
             auto_help,
             auto_switch,
-            options_toggle,
-            options_expanded: false,
             beta_summary,
             beta_label,
             beta_help,
             beta_switch,
-            first_separator,
             status_icon,
             status,
-            detail,
             running,
             source,
-            second_separator,
+            release,
+            detail,
+            relocation_detail,
             history,
-            diagnostics_toggle,
             diagnostics,
-            diagnostics_expanded: false,
             check,
             apply,
             download,
             migration,
-            third_separator,
             last_checked,
             locale,
             model: None,
@@ -257,35 +254,36 @@ impl AppUpdateCard {
     pub(crate) fn view(&self) -> &NSView {
         &self.view
     }
-    pub(crate) fn options_toggle(&self) -> &NSButton {
-        &self.options_toggle
+    pub(crate) fn settings_view(&self) -> &NSView {
+        &self.settings_view
     }
-
-    pub(crate) fn diagnostics_toggle(&self) -> &NSButton {
-        &self.diagnostics_toggle
-    }
-
-    pub(crate) fn diagnostics(&self) -> &NSTextField {
-        &self.diagnostics
+    pub(crate) fn details_view(&self) -> &NSView {
+        &self.details_view
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
         self.locale = locale;
-        set_text(&self.heading, text(locale, Message::AppUpdateTitle));
-        set_text(&self.auto_label, text(locale, Message::AppUpdateAutoCheck));
-        set_text(
-            &self.auto_help,
+        for (field, message) in [
+            (&self.heading, Message::AppUpdateTitle),
+            (&self.auto_label, Message::AppUpdateAutoCheck),
+            (&self.auto_help, Message::AppUpdateAutomaticHelp),
+            (&self.beta_label, Message::AppUpdateReceiveBeta),
+            (&self.beta_help, Message::AppUpdateBetaHelp),
+            (&self.beta_summary, Message::AppUpdateBetaEnabledSummary),
+        ] {
+            set_text(field, text(locale, message));
+            accessibility(field, text(locale, message));
+        }
+        accessibility(&self.auto_switch, text(locale, Message::AppUpdateAutoCheck));
+        accessibility_help(
+            &self.auto_switch,
             text(locale, Message::AppUpdateAutomaticHelp),
         );
-        set_text(
-            &self.beta_label,
+        accessibility(
+            &self.beta_switch,
             text(locale, Message::AppUpdateReceiveBeta),
         );
-        set_text(&self.beta_help, text(locale, Message::AppUpdateBetaHelp));
-        self.check.setTitle(&NSString::from_str(text(
-            locale,
-            Message::AppUpdateCheckNow,
-        )));
+        accessibility_help(&self.beta_switch, text(locale, Message::AppUpdateBetaHelp));
         self.download.setTitle(&NSString::from_str(text(
             locale,
             Message::AppUpdateDownloadRelease,
@@ -294,41 +292,28 @@ impl AppUpdateCard {
             &self.download,
             text(locale, Message::AppUpdateDownloadRelease),
         );
-        self.migration
-            .setTitle(&NSString::from_str(text(locale, Message::MigrationTitle)));
-        accessibility(&self.migration, text(locale, Message::MigrationTitle));
-        accessibility(&self.heading, text(locale, Message::AppUpdateTitle));
-        accessibility(&self.auto_switch, text(locale, Message::AppUpdateAutoCheck));
-        accessibility(
-            &self.beta_switch,
-            text(locale, Message::AppUpdateReceiveBeta),
-        );
-        accessibility(&self.beta_help, text(locale, Message::AppUpdateBetaHelp));
-        accessibility_help(&self.beta_switch, text(locale, Message::AppUpdateBetaHelp));
-        accessibility_help(
-            &self.auto_switch,
-            text(locale, Message::AppUpdateAutomaticHelp),
-        );
-        accessibility(
-            &self.auto_help,
-            text(locale, Message::AppUpdateAutomaticHelp),
-        );
-        accessibility(&self.check, text(locale, Message::AppUpdateCheckNow));
-        if let Some(model) = self.model.clone() {
+        if let Some(model) = self.model.take() {
             self.refresh(&model);
         } else {
-            self.render_status(
-                &CheckStatus::NotChecked,
-                text(self.locale, Message::AppUpdateNotChecked),
-                "",
-                "",
-                "",
-                None,
-                None,
-                None,
+            set_text(&self.status, text(locale, Message::AppUpdateNotChecked));
+            accessibility(&self.status, text(locale, Message::AppUpdateNotChecked));
+            self.check.setTitle(&NSString::from_str(text(
+                locale,
+                Message::AppUpdateCheckNow,
+            )));
+            accessibility(&self.check, text(locale, Message::AppUpdateCheckNow));
+            for field in [&self.running, &self.beta_summary] {
+                field.setHidden(true);
+            }
+            for action in [&self.apply, &self.download, &self.migration] {
+                action.setHidden(true);
+            }
+            set_text(&self.history, text(locale, Message::SettingsHistoryEmpty));
+            set_text(
+                &self.diagnostics,
+                text(locale, Message::SettingsDetailsEmpty),
             );
         }
-        self.refresh_options();
     }
 
     pub(crate) fn refresh(&mut self, model: &UpdateCardModel) {
@@ -342,6 +327,10 @@ impl AppUpdateCard {
         } else {
             NSControlStateValueOff
         });
+        self.auto_switch
+            .setEnabled(!model.busy && !model.settings_locked);
+        self.beta_switch
+            .setEnabled(!model.busy && !model.settings_locked);
         let check_title = text(
             self.locale,
             if model.last_checked.is_some() || model.status != CheckStatus::NotChecked {
@@ -352,25 +341,92 @@ impl AppUpdateCard {
         );
         self.check.setTitle(&NSString::from_str(check_title));
         accessibility(&self.check, check_title);
-        let busy = model.busy;
-        self.auto_switch.setEnabled(!busy && !model.settings_locked);
-        self.beta_switch.setEnabled(!busy && !model.settings_locked);
-        self.check.setEnabled(!busy);
-        self.render_status(
-            &model.status,
-            &model.status_text,
-            &model.running_version,
-            &model.source,
-            if model.relocation_detail.is_empty() {
-                &model.detail
-            } else {
-                &model.relocation_detail
-            },
-            model.last_checked,
-            model.action.as_ref(),
-            model.release.as_ref(),
+        self.check.setEnabled(!model.busy);
+        let (symbol, tint) = match model.status {
+            CheckStatus::Current | CheckStatus::Installed | CheckStatus::Applied => {
+                ("✓", NSColor::systemGreenColor())
+            }
+            CheckStatus::Available | CheckStatus::Local => ("●", NSColor::systemBlueColor()),
+            CheckStatus::Failed | CheckStatus::Unsupported => ("!", NSColor::systemOrangeColor()),
+            CheckStatus::NotChecked | CheckStatus::Checking => ("○", muted()),
+        };
+        set_text(&self.status_icon, symbol);
+        self.status_icon.setTextColor(Some(&tint));
+        set_text(&self.status, basic_status(model));
+        accessibility(&self.status, basic_status(model));
+        let running = if model.running_version.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}: {}",
+                text(self.locale, Message::AppUpdateRunning),
+                model.running_version
+            )
+        };
+        set_text(&self.running, &running);
+        accessibility(&self.running, &running);
+        self.running.setHidden(running.is_empty());
+        self.beta_summary.setHidden(!model.receive_beta_updates);
+
+        let source = format!(
+            "{}: {}",
+            text(self.locale, Message::AppUpdateSource),
+            model.source
         );
-        // Always reset the selector: this card is reused across discovery and recovery.
+        let release = model.release.as_ref().map_or_else(String::new, |release| {
+            format!("{} ({})", release.version, release.tag)
+        });
+        let checked = match model
+            .last_checked
+            .and_then(|seconds| format_checked_at(seconds, self.locale))
+        {
+            Some(date) => format!(
+                "{}: {}",
+                text(self.locale, Message::AppUpdateLastChecked),
+                date
+            ),
+            None => text(self.locale, Message::AppUpdateNeverChecked).to_owned(),
+        };
+        for (field, value, hide_empty) in [
+            (&self.source, source.as_str(), false),
+            (&self.release, release.as_str(), true),
+            (&self.last_checked, checked.as_str(), false),
+            (&self.detail, model.detail.as_str(), true),
+            (
+                &self.relocation_detail,
+                model.relocation_detail.as_str(),
+                true,
+            ),
+            (
+                &self.history,
+                if model.history.is_empty() {
+                    text(self.locale, Message::SettingsHistoryEmpty)
+                } else {
+                    &model.history
+                },
+                false,
+            ),
+            (
+                &self.diagnostics,
+                if model.diagnostics.is_empty() {
+                    text(self.locale, Message::SettingsDetailsEmpty)
+                } else {
+                    &model.diagnostics
+                },
+                false,
+            ),
+        ] {
+            set_text(field, value);
+            accessibility(field, value);
+            field.setHidden(hide_empty && value.is_empty());
+        }
+        let detail_color = if model.status == CheckStatus::Failed {
+            NSColor::systemRedColor()
+        } else {
+            muted()
+        };
+        self.detail.setTextColor(Some(&detail_color));
+
         unsafe {
             self.apply.setAction(Some(match model.primary_action {
                 Some(UpdateCardPrimaryAction::Migrate) => sel!(migrateLegacyInstallation:),
@@ -378,34 +434,32 @@ impl AppUpdateCard {
                 Some(UpdateCardPrimaryAction::Update) | None => sel!(applyAppUpdate:),
             }));
         }
+        let action_title = match model.primary_action {
+            Some(UpdateCardPrimaryAction::Migrate) => Some(model.migration_title.as_str()),
+            Some(UpdateCardPrimaryAction::Relocate) => Some(model.relocation_title.as_str()),
+            Some(UpdateCardPrimaryAction::Update) => model.action.as_ref().map(|action| {
+                text(
+                    self.locale,
+                    match action {
+                        UpdateAction::StandaloneReplace | UpdateAction::HomebrewUpgrade => {
+                            Message::AppUpdateInstall
+                        }
+                        UpdateAction::SourceRebuild => Message::AppUpdateRebuild,
+                        UpdateAction::ApplyInstalled => Message::AppUpdateApply,
+                        #[cfg(desktop_pet_legacy)]
+                        UpdateAction::HerdrReinstall => Message::AppUpdateInstall,
+                    },
+                )
+            }),
+            None => None,
+        };
         self.apply.setHidden(model.primary_action.is_none());
-        if model.primary_action == Some(UpdateCardPrimaryAction::Migrate) {
-            self.apply
-                .setTitle(&NSString::from_str(&model.migration_title));
-            accessibility(&self.apply, &model.migration_title);
-        } else if model.primary_action == Some(UpdateCardPrimaryAction::Relocate) {
-            self.apply
-                .setTitle(&NSString::from_str(&model.relocation_title));
-            accessibility(&self.apply, &model.relocation_title);
+        if let Some(title) = action_title {
+            self.apply.setTitle(&NSString::from_str(title));
+            accessibility(&self.apply, title);
         }
-        set_text(&self.history, &model.history);
-        self.history.setHidden(model.history.is_empty());
-        accessibility(&self.history, &model.history);
-        if self
-            .model
-            .as_ref()
-            .is_none_or(|old| old.diagnostics != model.diagnostics)
-        {
-            set_text(&self.diagnostics, &model.diagnostics);
-        }
-        accessibility(&self.diagnostics, &model.diagnostics);
-        self.diagnostics_toggle
-            .setHidden(model.diagnostics.is_empty());
-        self.diagnostics
-            .setHidden(model.diagnostics.is_empty() || !self.diagnostics_expanded);
-        self.localize_diagnostics_toggle();
         self.apply.setEnabled(
-            !busy
+            !model.busy
                 && !model.settings_locked
                 && match model.primary_action {
                     Some(UpdateCardPrimaryAction::Update) => model.action.is_some(),
@@ -416,271 +470,70 @@ impl AppUpdateCard {
         );
         self.download.setHidden(model.download_url.is_none());
         self.download
-            .setEnabled(!busy && !model.settings_locked && model.download_url.is_some());
+            .setEnabled(!model.busy && !model.settings_locked && model.download_url.is_some());
         self.migration
             .setTitle(&NSString::from_str(&model.migration_title));
+        accessibility(&self.migration, &model.migration_title);
         self.migration.setHidden(
             !model.migration_visible
                 || model.primary_action == Some(UpdateCardPrimaryAction::Migrate),
         );
         self.migration
-            .setEnabled(!busy && model.migration_available);
+            .setEnabled(!model.busy && model.migration_available);
         self.model = Some(model.clone());
-        self.refresh_options();
-    }
-
-    pub(crate) fn toggle_options(&mut self) {
-        self.options_expanded = !self.options_expanded;
-        self.refresh_options();
-    }
-
-    fn refresh_options(&self) {
-        let title = text(
-            self.locale,
-            if self.options_expanded {
-                Message::AppUpdateHideOptions
-            } else {
-                Message::AppUpdateShowOptions
-            },
-        );
-        self.options_toggle.setTitle(&NSString::from_str(title));
-        accessibility(&self.options_toggle, title);
-        let summary = text(self.locale, Message::AppUpdateBetaEnabledSummary);
-        set_text(&self.beta_summary, summary);
-        accessibility(&self.beta_summary, summary);
-        self.beta_summary.setHidden(
-            self.options_expanded
-                || self
-                    .model
-                    .as_ref()
-                    .is_none_or(|model| !model.receive_beta_updates),
-        );
-        self.beta_label.setHidden(!self.options_expanded);
-        self.beta_help.setHidden(!self.options_expanded);
-        self.beta_switch.setHidden(!self.options_expanded);
-    }
-
-    pub(crate) fn toggle_diagnostics(&mut self) {
-        self.diagnostics_expanded = !self.diagnostics_expanded;
-        self.diagnostics.setHidden(
-            !self.diagnostics_expanded
-                || self
-                    .model
-                    .as_ref()
-                    .is_none_or(|model| model.diagnostics.is_empty()),
-        );
-        self.localize_diagnostics_toggle();
-    }
-
-    fn localize_diagnostics_toggle(&self) {
-        let title = text(
-            self.locale,
-            if self.diagnostics_expanded {
-                Message::AppUpdateHideDiagnostics
-            } else {
-                Message::AppUpdateShowDiagnostics
-            },
-        );
-        self.diagnostics_toggle.setTitle(&NSString::from_str(title));
-        accessibility(&self.diagnostics_toggle, title);
-    }
-
-    fn render_status(
-        &self,
-        status: &CheckStatus,
-        status_text: &str,
-        running_version: &str,
-        source: &str,
-        detail: &str,
-        last_checked: Option<u64>,
-        action: Option<&UpdateAction>,
-        release: Option<&ReleaseCandidate>,
-    ) {
-        let (symbol, tint) = match status {
-            CheckStatus::Current | CheckStatus::Installed | CheckStatus::Applied => {
-                ("✓", NSColor::systemGreenColor())
-            }
-            CheckStatus::Available | CheckStatus::Local => ("●", NSColor::systemBlueColor()),
-            CheckStatus::Failed | CheckStatus::Unsupported => ("!", NSColor::systemOrangeColor()),
-            CheckStatus::NotChecked | CheckStatus::Checking => ("○", muted()),
-        };
-        set_text(&self.status_icon, symbol);
-        self.status_icon.setTextColor(Some(&tint));
-        set_text(&self.status, status_text);
-        accessibility(&self.status, status_text);
-        set_text(&self.detail, detail);
-        self.detail.setHidden(detail.is_empty());
-        let detail_tint = if *status == CheckStatus::Failed {
-            NSColor::systemRedColor()
-        } else {
-            muted()
-        };
-        self.detail.setTextColor(Some(&detail_tint));
-        accessibility(&self.detail, detail);
-        let running = if running_version.is_empty() {
-            String::new()
-        } else if let Some(release) = release {
-            format!(
-                "{}: {} → {} ({})",
-                text(self.locale, Message::AppUpdateRunning),
-                running_version,
-                release.version,
-                release.tag,
-            )
-        } else {
-            format!(
-                "{}: {}",
-                text(self.locale, Message::AppUpdateRunning),
-                running_version
-            )
-        };
-        let origin = if source.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "{}: {}",
-                text(self.locale, Message::AppUpdateSource),
-                source
-            )
-        };
-        set_text(&self.running, &running);
-        set_text(&self.source, &origin);
-        self.running.setHidden(running.is_empty());
-        self.source.setHidden(origin.is_empty());
-        accessibility(&self.running, &running);
-        accessibility(&self.source, &origin);
-        let action_message = match action {
-            Some(UpdateAction::StandaloneReplace | UpdateAction::HomebrewUpgrade) => {
-                Some(Message::AppUpdateInstall)
-            }
-            Some(UpdateAction::SourceRebuild) => Some(Message::AppUpdateRebuild),
-            Some(UpdateAction::ApplyInstalled) => Some(Message::AppUpdateApply),
-            #[cfg(desktop_pet_legacy)]
-            Some(UpdateAction::HerdrReinstall) => Some(Message::AppUpdateInstall),
-            None => None,
-        };
-        self.apply.setHidden(action_message.is_none());
-        if let Some(message) = action_message {
-            let title = text(self.locale, message);
-            self.apply.setTitle(&NSString::from_str(title));
-            accessibility(&self.apply, title);
-        }
-        let checked = match last_checked.and_then(|seconds| format_checked_at(seconds, self.locale))
-        {
-            Some(date) => format!(
-                "{}: {}",
-                text(self.locale, Message::AppUpdateLastChecked),
-                date
-            ),
-            None => text(self.locale, Message::AppUpdateNeverChecked).to_owned(),
-        };
-        set_text(&self.last_checked, &checked);
-        accessibility(&self.last_checked, &checked);
     }
 
     pub(crate) fn height(&self, width: f64) -> f64 {
         self.layout_contents(width, false)
     }
-
     pub(crate) fn layout(&self, frame: NSRect) {
         self.view.setFrame(frame);
         self.layout_contents(frame.size.width, true);
     }
+    pub(crate) fn settings_height(&self, width: f64) -> f64 {
+        self.layout_settings_contents(width, false)
+    }
+    pub(crate) fn layout_settings(&self, frame: NSRect) {
+        self.settings_view.setFrame(frame);
+        self.layout_settings_contents(frame.size.width, true);
+    }
+    pub(crate) fn details_height(&self, width: f64) -> f64 {
+        self.layout_details_contents(width, false)
+    }
+    pub(crate) fn layout_details(&self, frame: NSRect) {
+        self.details_view.setFrame(frame);
+        self.layout_details_contents(frame.size.width, true);
+    }
 
     fn layout_contents(&self, width: f64, apply: bool) -> f64 {
         let full = (width - 28.0).max(1.0);
-        let beside_switch = (width - 82.0).max(1.0);
         let mut y = 12.0;
         place(&self.heading, 14.0, full, 19.0, &mut y, apply);
         y += 5.0;
-        let row_height = measured(&self.auto_label, beside_switch).max(30.0);
-        if apply {
-            self.auto_label
-                .setFrame(rect(14.0, y, beside_switch, row_height));
-            self.auto_switch
-                .setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
+        if !self.running.isHidden() {
+            place(&self.running, 14.0, full, 14.0, &mut y, apply);
+            y += 5.0;
         }
-        y += row_height + 3.0;
-        place(&self.auto_help, 14.0, full, 14.0, &mut y, apply);
-        y += 6.0;
-        if apply {
-            self.options_toggle.setFrame(rect(
-                14.0,
-                y,
-                button_width(&self.options_toggle, full),
-                25.0,
-            ));
-        }
-        y += 25.0;
-        if !self.beta_summary.isHidden() {
-            y += 3.0;
-            place(&self.beta_summary, 14.0, full, 14.0, &mut y, apply);
-        }
-        if self.options_expanded {
-            y += 4.0;
-            let beta_row_height = measured(&self.beta_label, beside_switch).max(30.0);
-            if apply {
-                self.beta_label
-                    .setFrame(rect(14.0, y, beside_switch, beta_row_height));
-                self.beta_switch
-                    .setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
-            }
-            y += beta_row_height + 3.0;
-            place(&self.beta_help, 14.0, full, 14.0, &mut y, apply);
-        }
-        y += 7.0;
-        if apply {
-            self.first_separator.setFrame(rect(14.0, y, full, 1.0));
-        }
-        y += 6.0;
         let status_width = (full - 25.0).max(1.0);
-        let status_height = measured(&self.status, status_width).max(18.0);
+        let status_height = measured(&self.status, status_width).max(20.0);
         if apply {
             self.status_icon.setFrame(rect(14.0, y, 19.0, 20.0));
             self.status
                 .setFrame(rect(38.0, y, status_width, status_height));
         }
-        y += status_height.max(20.0) + 3.0;
-        for field in [&self.detail, &self.running, &self.source] {
-            if !field.isHidden() {
-                place(field, 38.0, (width - 52.0).max(1.0), 14.0, &mut y, apply);
-                y += 3.0;
-            }
+        y += status_height;
+        if !self.beta_summary.isHidden() {
+            y += 4.0;
+            place(&self.beta_summary, 14.0, full, 14.0, &mut y, apply);
         }
-        y += 5.0;
-        if apply {
-            self.second_separator.setFrame(rect(14.0, y, full, 1.0));
-        }
-        y += 7.0;
-        let check_width = button_width(&self.check, full);
-        let apply_width = if self.apply.isHidden() {
-            0.0
-        } else {
-            button_width(&self.apply, full)
-        };
-        let download_width = if self.download.isHidden() {
-            0.0
-        } else {
-            button_width(&self.download, full)
-        };
+        y += 8.0;
         let mut x = 14.0;
         let mut row_y = y;
-        for (button, button_width) in [
-            (&self.check, check_width),
-            (&self.apply, apply_width),
-            (&self.download, download_width),
-            (
-                &self.migration,
-                if self.migration.isHidden() {
-                    0.0
-                } else {
-                    button_width(&self.migration, full)
-                },
-            ),
-        ] {
-            if button_width == 0.0 {
+        for button in [&self.check, &self.apply, &self.download, &self.migration] {
+            if button.isHidden() {
                 continue;
             }
+            let button_width = button_width(button, full);
             if x > 14.0 && x + button_width > 14.0 + full {
                 x = 14.0;
                 row_y += 31.0;
@@ -690,31 +543,48 @@ impl AppUpdateCard {
             }
             x += button_width + 8.0;
         }
-        y = row_y + 25.0;
-        y += 7.0;
-        if apply {
-            self.third_separator.setFrame(rect(14.0, y, full, 1.0));
-        }
-        y += 7.0;
-        place(&self.last_checked, 14.0, full, 14.0, &mut y, apply);
-        if !self.history.isHidden() {
-            y += 5.0;
-            place(&self.history, 14.0, full, 14.0, &mut y, apply);
-        }
-        if !self.diagnostics_toggle.isHidden() {
-            y += 6.0;
-            let toggle_width = button_width(&self.diagnostics_toggle, full);
+        row_y + 39.0
+    }
+
+    fn layout_settings_contents(&self, width: f64, apply: bool) -> f64 {
+        let full = (width - 28.0).max(1.0);
+        let beside_switch = (width - 82.0).max(1.0);
+        let mut y = 12.0;
+        for (label, help, switch) in [
+            (&self.auto_label, &self.auto_help, &self.auto_switch),
+            (&self.beta_label, &self.beta_help, &self.beta_switch),
+        ] {
+            let height = measured(label, beside_switch).max(30.0);
             if apply {
-                self.diagnostics_toggle
-                    .setFrame(rect(14.0, y, toggle_width, 25.0));
+                label.setFrame(rect(14.0, y, beside_switch, height));
+                switch.setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
             }
-            y += 25.0;
-            if !self.diagnostics.isHidden() {
-                y += 5.0;
-                place(&self.diagnostics, 14.0, full, 14.0, &mut y, apply);
-            }
+            y += height + 3.0;
+            place(help, 14.0, full, 14.0, &mut y, apply);
+            y += 10.0;
         }
-        y + 14.0
+        y + 4.0
+    }
+
+    fn layout_details_contents(&self, width: f64, apply: bool) -> f64 {
+        let full = (width - 28.0).max(1.0);
+        let mut y = 12.0;
+        for field in [
+            &self.source,
+            &self.release,
+            &self.last_checked,
+            &self.detail,
+            &self.relocation_detail,
+            &self.history,
+            &self.diagnostics,
+        ] {
+            if field.isHidden() {
+                continue;
+            }
+            place(field, 14.0, full, 14.0, &mut y, apply);
+            y += 8.0;
+        }
+        y + 6.0
     }
 }
 
@@ -745,19 +615,6 @@ fn button_width(button: &NSButton, available: f64) -> f64 {
         .min(available)
 }
 
-fn separator(mtm: MainThreadMarker) -> Retained<NSBox> {
-    let line = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::default());
-    line.setBoxType(NSBoxType::Custom);
-    line.setBorderWidth(0.0);
-    line.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        0.28, 0.28, 0.32, 0.35,
-    ));
-    unsafe {
-        let _: () = msg_send![&*line, setAccessibilityElement: false];
-    }
-    line
-}
-
 fn label(size: f64, bold: bool, muted_color: bool, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let field = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
     let font = if bold {
@@ -774,6 +631,15 @@ fn label(size: f64, bold: bool, muted_color: bool, mtm: MainThreadMarker) -> Ret
     field.setTextColor(Some(&color));
     field.setMaximumNumberOfLines(0);
     field.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    field
+}
+
+fn diagnostic_label(size: f64, mtm: MainThreadMarker) -> Retained<NSTextField> {
+    let field = label(size, false, true, mtm);
+    field.setEditable(false);
+    field.setSelectable(true);
+    field.setRefusesFirstResponder(false);
+    field.setLineBreakMode(NSLineBreakMode::ByCharWrapping);
     field
 }
 
@@ -805,7 +671,9 @@ fn button(
 }
 
 fn set_text(field: &NSTextField, value: &str) {
-    field.setStringValue(&NSString::from_str(value));
+    if field.stringValue().to_string() != value {
+        field.setStringValue(&NSString::from_str(value));
+    }
 }
 
 fn accessibility(view: &NSView, value: &str) {

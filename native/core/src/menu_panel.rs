@@ -12,19 +12,24 @@ use desktop_pet_contracts::{HostConnections, LifecycleSettingView};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
-    define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message as ObjcMessage,
+    define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
+    Message as ObjcMessage,
 };
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox,
     NSBoxType, NSButton, NSButtonType, NSCellImagePosition, NSColor, NSControl, NSControlSize,
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
     NSFloatingWindowLevel, NSFont, NSImage, NSImageScaling, NSImageView, NSPanel, NSPopUpButton,
-    NSScrollElasticity, NSScrollView, NSScrollerStyle, NSSwitch, NSTextAlignment, NSTextField,
-    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSScreen, NSScrollElasticity, NSScrollView, NSScroller, NSScrollerStyle, NSSwitch,
+    NSTextAlignment, NSTextField, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask,
 };
 
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager,
+};
 use std::cell::Cell;
+use std::fmt::Write as _;
 const PANEL_WIDTH: f64 = 352.0;
 const PANEL_HEIGHT: f64 = 540.0;
 const PANEL_EDGE_INSET: f64 = 10.0;
@@ -32,11 +37,184 @@ const PANEL_RADIUS: f64 = 16.0;
 const CARD_RADIUS: f64 = 10.0;
 const SCROLL_TOP: f64 = 86.0;
 const FOOTER_HEIGHT: f64 = 50.0;
-const CHARACTER_VIEW_TOP: f64 = 106.0;
 const INITIAL_CHARACTER_HEIGHT: f64 = 72.0;
-const MENU_BAR_CARD_BOTTOM: f64 = 14.0;
 const MIN_SCALE: f64 = 0.35;
 const MAX_SCALE: f64 = 1.25;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SettingsTab {
+    Appearance = 0,
+    Connections = 1,
+    App = 2,
+}
+
+impl SettingsTab {
+    pub(crate) fn from_tag(tag: isize) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Appearance),
+            1 => Some(Self::Connections),
+            2 => Some(Self::App),
+            _ => None,
+        }
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SettingsDetailPage {
+    Appearance = 0,
+    Connections = 1,
+    MenuBar = 2,
+    UpdateSettings = 3,
+    ConnectionDiagnostics = 4,
+    UpdateDetails = 5,
+}
+
+impl SettingsDetailPage {
+    pub(crate) fn from_tag(tag: isize) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Appearance),
+            1 => Some(Self::Connections),
+            2 => Some(Self::MenuBar),
+            3 => Some(Self::UpdateSettings),
+            4 => Some(Self::ConnectionDiagnostics),
+            5 => Some(Self::UpdateDetails),
+            _ => None,
+        }
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+    fn message(self) -> Message {
+        match self {
+            Self::Appearance => Message::AppearanceDetails,
+            Self::Connections => Message::ConnectionSettings,
+            Self::MenuBar => Message::MenuBarSettings,
+            Self::UpdateSettings => Message::UpdateSettings,
+            Self::ConnectionDiagnostics => Message::ConnectionDiagnostics,
+            Self::UpdateDetails => Message::UpdateDetails,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SettingsDetailWindowIvars {
+    composition_escape: Cell<Option<u64>>,
+    update_frozen: Cell<bool>,
+}
+
+define_class!(
+    #[unsafe(super = NSWindow)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OMPetSettingsDetailWindow"]
+    #[ivars = SettingsDetailWindowIvars]
+    struct SettingsDetailNativeWindow;
+    unsafe impl NSObjectProtocol for SettingsDetailNativeWindow {}
+    impl SettingsDetailNativeWindow {
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: &NSEvent) {
+            let composing_escape = event.r#type() == objc2_app_kit::NSEventType::KeyDown && event.keyCode() == 53 && self.firstResponder()
+                .and_then(|responder| responder.downcast::<NSTextView>().ok())
+                .is_some_and(|editor| unsafe { msg_send![&*editor, hasMarkedText] });
+            self.ivars().composition_escape.set(composing_escape.then(|| event.timestamp().to_bits()));
+            let _: () = unsafe { msg_send![super(self), sendEvent: event] };
+        }
+        #[unsafe(method(close))]
+        fn close(&self) { crate::ui::request_settings_detail_close(); }
+        #[unsafe(method(performClose:))]
+        fn perform_close(&self, _sender: Option<&AnyObject>) { crate::ui::request_settings_detail_close(); }
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, sender: Option<&AnyObject>) {
+            if self.ivars().composition_escape.get().is_some_and(|number| {
+                objc2_app_kit::NSApplication::sharedApplication(self.mtm()).currentEvent()
+                    .is_some_and(|event| event.timestamp().to_bits() == number)
+            }) { return; }
+            if let Some(editor) = self.firstResponder().and_then(|r| r.downcast::<NSTextView>().ok()) {
+                let marked: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+                if marked {
+                    let _: () = unsafe { msg_send![&*editor, cancelOperation: sender] };
+                    return;
+                }
+            }
+            crate::ui::request_settings_detail_close();
+        }
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            if event.keyCode() == 13 && event.modifierFlags().contains(NSEventModifierFlags::Command) {
+                crate::ui::request_settings_detail_close();
+                true
+            } else if self.handle_edit_shortcut(event) {
+                true
+            } else {
+                unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            }
+        }
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if self.ivars().composition_escape.get() == Some(event.timestamp().to_bits()) {
+                let _: () = unsafe { msg_send![super(self), keyDown: event] };
+                return;
+            }
+            if self.handle_edit_shortcut(event) {
+                return;
+            }
+            if event.keyCode() == 53 {
+                if let Some(editor) = self.firstResponder().and_then(|r| r.downcast::<NSTextView>().ok()) {
+                    let marked: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+                    if marked {
+                        let _: () = unsafe { msg_send![&*editor, keyDown: event] };
+                        return;
+                    }
+                }
+                crate::ui::request_settings_detail_close();
+                return;
+            }
+            let _: () = unsafe { msg_send![super(self), keyDown: event] };
+        }
+    }
+);
+
+define_class!(
+    #[unsafe(super = NSTextField)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OMPetSettingsColorField"]
+    #[ivars = Cell<bool>]
+    struct SettingsColorNativeField;
+    unsafe impl NSObjectProtocol for SettingsColorNativeField {}
+    impl SettingsColorNativeField {
+        #[unsafe(method(isEnabled))]
+        fn is_enabled(&self) -> bool {
+            !self.ivars().get() && unsafe { msg_send![super(self), isEnabled] }
+        }
+    }
+);
+
+#[derive(Default)]
+struct SettingsDetailRootIvars {
+    layout_dirty: Cell<bool>,
+}
+
+define_class!(
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OMPetSettingsDetailRoot"]
+    #[ivars = SettingsDetailRootIvars]
+    struct SettingsDetailRoot;
+    unsafe impl NSObjectProtocol for SettingsDetailRoot {}
+    impl SettingsDetailRoot {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool { true }
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            self.ivars().layout_dirty.set(true);
+        }
+    }
+);
 
 #[derive(Default)]
 struct BubbleColorDraft {
@@ -370,6 +548,104 @@ impl MenuTabTrack {
     }
 }
 
+impl SettingsDetailNativeWindow {
+    fn handle_edit_shortcut(&self, event: &NSEvent) -> bool {
+        let modifiers = event.modifierFlags()
+            & (NSEventModifierFlags::Command
+                | NSEventModifierFlags::Shift
+                | NSEventModifierFlags::Control
+                | NSEventModifierFlags::Option);
+        let Some(key) = event.charactersIgnoringModifiers() else {
+            return false;
+        };
+        if key.length() != 1 {
+            return false;
+        }
+        let Ok(key) = u8::try_from(key.characterAtIndex(0)) else {
+            return false;
+        };
+        if !key.is_ascii() {
+            return false;
+        }
+        let key = key.to_ascii_lowercase();
+        let command = NSEventModifierFlags::Command;
+        let redo = modifiers == (command | NSEventModifierFlags::Shift);
+        if !matches!(key, b'a' | b'c' | b'x' | b'v' | b'z')
+            || (modifiers != command && !(key == b'z' && redo))
+        {
+            return false;
+        }
+        let Some(editor) = self
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSTextView>().ok())
+        else {
+            return false;
+        };
+        if !editor.window().is_some_and(|window| {
+            Retained::as_ptr(&window).cast::<()>() == (self as *const Self).cast::<()>()
+        }) {
+            return false;
+        }
+        if matches!(key, b'x' | b'v' | b'z')
+            && (self.ivars().update_frozen.get() || !editor.isEditable())
+        {
+            return true;
+        }
+        let marked: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        if marked {
+            return false;
+        }
+        match key {
+            b'a' => unsafe { editor.selectAll(None) },
+            b'c' => unsafe { editor.copy(None) },
+            b'x' => unsafe { editor.cut(None) },
+            b'v' => unsafe { editor.paste(None) },
+            b'z' => {
+                let undo: Option<Retained<NSUndoManager>> =
+                    unsafe { msg_send![&*editor, undoManager] };
+                if let Some(undo) = undo {
+                    if redo {
+                        if undo.canRedo() {
+                            undo.redo();
+                        }
+                    } else if undo.canUndo() {
+                        undo.undo();
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        true
+    }
+
+    fn new(frame: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SettingsDetailWindowIvars::default());
+        unsafe {
+            msg_send![super(this), initWithContentRect: frame,
+            styleMask: NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable,
+            backing: NSBackingStoreType::Buffered, defer: false]
+        }
+    }
+    fn finish_shutdown(&self) {
+        self.orderOut(None);
+        let _: () = unsafe { msg_send![super(self), close] };
+    }
+}
+
+impl SettingsColorNativeField {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(false));
+        unsafe { msg_send![super(this), initWithFrame: NSRect::default()] }
+    }
+}
+
+impl SettingsDetailRoot {
+    fn new(frame: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SettingsDetailRootIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 struct ScrollReadingPosition {
     offset: f64,
     anchor: Option<(Retained<NSView>, f64)>,
@@ -385,6 +661,36 @@ pub(crate) struct MenuPanel {
     character_tab: Retained<MenuPanelDocument>,
     bubble_tab: Retained<MenuPanelDocument>,
     settings_tab: Retained<MenuPanelDocument>,
+    detail_window: Retained<SettingsDetailNativeWindow>,
+    detail_root: Retained<SettingsDetailRoot>,
+    detail_scroll: Retained<NSScrollView>,
+    detail_document: Retained<MenuPanelDocument>,
+    detail_documents: [Retained<MenuPanelDocument>; 6],
+    selected_detail: Option<SettingsDetailPage>,
+    detail_offsets: Cell<[f64; 6]>,
+    detail_openers: [Retained<NSButton>; 6],
+    detail_opener: Option<Retained<NSButton>>,
+    saved_color_selection: Option<(usize, NSRange)>,
+    character_card: Retained<MenuPanelCard>,
+    bubble_visibility_card: Retained<MenuPanelCard>,
+    bubble_theme_card: Retained<MenuPanelCard>,
+    appearance_card: Retained<MenuPanelCard>,
+    scale_card: Retained<MenuPanelCard>,
+    app_general_card: Retained<MenuPanelCard>,
+    appearance_error: Retained<NSTextField>,
+    lifecycle_error_detail: Retained<NSTextField>,
+    connection_summary: Retained<NSTextField>,
+    connection_selection_summary: Retained<NSTextField>,
+    connection_error_summary: Retained<NSTextField>,
+    connection_settings_error: Retained<NSTextField>,
+    connection_snapshot_unavailable: bool,
+    connection_query_error: Option<String>,
+    connection_operation_error: Option<String>,
+    observation_locale: Option<UiLocale>,
+    footer_details: Retained<NSButton>,
+    update_frozen: bool,
+    update_details_problem: bool,
+    control_refresh_depth: usize,
     tabs: [Retained<NSButton>; 3],
     placement_buttons: [Retained<NSButton>; 5],
     character_view: Retained<NSView>,
@@ -404,10 +710,8 @@ pub(crate) struct MenuPanel {
     bubble_theme_label: Retained<NSTextField>,
     bubble_theme_popup: Retained<NSPopUpButton>,
     bubble_colors_label: Retained<NSTextField>,
-    bubble_colors_toggle: Retained<NSButton>,
-    bubble_colors_expanded: bool,
     bubble_color_labels: [Retained<NSTextField>; 5],
-    bubble_color_fields: [Retained<NSTextField>; 5],
+    bubble_color_fields: [Retained<SettingsColorNativeField>; 5],
     bubble_color_swatches: [Retained<NSBox>; 5],
     bubble_apply: Retained<NSButton>,
     bubble_reset: Retained<NSButton>,
@@ -442,8 +746,6 @@ pub(crate) struct MenuPanel {
     menu_bar_choose: Retained<NSButton>,
     menu_bar_restore: Retained<NSButton>,
     menu_bar_icon_help: Retained<NSTextField>,
-    menu_bar_icon_toggle: Retained<NSButton>,
-    menu_bar_icon_expanded: bool,
     menu_bar_icon_error: Retained<NSTextField>,
     menu_bar_icon_error_detail: Option<(Message, String)>,
     menu_bar_icon_custom: bool,
@@ -457,10 +759,6 @@ pub(crate) struct MenuPanel {
     connection_host_popup: Retained<NSPopUpButton>,
     connection_status: Retained<NSTextField>,
     connection_auto_help: Retained<NSTextField>,
-    connection_settings_toggle: Retained<NSButton>,
-    connection_diagnostics_toggle: Retained<NSButton>,
-    connection_settings_expanded: bool,
-    connection_diagnostics_expanded: bool,
     connection_profile_title: Retained<NSTextField>,
     connection_profile_labels: [Retained<NSTextField>; 5],
     connection_profile_values: [Retained<NSTextField>; 5],
@@ -475,7 +773,7 @@ pub(crate) struct MenuPanel {
     status_text: String,
     reset: Retained<NSButton>,
     quit: Retained<NSButton>,
-    selected_tab: usize,
+    selected_tab: SettingsTab,
     tab_offsets: Cell<[f64; 3]>,
 }
 
@@ -486,8 +784,7 @@ impl MenuPanel {
         locale: UiLocale,
         mtm: MainThreadMarker,
     ) -> Self {
-        let initial_height =
-            SCROLL_TOP + CHARACTER_VIEW_TOP + INITIAL_CHARACTER_HEIGHT + FOOTER_HEIGHT;
+        let initial_height = PANEL_HEIGHT;
         let frame = NSRect::new(
             NSPoint::new(0.0, 0.0),
             NSSize::new(PANEL_WIDTH, initial_height),
@@ -510,7 +807,7 @@ impl MenuPanel {
         let document = MenuPanelDocument::new(
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(PANEL_WIDTH, CHARACTER_VIEW_TOP + INITIAL_CHARACTER_HEIGHT),
+                NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
             ),
             mtm,
         );
@@ -546,7 +843,7 @@ impl MenuPanel {
         let character_tab = MenuPanelDocument::new(
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(PANEL_WIDTH, CHARACTER_VIEW_TOP + INITIAL_CHARACTER_HEIGHT),
+                NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
             ),
             mtm,
         );
@@ -575,6 +872,75 @@ impl MenuPanel {
         document.addSubview(&settings_tab);
         bubble_tab.setHidden(true);
         settings_tab.setHidden(true);
+        let available = NSScreen::mainScreen(mtm)
+            .map(|screen| screen.visibleFrame().size)
+            .unwrap_or(NSSize::new(800.0, 700.0));
+        let detail_size = NSSize::new(
+            600.0_f64.min((available.width - 32.0).max(1.0)),
+            560.0_f64.min((available.height - 64.0).max(1.0)),
+        );
+        let detail_frame = NSRect::new(NSPoint::new(0.0, 0.0), detail_size);
+        let detail_window = SettingsDetailNativeWindow::new(detail_frame, mtm);
+        unsafe { detail_window.setReleasedWhenClosed(false) };
+        detail_window.setContentMinSize(NSSize::new(
+            480.0_f64.min(detail_size.width),
+            420.0_f64.min(detail_size.height),
+        ));
+        detail_window.center();
+        if let Some(appearance) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+        {
+            let _: () = unsafe { msg_send![&*detail_window, setAppearance: Some(&*appearance)] };
+        }
+        let detail_root = SettingsDetailRoot::new(detail_frame, mtm);
+        detail_root.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        detail_window.setContentView(Some(&detail_root));
+        let detail_scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), detail_frame);
+        detail_scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
+        detail_scroll.setHasVerticalScroller(true);
+        detail_scroll.setHasHorizontalScroller(false);
+        detail_scroll.setAutohidesScrollers(true);
+        detail_scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        detail_scroll.setDrawsBackground(false);
+        detail_scroll.contentView().setDrawsBackground(false);
+        detail_scroll.setVerticalScrollElasticity(NSScrollElasticity::None);
+        detail_scroll.setHorizontalScrollElasticity(NSScrollElasticity::None);
+        let detail_document = MenuPanelDocument::new(detail_frame, mtm);
+        detail_document.setAutoresizesSubviews(false);
+        detail_scroll.setDocumentView(Some(&detail_document));
+        detail_root.addSubview(&detail_scroll);
+        let detail_documents = std::array::from_fn(|_| {
+            let document = MenuPanelDocument::new(detail_frame, mtm);
+            document.setAutoresizesSubviews(false);
+            document.setHidden(true);
+            set_accessibility_element(&document, false);
+            detail_document.addSubview(&document);
+            document
+        });
+        let detail_openers = std::array::from_fn(|index| {
+            let button = make_action_button("", target, sel!(openSettingsDetail:), mtm);
+            button.setTag(index as isize);
+            button
+        });
+        let appearance_error = diagnostic_label(mtm);
+        let lifecycle_error_detail = diagnostic_label(mtm);
+        let connection_summary = label("", 12.0, true, primary(), mtm);
+        let connection_selection_summary = label("", 12.0, true, primary(), mtm);
+        let connection_error_summary = label("", 11.0, false, NSColor::systemRedColor(), mtm);
+        for field in [
+            &connection_summary,
+            &connection_selection_summary,
+            &connection_error_summary,
+        ] {
+            field.setMaximumNumberOfLines(0);
+        }
+        let connection_settings_error = diagnostic_label(mtm);
+        let footer_details = make_action_button("", target, sel!(openSettingsDetail:), mtm);
+        footer_details.setTag(SettingsDetailPage::Appearance as isize);
+        footer_details.setHidden(true);
+        let app_general_card = MenuPanelCard::new(NSRect::default(), mtm);
 
         let title = label(
             desktop_pet_update_coordinator::identity::DISPLAY_NAME,
@@ -604,21 +970,21 @@ impl MenuPanel {
         let tabs = [
             make_tab(
                 "person.crop.circle.fill",
-                text(locale, Message::MenuCharacterTab),
+                text(locale, Message::MenuAppearanceTab),
                 0,
                 target,
                 mtm,
             ),
             make_tab(
                 "bubble.left.and.bubble.right.fill",
-                text(locale, Message::MenuBubbleTab),
+                text(locale, Message::MenuConnectionsTab),
                 1,
                 target,
                 mtm,
             ),
             make_tab(
                 "gearshape.fill",
-                text(locale, Message::MenuSettingsTab),
+                text(locale, Message::MenuAppTab),
                 2,
                 target,
                 mtm,
@@ -698,7 +1064,7 @@ impl MenuPanel {
         character_card.addSubview(&*character_visible_switch);
         character_tab.addSubview(&character_card);
         character_tab.addSubview(&character_browser_open);
-        character_tab.addSubview(&character_editing_open);
+        detail_documents[0].addSubview(&character_editing_open);
         character_tab.addSubview(&character_view);
 
         let bubble_visibility_card = MenuPanelCard::new(NSRect::default(), mtm);
@@ -717,7 +1083,7 @@ impl MenuPanel {
         );
         bubble_visibility_card.addSubview(&bubble_visible_label);
         bubble_visibility_card.addSubview(&*bubble_visible_switch);
-        bubble_tab.addSubview(&bubble_visibility_card);
+        character_tab.addSubview(&bubble_visibility_card);
 
         let status_indicators_label = label(
             text(locale, Message::MenuStatusIndicators),
@@ -732,8 +1098,8 @@ impl MenuPanel {
             &*status_indicators_switch,
             text(locale, Message::MenuStatusIndicators),
         );
-        bubble_visibility_card.addSubview(&status_indicators_label);
-        bubble_visibility_card.addSubview(&*status_indicators_switch);
+        detail_documents[0].addSubview(&status_indicators_label);
+        detail_documents[0].addSubview(&*status_indicators_switch);
 
         let bubble_placement_label = label(
             text(locale, Message::MenuBubblePlacement),
@@ -802,8 +1168,8 @@ impl MenuPanel {
         ];
         let bubble_theme_popup =
             make_selection_popup(&theme_specs, locale, target, sel!(setBubbleTheme:), mtm);
-        bubble_theme_card.addSubview(&bubble_theme_label);
-        bubble_theme_card.addSubview(&bubble_theme_popup);
+        bubble_visibility_card.addSubview(&bubble_theme_label);
+        bubble_visibility_card.addSubview(&bubble_theme_popup);
         let bubble_colors_label = label(
             text(locale, Message::CustomizeBubbleColors),
             11.0,
@@ -812,7 +1178,6 @@ impl MenuPanel {
             mtm,
         );
         bubble_colors_label.setMaximumNumberOfLines(0);
-        let bubble_colors_toggle = make_action_button("", target, sel!(toggleBubbleColors:), mtm);
         let color_messages = [
             Message::BubbleSurfaceColor,
             Message::BubbleTextColor,
@@ -823,7 +1188,7 @@ impl MenuPanel {
         let bubble_color_labels =
             color_messages.map(|message| label(text(locale, message), 11.0, false, primary(), mtm));
         let bubble_color_fields = color_messages.map(|message| {
-            let field = NSTextField::new(mtm);
+            let field = SettingsColorNativeField::new(mtm);
             field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0)));
             field.setTextColor(Some(&primary()));
             field.setEditable(true);
@@ -867,7 +1232,6 @@ impl MenuPanel {
         set_accessibility_label(&bubble_apply, text(locale, Message::ApplyBubbleColors));
         set_accessibility_label(&bubble_reset, text(locale, Message::ResetBubbleColors));
         bubble_theme_card.addSubview(&bubble_colors_label);
-        bubble_theme_card.addSubview(&bubble_colors_toggle);
         for ((name, field), swatch) in bubble_color_labels
             .iter()
             .zip(&bubble_color_fields)
@@ -881,7 +1245,7 @@ impl MenuPanel {
         bubble_theme_card.addSubview(&bubble_reset);
         bubble_theme_card.addSubview(&bubble_reload);
         bubble_theme_card.addSubview(&bubble_rebase);
-        bubble_tab.addSubview(&bubble_theme_card);
+        detail_documents[0].addSubview(&bubble_theme_card);
 
         let appearance_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*appearance_card, false);
@@ -983,8 +1347,8 @@ impl MenuPanel {
             make_selection_popup(&language_specs, locale, target, sel!(setLanguage:), mtm);
         let menu_bar_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*menu_bar_card, false);
-        menu_bar_card.addSubview(&language_label);
-        menu_bar_card.addSubview(&language_popup);
+        app_general_card.addSubview(&language_label);
+        app_general_card.addSubview(&language_popup);
         let menu_bar_label = label(
             text(locale, Message::MenuGeneral),
             12.5,
@@ -1088,7 +1452,6 @@ impl MenuPanel {
             mtm,
         );
         menu_bar_icon_help.setMaximumNumberOfLines(0);
-        let menu_bar_icon_toggle = make_action_button("", target, sel!(toggleMenuBarIcon:), mtm);
         let menu_bar_icon_error = label("", 10.5, false, NSColor::systemRedColor(), mtm);
         menu_bar_icon_error.setMaximumNumberOfLines(0);
         menu_bar_icon_error.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByCharWrapping);
@@ -1104,7 +1467,6 @@ impl MenuPanel {
         menu_bar_card.addSubview(&menu_bar_choose);
         menu_bar_card.addSubview(&menu_bar_restore);
         menu_bar_card.addSubview(&menu_bar_icon_help);
-        menu_bar_card.addSubview(&menu_bar_icon_toggle);
         menu_bar_card.addSubview(&menu_bar_icon_error);
         let observation_card = MenuPanelCard::new(NSRect::default(), mtm);
         set_accessibility_element(&*observation_card, false);
@@ -1139,10 +1501,6 @@ impl MenuPanel {
             mtm,
         );
         connection_auto_help.setMaximumNumberOfLines(0);
-        let connection_settings_toggle =
-            make_action_button("", target, sel!(toggleConnectionSettings:), mtm);
-        let connection_diagnostics_toggle =
-            make_action_button("", target, sel!(toggleConnectionDiagnostics:), mtm);
         let connection_profile_title = label(
             text(locale, Message::ConnectionProfile),
             11.0,
@@ -1164,34 +1522,51 @@ impl MenuPanel {
             &*connection_host_popup,
             &*connection_status,
             &*connection_auto_help,
-            &*connection_settings_toggle,
-            &*connection_diagnostics_toggle,
-            &*connection_profile_title,
+            &*connection_settings_error,
         ] {
-            observation_card.addSubview(view);
+            detail_documents[1].addSubview(view);
         }
+        detail_documents[4].addSubview(&connection_profile_title);
         for field in connection_profile_labels
             .iter()
             .chain(connection_profile_values.iter())
         {
-            observation_card.addSubview(field);
+            detail_documents[4].addSubview(field);
         }
         let observation_error = label("", 10.0, false, secondary(), mtm);
         observation_error.setMaximumNumberOfLines(0);
         observation_error.setSelectable(true);
         observation_error.setHidden(true);
-        for view in [&*observation_title as &NSView, &*observation_error] {
+        observation_card.addSubview(&observation_title);
+        detail_documents[4].addSubview(&observation_error);
+        detail_documents[4].addSubview(&lifecycle_error_detail);
+        detail_documents[0].addSubview(&appearance_error);
+        detail_documents[0].addSubview(&appearance_card);
+        detail_documents[2].addSubview(&menu_bar_card);
+        character_tab.addSubview(&scale_card);
+        settings_tab.addSubview(&app_general_card);
+        bubble_tab.addSubview(&observation_card);
+        for view in [
+            &*connection_selection_summary as &NSView,
+            &*connection_summary,
+            &*connection_error_summary,
+        ] {
             observation_card.addSubview(view);
         }
-        settings_tab.addSubview(&observation_card);
-        settings_tab.addSubview(&appearance_card);
-        settings_tab.addSubview(&scale_card);
-        settings_tab.addSubview(&menu_bar_card);
+        character_tab.addSubview(&detail_openers[0]);
+        for index in [1, 4] {
+            bubble_tab.addSubview(&detail_openers[index]);
+        }
+        for index in [2, 3, 5] {
+            settings_tab.addSubview(&detail_openers[index]);
+        }
         let mut lifecycle_card = LifecycleSettingsCard::new(locale, target, mtm);
-        observation_card.addSubview(lifecycle_card.separate_extensions());
+        detail_documents[1].addSubview(lifecycle_card.separate_extensions());
         settings_tab.addSubview(lifecycle_card.view());
         let update_card = AppUpdateCard::new(locale, target, mtm);
         settings_tab.addSubview(update_card.view());
+        detail_documents[3].addSubview(update_card.settings_view());
+        detail_documents[5].addSubview(update_card.details_view());
 
         let status = label("", 10.5, false, secondary(), mtm);
         status.setMaximumNumberOfLines(2);
@@ -1207,7 +1582,8 @@ impl MenuPanel {
         set_accessibility_label(&*reset, text(locale, Message::ResetPosition));
         set_accessibility_label(&*quit, text(locale, Message::MenuQuit));
         root.addSubview(&status);
-        root.addSubview(&reset);
+        character_tab.addSubview(&reset);
+        root.addSubview(&footer_details);
         root.addSubview(&quit);
 
         let mut panel = Self {
@@ -1220,6 +1596,36 @@ impl MenuPanel {
             character_tab,
             bubble_tab,
             settings_tab,
+            detail_window,
+            detail_root,
+            detail_scroll,
+            detail_document,
+            detail_documents,
+            selected_detail: None,
+            detail_offsets: Cell::new([0.0; 6]),
+            detail_openers,
+            saved_color_selection: None,
+            character_card,
+            bubble_visibility_card,
+            bubble_theme_card,
+            detail_opener: None,
+            appearance_card,
+            scale_card,
+            app_general_card,
+            appearance_error,
+            lifecycle_error_detail,
+            connection_summary,
+            connection_selection_summary,
+            connection_error_summary,
+            connection_settings_error,
+            connection_query_error: None,
+            observation_locale: None,
+            connection_operation_error: None,
+            connection_snapshot_unavailable: false,
+            footer_details,
+            update_frozen: false,
+            control_refresh_depth: 0,
+            update_details_problem: false,
             tabs,
             placement_buttons,
             character_view,
@@ -1239,8 +1645,6 @@ impl MenuPanel {
             bubble_theme_label,
             bubble_theme_popup,
             bubble_colors_label,
-            bubble_colors_toggle,
-            bubble_colors_expanded: false,
             bubble_color_labels,
             bubble_color_fields,
             bubble_color_swatches,
@@ -1277,8 +1681,6 @@ impl MenuPanel {
             menu_bar_choose,
             menu_bar_restore,
             menu_bar_icon_help,
-            menu_bar_icon_toggle,
-            menu_bar_icon_expanded: false,
             menu_bar_icon_error,
             menu_bar_icon_error_detail: None,
             menu_bar_icon_custom: false,
@@ -1292,10 +1694,6 @@ impl MenuPanel {
             connection_host_popup,
             connection_status,
             connection_auto_help,
-            connection_settings_toggle,
-            connection_diagnostics_toggle,
-            connection_settings_expanded: false,
-            connection_diagnostics_expanded: false,
             connection_profile_title,
             connection_profile_labels,
             connection_profile_values,
@@ -1310,11 +1708,11 @@ impl MenuPanel {
             status,
             reset,
             quit,
-            selected_tab: 0,
+            selected_tab: SettingsTab::Appearance,
             tab_offsets: Cell::new([0.0; 3]),
         };
         panel.set_menu_bar_mode(MenuBarMode::Always);
-        panel.select_tab(0);
+        panel.select_tab(SettingsTab::Appearance);
         panel.update_color_swatches();
         panel.set_locale(locale);
         panel.layout_root();
@@ -1324,7 +1722,7 @@ impl MenuPanel {
     pub(crate) fn show(&self) {
         if !self.panel.isVisible() {
             self.panel.makeKeyAndOrderFront(None);
-            let first = &self.tabs[self.selected_tab];
+            let first = &self.tabs[self.selected_tab.index()];
             self.panel.makeFirstResponder(Some(&**first));
         } else {
             self.panel.makeKeyAndOrderFront(None);
@@ -1342,10 +1740,6 @@ impl MenuPanel {
         self.panel.isVisible()
     }
 
-    pub(crate) fn is_character_tab(&self) -> bool {
-        self.selected_tab == 0
-    }
-
     pub(crate) fn set_character_content_height(&mut self, height: f64) -> bool {
         if self.character_content_height == height {
             return false;
@@ -1358,34 +1752,165 @@ impl MenuPanel {
         self.character_view.frame()
     }
 
-    pub(crate) fn select_tab(&mut self, index: usize) {
-        let index = index.min(2);
+    pub(crate) fn select_tab(&mut self, tab: SettingsTab) {
+        let index = tab.index();
         let mut offsets = self.tab_offsets.get();
-        offsets[self.selected_tab] = self.scroll.contentView().bounds().origin.y;
+        offsets[self.selected_tab.index()] = self.scroll.contentView().bounds().origin.y;
         self.tab_offsets.set(offsets);
-        if self.selected_tab != index {
-            let _ = self.panel.makeFirstResponder(None);
-        }
-        self.character_tab.setHidden(index != 0);
-        self.bubble_tab.setHidden(index != 1);
-        self.settings_tab.setHidden(index != 2);
-        self.selected_tab = index;
+        self.character_tab.setHidden(tab != SettingsTab::Appearance);
+        self.bubble_tab.setHidden(tab != SettingsTab::Connections);
+        self.settings_tab.setHidden(tab != SettingsTab::App);
+        self.selected_tab = tab;
         self.apply_tab_selection();
         self.layout_documents();
         self.panel.recalculateKeyViewLoop();
+        let maximum = (self.document.frame().size.height
+            - self.scroll.contentView().bounds().size.height)
+            .max(0.0);
         self.scroll
             .contentView()
-            .scrollToPoint(NSPoint::new(0.0, offsets[index]));
+            .scrollToPoint(NSPoint::new(0.0, offsets[index].clamp(0.0, maximum)));
         self.scroll
             .reflectScrolledClipView(&self.scroll.contentView());
         if self.panel.isKeyWindow() {
-            let tab = &self.tabs[index];
-            self.panel.makeFirstResponder(Some(&**tab));
+            self.panel.makeFirstResponder(Some(&*self.tabs[index]));
         }
     }
 
+    pub(crate) fn prepare_detail(
+        &mut self,
+        page: SettingsDetailPage,
+    ) -> Option<Retained<NSWindow>> {
+        if self.bubble_colors_marked() || self.menu_bar_icon_busy.get() {
+            return None;
+        }
+        let changed = self.selected_detail != Some(page);
+        let reopening = !self.detail_window.isVisible();
+        if changed {
+            self.remember_color_selection();
+            if !self.detail_window.makeFirstResponder(None) {
+                return None;
+            }
+        }
+        if let Some(old) = self.selected_detail {
+            let mut offsets = self.detail_offsets.get();
+            offsets[old.index()] = self.detail_scroll.contentView().bounds().origin.y;
+            self.detail_offsets.set(offsets);
+        }
+        self.selected_detail = Some(page);
+        for (index, document) in self.detail_documents.iter().enumerate() {
+            document.setHidden(index != page.index());
+        }
+        self.detail_window
+            .setTitle(&NSString::from_str(text(self.locale, page.message())));
+        self.layout_detail();
+        if changed || reopening {
+            self.restore_detail_offset(page);
+            if page == SettingsDetailPage::Appearance {
+                self.restore_color_selection();
+            }
+        }
+        Some(self.detail_window.retain().into_super())
+    }
+    pub(crate) fn set_detail_opener(&mut self, opener: Option<&NSButton>) {
+        self.detail_opener = opener.map(|button| button.retain());
+    }
+
+    pub(crate) fn detail_page(&self) -> Option<SettingsDetailPage> {
+        self.detail_window
+            .isVisible()
+            .then_some(self.selected_detail)
+            .flatten()
+    }
+    pub(crate) fn detail_window(&self) -> &NSWindow {
+        &self.detail_window
+    }
+    pub(crate) fn settings_surface_visible(&self) -> bool {
+        self.is_visible() || self.detail_window.isVisible()
+    }
+    pub(crate) fn appearance_detail_visible(&self) -> bool {
+        self.detail_page() == Some(SettingsDetailPage::Appearance)
+    }
+    pub(crate) fn connection_content_visible(&self) -> bool {
+        (self.is_visible() && self.selected_tab == SettingsTab::Connections)
+            || matches!(
+                self.detail_page(),
+                Some(SettingsDetailPage::Connections | SettingsDetailPage::ConnectionDiagnostics)
+            )
+    }
+    pub(crate) fn refresh_detail_layout(&mut self) {
+        if self.detail_root.ivars().layout_dirty.replace(false) {
+            self.layout_detail();
+        }
+    }
+    fn remember_color_selection(&mut self) {
+        for index in 0..self.bubble_color_fields.len() {
+            if let Some(editor) = self.bubble_field_editor(index) {
+                let selection = unsafe { msg_send![editor, selectedRange] };
+                self.saved_color_selection = Some((index, selection));
+                break;
+            }
+        }
+    }
+    fn restore_color_selection(&self) {
+        let Some((index, range)) = self.saved_color_selection else {
+            return;
+        };
+        if self.update_frozen {
+            return;
+        }
+        let length = self.bubble_color_fields[index].stringValue().length();
+        if range.location <= length && range.length <= length - range.location {
+            self.detail_window
+                .makeFirstResponder(Some(&*self.bubble_color_fields[index]));
+            if let Some(editor) = self.bubble_field_editor(index) {
+                let _: () = unsafe { msg_send![editor, setSelectedRange: range] };
+            }
+        }
+    }
+    pub(crate) fn finish_detail_close(&mut self) -> bool {
+        if self.bubble_colors_marked() || self.menu_bar_icon_busy.get() {
+            return false;
+        }
+        self.remember_color_selection();
+        if !self.detail_window.makeFirstResponder(None) {
+            return false;
+        }
+        let focus_opener = self.detail_window.isKeyWindow()
+            && self.panel.isVisible()
+            && objc2_app_kit::NSApplication::sharedApplication(self.panel.mtm()).isActive();
+        self.detail_window.orderOut(None);
+        if focus_opener {
+            self.panel.makeKeyAndOrderFront(None);
+            if let Some(page) = self.selected_detail {
+                let opener = self
+                    .detail_opener
+                    .as_ref()
+                    .unwrap_or(&self.detail_openers[page.index()]);
+                let hidden: bool = unsafe { msg_send![&**opener, isHiddenOrHasHiddenAncestor] };
+                if !hidden {
+                    self.panel.makeFirstResponder(Some(&**opener));
+                }
+            }
+        }
+        true
+    }
+
     fn bubble_field_editor(&self, index: usize) -> Option<&AnyObject> {
-        unsafe { msg_send![&*self.bubble_color_fields[index], currentEditor] }
+        let field = &self.bubble_color_fields[index];
+        let window = field.window()?;
+        let editor: Option<&AnyObject> = unsafe { msg_send![&**field, currentEditor] };
+        let editor = editor?;
+        let responder: Option<&AnyObject> = unsafe { msg_send![&*window, firstResponder] };
+        if !responder.is_some_and(|responder| std::ptr::eq(responder, editor)) {
+            return None;
+        }
+        if let Some(text) = editor.downcast_ref::<NSTextView>() {
+            if !text.allowsUndo() {
+                text.setAllowsUndo(true);
+            }
+        }
+        Some(editor)
     }
 
     pub(crate) fn bubble_colors_marked(&self) -> bool {
@@ -1407,11 +1932,11 @@ impl MenuPanel {
             palette.border,
             palette.accent,
         ][index];
-        BubbleColor::parse_hex(&self.bubble_color_fields[index].stringValue().to_string())
-            .map_or(true, |value| value != saved)
+        self.bubble_color_fields[index].stringValue().to_string() != saved.to_hex()
     }
 
     pub(crate) fn refresh_bubble_color_controls(&mut self) {
+        self.begin_control_refresh();
         let conflicted = self.bubble_draft.conflicted();
         let marked = self.bubble_colors_marked();
         let reading_position =
@@ -1420,7 +1945,6 @@ impl MenuPanel {
             self.bubble_reload.setEnabled(conflicted && !marked);
             self.bubble_rebase.setEnabled(conflicted && !marked);
             self.bubble_apply.setEnabled(!conflicted && !marked);
-            self.bubble_colors_toggle.setEnabled(!conflicted && !marked);
             self.bubble_control_state = Some((conflicted, marked));
             self.bubble_reload.setHidden(!conflicted);
             self.bubble_rebase.setHidden(!conflicted);
@@ -1437,6 +1961,8 @@ impl MenuPanel {
             self.bubble_conflict_label = Some(conflicted);
             self.layout_documents_at(reading_position.expect("changed conflict captures position"));
         }
+        self.localize_detail_openers();
+        self.end_control_refresh();
     }
 
     pub(crate) fn set_bubble_appearance(&mut self, appearance: BubbleAppearance) {
@@ -1456,9 +1982,6 @@ impl MenuPanel {
                 BubbleTheme::Custom => 3,
             };
             self.bubble_theme_popup.selectItemWithTag(tag);
-            if theme_changed {
-                self.bubble_colors_expanded = appearance.theme == BubbleTheme::Custom;
-            }
         }
         if !editing {
             let palette = appearance.palette();
@@ -1495,7 +2018,6 @@ impl MenuPanel {
             BubbleTheme::Custom => 3,
         };
         self.bubble_theme_popup.selectItemWithTag(tag);
-        self.bubble_colors_expanded = appearance.theme == BubbleTheme::Custom;
         self.refresh_bubble_color_controls();
         self.layout_documents();
     }
@@ -1541,25 +2063,6 @@ impl MenuPanel {
         true
     }
 
-    pub(crate) fn toggle_bubble_colors(&mut self) {
-        if self.bubble_draft.conflicted() || self.bubble_colors_marked() {
-            return;
-        }
-        let reading_position = self.reading_position();
-        self.bubble_colors_expanded = !self.bubble_colors_expanded;
-        self.panel
-            .makeFirstResponder(Some(&*self.bubble_colors_toggle));
-        self.layout_documents_at(reading_position);
-    }
-
-    pub(crate) fn toggle_menu_bar_icon(&mut self) {
-        let reading_position = self.reading_position();
-        self.menu_bar_icon_expanded = !self.menu_bar_icon_expanded;
-        self.panel
-            .makeFirstResponder(Some(&*self.menu_bar_icon_toggle));
-        self.layout_documents_at(reading_position);
-    }
-
     pub(crate) fn set_show_status_indicators(&self, enabled: bool) {
         self.status_indicators_switch.setState(if enabled {
             NSControlStateValueOn
@@ -1598,6 +2101,7 @@ impl MenuPanel {
         providers: &std::collections::BTreeMap<String, String>,
         connections: &HostConnections,
     ) {
+        self.begin_control_refresh();
         self.character_visible_switch.setState(if scene.visible {
             NSControlStateValueOn
         } else {
@@ -1670,9 +2174,8 @@ impl MenuPanel {
         self.sync_observation(observation, providers, connections);
         self.update_color_swatches();
         self.layout_root();
-        if !self.frozen_controls.is_empty() {
-            self.set_update_frozen(true);
-        }
+        self.refresh_lifecycle_diagnostics();
+        self.end_control_refresh();
     }
 
     pub(crate) fn set_language_preference(&self, language: LanguagePreference) {
@@ -1702,18 +2205,26 @@ impl MenuPanel {
         };
         self.status.setTextColor(Some(&color));
         self.update_status_text();
+        self.layout_root();
     }
 
     fn update_status_text(&self) {
-        let error = self.presentation_error.as_ref().map(|detail| {
-            format!(
-                "{}: {detail}",
-                text(self.locale, Message::PresentationSaveFailure)
-            )
-        });
-        let value = error.as_deref().unwrap_or(&self.status_text);
-        self.status.setStringValue(&NSString::from_str(value));
+        let value = if self.presentation_error.is_some() {
+            text(self.locale, Message::PresentationSaveFailure)
+        } else {
+            &self.status_text
+        };
+        set_readonly_value(&self.status, value);
         set_tooltip(&self.status, value);
+        self.footer_details
+            .setHidden(self.presentation_error.is_none());
+        set_readonly_value(
+            &self.appearance_error,
+            self.presentation_error
+                .as_deref()
+                .unwrap_or(text(self.locale, Message::SettingsDetailsEmpty)),
+        );
+        self.localize_detail_openers();
     }
 
     pub(crate) fn set_menu_bar_icon(
@@ -1722,6 +2233,7 @@ impl MenuPanel {
         custom: bool,
         error: Option<(Message, &str)>,
     ) {
+        self.begin_control_refresh();
         self.menu_bar_preview.setImage(Some(image));
         self.menu_bar_icon_custom = custom;
         self.menu_bar_icon_error_detail =
@@ -1730,15 +2242,18 @@ impl MenuPanel {
         self.menu_bar_restore
             .setEnabled(custom && !self.menu_bar_icon_busy.get());
         self.layout_documents();
+        self.end_control_refresh();
     }
 
-    pub(crate) fn set_menu_bar_icon_busy(&self, busy: bool) {
+    pub(crate) fn set_menu_bar_icon_busy(&mut self, busy: bool) {
         // This setter is called on the main thread; keep the state together
         // with the controls so clearing busy never enables reset for Default.
+        self.begin_control_refresh();
         self.menu_bar_icon_busy.set(busy);
         self.menu_bar_choose.setEnabled(!busy);
         self.menu_bar_restore
             .setEnabled(self.menu_bar_icon_custom && !busy);
+        self.end_control_refresh();
     }
 
     fn update_menu_bar_icon_labels(&self) {
@@ -1765,10 +2280,11 @@ impl MenuPanel {
                 .setStringValue(&NSString::from_str(""));
             self.menu_bar_icon_error.setHidden(true);
         }
+        self.localize_detail_openers();
     }
 
     pub(crate) fn revert_observation_controls(&mut self) {
-        self.observation_preferences = None;
+        self.observation_locale = None;
     }
 
     pub(crate) fn sync_observation(
@@ -1780,12 +2296,25 @@ impl MenuPanel {
         if self.observation_preferences.as_ref() == Some(preferences)
             && self.provider_labels == *providers
             && self.connection_hosts == *connections
+            && self.observation_locale == Some(self.locale)
         {
             return;
         }
-        self.provider_labels = providers.clone();
-        self.provider_ids = providers.keys().cloned().collect();
-        self.connection_hosts = connections.clone();
+        self.begin_control_refresh();
+        self.observation_locale = Some(self.locale);
+        self.provider_labels.clone_from(providers);
+        self.connection_hosts.clone_from(connections);
+        self.observation_preferences = Some(preferences.clone());
+        self.rebuild_observation_controls();
+        self.layout_documents();
+        self.end_control_refresh();
+    }
+
+    fn rebuild_observation_controls(&mut self) {
+        let Some(preferences) = self.observation_preferences.as_ref() else {
+            return;
+        };
+        self.provider_ids = self.provider_labels.keys().cloned().collect();
         self.connection_host_popup.removeAllItems();
         self.connection_host_popup
             .addItemWithTitle(&NSString::from_str(text(
@@ -1797,19 +2326,18 @@ impl MenuPanel {
         }
         for (index, provider) in self.provider_ids.iter().enumerate() {
             self.connection_host_popup
-                .addItemWithTitle(&NSString::from_str(&providers[provider]));
+                .addItemWithTitle(&NSString::from_str(&self.provider_labels[provider]));
             if let Some(item) = self.connection_host_popup.itemAtIndex((index + 1) as isize) {
                 item.setTag((index + 1) as isize);
             }
         }
         if let ObservationSelection::Provider(provider) = &preferences.host {
-            if !providers.contains_key(provider) {
+            if !self.provider_labels.contains_key(provider) {
                 self.provider_ids.push(provider.clone());
-                let label = crate::session_view::display_value(Some(provider)).unwrap_or_default();
                 self.connection_host_popup
-                    .addItemWithTitle(&NSString::from_str(&format!(
-                        "{label} · {}",
-                        text(self.locale, Message::ConnectionUnavailable)
+                    .addItemWithTitle(&NSString::from_str(text(
+                        self.locale,
+                        Message::ConnectionUnavailable,
                     )));
                 if let Some(item) = self
                     .connection_host_popup
@@ -1828,37 +2356,37 @@ impl MenuPanel {
                 .map_or(-1, |index| (index + 1) as isize),
         };
         self.connection_host_popup.selectItemWithTag(tag);
-        let mut status = providers
-            .iter()
-            .map(|(provider, label)| {
-                let count = connections.get(provider).copied().unwrap_or_default();
-                let message = if !preferences.host.includes_provider(provider) {
-                    Message::ConnectionDisabled
-                } else if count > 0 {
-                    Message::ConnectionConnected
-                } else {
-                    Message::ConnectionWaiting
-                };
-                format!("{label}: {} ({count})", text(self.locale, message))
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        if providers.is_empty() {
-            status = text(self.locale, Message::ConnectionNoProviders).to_owned();
-        }
-        if let ObservationSelection::Provider(provider) = &preferences.host {
-            if !providers.contains_key(provider) {
-                status.push_str(&format!(
-                    " · {}",
-                    text(self.locale, Message::ConnectionUnavailable)
-                ));
+        let mut status = String::new();
+        for (provider, label) in &self.provider_labels {
+            let count = self
+                .connection_hosts
+                .get(provider)
+                .copied()
+                .unwrap_or_default();
+            let message = if !preferences.host.includes_provider(provider) {
+                Message::ConnectionDisabled
+            } else if count > 0 {
+                Message::ConnectionConnected
+            } else {
+                Message::ConnectionWaiting
+            };
+            if !status.is_empty() {
+                status.push('\n');
             }
+            let _ = write!(status, "{label}: {} · {count}", text(self.locale, message));
         }
-        self.connection_status
-            .setStringValue(&NSString::from_str(&status));
-        set_accessibility_label(&self.connection_status, &status);
-        self.observation_preferences = Some(preferences.clone());
-        self.layout_documents();
+        if self.provider_labels.is_empty() {
+            status.push_str(text(self.locale, Message::ConnectionNoProviders));
+        }
+        if matches!(&preferences.host, ObservationSelection::Provider(provider) if !self.provider_labels.contains_key(provider))
+        {
+            if !status.is_empty() {
+                status.push('\n');
+            }
+            status.push_str(text(self.locale, Message::ConnectionUnavailable));
+        }
+        set_readonly_value(&self.connection_status, &status);
+        self.update_connection_summary();
     }
 
     pub(crate) fn observation_selection(&self, tag: isize) -> Option<ObservationSelection> {
@@ -1877,15 +2405,125 @@ impl MenuPanel {
         actions: &[(String, desktop_pet_contracts::LifecycleActionView)],
         error: Option<&str>,
     ) {
-        let reading_position = self.reading_position();
+        self.begin_control_refresh();
         self.lifecycle_card.sync_extensions(settings);
         self.lifecycle_card.sync_actions(actions);
-        self.observation_error
-            .setStringValue(&NSString::from_str(error.unwrap_or("")));
-        self.layout_documents_at(reading_position);
-        if !self.frozen_controls.is_empty() {
-            self.set_update_frozen(true);
+        self.lifecycle_card.set_extensions_available(true);
+        self.connection_snapshot_unavailable = false;
+        self.connection_query_error = error.map(str::to_owned);
+        self.refresh_connection_error();
+        self.layout_documents();
+        self.end_control_refresh();
+    }
+
+    pub(crate) fn extension_setting_enabled(&self, provider: &str, key: &str) -> bool {
+        !self.update_frozen
+            && !self.connection_snapshot_unavailable
+            && self.lifecycle_card.extension_setting_enabled(provider, key)
+    }
+    pub(crate) fn extension_action_enabled(&self, provider: &str, key: &str) -> bool {
+        !self.update_frozen
+            && !self.connection_snapshot_unavailable
+            && self.lifecycle_card.extension_action_enabled(provider, key)
+    }
+    pub(crate) fn set_connection_operation_error(&mut self, detail: &str) {
+        self.connection_operation_error = Some(detail.to_owned());
+        self.refresh_connection_error();
+        self.layout_documents();
+    }
+    pub(crate) fn clear_connection_operation_error(&mut self) {
+        self.connection_operation_error = None;
+        self.refresh_connection_error();
+        self.layout_documents();
+    }
+    fn connection_has_error(&self) -> bool {
+        self.connection_query_error.is_some() || self.connection_operation_error.is_some()
+    }
+
+    pub(crate) fn set_connection_snapshot_unavailable(&mut self, detail: &str) {
+        self.begin_control_refresh();
+        self.connection_snapshot_unavailable = true;
+        self.connection_query_error = Some(detail.to_owned());
+        self.lifecycle_card.set_extensions_available(false);
+        self.refresh_connection_error();
+        self.layout_documents();
+        self.end_control_refresh();
+    }
+    fn update_connection_summary(&self) {
+        let Some(preferences) = &self.observation_preferences else {
+            set_readonly_value(
+                &self.connection_selection_summary,
+                text(self.locale, Message::ConnectionHostAuto),
+            );
+            set_readonly_value(
+                &self.connection_summary,
+                text(self.locale, Message::SettingsSnapshotUnavailable),
+            );
+            return;
+        };
+        let name = match &preferences.host {
+            ObservationSelection::Auto => text(self.locale, Message::ConnectionHostAuto),
+            ObservationSelection::Provider(provider) => self
+                .provider_labels
+                .get(provider)
+                .map(String::as_str)
+                .unwrap_or(text(self.locale, Message::ConnectionUnavailable)),
+        };
+        set_readonly_value(&self.connection_selection_summary, name);
+        let count = connection_selected_count(
+            &preferences.host,
+            &self.provider_labels,
+            &self.connection_hosts,
+        );
+        let message = connection_summary_message(
+            &preferences.host,
+            &self.provider_labels,
+            &self.connection_hosts,
+        );
+        set_readonly_value(
+            &self.connection_summary,
+            &format!("{} · {count}", text(self.locale, message)),
+        );
+    }
+    fn refresh_connection_error(&self) {
+        let combined = match (
+            &self.connection_query_error,
+            &self.connection_operation_error,
+        ) {
+            (Some(query), Some(operation)) => Some(format!("{query}\n\n{operation}")),
+            _ => None,
+        };
+        let detail = combined
+            .as_deref()
+            .or(self.connection_query_error.as_deref())
+            .or(self.connection_operation_error.as_deref())
+            .unwrap_or(text(self.locale, Message::SettingsDetailsEmpty));
+        set_readonly_value(&self.observation_error, detail);
+        set_readonly_value(&self.connection_settings_error, detail);
+        let message = connection_query_message(
+            self.connection_snapshot_unavailable,
+            self.connection_has_error(),
+        )
+        .unwrap_or(Message::SettingsConnectionError);
+        set_readonly_value(&self.connection_error_summary, text(self.locale, message));
+        self.localize_detail_openers();
+    }
+    fn refresh_lifecycle_diagnostics(&self) {
+        set_readonly_value(
+            &self.lifecycle_error_detail,
+            self.lifecycle_card
+                .error_detail()
+                .unwrap_or(text(self.locale, Message::SettingsDetailsEmpty)),
+        );
+        self.localize_detail_openers();
+    }
+    pub(crate) fn clear_connection_profile(&mut self) {
+        for field in &self.connection_profile_values {
+            set_readonly_value(field, text(self.locale, Message::SettingsDetailsEmpty));
+            set_tooltip(field, "");
         }
+        self.localize_connection();
+        self.layout_detail();
     }
 
     pub(crate) fn set_connection_profile(
@@ -1903,42 +2541,14 @@ impl MenuPanel {
             control_socket.as_path(),
         ]) {
             let value = path.to_string_lossy();
-            field.setStringValue(&NSString::from_str(&value));
+            set_readonly_value(field, &value);
             set_tooltip(field, &value);
         }
         let field = &self.connection_profile_values[4];
-        field.setStringValue(&NSString::from_str(runtime_identity));
+        set_readonly_value(field, runtime_identity);
         set_tooltip(field, runtime_identity);
         self.localize_connection();
         self.layout_documents();
-    }
-
-    pub(crate) fn toggle_connection_settings(&mut self) {
-        let reading_position = self.reading_position();
-        self.connection_settings_expanded = !self.connection_settings_expanded;
-        set_connection_disclosure(
-            &self.connection_settings_toggle,
-            self.locale,
-            Message::ConnectionSettings,
-            self.connection_settings_expanded,
-        );
-        self.panel
-            .makeFirstResponder(Some(&*self.connection_settings_toggle));
-        self.layout_documents_at(reading_position);
-    }
-
-    pub(crate) fn toggle_connection_diagnostics(&mut self) {
-        let reading_position = self.reading_position();
-        self.connection_diagnostics_expanded = !self.connection_diagnostics_expanded;
-        set_connection_disclosure(
-            &self.connection_diagnostics_toggle,
-            self.locale,
-            Message::ConnectionDiagnostics,
-            self.connection_diagnostics_expanded,
-        );
-        self.panel
-            .makeFirstResponder(Some(&*self.connection_diagnostics_toggle));
-        self.layout_documents_at(reading_position);
     }
 
     fn localize_connection(&self) {
@@ -1961,20 +2571,6 @@ impl MenuPanel {
             &self.connection_host_popup,
             text(locale, Message::ConnectionHost),
         );
-        for (button, message, expanded) in [
-            (
-                &self.connection_settings_toggle,
-                Message::ConnectionSettings,
-                self.connection_settings_expanded,
-            ),
-            (
-                &self.connection_diagnostics_toggle,
-                Message::ConnectionDiagnostics,
-                self.connection_diagnostics_expanded,
-            ),
-        ] {
-            set_connection_disclosure(button, locale, message, expanded);
-        }
         for ((title, value), message) in self
             .connection_profile_labels
             .iter()
@@ -1994,17 +2590,20 @@ impl MenuPanel {
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
+        self.begin_control_refresh();
         self.panel
             .setTitle(&NSString::from_str(text(locale, Message::MenuPanelTitle)));
         self.panel_title
             .setStringValue(&NSString::from_str(text(locale, Message::MenuPanelTitle)));
         set_accessibility_label(&*self.panel_title, text(locale, Message::MenuPanelTitle));
-        self.tabs[0].setTitle(&NSString::from_str(text(locale, Message::MenuCharacterTab)));
-        self.tabs[1].setTitle(&NSString::from_str(text(locale, Message::MenuBubbleTab)));
-        self.tabs[2].setTitle(&NSString::from_str(text(locale, Message::MenuSettingsTab)));
-        set_accessibility_label(&*self.tabs[0], text(locale, Message::MenuCharacterTab));
-        set_accessibility_label(&*self.tabs[1], text(locale, Message::MenuBubbleTab));
-        set_accessibility_label(&*self.tabs[2], text(locale, Message::MenuSettingsTab));
+        for (button, message) in self.tabs.iter().zip([
+            Message::MenuAppearanceTab,
+            Message::MenuConnectionsTab,
+            Message::MenuAppTab,
+        ]) {
+            button.setTitle(&NSString::from_str(text(locale, message)));
+            set_accessibility_label(button, text(locale, message));
+        }
         self.character_visible_label
             .setStringValue(&NSString::from_str(text(
                 locale,
@@ -2243,7 +2842,8 @@ impl MenuPanel {
         self.bubble_conflict_label = None;
         self.refresh_bubble_color_controls();
         self.update_menu_bar_icon_labels();
-        self.observation_preferences = None;
+        self.observation_locale = None;
+        self.rebuild_observation_controls();
         self.observation_title
             .setStringValue(&NSString::from_str(text(locale, Message::ConnectionTitle)));
         self.localize_connection();
@@ -2275,16 +2875,21 @@ impl MenuPanel {
         );
         set_accessibility_label(&*self.reset, text(locale, Message::ResetPosition));
         set_accessibility_label(&*self.quit, text(locale, Message::MenuQuit));
+        set_tooltip(&self.quit, text(locale, Message::LifecycleQuitHelp));
+        let _: () = unsafe {
+            msg_send![&*self.quit, setAccessibilityHelp: Some(&*NSString::from_str(text(locale, Message::LifecycleQuitHelp)))]
+        };
+        self.update_status_text();
+        self.update_connection_summary();
+        self.refresh_connection_error();
+        self.refresh_lifecycle_diagnostics();
+        self.localize_detail_openers();
+        self.end_control_refresh();
         self.layout_root();
     }
 
     pub(crate) fn reanchor_at(&self, anchor_screen_rect: NSRect, visible_frame: NSRect) {
-        let desired_height = if self.is_character_tab() {
-            SCROLL_TOP + CHARACTER_VIEW_TOP + self.character_content_height + FOOTER_HEIGHT
-        } else {
-            PANEL_HEIGHT
-        };
-        let height = desired_height.min((visible_frame.size.height - 16.0).max(1.0));
+        let height = PANEL_HEIGHT.min((visible_frame.size.height - 16.0).max(1.0));
         let width = PANEL_WIDTH.min((visible_frame.size.width - 16.0).max(1.0));
         self.panel.setContentSize(NSSize::new(width, height));
         self.root.setFrame(NSRect::new(
@@ -2319,6 +2924,7 @@ impl MenuPanel {
     pub(crate) fn shutdown(&self) {
         self.hide();
         self.panel.close();
+        self.detail_window.finish_shutdown();
     }
 
     pub(crate) fn window(&self) -> &NSPanel {
@@ -2328,28 +2934,92 @@ impl MenuPanel {
         self.lifecycle_card.value(key)
     }
     pub(crate) fn refresh_app_update(&mut self, model: &UpdateCardModel) {
-        let reading_position = self.reading_position();
+        self.begin_control_refresh();
         self.update_card.refresh(model);
-        self.layout_root_at(reading_position);
-        if !self.frozen_controls.is_empty() {
-            self.set_update_frozen(true);
+        self.update_details_problem =
+            model.status == desktop_pet_update_coordinator::CheckStatus::Failed;
+        self.localize_detail_openers();
+        self.layout_root();
+        self.layout_detail();
+        self.end_control_refresh();
+    }
+    fn restore_frozen_controls(&mut self) {
+        for (control, enabled) in self.frozen_controls.drain(..) {
+            control.setEnabled(enabled);
         }
     }
-    pub(crate) fn toggle_update_diagnostics(&mut self) {
-        let reading_position = self.reading_position();
-        self.update_card.toggle_diagnostics();
-        self.layout_documents_at(reading_position);
+    fn begin_control_refresh(&mut self) {
+        if self.control_refresh_depth == 0 && self.update_frozen {
+            self.restore_frozen_controls();
+        }
+        self.control_refresh_depth += 1;
     }
-    pub(crate) fn toggle_update_options(&mut self) {
-        let reading_position = self.reading_position();
-        self.update_card.toggle_options();
-        self.panel
-            .makeFirstResponder(Some(self.update_card.options_toggle()));
-        self.layout_documents_at(reading_position);
+    fn end_control_refresh(&mut self) {
+        self.control_refresh_depth -= 1;
+        if self.control_refresh_depth == 0 && self.update_frozen {
+            self.freeze_controls();
+        }
+    }
+    fn freeze_controls(&mut self) {
+        fn visit(
+            view: &NSView,
+            exempt: &[&NSView],
+            controls: &mut Vec<(Retained<NSControl>, bool)>,
+        ) {
+            for child in view.subviews().iter() {
+                if let Some(control) = child.downcast_ref::<NSControl>() {
+                    let readonly = child
+                        .downcast_ref::<NSTextField>()
+                        .is_some_and(|field| !field.isEditable());
+                    let opener = child
+                        .downcast_ref::<NSButton>()
+                        .is_some_and(|button| button.action() == Some(sel!(openSettingsDetail:)));
+                    let scroller = child.downcast_ref::<NSScroller>().is_some();
+                    let editing = child
+                        .downcast_ref::<SettingsColorNativeField>()
+                        .is_some_and(|field| field.ivars().get());
+                    if !readonly
+                        && !opener
+                        && !scroller
+                        && !editing
+                        && !exempt.iter().any(|view| std::ptr::eq(*view, &*child))
+                    {
+                        controls.push((control.retain(), control.isEnabled()));
+                        control.setEnabled(false);
+                    }
+                }
+                visit(&child, exempt, controls);
+            }
+        }
+        // setEnabled(false) ends an active field editor session and clears Undo.
+        // Report its host as disabled without that setter, keeping the native
+        // editor read-only. Preserve this flag through refresh and focus changes.
+        for index in 0..self.bubble_color_fields.len() {
+            if let Some(editor) = self
+                .bubble_field_editor(index)
+                .and_then(|editor| editor.downcast_ref::<NSTextView>())
+            {
+                self.bubble_color_fields[index].ivars().set(true);
+                editor.setEditable(false);
+            }
+        }
+        let exempt: [&NSView; 4] = [&self.quit, &self.tabs[0], &self.tabs[1], &self.tabs[2]];
+        visit(&self.root, &exempt, &mut self.frozen_controls);
+        visit(&self.detail_root, &exempt, &mut self.frozen_controls);
     }
     pub(crate) fn set_update_frozen(&mut self, frozen: bool) {
-        for field in &self.bubble_color_fields {
-            field.setEditable(!frozen);
+        if self.update_frozen == frozen {
+            return;
+        }
+        self.update_frozen = frozen;
+        self.detail_window.ivars().update_frozen.set(frozen);
+        if frozen {
+            self.freeze_controls();
+        } else {
+            for field in &self.bubble_color_fields {
+                field.ivars().set(false);
+            }
+            self.restore_frozen_controls();
         }
         for index in 0..self.bubble_color_fields.len() {
             if let Some(editor) = self
@@ -2357,54 +3027,6 @@ impl MenuPanel {
                 .and_then(|editor| editor.downcast_ref::<NSTextView>())
             {
                 editor.setEditable(!frozen);
-            }
-        }
-        if frozen {
-            fn disable(
-                view: &NSView,
-                quit: &NSButton,
-                diagnostics_toggle: &NSButton,
-                options_toggle: &NSButton,
-                diagnostics: &NSTextField,
-                controls: &mut Vec<(Retained<NSControl>, bool)>,
-            ) {
-                for child in view.subviews().iter() {
-                    if let Some(control) = child.downcast_ref::<NSControl>() {
-                        if !std::ptr::eq(&*child, quit as &NSView)
-                            && !std::ptr::eq(&*child, diagnostics_toggle as &NSView)
-                            && !std::ptr::eq(&*child, diagnostics as &NSView)
-                            && !std::ptr::eq(&*child, options_toggle as &NSView)
-                        {
-                            if !controls
-                                .iter()
-                                .any(|(saved, _)| std::ptr::eq(&**saved, control))
-                            {
-                                controls.push((control.retain(), control.isEnabled()));
-                            }
-                            control.setEnabled(false);
-                        }
-                    }
-                    disable(
-                        &child,
-                        quit,
-                        diagnostics_toggle,
-                        options_toggle,
-                        diagnostics,
-                        controls,
-                    );
-                }
-            }
-            disable(
-                &self.root,
-                &self.quit,
-                self.update_card.diagnostics_toggle(),
-                self.update_card.options_toggle(),
-                self.update_card.diagnostics(),
-                &mut self.frozen_controls,
-            );
-        } else {
-            for (control, enabled) in self.frozen_controls.drain(..) {
-                control.setEnabled(enabled);
             }
         }
     }
@@ -2449,17 +3071,19 @@ impl MenuPanel {
 
     pub(crate) fn lifecycle_saved(&mut self, settings: LifecycleSettings) {
         self.lifecycle_card.saved(settings);
+        self.refresh_lifecycle_diagnostics();
         self.layout_documents();
     }
 
     pub(crate) fn lifecycle_failed(&mut self, settings: LifecycleSettings, detail: String) {
         self.lifecycle_card.failed(settings, detail);
+        self.refresh_lifecycle_diagnostics();
         self.layout_documents();
     }
 
     fn apply_tab_selection(&self) {
         for (index, button) in self.tabs.iter().enumerate() {
-            let selected = index == self.selected_tab;
+            let selected = index == self.selected_tab.index();
             button.setState(if selected {
                 NSControlStateValueOn
             } else {
@@ -2484,7 +3108,7 @@ impl MenuPanel {
         let track_x = 12.0;
         let track_width = (width - 24.0).max(1.0);
         let tab_width = (track_width / 3.0).max(1.0);
-        let indicator_x = track_x + 2.0 + tab_width * self.selected_tab as f64;
+        let indicator_x = track_x + 2.0 + tab_width * self.selected_tab.index() as f64;
         self.tab_indicator.setFrame(NSRect::new(
             NSPoint::new(indicator_x, 50.0),
             NSSize::new((tab_width - 4.0).max(1.0), 26.0),
@@ -2551,19 +3175,22 @@ impl MenuPanel {
             .max(SCROLL_TOP + 8.0);
         let button_h = 28.0;
         let quit_w = 48.0;
-        let reset_w = 90.0;
+        let details_w = if self.presentation_error.is_some() {
+            70.0
+        } else {
+            0.0
+        };
         let right_margin = 14.0;
         let quit_x = width - right_margin - quit_w;
-        let reset_x = quit_x - 8.0 - reset_w;
-        let status_w = (reset_x - 16.0 - 8.0).max(1.0);
+        let status_w = (quit_x - details_w - 28.0).max(1.0);
 
         self.status.setFrame(NSRect::new(
             NSPoint::new(16.0, footer_y),
             NSSize::new(status_w, 32.0),
         ));
-        self.reset.setFrame(NSRect::new(
-            NSPoint::new(reset_x, footer_y + 2.0),
-            NSSize::new(reset_w, button_h),
+        self.footer_details.setFrame(NSRect::new(
+            NSPoint::new(quit_x - details_w - 8.0, footer_y + 2.0),
+            NSSize::new(details_w, button_h),
         ));
         self.quit.setFrame(NSRect::new(
             NSPoint::new(quit_x, footer_y + 2.0),
@@ -2584,589 +3211,444 @@ impl MenuPanel {
     }
 
     fn layout_documents_at(&self, reading_position: ScrollReadingPosition) {
-        let ScrollReadingPosition {
-            offset: old_offset,
-            anchor,
-        } = reading_position;
-        let scroll_frame = self.scroll.frame();
-        let scroll_width = scroll_frame.size.width.max(1.0);
-        let scroll_height = scroll_frame.size.height.max(1.0);
-
-        let char_view_height = self.character_content_height;
-        let char_content_height = (CHARACTER_VIEW_TOP + char_view_height).max(scroll_height);
-
-        let initial_width = (scroll_width - 30.0).max(1.0);
-        let mut settings_height = self.settings_height(initial_width).max(scroll_height);
-        let bubble_height = self.bubble_height(initial_width).max(scroll_height);
-        let content_height = match self.selected_tab {
-            0 => char_content_height,
-            1 => bubble_height,
-            _ => settings_height,
-        };
-
-        self.document.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, content_height),
-        ));
-        self.character_tab.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, char_content_height),
-        ));
-        self.bubble_tab.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, bubble_height),
-        ));
-        self.settings_tab.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, settings_height),
-        ));
-
-        self.scroll.layoutSubtreeIfNeeded();
-        self.scroll.tile();
-        self.scroll.layoutSubtreeIfNeeded();
-
-        let clip_width = self
-            .scroll
-            .contentView()
-            .bounds()
-            .size
-            .width
-            .min(scroll_width)
-            .max(1.0);
-        let visible_width = self
-            .scroll
-            .documentVisibleRect()
-            .size
-            .width
-            .min(clip_width)
-            .max(1.0);
-
-        let is_legacy = visible_width < scroll_width - 1.0;
-        let scroller_allowance = if is_legacy { 0.0 } else { 14.0 };
-        let outer_margin = 8.0;
-        let card_width = (visible_width - outer_margin * 2.0 - scroller_allowance).max(1.0);
-
-        settings_height = self.settings_height(card_width).max(scroll_height);
-        let bubble_height = self.bubble_height(card_width).max(scroll_height);
-        self.bubble_tab.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, bubble_height),
-        ));
-        if self.selected_tab == 1 {
-            self.document.setFrame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(scroll_width, bubble_height),
-            ));
+        let width = self.scroll.contentView().bounds().size.width.max(1.0);
+        let card_width = (width - 30.0).max(1.0);
+        let viewport = self.scroll.contentView().bounds().size.height.max(1.0);
+        let heights = [
+            self.layout_appearance_basic(card_width, width),
+            self.layout_connections_basic(card_width),
+            self.layout_app_basic(card_width),
+        ];
+        for (index, view) in [&self.character_tab, &self.bubble_tab, &self.settings_tab]
+            .iter()
+            .enumerate()
+        {
+            view.setFrame(rect(0.0, 0.0, width, heights[index].max(viewport)));
         }
-        if self.selected_tab == 2 {
-            self.document.setFrame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(scroll_width, settings_height),
-            ));
-        }
-        self.settings_tab.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(scroll_width, settings_height),
+        self.document.setFrame(rect(
+            0.0,
+            0.0,
+            width,
+            heights[self.selected_tab.index()].max(viewport),
         ));
-        self.layout_character(card_width, clip_width, char_view_height);
-        self.layout_bubble(card_width);
-        self.layout_settings(card_width);
-        let max_offset = (self.document.frame().size.height
-            - self.scroll.contentView().bounds().size.height)
-            .max(0.0);
-        let restored_offset = anchor
+        let maximum = (self.document.frame().size.height - viewport).max(0.0);
+        let offset = reading_position
+            .anchor
             .filter(|(view, _)| {
                 let hidden: bool = unsafe { msg_send![&**view, isHiddenOrHasHiddenAncestor] };
                 view.window().is_some() && !hidden
             })
-            .map_or(old_offset, |(view, old_y)| {
-                old_offset
+            .map_or(reading_position.offset, |(view, old_y)| {
+                reading_position.offset
                     + view
                         .convertRect_toView(view.bounds(), Some(&self.document))
                         .origin
                         .y
                     - old_y
             })
-            .clamp(0.0, max_offset);
+            .clamp(0.0, maximum);
         self.scroll
             .contentView()
-            .scrollToPoint(NSPoint::new(0.0, restored_offset));
+            .scrollToPoint(NSPoint::new(0.0, offset));
         self.scroll
             .reflectScrolledClipView(&self.scroll.contentView());
         self.panel.recalculateKeyViewLoop();
+        self.layout_detail();
     }
 
-    fn layout_character(&self, card_width: f64, clip_width: f64, char_view_height: f64) {
-        let cards = self.character_tab.subviews();
-        let character_card = cards.objectAtIndex(0);
-        character_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 6.0),
-            NSSize::new(card_width, 46.0),
-        ));
-        self.character_visible_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 11.0),
-            NSSize::new((card_width - 80.0).max(1.0), 24.0),
-        ));
-        self.character_visible_switch.setFrame(NSRect::new(
-            NSPoint::new(card_width - 58.0, 8.0),
-            NSSize::new(46.0, 30.0),
-        ));
-        let gap = 8.0;
-        let btn_width = ((card_width - gap) * 0.5).max(1.0);
-        self.character_browser_open.setFrame(NSRect::new(
-            NSPoint::new(8.0, 58.0),
-            NSSize::new(btn_width, 36.0),
-        ));
-        self.character_editing_open.setFrame(NSRect::new(
-            NSPoint::new(8.0 + btn_width + gap, 58.0),
-            NSSize::new((card_width - btn_width - gap).max(1.0), 36.0),
-        ));
-        self.character_view.setFrame(NSRect::new(
-            NSPoint::new(0.0, CHARACTER_VIEW_TOP),
-            NSSize::new(clip_width, char_view_height),
-        ));
-    }
-
-    fn bubble_theme_height(&self, card_width: f64) -> f64 {
-        if !self.bubble_colors_expanded && !self.bubble_draft.conflicted() {
-            return 94.0;
+    fn layout_appearance_basic(&self, width: f64, clip_width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut y = 8.0;
+        self.character_view
+            .setFrame(rect(0.0, y, clip_width, self.character_content_height));
+        y += self.character_content_height + 8.0;
+        self.character_browser_open
+            .setFrame(rect(8.0, y, width, 30.0));
+        y += 38.0;
+        self.character_card.setFrame(rect(8.0, y, width, 46.0));
+        place_switch(
+            &self.character_visible_label,
+            &self.character_visible_switch,
+            width,
+            8.0,
+        );
+        y += 54.0;
+        self.scale_card.setFrame(rect(8.0, y, width, 50.0));
+        self.scale_label
+            .setFrame(rect(14.0, 14.0, (width - 154.0).max(1.0), 22.0));
+        self.scale_down
+            .setFrame(rect(width - 132.0, 11.0, 28.0, 28.0));
+        self.scale_readout
+            .setFrame(rect(width - 98.0, 14.0, 56.0, 22.0));
+        self.scale_up.setFrame(rect(width - 38.0, 11.0, 28.0, 28.0));
+        y += 58.0;
+        self.bubble_visibility_card
+            .setFrame(rect(8.0, y, width, 206.0));
+        place_switch(
+            &self.bubble_visible_label,
+            &self.bubble_visible_switch,
+            width,
+            8.0,
+        );
+        self.bubble_placement_label
+            .setFrame(rect(14.0, 44.0, content, 20.0));
+        let button_width = ((content - 12.0) / 3.0).max(1.0);
+        for (index, button) in self.placement_buttons.iter().enumerate() {
+            button.setFrame(rect(
+                14.0 + (index % 3) as f64 * (button_width + 6.0),
+                68.0 + (index / 3) as f64 * 30.0,
+                button_width,
+                26.0,
+            ));
         }
-        let conflict_height = if self.bubble_draft.conflicted() {
-            measured_label_height(&self.bubble_colors_label, (card_width - 28.0).max(1.0)) + 8.0
-        } else {
-            0.0
-        };
-        94.0 + conflict_height
-            + 150.0
-            + 36.0
-            + if self.bubble_draft.conflicted() {
-                68.0
-            } else {
-                0.0
-            }
+        self.bubble_theme_label
+            .setFrame(rect(14.0, 134.0, content, 20.0));
+        self.bubble_theme_popup
+            .setFrame(rect(14.0, 158.0, content, 28.0));
+        y += 214.0;
+        self.detail_openers[0].setFrame(rect(8.0, y, width, 28.0));
+        y += 36.0;
+        self.reset.setFrame(rect(8.0, y, width, 28.0));
+        y + 36.0
     }
 
-    fn bubble_height(&self, card_width: f64) -> f64 {
-        244.0 + self.bubble_theme_height(card_width)
+    fn layout_connections_basic(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut inner = 12.0;
+        for field in [
+            &self.observation_title,
+            &self.connection_selection_summary,
+            &self.connection_summary,
+        ] {
+            place_observation_label(field, 14.0, content, 20.0, &mut inner, true);
+            inner += 8.0;
+        }
+        if self.connection_has_error() {
+            place_observation_label(
+                &self.connection_error_summary,
+                14.0,
+                content,
+                18.0,
+                &mut inner,
+                true,
+            );
+            inner += 8.0;
+        }
+        self.connection_error_summary
+            .setHidden(!self.connection_has_error());
+        self.observation_card
+            .setFrame(rect(8.0, 8.0, width, inner + 4.0));
+        let mut y = inner + 20.0;
+        for index in [1, 4] {
+            self.detail_openers[index].setFrame(rect(8.0, y, width, 28.0));
+            y += 36.0;
+        }
+        y + 8.0
     }
 
-    fn layout_bubble(&self, card_width: f64) {
-        let cards = self.bubble_tab.subviews();
-        let visibility_card = cards.objectAtIndex(0);
-        let theme_card = cards.objectAtIndex(1);
-        let width = (card_width - 28.0).max(1.0);
-        visibility_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 8.0),
-            NSSize::new(card_width, 220.0),
+    fn layout_app_basic(&self, width: f64) -> f64 {
+        self.app_general_card.setFrame(rect(8.0, 8.0, width, 72.0));
+        self.language_label
+            .setFrame(rect(14.0, 8.0, (width - 28.0).max(1.0), 20.0));
+        self.language_popup
+            .setFrame(rect(14.0, 32.0, (width - 28.0).max(1.0), 28.0));
+        let mut y = 88.0;
+        let height = self.lifecycle_card.height(width);
+        self.lifecycle_card.layout(rect(8.0, y, width, height));
+        y += height + 8.0;
+        let height = self.update_card.height(width);
+        self.update_card.layout(rect(8.0, y, width, height));
+        y += height + 8.0;
+        for index in [2, 3, 5] {
+            self.detail_openers[index].setFrame(rect(8.0, y, width, 28.0));
+            y += 36.0;
+        }
+        y + 8.0
+    }
+
+    fn restore_detail_offset(&self, page: SettingsDetailPage) {
+        let maximum = (self.detail_document.frame().size.height
+            - self.detail_scroll.contentView().bounds().size.height)
+            .max(0.0);
+        self.detail_scroll.contentView().scrollToPoint(NSPoint::new(
+            0.0,
+            self.detail_offsets.get()[page.index()].clamp(0.0, maximum),
         ));
-        for (label, toggle, y) in [
-            (&self.bubble_visible_label, &self.bubble_visible_switch, 8.0),
+        self.detail_scroll
+            .reflectScrolledClipView(&self.detail_scroll.contentView());
+    }
+
+    fn layout_detail(&self) {
+        let Some(page) = self.selected_detail else {
+            return;
+        };
+        let old_offset = self.detail_scroll.contentView().bounds().origin.y;
+        self.detail_scroll.setFrame(self.detail_root.bounds());
+        let width = (self.detail_scroll.contentView().bounds().size.width - 30.0).max(1.0);
+        let height = match page {
+            SettingsDetailPage::Appearance => self.layout_appearance_detail(width),
+            SettingsDetailPage::Connections => self.layout_connections_detail(width),
+            SettingsDetailPage::MenuBar => self.layout_menu_bar_detail(width),
+            SettingsDetailPage::UpdateSettings => {
+                let height = self.update_card.settings_height(width);
+                self.update_card
+                    .layout_settings(rect(8.0, 8.0, width, height));
+                height + 16.0
+            }
+            SettingsDetailPage::ConnectionDiagnostics => self.layout_connection_diagnostics(width),
+            SettingsDetailPage::UpdateDetails => {
+                let height = self.update_card.details_height(width);
+                self.update_card
+                    .layout_details(rect(8.0, 8.0, width, height));
+                height + 16.0
+            }
+        }
+        .max(self.detail_scroll.contentView().bounds().size.height);
+        let document_width = self
+            .detail_scroll
+            .contentView()
+            .bounds()
+            .size
+            .width
+            .max(1.0);
+        self.detail_documents[page.index()].setFrame(rect(0.0, 0.0, document_width, height));
+        self.detail_document
+            .setFrame(rect(0.0, 0.0, document_width, height));
+        let maximum = (height - self.detail_scroll.contentView().bounds().size.height).max(0.0);
+        self.detail_scroll
+            .contentView()
+            .scrollToPoint(NSPoint::new(0.0, old_offset.clamp(0.0, maximum)));
+        self.detail_scroll
+            .reflectScrolledClipView(&self.detail_scroll.contentView());
+        self.detail_window.recalculateKeyViewLoop();
+        self.detail_root.ivars().layout_dirty.set(false);
+    }
+
+    fn layout_appearance_detail(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        self.status_indicators_label
+            .setFrame(rect(22.0, 16.0, (width - 80.0).max(1.0), 24.0));
+        self.status_indicators_switch
+            .setFrame(rect(width - 50.0, 12.0, 46.0, 30.0));
+        let mut inner = 12.0;
+        for field in [&self.settings_appearance_label, &self.click_behavior_label] {
+            place_observation_label(field, 14.0, content, 20.0, &mut inner, true);
+            inner += 6.0;
+        }
+        for (name, toggle, help) in [
             (
-                &self.status_indicators_label,
-                &self.status_indicators_switch,
-                48.0,
+                &self.full_passthrough_label,
+                &self.full_passthrough_switch,
+                &self.full_passthrough_help,
+            ),
+            (
+                &self.alpha_passthrough_label,
+                &self.alpha_passthrough_switch,
+                &self.alpha_passthrough_help,
             ),
         ] {
-            label.setFrame(NSRect::new(
-                NSPoint::new(14.0, y + 3.0),
-                NSSize::new((card_width - 80.0).max(1.0), 24.0),
-            ));
-            toggle.setFrame(NSRect::new(
-                NSPoint::new(card_width - 58.0, y),
-                NSSize::new(46.0, 30.0),
-            ));
+            place_switch(name, toggle, width, inner);
+            inner += 34.0;
+            place_observation_label(help, 14.0, content, 16.0, &mut inner, true);
+            inner += 10.0;
         }
-        self.bubble_placement_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 91.0),
-            NSSize::new(width, 18.0),
-        ));
-        let button_width = ((width - 12.0) / 3.0).max(1.0);
-        for (index, column, row) in [(1, 1, 0), (3, 0, 1), (0, 1, 1), (4, 2, 1), (2, 1, 2)] {
-            self.placement_buttons[index].setFrame(NSRect::new(
-                NSPoint::new(
-                    14.0 + column as f64 * (button_width + 6.0),
-                    115.0 + row as f64 * 30.0,
-                ),
-                NSSize::new(button_width, 24.0),
-            ));
-        }
-        theme_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 236.0),
-            NSSize::new(card_width, self.bubble_theme_height(card_width)),
-        ));
-        self.bubble_theme_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 8.0),
-            NSSize::new(width, 18.0),
-        ));
-        self.bubble_theme_popup.setFrame(NSRect::new(
-            NSPoint::new(14.0, 30.0),
-            NSSize::new(width, 26.0),
-        ));
-        let conflicted = self.bubble_draft.conflicted();
-        let expanded = self.bubble_colors_expanded || conflicted;
-        set_connection_disclosure(
-            &self.bubble_colors_toggle,
-            self.locale,
-            Message::CustomizeBubbleColors,
-            expanded,
+        self.appearance_card.setFrame(rect(8.0, 50.0, width, inner));
+        let mut y = 50.0 + inner + 8.0;
+        let mut color_y = 12.0;
+        place_observation_label(
+            &self.bubble_colors_label,
+            14.0,
+            content,
+            18.0,
+            &mut color_y,
+            true,
         );
-        let mut y = 60.0;
-        place_connection_disclosure(&self.bubble_colors_toggle, card_width, &mut y, true);
-        self.bubble_colors_label.setHidden(!conflicted);
-        if conflicted {
-            place_observation_label(&self.bubble_colors_label, 14.0, width, 18.0, &mut y, true);
-            y += 8.0;
-        }
-        let field_width = 86.0;
-        let swatch_x = card_width - 126.0;
+        color_y += 10.0;
         for ((name, field), swatch) in self
             .bubble_color_labels
             .iter()
             .zip(&self.bubble_color_fields)
             .zip(&self.bubble_color_swatches)
         {
-            name.setHidden(!expanded);
-            field.setHidden(!expanded);
-            field.setRefusesFirstResponder(!expanded);
-            swatch.setHidden(!expanded);
-            if !expanded {
-                continue;
-            }
-            name.setFrame(NSRect::new(
-                NSPoint::new(14.0, y + 2.0),
-                NSSize::new((swatch_x - 20.0).max(1.0), 20.0),
-            ));
-            swatch.setFrame(NSRect::new(
-                NSPoint::new(swatch_x, y + 2.0),
-                NSSize::new(18.0, 18.0),
-            ));
-            field.setFrame(NSRect::new(
-                NSPoint::new(card_width - 100.0, y),
-                NSSize::new(field_width, 22.0),
-            ));
-            y += 30.0;
+            name.setFrame(rect(14.0, color_y + 2.0, (width - 154.0).max(1.0), 20.0));
+            swatch.setFrame(rect(width - 126.0, color_y + 2.0, 18.0, 18.0));
+            field.setFrame(rect(width - 100.0, color_y, 86.0, 22.0));
+            color_y += 30.0;
         }
-        for button in [&self.bubble_apply, &self.bubble_reset] {
-            button.setHidden(!expanded);
-            button.setRefusesFirstResponder(!expanded);
-        }
-        let button_width = ((width - 8.0) / 2.0).max(1.0);
-        self.bubble_apply.setFrame(NSRect::new(
-            NSPoint::new(14.0, y),
-            NSSize::new(button_width, 28.0),
-        ));
-        self.bubble_reset.setFrame(NSRect::new(
-            NSPoint::new(22.0 + button_width, y),
-            NSSize::new(button_width, 28.0),
-        ));
-        y += 36.0;
+        let half = ((content - 8.0) / 2.0).max(1.0);
+        self.bubble_apply.setFrame(rect(14.0, color_y, half, 28.0));
+        self.bubble_reset
+            .setFrame(rect(22.0 + half, color_y, half, 28.0));
+        color_y += 36.0;
         for button in [&self.bubble_reload, &self.bubble_rebase] {
-            button.setHidden(!conflicted);
-            button.setRefusesFirstResponder(!conflicted);
-            button.setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 28.0)));
-            y += 34.0;
-        }
-    }
-
-    fn settings_height(&self, card_width: f64) -> f64 {
-        settings_content_height(
-            self.menu_bar_card_height(card_width),
-            self.observation_height(card_width),
-            self.lifecycle_card.height(card_width),
-            self.update_card.height(card_width),
-        )
-    }
-
-    fn menu_bar_card_height(&self, card_width: f64) -> f64 {
-        self.layout_menu_bar_card(card_width, false)
-    }
-
-    fn layout_menu_bar_card(&self, card_width: f64, apply: bool) -> f64 {
-        let width = (card_width - 28.0).max(1.0);
-        let label_width = (width * 0.4).max(1.0);
-        if apply {
-            self.menu_bar_label.setFrame(NSRect::new(
-                NSPoint::new(14.0, 10.0),
-                NSSize::new(width, 18.0),
-            ));
-        }
-        let mut y = 36.0;
-        for (label, popup) in [
-            (&self.language_label, &self.language_popup),
-            (&self.menu_bar_visibility, &self.menu_bar_popup),
-        ] {
-            let height = measured_label_height(label, label_width).max(28.0);
-            if apply {
-                label.setFrame(NSRect::new(
-                    NSPoint::new(14.0, y),
-                    NSSize::new(label_width, height),
-                ));
-                popup.setFrame(NSRect::new(
-                    NSPoint::new(20.0 + label_width, y),
-                    NSSize::new((width - label_width - 6.0).max(1.0), 28.0),
-                ));
+            button.setHidden(!self.bubble_draft.conflicted());
+            if self.bubble_draft.conflicted() {
+                button.setFrame(rect(14.0, color_y, content, 28.0));
+                color_y += 34.0;
             }
-            y += height + 8.0;
         }
-        place_observation_label(&self.menu_bar_help, 14.0, width, 16.0, &mut y, apply);
-        y += 8.0;
-        if apply {
-            self.menu_bar_separator
-                .setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 1.0)));
-            self.menu_bar_preview_well.setFrame(NSRect::new(
-                NSPoint::new(14.0, y + 9.0),
-                NSSize::new(36.0, 36.0),
-            ));
-            self.menu_bar_preview
-                .setFrame(NSRect::new(NSPoint::new(9.0, 9.0), NSSize::new(18.0, 18.0)));
-            self.menu_bar_icon_status.setFrame(NSRect::new(
-                NSPoint::new(60.0, y + 18.0),
-                NSSize::new((width - 46.0).max(1.0), 18.0),
-            ));
-            set_connection_disclosure(
-                &self.menu_bar_icon_toggle,
-                self.locale,
-                Message::MenuBarIconCustomize,
-                self.menu_bar_icon_expanded,
-            );
-            for view in [
-                &*self.menu_bar_choose as &NSView,
-                &*self.menu_bar_restore,
-                &*self.menu_bar_icon_help,
-            ] {
-                view.setHidden(!self.menu_bar_icon_expanded);
-            }
-            self.menu_bar_choose
-                .setRefusesFirstResponder(!self.menu_bar_icon_expanded);
-            self.menu_bar_restore
-                .setRefusesFirstResponder(!self.menu_bar_icon_expanded);
-        }
-        y += 52.0;
-        place_connection_disclosure(&self.menu_bar_icon_toggle, card_width, &mut y, apply);
-        if self.menu_bar_icon_expanded {
-            for button in [&self.menu_bar_choose, &self.menu_bar_restore] {
-                if apply {
-                    button.setFrame(NSRect::new(NSPoint::new(14.0, y), NSSize::new(width, 28.0)));
-                }
-                y += 34.0;
-            }
-            place_observation_label(&self.menu_bar_icon_help, 14.0, width, 16.0, &mut y, apply);
-        }
-        if self.menu_bar_icon_error_detail.is_some() {
-            y += 6.0;
-            place_observation_label(&self.menu_bar_icon_error, 14.0, width, 16.0, &mut y, apply);
-        }
-        y + MENU_BAR_CARD_BOTTOM
+        self.bubble_theme_card
+            .setFrame(rect(8.0, y, width, color_y + 8.0));
+        y += color_y + 16.0;
+        self.character_editing_open
+            .setFrame(rect(8.0, y, width, 30.0));
+        y += 40.0;
+        place_observation_label(&self.appearance_error, 22.0, content, 18.0, &mut y, true);
+        y + 16.0
     }
 
-    fn layout_settings(&self, card_width: f64) {
-        let cards = self.settings_tab.subviews();
-        let appearance_card = cards.objectAtIndex(1);
-        let scale_card = cards.objectAtIndex(2);
-
-        appearance_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 16.0 + self.menu_bar_card_height(card_width)),
-            NSSize::new(card_width, 146.0),
-        ));
-        self.settings_appearance_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 10.0),
-            NSSize::new((card_width - 28.0).max(1.0), 20.0),
-        ));
-        self.click_behavior_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 30.0),
-            NSSize::new((card_width - 28.0).max(1.0), 16.0),
-        ));
-
-        self.full_passthrough_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 52.0),
-            NSSize::new((card_width - 80.0).max(1.0), 20.0),
-        ));
-        self.full_passthrough_switch.setFrame(NSRect::new(
-            NSPoint::new(card_width - 58.0, 48.0),
-            NSSize::new(46.0, 30.0),
-        ));
-        self.full_passthrough_help.setFrame(NSRect::new(
-            NSPoint::new(14.0, 72.0),
-            NSSize::new((card_width - 28.0).max(1.0), 16.0),
-        ));
-
-        self.alpha_passthrough_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 94.0),
-            NSSize::new((card_width - 80.0).max(1.0), 20.0),
-        ));
-        self.alpha_passthrough_switch.setFrame(NSRect::new(
-            NSPoint::new(card_width - 58.0, 90.0),
-            NSSize::new(46.0, 30.0),
-        ));
-        self.alpha_passthrough_help.setFrame(NSRect::new(
-            NSPoint::new(14.0, 114.0),
-            NSSize::new((card_width - 28.0).max(1.0), 16.0),
-        ));
-
-        scale_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 170.0 + self.menu_bar_card_height(card_width)),
-            NSSize::new(card_width, 54.0),
-        ));
-        self.scale_label.setFrame(NSRect::new(
-            NSPoint::new(14.0, 16.0),
-            NSSize::new((card_width - 150.0).max(1.0), 22.0),
-        ));
-        self.scale_down.setFrame(NSRect::new(
-            NSPoint::new(card_width - 132.0, 13.0),
-            NSSize::new(28.0, 28.0),
-        ));
-        self.scale_readout.setFrame(NSRect::new(
-            NSPoint::new(card_width - 98.0, 16.0),
-            NSSize::new(56.0, 22.0),
-        ));
-        self.scale_up.setFrame(NSRect::new(
-            NSPoint::new(card_width - 38.0, 13.0),
-            NSSize::new(28.0, 28.0),
-        ));
-
-        let menu_bar_height = self.layout_menu_bar_card(card_width, true);
-        self.menu_bar_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, 8.0),
-            NSSize::new(card_width, menu_bar_height),
-        ));
-        let mut y = menu_bar_height + 232.0;
-        let lifecycle_height = self.lifecycle_card.height(card_width);
-        self.lifecycle_card.layout(NSRect::new(
-            NSPoint::new(8.0, y),
-            NSSize::new(card_width, lifecycle_height),
-        ));
-        y += lifecycle_height + 8.0;
-        let update_height = self.update_card.height(card_width);
-        self.update_card.layout(NSRect::new(
-            NSPoint::new(8.0, y),
-            NSSize::new(card_width, update_height),
-        ));
-        y += update_height + 8.0;
-        let observation_height = self.layout_observation(card_width, true);
-        self.observation_card.setFrame(NSRect::new(
-            NSPoint::new(8.0, y),
-            NSSize::new(card_width, observation_height),
-        ));
-    }
-
-    fn observation_height(&self, card_width: f64) -> f64 {
-        self.layout_observation(card_width, false)
-    }
-
-    fn layout_observation(&self, width: f64, apply: bool) -> f64 {
-        let content_width = (width - 28.0).max(1.0);
-        let settings = self.connection_settings_expanded;
-        let diagnostics = self.connection_diagnostics_expanded;
+    fn layout_connections_detail(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut y = 16.0;
+        place_observation_label(
+            &self.connection_host_label,
+            22.0,
+            content,
+            20.0,
+            &mut y,
+            true,
+        );
+        y += 6.0;
+        self.connection_host_popup
+            .setFrame(rect(22.0, y, content, 28.0));
+        y += 38.0;
         let auto = self
             .observation_preferences
             .as_ref()
             .is_none_or(|p| p.host == ObservationSelection::Auto);
-        if apply {
-            self.connection_auto_help.setHidden(!settings || !auto);
-            self.connection_status.setHidden(!settings);
-            self.connection_profile_title.setHidden(!diagnostics);
-            for (title, value) in self
-                .connection_profile_labels
-                .iter()
-                .zip(&self.connection_profile_values)
-            {
-                title.setHidden(!diagnostics);
-                value.setHidden(!diagnostics);
-                value.setRefusesFirstResponder(!diagnostics);
-            }
-            self.observation_error
-                .setHidden(self.observation_error.stringValue().length() == 0);
+        self.connection_auto_help.setHidden(!auto);
+        if auto {
+            place_observation_label(
+                &self.connection_auto_help,
+                22.0,
+                content,
+                16.0,
+                &mut y,
+                true,
+            );
+            y += 12.0;
         }
-        let mut y = 14.0;
+        place_observation_label(&self.connection_status, 22.0, content, 18.0, &mut y, true);
+        y += 12.0;
+        let height = self.lifecycle_card.extensions_height(width);
+        self.lifecycle_card
+            .layout_extensions(rect(8.0, y, width, height));
+        y += height + 12.0;
+        self.connection_settings_error
+            .setHidden(!self.connection_has_error());
+        if self.connection_has_error() {
+            place_observation_label(
+                &self.connection_settings_error,
+                22.0,
+                content,
+                18.0,
+                &mut y,
+                true,
+            );
+        }
+        y + 16.0
+    }
+
+    fn layout_connection_diagnostics(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut y = 16.0;
         place_observation_label(
-            &self.observation_title,
-            14.0,
-            content_width,
-            18.0,
+            &self.connection_profile_title,
+            22.0,
+            content,
+            20.0,
             &mut y,
-            apply,
+            true,
         );
-        y += 8.0;
-        let host_width = (content_width * 0.4).max(1.0);
-        let host_height = measured_label_height(&self.connection_host_label, host_width).max(28.0);
-        if apply {
-            self.connection_host_label.setFrame(NSRect::new(
-                NSPoint::new(14.0, y),
-                NSSize::new(host_width, host_height),
-            ));
-            self.connection_host_popup.setFrame(NSRect::new(
-                NSPoint::new(20.0 + host_width, y),
-                NSSize::new((content_width - host_width - 6.0).max(1.0), 28.0),
-            ));
+        y += 12.0;
+        for (title, value) in self
+            .connection_profile_labels
+            .iter()
+            .zip(&self.connection_profile_values)
+        {
+            place_observation_label(title, 22.0, content, 16.0, &mut y, true);
+            y += 4.0;
+            place_observation_label(value, 22.0, content, 18.0, &mut y, true);
+            y += 12.0;
         }
-        y += host_height + 6.0;
-        place_connection_disclosure(&self.connection_settings_toggle, width, &mut y, apply);
-        if settings {
-            place_observation_label(
-                &self.connection_status,
-                14.0,
-                content_width,
-                16.0,
-                &mut y,
-                apply,
-            );
-            y += 8.0;
+        for field in [&self.observation_error, &self.lifecycle_error_detail] {
+            field.setHidden(false);
+            place_observation_label(field, 22.0, content, 18.0, &mut y, true);
+            y += 12.0;
         }
-        if settings {
-            if auto {
-                place_observation_label(
-                    &self.connection_auto_help,
-                    14.0,
-                    content_width,
-                    16.0,
-                    &mut y,
-                    apply,
-                );
-                y += 8.0;
-            }
-        }
-        let extension_height = self.lifecycle_card.extensions_height(width, settings);
-        if apply {
-            self.lifecycle_card.layout_extensions(
-                NSRect::new(NSPoint::new(0.0, y), NSSize::new(width, extension_height)),
-                settings,
-            );
-        }
-        y += extension_height;
-        place_connection_disclosure(&self.connection_diagnostics_toggle, width, &mut y, apply);
-        if diagnostics {
-            place_observation_label(
-                &self.connection_profile_title,
-                14.0,
-                content_width,
-                16.0,
-                &mut y,
-                apply,
-            );
-            y += 6.0;
-            for (title, value) in self
-                .connection_profile_labels
-                .iter()
-                .zip(&self.connection_profile_values)
-            {
-                place_observation_label(title, 14.0, content_width, 15.0, &mut y, apply);
-                y += 2.0;
-                place_observation_label(value, 14.0, content_width, 16.0, &mut y, apply);
-                y += 8.0;
-            }
-        }
-        if self.observation_error.stringValue().length() > 0 {
-            place_observation_label(
-                &self.observation_error,
-                14.0,
-                content_width,
-                16.0,
-                &mut y,
-                apply,
-            );
+        y + 8.0
+    }
+
+    fn layout_menu_bar_detail(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut y = 12.0;
+        for field in [&self.menu_bar_label, &self.menu_bar_visibility] {
+            place_observation_label(field, 14.0, content, 20.0, &mut y, true);
             y += 6.0;
         }
-        y + 10.0
+        self.menu_bar_popup.setFrame(rect(14.0, y, content, 28.0));
+        y += 38.0;
+        place_observation_label(&self.menu_bar_help, 14.0, content, 18.0, &mut y, true);
+        y += 12.0;
+        self.menu_bar_separator
+            .setFrame(rect(14.0, y, content, 1.0));
+        self.menu_bar_preview_well
+            .setFrame(rect(14.0, y + 10.0, 36.0, 36.0));
+        self.menu_bar_preview.setFrame(rect(9.0, 9.0, 18.0, 18.0));
+        self.menu_bar_icon_status
+            .setFrame(rect(60.0, y + 18.0, (content - 46.0).max(1.0), 22.0));
+        y += 58.0;
+        for button in [&self.menu_bar_choose, &self.menu_bar_restore] {
+            button.setFrame(rect(14.0, y, content, 28.0));
+            y += 36.0;
+        }
+        place_observation_label(&self.menu_bar_icon_help, 14.0, content, 18.0, &mut y, true);
+        if self.menu_bar_icon_error_detail.is_some() {
+            y += 12.0;
+            place_observation_label(&self.menu_bar_icon_error, 14.0, content, 18.0, &mut y, true);
+        }
+        self.menu_bar_card.setFrame(rect(8.0, 8.0, width, y + 12.0));
+        y + 28.0
+    }
+
+    fn localize_detail_openers(&self) {
+        for (index, button) in self.detail_openers.iter().enumerate() {
+            let page = SettingsDetailPage::from_tag(index as isize).expect("known detail page");
+            let error = match page {
+                SettingsDetailPage::Appearance => {
+                    self.presentation_error.is_some() || self.bubble_draft.conflicted()
+                }
+                SettingsDetailPage::Connections | SettingsDetailPage::ConnectionDiagnostics => {
+                    self.connection_has_error() || self.lifecycle_card.error_detail().is_some()
+                }
+                SettingsDetailPage::MenuBar => self.menu_bar_icon_error_detail.is_some(),
+                SettingsDetailPage::UpdateDetails => self.update_details_problem,
+                _ => false,
+            };
+            let title = format!(
+                "{}{}…",
+                if error { "⚠ " } else { "" },
+                text(self.locale, page.message())
+            );
+            button.setTitle(&NSString::from_str(&title));
+            set_accessibility_label(button, &title);
+        }
+        self.footer_details.setTitle(&NSString::from_str(text(
+            self.locale,
+            Message::SettingsDetailsLink,
+        )));
+        set_accessibility_label(
+            &self.footer_details,
+            &format!(
+                "{} · {}",
+                text(self.locale, Message::AppearanceDetails),
+                text(self.locale, Message::SettingsDetailsLink)
+            ),
+        );
+        if let Some(page) = self.selected_detail {
+            self.detail_window
+                .setTitle(&NSString::from_str(text(self.locale, page.message())));
+        }
     }
 }
 
@@ -3201,38 +3683,72 @@ fn scroll_reading_anchor(
     best
 }
 
-fn set_connection_disclosure(
-    button: &NSButton,
-    locale: UiLocale,
-    message: Message,
-    expanded: bool,
-) {
-    let title = text(locale, message);
-    button.setTitle(&NSString::from_str(&format!(
-        "{} {title}",
-        if expanded { "▾" } else { "▸" }
-    )));
-    set_accessibility_label(button, title);
-    let _: () = unsafe { msg_send![button, setAccessibilityExpanded: expanded] };
+fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(x, y),
+        NSSize::new(width.max(1.0), height.max(1.0)),
+    )
 }
 
-fn place_connection_disclosure(button: &NSButton, width: f64, y: &mut f64, apply: bool) {
-    if apply {
-        button.setFrame(NSRect::new(
-            NSPoint::new(14.0, *y),
-            NSSize::new((width - 28.0).max(1.0), 26.0),
-        ));
+fn place_switch(name: &NSTextField, toggle: &NSSwitch, width: f64, y: f64) {
+    name.setFrame(rect(14.0, y + 3.0, (width - 80.0).max(1.0), 24.0));
+    toggle.setFrame(rect(width - 58.0, y, 46.0, 30.0));
+}
+
+fn diagnostic_label(mtm: MainThreadMarker) -> Retained<NSTextField> {
+    let field = label("", 11.0, false, secondary(), mtm);
+    field.setMaximumNumberOfLines(0);
+    field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByCharWrapping);
+    field.setEditable(false);
+    field.setSelectable(true);
+    field.setRefusesFirstResponder(false);
+    field
+}
+
+fn set_readonly_value(field: &NSTextField, value: &str) {
+    if field.stringValue().to_string() != value {
+        field.setStringValue(&NSString::from_str(value));
+        set_accessibility_label(field, value);
     }
-    *y += 30.0;
 }
 
-fn settings_content_height(
-    menu_bar_height: f64,
-    observation_height: f64,
-    lifecycle_height: f64,
-    update_height: f64,
-) -> f64 {
-    256.0 + menu_bar_height + observation_height + lifecycle_height + update_height
+fn connection_selected_count(
+    selection: &ObservationSelection,
+    providers: &std::collections::BTreeMap<String, String>,
+    connections: &HostConnections,
+) -> usize {
+    providers
+        .keys()
+        .filter(|provider| selection.includes_provider(provider))
+        .map(|provider| connections.get(provider).copied().unwrap_or_default())
+        .sum()
+}
+
+fn connection_query_message(unavailable: bool, has_error: bool) -> Option<Message> {
+    if unavailable {
+        Some(Message::SettingsSnapshotUnavailable)
+    } else if has_error {
+        Some(Message::SettingsConnectionError)
+    } else {
+        None
+    }
+}
+
+fn connection_summary_message(
+    selection: &ObservationSelection,
+    providers: &std::collections::BTreeMap<String, String>,
+    connections: &HostConnections,
+) -> Message {
+    if matches!(selection, ObservationSelection::Provider(provider) if !providers.contains_key(provider))
+    {
+        Message::ConnectionUnavailable
+    } else if providers.is_empty() {
+        Message::ConnectionNoProviders
+    } else if connection_selected_count(selection, providers, connections) > 0 {
+        Message::ConnectionConnected
+    } else {
+        Message::ConnectionWaiting
+    }
 }
 
 fn measured_label_height(field: &NSTextField, width: f64) -> f64 {
@@ -3651,5 +4167,99 @@ mod tests {
         draft.saved(custom);
         assert_eq!(draft.baseline, Some(custom));
         assert!(!draft.conflicted());
+    }
+
+    #[test]
+    fn connection_summary_only_counts_registered_selected_providers() {
+        let providers = [
+            ("tern".into(), "Tern".into()),
+            ("other".into(), "Other".into()),
+        ]
+        .into();
+        let connections = [("tern".into(), 2), ("removed".into(), 7)].into();
+        assert_eq!(
+            connection_selected_count(&ObservationSelection::Auto, &providers, &connections),
+            2
+        );
+        assert_eq!(
+            connection_summary_message(&ObservationSelection::Auto, &providers, &connections),
+            Message::ConnectionConnected
+        );
+        assert_eq!(
+            connection_summary_message(
+                &ObservationSelection::Provider("other".into()),
+                &providers,
+                &connections
+            ),
+            Message::ConnectionWaiting
+        );
+        assert_eq!(
+            connection_selected_count(
+                &ObservationSelection::Provider("other".into()),
+                &providers,
+                &connections
+            ),
+            0
+        );
+        assert_eq!(
+            connection_summary_message(
+                &ObservationSelection::Provider("removed".into()),
+                &providers,
+                &connections
+            ),
+            Message::ConnectionUnavailable
+        );
+        assert_eq!(
+            connection_summary_message(
+                &ObservationSelection::Auto,
+                &Default::default(),
+                &connections
+            ),
+            Message::ConnectionNoProviders
+        );
+        assert_eq!(
+            connection_summary_message(
+                &ObservationSelection::Provider("missing".into()),
+                &Default::default(),
+                &connections
+            ),
+            Message::ConnectionUnavailable
+        );
+        let stale = [("removed".into(), 7)].into();
+        assert_eq!(
+            connection_summary_message(&ObservationSelection::Auto, &providers, &stale),
+            Message::ConnectionWaiting
+        );
+    }
+
+    #[test]
+    fn unavailable_snapshot_is_distinct_from_empty_and_does_not_replace_connection_state() {
+        let providers = [("tern".into(), "Tern".into())].into();
+        let connections = [("tern".into(), 2)].into();
+        assert_eq!(connection_query_message(false, false), None);
+        assert_eq!(
+            connection_query_message(true, false),
+            Some(Message::SettingsSnapshotUnavailable)
+        );
+        assert_eq!(
+            connection_query_message(true, true),
+            Some(Message::SettingsSnapshotUnavailable)
+        );
+        assert_eq!(
+            connection_query_message(false, true),
+            Some(Message::SettingsConnectionError)
+        );
+        assert_eq!(
+            connection_summary_message(&ObservationSelection::Auto, &providers, &connections),
+            Message::ConnectionConnected
+        );
+        assert_eq!(
+            connection_summary_message(
+                &ObservationSelection::Auto,
+                &Default::default(),
+                &Default::default()
+            ),
+            Message::ConnectionNoProviders
+        );
     }
 }

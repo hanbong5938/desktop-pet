@@ -48,14 +48,14 @@ use crate::dialogue_editor::{
 };
 use crate::display_geometry::{DisplayGeometry, BASE_HEIGHT, BASE_WIDTH};
 use crate::i18n::{
-    default_dialogue, disconnected_sources, language_save_failure, resolve_language,
-    status_indicator_summary, task_disclosure, task_status, text, worktree_remove_confirmation,
-    LanguagePreference, Message, TaskStatus, UiLocale,
+    default_dialogue, disconnected_sources, resolve_language, status_indicator_summary,
+    task_disclosure, task_status, text, worktree_remove_confirmation, LanguagePreference, Message,
+    TaskStatus, UiLocale,
 };
 use crate::interaction::{GestureAction, Interaction, Point, RegionPolicy};
 use crate::lifecycle::{LifecycleSetting, Paths};
 use crate::menu_bar_icon;
-use crate::menu_panel::MenuPanel;
+use crate::menu_panel::{MenuPanel, SettingsDetailPage, SettingsTab};
 use crate::official_characters::OfficialCharacters;
 use crate::operations::{PromptSender, WorktreeRemoveSender};
 use crate::pointer_capture::{CaptureId, CaptureState, DownDecision, EventIdentity, PointerSource};
@@ -116,6 +116,26 @@ static NEXT_UI_OPERATION: AtomicU64 = AtomicU64::new(1);
 static UI_USER_STOP_RECORDED: AtomicBool = AtomicBool::new(false);
 static SETTINGS_REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy)]
+enum SettingsDetailIntent {
+    Open(SettingsDetailPage),
+    Close,
+    ChooseMenuBarIcon,
+}
+
+fn clear_overridden_relocation_summary(
+    model: &mut crate::update_card::UpdateCardModel,
+    legacy_incomplete: bool,
+    approved_waiting: bool,
+    launch_error: bool,
+    migration_busy: bool,
+    frozen: bool,
+) {
+    if legacy_incomplete || approved_waiting || launch_error || migration_busy || frozen {
+        model.relocation_summary.clear();
+    }
+}
+
 enum PendingNative {
     Preparing {
         token: RendererToken,
@@ -174,6 +194,9 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static STARTUP_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     static SCREEN_CHANGE_PENDING: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_DETAIL_INTENT: Cell<Option<SettingsDetailIntent>> = const { Cell::new(None) };
+    static SETTINGS_DETAIL_DISPATCHED: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_DETAIL_OPENER: RefCell<Option<Retained<NSButton>>> = const { RefCell::new(None) };
     static DEFERRED_BRIDGES: RefCell<VecDeque<DeferredBridge>> = const { RefCell::new(VecDeque::new()) };
     // Readable while UI is mutably borrowed; only binds sparse reentrant events to
     // their original down. CaptureState in Ui remains the sole lifecycle authority.
@@ -1643,6 +1666,7 @@ define_class!(
         fn tick(&self, _timer: &NSTimer) {
             with_ui_internal(|ui| ui.frame_tick());
             present_requested_settings();
+            present_requested_settings_detail();
         }
 
         #[unsafe(method(prepareTick:))]
@@ -1670,6 +1694,13 @@ define_class!(
 
         #[unsafe(method(languageTick:))]
         fn language_tick(&self, _timer: &NSTimer) {
+            with_ui_internal(|ui| {
+                ui.menu_panel.refresh_detail_layout();
+                if ui.menu_panel.appearance_detail_visible() {
+                    ui.menu_panel.refresh_bubble_color_controls();
+                }
+            });
+            present_requested_settings_detail();
             with_ui_mut(|ui| {
                 ui.try_finalize_pending_bubble_resize();
                 if ui.pending_language.is_some() {
@@ -1703,7 +1734,7 @@ define_class!(
                 {
                     ui.sync_dialogue_editor_content(false);
                 }
-                if ui.menu_panel.is_visible() {
+                if ui.menu_panel.settings_surface_visible() {
                     ui.menu_panel.refresh_bubble_color_controls();
                 }
                 if !ui.pending_preference_operations.is_empty() {
@@ -1712,6 +1743,9 @@ define_class!(
                 if !ui.pending_ui_updates() {
                     ui.stop_language_timer();
                 }
+            });
+            with_ui_internal(|ui| {
+                if !ui.pending_ui_updates() { ui.stop_language_timer(); }
             });
         }
     }
@@ -2344,7 +2378,7 @@ define_class!(
 
         #[unsafe(method(chooseMenuBarIcon:))]
         fn choose_menu_bar_icon(&self, _sender: Option<&AnyObject>) {
-            choose_menu_bar_icon();
+            request_settings_detail(SettingsDetailIntent::ChooseMenuBarIcon);
         }
 
         #[unsafe(method(resetMenuBarIcon:))]
@@ -2398,36 +2432,12 @@ define_class!(
         }
 
 
-        #[unsafe(method(toggleUpdateDiagnostics:))]
-        fn toggle_update_diagnostics(&self, _sender: Option<&AnyObject>) {
-            with_ui_internal(|ui| {
-                ui.menu_panel.toggle_update_diagnostics();
-                ui.sync_character_menu_frame();
-            });
-        }
-
-        #[unsafe(method(toggleUpdateOptions:))]
-        fn toggle_update_options(&self, _sender: Option<&AnyObject>) {
-            with_ui_internal(|ui| {
-                ui.menu_panel.toggle_update_options();
-                ui.sync_character_menu_frame();
-            });
-        }
-
-        #[unsafe(method(toggleBubbleColors:))]
-        fn toggle_bubble_colors(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_bubble_colors();
-                ui.reanchor_menu_panel();
-            });
-        }
-
-        #[unsafe(method(toggleMenuBarIcon:))]
-        fn toggle_menu_bar_icon(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_menu_bar_icon();
-                ui.reanchor_menu_panel();
-            });
+        #[unsafe(method(openSettingsDetail:))]
+        fn open_settings_detail(&self, sender: Option<&AnyObject>) {
+            let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else { return; };
+            let Some(page) = SettingsDetailPage::from_tag(button.tag()) else { return; };
+            request_settings_detail(SettingsDetailIntent::Open(page));
+            SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = Some(button.retain()));
         }
 
 
@@ -2462,28 +2472,17 @@ define_class!(
         }
 
 
-        #[unsafe(method(toggleConnectionSettings:))]
-        fn toggle_connection_settings(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_connection_settings();
-                ui.reanchor_menu_panel();
-            });
-        }
-
-        #[unsafe(method(toggleConnectionDiagnostics:))]
-        fn toggle_connection_diagnostics(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_connection_diagnostics();
-                ui.reanchor_menu_panel();
-            });
-        }
 
         #[unsafe(method(toggleIntegrationSetting:))]
         fn toggle_integration_setting(&self, sender: Option<&AnyObject>) {
             let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
             let Some(identifier) = toggle.identifier() else { return };
             let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
-            with_ui_mut(|ui| ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn));
+            with_ui_mut(|ui| {
+                if ui.menu_panel.extension_setting_enabled(&provider, &key) {
+                    ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn);
+                }
+            });
         }
 
         #[unsafe(method(activateIntegrationAction:))]
@@ -2493,6 +2492,9 @@ define_class!(
             let Some(identifier) = button.identifier() else { return };
             let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
             let context = with_ui_read(|ui| {
+                if ui.update_frozen.is_some() || !ui.menu_panel.extension_action_enabled(&provider, &key) {
+                    return Err("integration action is no longer available".to_owned());
+                }
                 let state = ui.shared.lock().map_err(|_| "native state lock is poisoned".to_owned())?;
                 let extension = state.lifecycle_extensions().iter()
                     .find(|extension| extension.provider() == provider).cloned()
@@ -2524,8 +2526,9 @@ define_class!(
                     extension.activate_action(&store, &selection, &key, locale.tag(), preferences)
                 }
             });
-            if let Err(error) = result {
-                with_ui_mut(|ui| ui.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error));
+            match result {
+                Err(error) => with_ui_mut(|ui| ui.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error)),
+                Ok(()) => with_ui_mut(|ui| ui.menu_panel.clear_connection_operation_error()),
             }
         }
 
@@ -2666,14 +2669,8 @@ define_class!(
             let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else {
                 return;
             };
-            let Ok(index) = usize::try_from(button.tag()) else {
-                return;
-            };
-            if index >= 3 {
-                return;
-            }
-
-            with_ui_mut(|ui| ui.select_menu_tab(index));
+            let Some(tab) = SettingsTab::from_tag(button.tag()) else { return; };
+            with_ui_internal(|ui| ui.select_menu_tab(tab));
         }
         #[unsafe(method(setDialogueLocale:))]
         fn set_dialogue_locale(&self, sender: Option<&AnyObject>) {
@@ -3391,6 +3388,9 @@ pub fn wake() {
                 ui.handle_screen_change();
             }
             ui.refresh();
+            if SETTINGS_DETAIL_INTENT.with(|pending| pending.get().is_some()) {
+                ui.queue_language_apply();
+            }
         });
     });
 }
@@ -4115,6 +4115,9 @@ fn menu_event_is_inside(event: &NSEvent, ui: &Ui) -> bool {
     if event_window_number == ui.menu_panel.window().windowNumber() {
         return true;
     }
+    if event_window_number == ui.menu_panel.detail_window().windowNumber() {
+        return false;
+    }
     if event_window_number == ui.panel.windowNumber()
         || event_window_number == ui.bubble_panel.windowNumber()
     {
@@ -4214,8 +4217,7 @@ fn present_requested_settings() {
         let slot = cell.try_borrow_mut().map_err(|_| ())?;
         SETTINGS_REQUEST_PENDING.store(false, Ordering::Release);
         Ok(slot.as_ref().and_then(|ui| {
-            if ui.update_frozen.is_some()
-                || ui.composer_marked()
+            if ui.composer_marked()
                 || ui.cards.is_composing()
                 || ui.menu_panel.bubble_colors_marked()
                 || ui.menu_bar_icon_shutdown()
@@ -4240,15 +4242,15 @@ fn present_requested_settings() {
         }))
     });
     if let Ok(Some(anchor)) = anchor {
-        present_settings_at(anchor, Some(2));
+        present_settings_at(anchor, Some(SettingsTab::App));
     }
     // A nested AppKit callback may still hold UI. Leave the coalesced intent
     // pending for the existing frame timer after its UI borrow is released.
 }
 
-fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
+fn present_settings_at(anchor: NSRect, tab: Option<SettingsTab>) {
     let mut shown_on = None;
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if ui.composer_marked()
             || ui.cards.is_composing()
             || ui.menu_panel.bubble_colors_marked()
@@ -4284,6 +4286,102 @@ fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
         // refused while another app is active, leaving this key panel's native
         // controls drawn inactive; the status-item gesture requires activation.
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+}
+
+fn request_settings_detail(intent: SettingsDetailIntent) {
+    SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = None);
+    SETTINGS_DETAIL_INTENT.with(|pending| pending.set(Some(intent)));
+    if !SETTINGS_DETAIL_DISPATCHED.with(|scheduled| scheduled.replace(true)) {
+        DispatchQueue::main().exec_async(present_requested_settings_detail);
+    }
+    wake();
+}
+
+pub(crate) fn request_settings_detail_close() {
+    request_settings_detail(SettingsDetailIntent::Close);
+}
+
+fn present_requested_settings_detail() {
+    SETTINGS_DETAIL_DISPATCHED.with(|scheduled| scheduled.set(false));
+    let Some(intent) = SETTINGS_DETAIL_INTENT.with(Cell::take) else {
+        return;
+    };
+    let opener = SETTINGS_DETAIL_OPENER.with(|opener| opener.borrow_mut().take());
+    let mut window = None;
+    let mut activate = None;
+    let mut choose = false;
+    let consumed = UI.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return false;
+        };
+        let Some(ui) = slot.as_mut() else {
+            return true;
+        };
+        if ui.menu_bar_icon_shutdown() {
+            return true;
+        }
+        if ui.menu_panel.bubble_colors_marked() || ui.menu_bar_icon_busy {
+            ui.queue_language_apply();
+            return false;
+        }
+        match intent {
+            SettingsDetailIntent::Close => {
+                let closed = ui.menu_panel.finish_detail_close();
+                if !closed {
+                    ui.queue_language_apply();
+                }
+                closed
+            }
+            SettingsDetailIntent::Open(page) => {
+                ui.sync_menu_panel_state();
+                ui.refresh_app_update();
+                window = ui.menu_panel.prepare_detail(page);
+                if window.is_some() {
+                    ui.menu_panel.set_detail_opener(opener.as_deref());
+                    if matches!(
+                        page,
+                        SettingsDetailPage::Connections | SettingsDetailPage::ConnectionDiagnostics
+                    ) {
+                        ui.refresh_observation_panel();
+                    }
+                    ui.menu_panel.refresh_bubble_color_controls();
+                    ui.menu_panel.refresh_detail_layout();
+                    ui.queue_language_apply();
+                    activate = Some(ui.mtm);
+                    true
+                } else {
+                    ui.queue_language_apply();
+                    false
+                }
+            }
+            SettingsDetailIntent::ChooseMenuBarIcon => {
+                choose = ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+                    && ui.update_frozen.is_none()
+                    && ui.menu_bar_icon_operation_allowed();
+                true
+            }
+        }
+    });
+    if !consumed {
+        SETTINGS_DETAIL_INTENT.with(|pending| {
+            if pending.get().is_none() {
+                pending.set(Some(intent));
+                SETTINGS_DETAIL_OPENER.with(|slot| *slot.borrow_mut() = opener);
+            }
+        });
+        wake();
+        return;
+    }
+    // No RefCell or state mutex is held while AppKit activates or runs its picker loop.
+    if let Some(window) = window {
+        window.makeKeyAndOrderFront(None);
+    }
+    if let Some(mtm) = activate {
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+    if choose {
+        choose_menu_bar_icon();
     }
 }
 
@@ -5138,46 +5236,37 @@ fn begin_worktree_remove(target: WorktreeRemoveTarget) {
     });
 }
 
-fn begin_menu_bar_icon_operation(
-    hide_settings: bool,
-) -> Option<(MainThreadMarker, UiLocale, Option<NSRect>, PathBuf)> {
+fn begin_menu_bar_icon_operation() -> Option<(MainThreadMarker, UiLocale, PathBuf)> {
     let mut started = None;
     with_ui_mut(|ui| {
         if ui.menu_bar_icon_busy
-            || !ui.menu_panel.is_visible()
+            || ui.menu_panel.detail_page() != Some(SettingsDetailPage::MenuBar)
+            || ui.menu_panel.bubble_colors_marked()
             || !ui.menu_bar_icon_operation_allowed()
         {
             return;
         }
         ui.menu_bar_icon_busy = true;
         ui.menu_panel.set_menu_bar_icon_busy(true);
-        let anchor = if hide_settings {
-            ui.settings_anchor
-        } else {
-            None
-        };
-        if hide_settings {
-            ui.menu_panel.hide();
-        }
-        started = Some((
-            ui.mtm,
-            ui.locale,
-            anchor,
-            ui.lifecycle_paths.config_dir.clone(),
-        ));
+        started = Some((ui.mtm, ui.locale, ui.lifecycle_paths.config_dir.clone()));
     });
     started
 }
 
 fn choose_menu_bar_icon() {
-    let Some((mtm, locale, anchor, config_dir)) = begin_menu_bar_icon_operation(true) else {
+    let Some((mtm, locale, config_dir)) = begin_menu_bar_icon_operation() else {
         return;
     };
     // No UI RefCell borrow is held across the modal loop or image decoding/publishing.
     let result = match choose_menu_bar_icon_source(mtm, locale) {
         Ok(Some(path)) => {
-            if with_ui_read(|ui| ui.menu_bar_icon_busy && ui.menu_bar_icon_operation_allowed())
-                != Some(true)
+            if with_ui_read(|ui| {
+                ui.menu_bar_icon_busy
+                    && ui.menu_bar_icon_operation_allowed()
+                    && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+                    && !SETTINGS_DETAIL_INTENT
+                        .with(|pending| matches!(pending.get(), Some(SettingsDetailIntent::Close)))
+            }) != Some(true)
             {
                 None
             } else {
@@ -5194,12 +5283,16 @@ fn choose_menu_bar_icon() {
         Ok(None) => None,
         Err(error) => Some(Err((Message::MenuBarIconImportFailure, error))),
     };
-    let mut reopen_anchor = None;
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if !ui.menu_bar_icon_busy {
             return;
         }
-        if ui.menu_bar_icon_operation_allowed() {
+        if ui.update_frozen.is_none()
+            && ui.menu_bar_icon_operation_allowed()
+            && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+            && !SETTINGS_DETAIL_INTENT
+                .with(|pending| matches!(pending.get(), Some(SettingsDetailIntent::Close)))
+        {
             if let Some(result) = result {
                 match result {
                     Ok((preference, image)) => ui.commit_menu_bar_icon(preference, image),
@@ -5209,25 +5302,23 @@ fn choose_menu_bar_icon() {
         }
         ui.menu_bar_icon_busy = false;
         ui.menu_panel.set_menu_bar_icon_busy(false);
-        if !ui.menu_bar_icon_shutdown() {
-            reopen_anchor = anchor;
-        }
     });
-    if let Some(anchor) = reopen_anchor {
-        present_settings_at(anchor, None);
-    }
+    present_requested_settings_detail();
 }
 
 fn reset_menu_bar_icon() {
-    let Some((mtm, locale, _, _)) = begin_menu_bar_icon_operation(false) else {
+    let Some((mtm, locale, _)) = begin_menu_bar_icon_operation() else {
         return;
     };
     let image = menu_bar_icon::default_image(mtm, text(locale, Message::MenuBarMenuTitle));
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if !ui.menu_bar_icon_busy {
             return;
         }
-        if ui.menu_bar_icon_operation_allowed() {
+        if ui.update_frozen.is_none()
+            && ui.menu_bar_icon_operation_allowed()
+            && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+        {
             match image {
                 Ok(image) => ui.commit_default_menu_bar_icon(image),
                 Err(error) => {
@@ -6327,13 +6418,14 @@ impl Ui {
     fn queue_bubble_appearance_error(&self, title: Message, detail: &str) {
         let detail = detail.to_owned();
         DispatchQueue::main().exec_async(move || {
-            let Some((mtm, locale)) = with_ui_read(|ui| (ui.mtm, ui.locale)) else {
-                return;
-            };
-            // Let the menu action and UI borrow finish before entering AppKit's
-            // nested modal loop, as with language-save failures.
-            with_ui_mut(|ui| ui.menu_panel.hide());
-            show_bubble_appearance_error(mtm, locale, title, &detail);
+            with_ui_internal(|ui| {
+                let value = format!("{}: {detail}", text(ui.locale, title));
+                if title == Message::ObservationSaveFailed {
+                    ui.menu_panel.set_connection_operation_error(&value);
+                } else {
+                    ui.menu_panel.set_presentation_error(Some(&value));
+                }
+            });
         });
     }
 
@@ -6349,8 +6441,7 @@ impl Ui {
 
     fn apply_custom_bubble_colors(&mut self) {
         if self.menu_panel.bubble_colors_conflicted() || self.menu_panel.bubble_colors_marked() {
-            // Keep the local draft and field editor intact. The panel displays
-            // its inline conflict status until an explicit reload or rebase.
+            // Preserve the field editor and conflict until an explicit reload or rebase.
             return;
         }
         match self.menu_panel.custom_bubble_palette() {
@@ -6380,6 +6471,11 @@ impl Ui {
                 self.menu_panel.bubble_colors_saved(appearance);
                 if reload_colors {
                     self.menu_panel.reload_bubble_colors();
+                }
+                if reload_colors && appearance.theme == BubbleTheme::Custom {
+                    request_settings_detail(SettingsDetailIntent::Open(
+                        SettingsDetailPage::Appearance,
+                    ));
                 }
             }
             Err(error) => {
@@ -6495,6 +6591,7 @@ impl Ui {
             || self.composer_marked()
             || self.character_browser.has_marked_text()
             || self.cards.is_composing()
+            || self.menu_panel.bubble_colors_marked()
             || NSEvent::pressedMouseButtons() != 0
             || appkit_event_tracking_active()
     }
@@ -6504,7 +6601,8 @@ impl Ui {
             || self.pending_bubble_scene.is_some()
             || self.pending_bubble_resize.is_some()
             || !self.pending_preference_operations.is_empty()
-            || self.menu_panel.is_visible()
+            || self.menu_panel.settings_surface_visible()
+            || SETTINGS_DETAIL_INTENT.with(|pending| pending.get().is_some())
             || self.character_browser.is_visible()
             || (self.dialogue_editor.is_visible() && self.dialogue_editor.needs_initial_hydration())
             || self.has_pending_native_dialogue()
@@ -6592,14 +6690,7 @@ impl Ui {
     }
 
     fn queue_language_save_failure(&self, error: &str) {
-        let error = error.to_owned();
-        DispatchQueue::main().exec_async(move || {
-            let Some((mtm, locale)) = with_ui_read(|ui| (ui.mtm, ui.locale)) else {
-                return;
-            };
-            with_ui_mut(|ui| ui.menu_panel.hide());
-            show_language_save_failure(mtm, locale, &error);
-        });
+        self.queue_bubble_appearance_error(Message::LanguageSaveFailed, error);
     }
 
     fn prepare_native(
@@ -7141,16 +7232,24 @@ impl Ui {
     fn sync_menu_panel_state(&mut self) {
         let scene = self.last_scene.clone();
         let status = status_text(&scene, self.locale);
-        if let Ok(state) = self.shared.lock() {
+        let snapshot = self.shared.lock().ok().map(|state| {
+            (
+                state.lifecycle_settings(),
+                state.observation_preferences().clone(),
+                state.provider_labels().clone(),
+                state.host_connections().clone(),
+            )
+        });
+        if let Some((lifecycle, observation, providers, connections)) = snapshot {
             self.menu_panel.sync(
                 &scene,
                 self.prefs.menu_bar_mode(),
                 self.prefs.language(),
                 &status,
-                state.lifecycle_settings(),
-                state.observation_preferences(),
-                state.provider_labels(),
-                state.host_connections(),
+                lifecycle,
+                &observation,
+                &providers,
+                &connections,
             );
         }
     }
@@ -7249,7 +7348,7 @@ impl Ui {
             self.start_browser_timer();
         }
         self.browser_preview_revision = self.character_previews.revision();
-        if height_changed && self.menu_panel.is_visible() && self.menu_panel.is_character_tab() {
+        if height_changed && self.menu_panel.is_visible() {
             self.reanchor_menu_panel();
         } else {
             self.sync_character_menu_frame();
@@ -7605,18 +7704,7 @@ impl Ui {
             }
             Err(error) => {
                 self.cards.reject_options(self.prefs.session_list());
-                let locale = self.locale;
-                DispatchQueue::main().exec_async(move || {
-                    let Some(mtm) = with_ui_read(|ui| ui.mtm) else {
-                        return;
-                    };
-                    show_bubble_appearance_error(
-                        mtm,
-                        locale,
-                        Message::SessionListSaveFailure,
-                        &error,
-                    );
-                });
+                self.queue_bubble_appearance_error(Message::SessionListSaveFailure, &error);
             }
         }
     }
@@ -8779,6 +8867,8 @@ impl Ui {
                     },
                 ),
             );
+        } else {
+            self.menu_panel.clear_connection_profile();
         }
         let mut model = self.app_update.model(self.locale);
         if let Some(plan) = &self.migration.plan {
@@ -8974,6 +9064,18 @@ impl Ui {
         if self.update_frozen.is_some() {
             model.primary_action = None;
         }
+        clear_overridden_relocation_summary(
+            &mut model,
+            self.migration.plan.is_some()
+                && !self.migration.record.as_ref().is_some_and(|record| {
+                    record.phase
+                        == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
+                }),
+            self.migration_approved_waiting.is_some(),
+            self.migration.launch_error.is_some(),
+            self.migration.busy,
+            self.update_frozen.is_some(),
+        );
         if let Some((operation_id, alert)) = &self.update_consent {
             if self
                 .migration
@@ -10520,7 +10622,7 @@ impl Ui {
                 })
                 .unwrap_or(false);
                 if !inside && !context_opening {
-                    with_ui_mut(|ui| {
+                    with_ui_internal(|ui| {
                         if ui.menu_panel.is_visible() {
                             ui.menu_panel.hide();
                         }
@@ -10536,7 +10638,7 @@ impl Ui {
 
         let global: RcBlock<dyn Fn(NonNull<NSEvent>)> = RcBlock::new(|_event: NonNull<NSEvent>| {
             with_ui_mut(|ui| ui.fold_reply());
-            with_ui_mut(|ui| {
+            with_ui_internal(|ui| {
                 if ui.menu_panel.is_visible() {
                     ui.menu_panel.hide();
                 }
@@ -10587,6 +10689,11 @@ impl Ui {
     }
 
     fn shutdown(&mut self) {
+        SETTINGS_DETAIL_INTENT.with(|pending| pending.set(None));
+        SETTINGS_DETAIL_DISPATCHED.with(|pending| pending.set(false));
+        SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = None);
+        SETTINGS_REQUEST_PENDING.store(false, Ordering::Release);
+        self.menu_bar_icon_busy = false;
         self.clear_update_consent();
         self.invalidate_pointer_capture();
         self.stop_capture_timer();
@@ -13639,17 +13746,23 @@ impl Ui {
             if let Err(error) = self.commit_gui_observation_patch(patch) {
                 self.menu_panel.revert_observation_controls();
                 self.sync_observation_panel();
-                self.queue_bubble_appearance_error(
-                    if error.code == "revision_conflict" {
-                        Message::PreferenceRevisionConflict
-                    } else {
-                        Message::ObservationSaveFailed
-                    },
-                    &error.detail,
+                let detail = format!(
+                    "{}: {}",
+                    text(
+                        self.locale,
+                        if error.code == "revision_conflict" {
+                            Message::PreferenceRevisionConflict
+                        } else {
+                            Message::ObservationSaveFailed
+                        }
+                    ),
+                    error.detail
                 );
+                self.menu_panel.set_connection_operation_error(&detail);
                 return;
             }
         }
+        self.menu_panel.clear_connection_operation_error();
         self.menu_panel.revert_observation_controls();
         self.sync_observation_panel();
         self.settle_preference_operations();
@@ -13657,52 +13770,72 @@ impl Ui {
     }
 
     fn sync_observation_panel(&mut self) {
-        if !self.menu_panel.is_visible() {
-            return;
+        if self.menu_panel.connection_content_visible() {
+            self.refresh_observation_panel();
         }
-        let settings_context = self.shared.lock().ok().map(|state| {
-            self.menu_panel.sync_observation(
-                self.prefs.observation(),
-                state.provider_labels(),
-                state.host_connections(),
-            );
-            (
-                state.lifecycle_extensions().to_vec(),
-                state.profile_store().cloned(),
-            )
-        });
-        if let Some((extensions, Some(store))) = settings_context {
-            let mut views = Vec::new();
-            let mut actions = Vec::new();
-            let mut errors = Vec::new();
-            let selection = self.prefs.observation_host();
-            for extension in extensions {
-                match extension.settings(&store, &selection, self.locale.tag()) {
-                    Ok(settings) => views.extend(
-                        settings
-                            .into_iter()
-                            .map(|view| (extension.provider().to_owned(), view)),
-                    ),
-                    Err(error) => errors.push(error),
-                }
-                match extension.actions(&store, &selection, self.locale.tag()) {
-                    Ok(items) => actions.extend(
-                        items
-                            .into_iter()
-                            .map(|view| (extension.provider().to_owned(), view)),
-                    ),
-                    Err(error) => errors.push(error),
-                }
+    }
+
+    fn refresh_observation_panel(&mut self) {
+        // Clone domain data only. No AppKit call or provider callback runs under the state lock.
+        let snapshot = self
+            .shared
+            .lock()
+            .map(|state| {
+                (
+                    state.provider_labels().clone(),
+                    state.host_connections().clone(),
+                    state.lifecycle_extensions().to_vec(),
+                    state.profile_store().cloned(),
+                )
+            })
+            .map_err(|_| "native state lock is poisoned".to_owned());
+        let (providers, connections, extensions, store) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.menu_panel
+                    .set_connection_snapshot_unavailable(&error.to_string());
+                return;
             }
-            let error = errors.join("\n");
-            self.menu_panel.sync_integration_settings(
-                &views,
-                &actions,
-                (!error.is_empty()).then_some(error.as_str()),
-            );
-        } else {
-            self.menu_panel.sync_integration_settings(&[], &[], None);
+        };
+        self.menu_panel
+            .sync_observation(self.prefs.observation(), &providers, &connections);
+        let Some(store) = store else {
+            if providers.is_empty() && extensions.is_empty() {
+                self.menu_panel.sync_integration_settings(&[], &[], None);
+            } else {
+                self.menu_panel
+                    .set_connection_snapshot_unavailable("profile store is not available");
+            }
+            return;
+        };
+        let mut views = Vec::new();
+        let mut actions = Vec::new();
+        let mut errors = Vec::new();
+        let selection = self.prefs.observation_host();
+        for extension in extensions {
+            let provider = extension.provider().to_owned();
+            if !providers.contains_key(&provider) {
+                continue;
+            }
+            let settings = extension.settings(&store, &selection, self.locale.tag());
+            let items = extension.actions(&store, &selection, self.locale.tag());
+            match settings {
+                Ok(settings) => {
+                    views.extend(settings.into_iter().map(|view| (provider.clone(), view)))
+                }
+                Err(error) => errors.push(format!("{provider}: {error}")),
+            }
+            match items {
+                Ok(items) => actions.extend(items.into_iter().map(|view| (provider.clone(), view))),
+                Err(error) => errors.push(format!("{provider}: {error}")),
+            }
         }
+        let error = errors.join("\n");
+        self.menu_panel.sync_integration_settings(
+            &views,
+            &actions,
+            (!error.is_empty()).then_some(error.as_str()),
+        );
         self.reanchor_menu_panel();
     }
 
@@ -13728,8 +13861,12 @@ impl Ui {
             });
         let result =
             context.and_then(|(extension, store)| extension.apply_setting(&store, key, value));
-        if let Err(error) = result {
-            self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
+        match result {
+            Err(error) => self.menu_panel.set_connection_operation_error(&format!(
+                "{}: {error}",
+                text(self.locale, Message::ObservationSaveFailed)
+            )),
+            Ok(()) => self.menu_panel.clear_connection_operation_error(),
         }
         if let Err(error) = self
             .prefs
@@ -13747,9 +13884,10 @@ impl Ui {
         self.refresh();
     }
 
-    fn select_menu_tab(&mut self, index: usize) {
-        self.menu_panel.select_tab(index);
+    fn select_menu_tab(&mut self, tab: SettingsTab) {
+        self.menu_panel.select_tab(tab);
         self.reanchor_menu_panel();
+        self.sync_observation_panel();
     }
 
     fn save_lifecycle_setting(&mut self, key: LifecycleSetting) {
@@ -13840,35 +13978,6 @@ fn confirm_remove(mtm: MainThreadMarker, locale: UiLocale, id: &str) -> bool {
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Remove)));
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
     alert.runModal() == NSAlertFirstButtonReturn
-}
-fn show_bubble_appearance_error(
-    mtm: MainThreadMarker,
-    locale: UiLocale,
-    title: Message,
-    detail: &str,
-) {
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(text(locale, title)));
-    alert.setInformativeText(&NSString::from_str(detail));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
-    let _ = alert.runModal();
-}
-
-fn show_language_save_failure(mtm: MainThreadMarker, locale: UiLocale, error: &str) {
-    let alert = NSAlert::new(mtm);
-    let title = NSString::from_str(text(locale, Message::LanguageSaveFailed));
-    alert.setMessageText(&title);
-    let detail = language_save_failure(locale, error);
-    alert.setInformativeText(&NSString::from_str(&detail));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
-    let window = alert.window();
-    if let Some(content) = window.contentView() {
-        set_accessibility_label(
-            &content,
-            text(locale, Message::LanguageSaveFailedAccessibility),
-        );
-    }
-    let _ = alert.runModal();
 }
 
 impl Drop for Ui {
@@ -14712,6 +14821,58 @@ mod tests {
     use super::*;
     use crate::automation::{test_automation, OperationState, PresentationRequest};
     use crate::composer_layout::BOTTOM_INSET;
+
+    #[test]
+    fn update_overlay_priority_clears_relocation_summary_without_changing_details() {
+        use crate::update_card::UpdateCardModel;
+        use desktop_pet_update_coordinator::CheckStatus;
+        let original = UpdateCardModel {
+            auto_check: true,
+            receive_beta_updates: false,
+            busy: false,
+            settings_locked: false,
+            status: CheckStatus::Checking,
+            status_text: "Checking".into(),
+            running_version: "1.0".into(),
+            source: "source".into(),
+            detail: "RAW_DETAIL".into(),
+            history: "history".into(),
+            diagnostics: "RAW_DIAGNOSTICS".into(),
+            last_checked: None,
+            action: None,
+            primary_action: None,
+            release: None,
+            download_url: None,
+            migration_available: false,
+            migration_visible: false,
+            migration_title: String::new(),
+            relocation_available: false,
+            relocation_title: String::new(),
+            relocation_detail: "RAW_RELOCATION".into(),
+            relocation_summary: "Ready".into(),
+        };
+        for index in 0..5 {
+            let mut model = original.clone();
+            clear_overridden_relocation_summary(
+                &mut model,
+                index == 0,
+                index == 1,
+                index == 2,
+                index == 3,
+                index == 4,
+            );
+            assert!(model.relocation_summary.is_empty());
+            assert_eq!(model.status_text, original.status_text);
+            assert_eq!(model.detail, original.detail);
+            assert_eq!(model.relocation_detail, original.relocation_detail);
+            assert_eq!(model.diagnostics, original.diagnostics);
+        }
+        let mut completed = original;
+        completed.retain_completed_migration("completed-operation", UiLocale::En);
+        clear_overridden_relocation_summary(&mut completed, false, false, false, false, false);
+        assert_eq!(completed.relocation_summary, "Ready");
+        assert!(completed.history.contains("completed-operation"));
+    }
 
     fn migration_ui_plan() -> desktop_pet_update_coordinator::migration::MigrationPlan {
         use desktop_pet_update_coordinator::migration::{

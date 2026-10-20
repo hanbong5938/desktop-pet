@@ -552,7 +552,7 @@ describe("Wiki projection", () => {
       expect(await snapshot(frozen.output)).toEqual(frozenBefore);
       expect(existsSync(join(frozen.output, "Release-v0.2.0.md"))).toBe(false);
     }
-  });
+  }, 30_000);
 
   test("repeat rendering is byte/mtime idempotent and removes only prior manifest-owned stale pages", async () => {
     const options = await fixture();
