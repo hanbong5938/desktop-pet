@@ -1,5 +1,9 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Stable 0.4.16 correction: isolated helper HOME
+
+The [0.4.16 correction](v0.4.16.md) restores only the trusted OS-account HOME after clearing the detached install helper's environment. The affected operation failed its metadata query before ownership ACK or installation; its matching helper settled the unowned preparation without replay, installation or restart. Existing source/profile and Tern work are preserved; actual recovery remains a separate observation.
+
 ## Stable 0.4.15 correction: SDK validation-child preflight
 
 The [0.4.15 correction](v0.4.15.md) addresses recovery preflight encountering genuine SDK-generated read-only default-pack validation children while the original Pet was already stopped. Unknown/foreign-profile clients remain blocked; original data, unchanged Tern processes and published tags/assets remain protected. No affected-machine recovery success is claimed, and packages remain ad-hoc signed, not notarized.

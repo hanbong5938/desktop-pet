@@ -1034,6 +1034,7 @@ fn detached(
         .arg("--operation-id")
         .arg(id)
         .env_clear()
+        .env("HOME", installation::os_home()?)
         .env(
             "DESKTOP_PET_INSTALL_RECOVER",
             if recover { "1" } else { "0" },

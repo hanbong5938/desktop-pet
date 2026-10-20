@@ -76,7 +76,7 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 真正 beta.7 helper 可以选择新稳定版，但实机确认了另一个已发布 helper 缺陷：响应后的套接字关闭，再查询 Darwin peer PID 会在安装前报 `cannot authenticate control peer PID`。只检查应用更新无法修复已发布 helper。[0.4.14 修正](releases/v0.4.14.md)修复认证并提供明确批准的操作员恢复。不要反复重试旧 updater，也不要假定此前应用内路径已成功。
 
-经批准的操作员恢复请使用 [v0.4.15 或更新版本](releases/v0.4.15.md)。预检会单独认证现有 SDK 的内部默认 pack 验证进程，不会放行任意 pack 命令或其他配置目录。不要为了消除阻塞而停止 Tern 或绕过安装保护。
+经批准的操作员恢复请使用 [v0.4.16 或更新版本](releases/v0.4.16.md)。它包含 SDK 内部默认 pack 验证认证及隔离 helper 的可信 HOME 修正，不会放行任意 pack 命令或其他配置目录。不要为了消除阻塞而停止 Tern 或绕过安装保护。
 
 保留已认证的原 config/state、角色、设置及用户资料。既有 Tern SDK 在 native 事务结算后仅更改保存的 executable，native 不覆盖 KV。不要猜测默认值、合并 profile，或用 Configure/Connect、Tern 重启、plugin reload 隐藏失败。签名原件及事务证据保留在 private retention。
 
