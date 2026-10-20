@@ -109,11 +109,13 @@ Legacy protocol-1/2/3 plans, journals and reservations remain blocked and preser
 
 ```text
 desktop-pet-update-coordinator install-coordinated --request ABS
+desktop-pet-update-coordinator install-relocate --request ABS
+desktop-pet-update-coordinator install-relocate-manual --request ABS
 desktop-pet-update-coordinator install-status --state-dir ABS --operation-id ID
 desktop-pet-update-coordinator install-recover --state-dir ABS --operation-id ID
 ```
 
-This source path is not evidence that an immutable public installer has been republished or that live Tern acceptance has passed. Only the pinned prebuilt branch selects `install-coordinated`; raw `install --request ABS`, source installation and migration retain their existing admission/consent boundaries. The private version-1 request names `kind:"standalone"` and the complete validated `staged_app`. An absent installation and verified same/higher-version reuse keep their existing behavior. A lower-version upgrade may replace only the same Standalone owner, never take over Homebrew/Source or change beta preferences.
+This source path is not evidence of publication or live Tern qualification. The pinned prebuilt branch selects `install-coordinated`; its version-1 request names `kind:"standalone"` and the complete validated `staged_app`. New normal Standalone operations use only the private canonical owner. Raw/source/migration admission and stable/beta preferences remain separate; Applications reuse now requires the separately consented relocation path and cannot silently re-register H.
 
 The native confirmation identifies old/new versions, root and exact config/state pair. It authorizes a short **Desktop Pet-only** shutdown/restart, not termination/restart of Tern, windows, terminals or agent jobs, plugin reload, or Configure/KV rewriting. Save Pet edits first: the public beta.1 compatibility bootstrap uses **normal Quit**, not draft-aware Prepare. Cancel or confirmation-window failure precedes Stop. Two Tern windows on one native profile are supported; different active native profiles are listed and rejected before any app is stopped. A stopped source stays stopped; profileless queries cannot invent/adopt a profile.
 
@@ -124,6 +126,12 @@ Results contain `version`, `operation_id`, `state_dir`, `status`, `installation`
 `install-coordinated` waits for a terminal outcome: exit 0 for `reused`, `installed_stopped`, `applied`; exit 2 for `cancelled`; exit 1 otherwise. `install-status` exits 0 when the observation is valid, even for failure/unknown status. Use the reported operation ID/state directory and its retained signed helper for `install-status` / `install-recover`, not normal updater `recover --start` or another installation attempt. Recovery never replays Stop; a lost ACK, unadvanced index or later user Stop grants no restart permission. Release-only recovery can clear a reservation after verified disk/execution quiescence without granting startup.
 
 Full old bundles and their **original sidecars** remain in private retained storage while old clients/resources may still use them. This implementation does not automatically delete that storage, even after captured clients exit. Keep retained paths, immutable approval/ACK/replacement evidence and recovery resources; do not delete reservation markers or operation directories to bypass an uncertain result.
+
+`install-relocate` is the app's one-shot automatic admission; `install-relocate-manual` starts a fresh explicitly requested attempt only after prior admission settlement and reservation release. Both accept a private bounded strict v1 `{version,context,parent}` request, not arbitrary source/destination/profile paths. The authenticated parent must be a completed lower-version neutral update to genuine Stable at the original OS-home Applications bundle. The old helper must exit and release its root/profile reservations first. The new helper independently verifies the parent, exact signed source closure and original profile, then asks a second visible native consent to relocate the same version to the OS-home private location. This is not a replacement terminal bootstrap for beta.7.
+
+New approvals use v2; historical v1 journal/result/ACK bytes remain readable, but only their recorded matching helper may recover them. Relocation Stop/ACK stays source-bound, while installed results/startup bind the private destination. An atomic disk commit receipt divides exact rollback-before from roll-forward-after; the source inode and sidecar remain retained. No H alias remains. Admission is Settled only after durable outcome and exact reservation absence, not merely a terminal result. Interrupted pre-Stop confirmation can release an unchanged live source without Stop/restart; post-Stop uncertainty preserves evidence.
+
+Tern handover keeps the existing SDK wire and never writes KV natively. Native success and disconnected/incompatible-consumer pending are distinct. Challenge/receipt files use the private `install-{id}.tern-relocation/` directory with complete image/instance/tuple or window digests; nesting avoids macOS's 255-byte basename limit without shortening evidence hashes.
 
 ### Corrected successor bridge automatic update (v0.3.15 → Core v0.4.11; source contract, not deployment evidence)
 
@@ -369,7 +377,7 @@ desktop-pet update-status [OPID] --state-dir PATH
 
 ### Tern을 유지하는 standalone 설치 transaction (현재 소스 계약)
 
-고정 prebuilt 설치기의 새 경로는 검증된 helper의 `install-coordinated --request ABS`입니다. 공개 불변 자산의 재게시나 실제 Tern acceptance 성공을 뜻하지 않습니다. 같은 Standalone 소유자의 낮은 버전만 대상으로 하며 absent/same-or-higher reuse, raw/source/migration 및 stable/beta 선택 정책은 유지합니다. native 승인창은 정확한 root·버전·config/state와 **Desktop Pet만 재시작하며 Tern·창·터미널·agent 작업은 유지**한다는 범위를 표시합니다. beta.1 bootstrap은 draft-aware Prepare가 아닌 **일반 Quit**이므로 Pet 편집 내용을 먼저 저장하세요. Cancel/창 생성 실패와 다른 active profile 충돌은 Stop 전 종료합니다. 한 native profile의 Tern 다중 창은 충돌 프로필이 아닙니다.
+고정 prebuilt 설치기의 경로는 검증된 helper의 `install-coordinated --request ABS`입니다. 일반 Standalone 설치·업데이트와 reuse는 private 정식 소유자만 허용하며 Applications를 조용히 재등록하지 않습니다. beta.7 복구는 터미널이 아닌 앱 업데이트에서 시작하고 구 helper가 완전히 정산한 뒤 별도 native 동의로 같은 정식 버전을 이관합니다. 앱의 자동 `install-relocate --request ABS`와 명시적 재시도 `install-relocate-manual --request ABS`는 strict v1 `{version,context,parent}`만 받으며 임의 경로·새 프로필을 승인하지 않습니다. 취소·승인창 실패·다른 active profile 충돌은 Stop 전에 종료합니다. **Pet만 재시작하고 Tern·창·터미널·작업은 유지**하며 미저장 Pet 편집은 먼저 저장하세요. 실제 GUI 검증·공개 성공을 뜻하지 않습니다.
 
 `installed`는 디스크 교체, `applied`는 새 인스턴스·동일 프로필/관찰/assets·UI/control 준비 확인입니다. 원래 stopped였으면 `installed_stopped` / `restart:"not_requested"`로 끝나며 시작하지 않습니다. 미확정/시작 실패는 원본 보존 성공으로 표시하지 않습니다. 보고된 operation ID/state-dir 및 보존된 서명 helper로 `install-status --state-dir ABS --operation-id ID`, `install-recover --state-dir ABS --operation-id ID`를 사용하세요. status의 exit 0은 관찰 성공이지 설치 성공이 아닙니다. 일반 updater의 `recover --start`와 혼용하지 않습니다. Stop ACK 유실·미전이 index·추가 사용자 Stop는 복구 동의로 재시작 권한이 되지 않습니다. 디스크·실행 종료가 확인된 release-only 복구는 재시작 없이 예약만 해제할 수 있습니다. old bundle과 **원래 sidecar**는 private storage에 보존하며 자동 삭제하지 않습니다. 진행/불명 작업의 증거·도우미·stage·표식을 임의 삭제하지 마세요.
 

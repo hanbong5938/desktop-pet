@@ -1,5 +1,8 @@
 //! App cutover completion and external provider availability are separate facts.
 use super::*;
+#[path = "migration_integrations_relocation.rs"]
+mod relocation;
+pub use relocation::{observe_relocation_tern, observe_relocation_tern_windows};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -799,20 +802,33 @@ enum OwnerUpgradeProof {
         previous_image: ExecutableIdentity,
     },
 }
-/// Read-only settlement under the caller's nonblocking operation lease. Neither
-/// a terminal result nor a bootstrap ACK by itself grants execution authority.
-pub fn verify_standalone_settlement(
+#[derive(Default)]
+struct SettlementAccess {
+    #[cfg(test)]
+    global: Option<PathBuf>,
+}
+impl SettlementAccess {
+    fn start_allowed(&self, origin: &InstallOrigin, state: &Path) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(global) = &self.global {
+            return protocol::test_scope::start_allowed_at(global, origin, state, None, None);
+        }
+        protocol::start_allowed(origin, state, None, None)
+    }
+}
+fn standalone_settlement_preflight(
     plan: &crate::standalone_install::StandaloneInstallPlan,
     record: &crate::standalone_install::StandaloneInstallRecord,
     context: Option<&UpdateContext>,
+    access: &SettlementAccess,
 ) -> Result<(), String> {
-    use crate::standalone_install::{self, InstallRestart, InstallStatus, StandaloneInstallPhase};
     record.validate(plan)?;
     if !standalone_terminal_settleable(record) {
         return Err("standalone operation is active or has an unresolved outcome".into());
     }
-    if standalone_install::read_plan(&plan.profile.state_dir, &plan.operation_id)? != *plan
-        || standalone_install::read_record(&plan.profile.state_dir, &plan.operation_id)?.as_ref()
+    if crate::standalone_install::read_plan(&plan.profile.state_dir, &plan.operation_id)? != *plan
+        || crate::standalone_install::read_record(&plan.profile.state_dir, &plan.operation_id)?
+            .as_ref()
             != Some(record)
         || protocol::observe_latest_operation(&plan.profile.state_dir)?.as_ref()
             != Some(&protocol::OperationObservation::StandaloneInstall(
@@ -821,15 +837,34 @@ pub fn verify_standalone_settlement(
     {
         return Err("standalone immutable approval or latest result changed".into());
     }
-    protocol::start_allowed(plan.origin(), &plan.profile.state_dir, None, None)?;
+    access.start_allowed(plan.installed_origin(), &plan.profile.state_dir)?;
+    if plan.reservation_target().is_some() {
+        access.start_allowed(plan.origin(), &plan.profile.state_dir)?;
+    }
     if let Some(context) = context {
+        let owner = if record.result.installed {
+            plan.installed_origin()
+        } else {
+            plan.origin()
+        };
         if context.config_dir != plan.profile.config_dir
             || context.state_dir != plan.profile.state_dir
-            || context.running_origin.as_deref() != Some(plan.origin())
+            || context.running_origin.as_deref() != Some(owner)
         {
             return Err("standalone settlement profile/owner differs from runtime".into());
         }
     }
+    Ok(())
+}
+/// Read-only settlement under the caller's nonblocking operation lease. Neither
+/// a terminal result nor a bootstrap ACK by itself grants execution authority.
+pub fn verify_standalone_settlement(
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+    record: &crate::standalone_install::StandaloneInstallRecord,
+    context: Option<&UpdateContext>,
+) -> Result<(), String> {
+    use crate::standalone_install::{self, InstallRestart, InstallStatus, StandaloneInstallPhase};
+    standalone_settlement_preflight(plan, record, context, &SettlementAccess::default())?;
     if record.result.installed {
         let retained = crate::installation::validate_standalone_replacement(plan)?;
         if record.result.installation.as_ref() != Some(&retained.installation)
@@ -874,7 +909,10 @@ pub fn verify_standalone_settlement(
             if let Some(context) = context {
                 // A subsequent ordinary, independently fenced user launch may
                 // settle installed-only history; it never changes applied=false.
-                let live = crate::native_runtime::capture_instance(plan.origin(), &plan.profile)?;
+                let live = crate::native_runtime::capture_instance(
+                    plan.installed_origin(),
+                    &plan.profile,
+                )?;
                 let generation = protocol::stop_generation(&plan.profile.state_dir)?;
                 if live.image != retained.installation.image
                     || live.image != context.running
@@ -884,7 +922,7 @@ pub fn verify_standalone_settlement(
                     || live.context.assets_override != context.assets_override
                     || live.context.observation_mode()? != context.observation_mode()?
                     || protocol::verified_runtime_start_fence(
-                        plan.origin(),
+                        plan.installed_origin(),
                         &plan.profile.state_dir,
                         live.incarnation.pid,
                         &live.instance_id,
@@ -903,6 +941,7 @@ pub fn verify_standalone_settlement(
                     &retained.intent_path,
                     &plan.operation_id,
                     &plan.original,
+                    plan.installed_origin(),
                 )?;
                 let scope =
                     crate::native_runtime::recover_install_scope(&recovered, &plan.profile)?;
@@ -930,6 +969,7 @@ pub fn verify_standalone_settlement(
                     &intent,
                     &plan.operation_id,
                     &plan.original,
+                    plan.installed_origin(),
                 )?;
                 if recovered.installation.is_some() {
                     return Err(
@@ -990,7 +1030,10 @@ pub fn verify_standalone_settlement(
         }
     }
     // Close the disk/runtime sampling window against a new reservation or Stop.
-    protocol::start_allowed(plan.origin(), &plan.profile.state_dir, None, None)?;
+    protocol::start_allowed(plan.installed_origin(), &plan.profile.state_dir, None, None)?;
+    if plan.reservation_target().is_some() {
+        protocol::start_allowed(plan.origin(), &plan.profile.state_dir, None, None)?;
+    }
     if record.result.applied
         && protocol::stop_generation(&plan.profile.state_dir)?
             != plan
@@ -1027,6 +1070,36 @@ fn standalone_terminal_settleable(
     }
 }
 
+/// Portable historical settlement shared by legacy continuity and relocation.
+/// Caller separately holds the exact nonblocking helper lease, proves release,
+/// and validates retained closure/inode evidence; this never consults live H.
+fn verify_completed_owner_update(
+    plan: &crate::UpdatePlan,
+    result: &protocol::OperationRecord,
+    origin: &InstallOrigin,
+    profile: &crate::native_runtime::ProfilePaths,
+    candidate: &ExecutableIdentity,
+) -> Result<(), String> {
+    if plan.version != 4
+        || result.version != 4
+        || result.operation_id != plan.operation_id
+        || result.phase != protocol::OperationPhase::Completed
+        || !result.installed
+        || !result.applied
+        || result.execution_fence != protocol::ExecutionFence::ManagerExited
+        || result.candidate.as_ref() != Some(candidate)
+        || plan.context.config_dir != profile.config_dir
+        || plan.context.state_dir != profile.state_dir
+        || crate::physical_install_root(plan.target_origin())?
+            != crate::physical_install_root(origin)?
+    {
+        return Err(
+            "owner updater lacks exact completed/applied/released-manager profile/image evidence"
+                .into(),
+        );
+    }
+    Ok(())
+}
 fn owner_upgrade(
     plan: &MigrationPlan,
     context: &UpdateContext,
@@ -1063,16 +1136,26 @@ fn owner_upgrade(
         return installed_owner_upgrade(plan, context);
     }
     let _lease = protocol::lock_operation(&context.state_dir, &result.operation_id)?;
-    if result.phase != protocol::OperationPhase::Completed
-        || !result.installed
-        || !result.applied
-        || result.execution_fence != protocol::ExecutionFence::ManagerExited
-        || result.candidate.as_ref() != Some(&context.running)
-        || prior.context.config_dir != context.config_dir
-        || prior.context.state_dir != context.state_dir
-        || crate::physical_install_root(prior.target_origin())?
-            != crate::physical_install_root(&plan.target.origin)?
-        || context.running_origin.as_deref() != Some(prior.target_origin())
+    verify_completed_owner_update(
+        &prior,
+        &result,
+        &plan.target.origin,
+        &crate::native_runtime::ProfilePaths {
+            config_dir: context.config_dir.clone(),
+            state_dir: context.state_dir.clone(),
+        },
+        &context.running,
+    )?;
+    if protocol::reservation_exists(
+        &prior.origin,
+        prior.target.as_ref().map(|target| &target.origin),
+        &context.state_dir,
+        &prior.operation_id,
+    )? {
+        return Err("current owner updater has not released its root/profile reservation".into());
+    }
+    protocol::start_allowed(prior.target_origin(), &context.state_dir, None, None)?;
+    if context.running_origin.as_deref() != Some(prior.target_origin())
         || context.version != crate::identity::neutral::VERSION
         || executable_identity(&context.running.path)? != context.running
     {
@@ -1823,6 +1906,9 @@ pub fn committed_route(
     state: &Path,
     bytes: &[u8],
 ) -> Result<serde_json::Value, String> {
+    if bytes.len() > MAX_FRAME {
+        return Err("Tern route request exceeds 16 KiB".into());
+    }
     let request: RouteRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if request.version != 1
         || request.kind != "legacy-migration-route"
@@ -1836,11 +1922,21 @@ pub fn committed_route(
     let directory = state.join("updates-v4");
     owned_directory(&directory)?;
     let mut count = 0;
+    let mut response = relocation::committed_route(&request)?;
     let mut seen = std::collections::BTreeSet::new();
     for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if name.starts_with("install-") && name.ends_with(".plan.json") {
+            count += 1;
+            if count > 1024 {
+                return Err("migration/relocation route history exceeds bound".into());
+            }
+            // Shared version-aware decoding already authenticated or skipped
+            // every standalone plan in the relocation namespace above.
+            continue;
+        }
         let path = if name.ends_with(".migration-plan.json") {
             entry.path()
         } else if name.ends_with(".migration-profile.json") {
@@ -1892,20 +1988,22 @@ pub fn committed_route(
             config_dir: config.to_path_buf(),
             state_dir: state.to_path_buf(),
         };
-        let mut response = serde_json::json!({"version":1,"kind":"legacy-migration-route","committed":true,"original":original,"target":target});
+        let mut candidate_response = serde_json::json!({"version":1,"kind":"legacy-migration-route","committed":true,"original":original,"target":target});
         let handover = issue_handover(
             &plan, &record, profile, &live, &original, &target, &authority,
         )?;
-        response
+        candidate_response
             .as_object_mut()
             .expect("route response object")
             .insert(
                 "handover".into(),
                 serde_json::to_value(handover).map_err(|e| e.to_string())?,
             );
-        return Ok(response);
+        if response.replace(candidate_response).is_some() {
+            return Err("ambiguous authenticated Tern route authorities".into());
+        }
     }
-    Err("no authenticated committed migration preserves this saved executable and original profile pair".into())
+    response.ok_or_else(|| "no authenticated committed migration preserves this saved executable and original profile pair".into())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1961,10 +2059,35 @@ pub fn integration_handover(
     state: &Path,
     bytes: &[u8],
 ) -> Result<serde_json::Value, String> {
+    if bytes.len() > MAX_FRAME {
+        return Err("Tern handover request exceeds 16 KiB".into());
+    }
     let request: HandoverRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     validate_handover_request(&request, config, state)?;
     if crate::identity::LEGACY {
         return Err("legacy envelope has no migration handover authority".into());
+    }
+    if relocation::is_install_plan_path(
+        state,
+        &request.handover.plan_path,
+        &request.handover.operation_id,
+    )? {
+        return relocation::integration_handover(config, state, &request);
+    }
+    if request.handover.plan_path
+        != state.join("updates-v4").join(format!(
+            "{}.migration-plan.json",
+            request.handover.operation_id
+        ))
+    {
+        // Multi-profile legacy approvals use their authenticated profile pointer.
+        let pointer = state.join("updates-v4").join(format!(
+            "{}.migration-profile.json",
+            request.handover.operation_id
+        ));
+        if profile_plan_path(&pointer, config, state)? != request.handover.plan_path {
+            return Err("unrecognized Tern handover evidence namespace".into());
+        }
     }
     let plan_bytes = owned_private_file(&request.handover.plan_path, MAX_PLAN)?;
     let plan: MigrationPlan = serde_json::from_slice(&plan_bytes).map_err(|e| e.to_string())?;

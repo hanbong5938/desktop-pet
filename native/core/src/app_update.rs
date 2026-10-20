@@ -1,5 +1,6 @@
 //! App-side, read-only update discovery and explicit helper handoff.
 //! AppKit never waits for a manager, hash, source probe, or helper stdout.
+//! Relocation follows the helper's admitted operation, never a manual retry's older one-shot offer.
 //! The successor bridge continues the authenticated original update approval.
 //! No independent migration consent is required after that bounded approval.
 use crate::i18n::{text, Message, UiLocale};
@@ -11,6 +12,9 @@ use desktop_pet_update_coordinator::protocol::{
 };
 use desktop_pet_update_coordinator::standalone_install::{
     self, InstallStatus, StandaloneInstallRecord,
+};
+use desktop_pet_update_coordinator::standalone_relocation::{
+    self, RelocationAdmission, SettledRelocationParent,
 };
 use desktop_pet_update_coordinator::{
     check, read_operation, read_plan, recheck_plan, stage_helper, write_plan, CheckSnapshot,
@@ -25,9 +29,31 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RelocationTernObservation {
+    captured: bool,
+    windows: usize,
+    pending: bool,
+    detail: Option<String>,
+}
+
 const CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
 pub(super) enum Event {
+    RelocationAdmission {
+        context: UpdateContext,
+        result: Result<RelocationAdmission, String>,
+    },
+    RelocationFinished {
+        context: UpdateContext,
+        operation_id: String,
+        result: Result<(), String>,
+    },
+    RelocationTernObserved {
+        context: UpdateContext,
+        operation_id: String,
+        result: Result<RelocationTernObservation, String>,
+    },
     Checked {
         request_id: u64,
         policy_generation: u64,
@@ -139,6 +165,15 @@ pub(super) struct AppUpdateService {
     migration_problem: Option<String>,
     migration_history_verified: bool,
     migration_blocked: bool,
+    relocation_parent: Option<SettledRelocationParent>,
+    relocation_busy: bool,
+    relocation_polled: bool,
+    next_relocation_parent_poll: Instant,
+    relocation_auto_attempted: bool,
+    relocation_waiting: bool,
+    relocation_tern: Option<(String, RelocationTernObservation)>,
+    relocation_tern_in_flight: bool,
+    next_relocation_tern_poll: Instant,
 }
 
 impl AppUpdateService {
@@ -194,6 +229,15 @@ impl AppUpdateService {
             migration_problem: None,
             migration_history_verified: false,
             migration_blocked: false,
+            relocation_parent: None,
+            relocation_busy: false,
+            relocation_polled: false,
+            next_relocation_parent_poll: Instant::now(),
+            relocation_auto_attempted: false,
+            relocation_waiting: false,
+            relocation_tern: None,
+            relocation_tern_in_flight: false,
+            next_relocation_tern_poll: Instant::now(),
         };
         service.check_migration_eligibility();
         service.check_migration_history();
@@ -218,6 +262,384 @@ impl AppUpdateService {
     pub(super) fn revision(&self) -> u64 {
         self.revision
     }
+
+    fn at_relocation_home(&self) -> bool {
+        self.context.as_ref().is_some_and(|context| {
+            !desktop_pet_update_coordinator::identity::LEGACY
+                && desktop_pet_update_coordinator::installation::os_home()
+                    .ok()
+                    .is_some_and(|home| {
+                        context.running_origin.as_deref()
+                            == Some(&InstallOrigin::Standalone {
+                                bundle: home.join("Applications/DesktopPet.app"),
+                            })
+                    })
+        })
+    }
+
+    /// Called only by the UI-ready default run loop, never a tracking/modal loop.
+    pub(super) fn poll_relocation(&mut self) {
+        self.poll_relocation_tern();
+        if !self.at_relocation_home() || self.relocation_busy {
+            return;
+        }
+        if self.journal_error.is_some()
+            || self
+                .operation
+                .as_ref()
+                .is_some_and(|record| !terminal_phase(record.phase))
+            || self
+                .standalone_operation
+                .as_ref()
+                .is_some_and(|record| !record.result.terminal())
+        {
+            return;
+        }
+        if self.relocation_parent.is_some() && !self.relocation_auto_attempted {
+            self.relocation_auto_attempted = true;
+            self.launch_relocation(false);
+            return;
+        }
+        if self.relocation_polled || Instant::now() < self.next_relocation_parent_poll {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.relocation_polled = true;
+        self.next_relocation_parent_poll = Instant::now() + Duration::from_secs(1);
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = standalone_relocation::resume_relocation_parent(&context);
+            let _ = sender.send(Event::RelocationAdmission { context, result });
+        });
+    }
+
+    pub(super) fn relocation_admission(
+        &mut self,
+        context: UpdateContext,
+        result: Result<RelocationAdmission, String>,
+    ) {
+        if self.context.as_ref() != Some(&context) {
+            return;
+        }
+        match result {
+            Ok(RelocationAdmission::Eligible(parent)) => {
+                self.relocation_parent = Some(parent);
+                self.relocation_waiting = false;
+            }
+            Ok(RelocationAdmission::Waiting) => {
+                self.relocation_waiting = true;
+                self.relocation_polled = false;
+            }
+            Ok(RelocationAdmission::Superseded) => {
+                self.relocation_waiting = false;
+                self.relocation_auto_attempted = true;
+            }
+            Err(error) => {
+                self.problem = Some(error);
+                self.relocation_auto_attempted = true;
+            }
+        }
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub(super) fn begin_standalone_relocation(&mut self) {
+        self.launch_relocation(true);
+    }
+
+    fn launch_relocation(&mut self, manual: bool) {
+        if !self.at_relocation_home()
+            || self.relocation_busy
+            || self.launching.is_some()
+            || self.journal_error.is_some()
+        {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let parent = self.relocation_parent.clone();
+        self.relocation_busy = true;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let mut operation_id = String::new();
+            let result = (|| {
+                let parent = match parent {
+                    Some(parent) => parent,
+                    None if manual => standalone_relocation::discover_relocation_parent(&context)?
+                        .ok_or(
+                            "No authenticated completed home update is available for relocation.",
+                        )?,
+                    None => return Err("No automatic relocation parent is available.".into()),
+                };
+                let replay = !manual
+                    && standalone_install::read_relocation_offer(
+                        &context.state_dir,
+                        &parent.operation_id,
+                    )?
+                    .is_some();
+                if !replay {
+                    standalone_relocation::validate_settled_parent(&context, &parent)?;
+                }
+                // A terminal result alone is not release evidence. Admission Settled
+                // is written by the helper only after checking exact scope release.
+                for id in if manual {
+                    standalone_install::relocation_attempts(
+                        &context.state_dir,
+                        &parent.operation_id,
+                    )?
+                } else {
+                    Vec::new()
+                } {
+                    let admission = standalone_install::read_admission(&context.state_dir, &id)?
+                        .ok_or("relocation attempt has no admission")?;
+                    if admission.phase != standalone_install::StandaloneAdmissionPhase::Settled {
+                        operation_id = id.clone();
+                        return Err(format!("Relocation {id} requires observation or recovery before another attempt."));
+                    }
+                }
+                let request = standalone_relocation::RelocationRequest {
+                    version: 1,
+                    context: context.clone(),
+                    parent,
+                };
+                let updates = private_updates(&context.state_dir)?;
+                let nonce = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_nanos();
+                let path = updates.join(format!(
+                    "relocation-request-{}-{nonce}.json",
+                    std::process::id()
+                ));
+                desktop_pet_update_coordinator::protocol::write_private_atomic_new(
+                    &path,
+                    &serde_json::to_vec(&request).map_err(|e| e.to_string())?,
+                    0o600,
+                )?;
+                let helper = context
+                    .executable
+                    .parent()
+                    .ok_or("missing app executable directory")?
+                    .join("desktop-pet-update-coordinator");
+                let previous_attempts = if manual {
+                    standalone_install::relocation_attempts(
+                        &context.state_dir,
+                        &request.parent.operation_id,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let output = Command::new(helper)
+                    .arg(if manual {
+                        "install-relocate-manual"
+                    } else {
+                        "install-relocate"
+                    })
+                    .arg("--request")
+                    .arg(path)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                let (status, stdout) = read_relocation_helper(output)?;
+                operation_id =
+                    authenticate_relocation_outcome(&request, &previous_attempts, &stdout)?;
+                if status.code()
+                    == Some(
+                        serde_json::from_slice::<standalone_install::StandaloneInstallResult>(
+                            &stdout,
+                        )
+                        .map_err(|e| e.to_string())?
+                        .exit_code(),
+                    )
+                {
+                    Ok(())
+                } else {
+                    Err(format!("Relocation helper exited with {status}; observing its authenticated operation."))
+                }
+            })();
+            let _ = sender.send(Event::RelocationFinished {
+                context,
+                operation_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn relocation_finished(
+        &mut self,
+        context: UpdateContext,
+        operation_id: String,
+        result: Result<(), String>,
+    ) {
+        if self.context.as_ref() != Some(&context) {
+            return;
+        }
+        self.relocation_busy = false;
+        if let Err(error) = result {
+            self.problem = Some(error);
+        }
+        if !operation_id.is_empty()
+            && self.launching.is_none()
+            && self.launch_plan.is_none()
+            && self.prepared_plan.is_none()
+            && self.journal_error.is_none()
+            && self
+                .operation
+                .as_ref()
+                .is_none_or(|record| settled_terminal(record))
+            && self.standalone_operation.as_ref().is_none_or(|record| {
+                record.operation_id == operation_id
+                    || matches!(
+                        record.result.status,
+                        InstallStatus::Cancelled
+                            | InstallStatus::Failed
+                            | InstallStatus::Applied
+                            | InstallStatus::InstalledStopped
+                    )
+            })
+        {
+            if let Some(parent) = self.operation.take() {
+                self.previous_outcome = Some(parent);
+            }
+            if self
+                .standalone_operation
+                .as_ref()
+                .is_some_and(|record| record.operation_id != operation_id)
+            {
+                self.previous_standalone_outcome = self.standalone_operation.take();
+            }
+            self.observed_operation_id = Some(operation_id.clone());
+            self.next_journal_poll = Instant::now();
+            self.reload_journal(operation_id);
+        }
+        self.revision = self.revision.wrapping_add(1);
+    }
+    fn poll_relocation_tern(&mut self) {
+        if self.relocation_tern_in_flight || Instant::now() < self.next_relocation_tern_poll {
+            return;
+        }
+        let Some(record) = self
+            .standalone_operation
+            .as_ref()
+            .or(self.previous_standalone_outcome.as_ref())
+            .filter(|record| record.result.installed && record.result.applied)
+        else {
+            return;
+        };
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let operation_id = record.operation_id.clone();
+        self.relocation_tern_in_flight = true;
+        self.next_relocation_tern_poll = Instant::now() + Duration::from_secs(5);
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let plan = standalone_install::read_plan(&context.state_dir, &operation_id)?;
+                let standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+                    tern, ..
+                } = &plan.purpose
+                else {
+                    return Ok(RelocationTernObservation {
+                        captured: false,
+                        windows: 0,
+                        pending: false,
+                        detail: None,
+                    });
+                };
+                if tern.is_none() {
+                    return Ok(RelocationTernObservation {
+                        captured: false,
+                        windows: 0,
+                        pending: false,
+                        detail: None,
+                    });
+                }
+                let (statuses, status_error) =
+                    match desktop_pet_update_coordinator::migration::observe_relocation_tern(
+                        &context,
+                        &operation_id,
+                    ) {
+                        Ok(statuses) => (statuses, None),
+                        Err(error) => (Vec::new(), Some(error)),
+                    };
+                let count =
+                    desktop_pet_update_coordinator::migration::observe_relocation_tern_windows(
+                        &context,
+                        &operation_id,
+                    );
+                let (windows, count_error) = match count {
+                    Ok(Some(count)) => (count, None),
+                    Ok(None) => (
+                        0,
+                        Some("Captured Tern configuration has no window observation.".to_owned()),
+                    ),
+                    Err(error) => (0, Some(error)),
+                };
+                let detail = count_error
+                    .or(status_error)
+                    .or_else(|| statuses.iter().find_map(|status| status.error.clone()));
+                let pending = windows == 0
+                    || statuses.iter().any(|status| !status.connected)
+                    || detail.is_some();
+                Ok(RelocationTernObservation {
+                    captured: true,
+                    windows,
+                    pending,
+                    detail,
+                })
+            })();
+            let _ = sender.send(Event::RelocationTernObserved {
+                context,
+                operation_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn relocation_tern_observed(
+        &mut self,
+        context: UpdateContext,
+        operation_id: String,
+        result: Result<RelocationTernObservation, String>,
+    ) {
+        if self.context.as_ref() != Some(&context) {
+            return;
+        }
+        self.relocation_tern_in_flight = false;
+        let current = self
+            .standalone_operation
+            .as_ref()
+            .or(self.previous_standalone_outcome.as_ref());
+        if current.is_none_or(|record| {
+            record.operation_id != operation_id
+                || !record.result.installed
+                || !record.result.applied
+        }) {
+            return;
+        }
+        let observation = result.unwrap_or_else(|error| RelocationTernObservation {
+            captured: false,
+            windows: 0,
+            pending: true,
+            detail: Some(error),
+        });
+        if self
+            .relocation_tern
+            .as_ref()
+            .is_none_or(|(current_id, current)| {
+                current_id != &operation_id || current != &observation
+            })
+        {
+            self.relocation_tern = Some((operation_id, observation));
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     pub(super) fn policy(&self) -> UpdatePolicy {
         self.policy
     }
@@ -336,6 +758,15 @@ impl AppUpdateService {
             return;
         }
         self.context = context;
+        self.relocation_parent = None;
+        self.relocation_busy = false;
+        self.relocation_polled = false;
+        self.next_relocation_parent_poll = Instant::now();
+        self.relocation_auto_attempted = false;
+        self.relocation_waiting = false;
+        self.relocation_tern = None;
+        self.relocation_tern_in_flight = false;
+        self.next_relocation_tern_poll = Instant::now();
         self.check_migration_eligibility();
         self.check_migration_history();
         // Retire discovery and consent, not the immutable plan or journal owned
@@ -901,7 +1332,7 @@ impl AppUpdateService {
         let context = context.clone();
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let result = observe_operation(&context.state_dir, &operation_id);
+            let result = observe_app_operation(&context, &operation_id);
             let prepared_recovery =
                 result
                     .as_ref()
@@ -1406,10 +1837,52 @@ impl AppUpdateService {
         if let Some(error) = &self.migration_problem {
             let _ = writeln!(diagnostics, "Migration unavailable: {error}");
         }
+        let relocation_tern = self.relocation_tern.as_ref().and_then(|(id, observation)| {
+            self.standalone_operation
+                .as_ref()
+                .or(self.previous_standalone_outcome.as_ref())
+                .filter(|record| {
+                    &record.operation_id == id && record.result.installed && record.result.applied
+                })
+                .and_then(|_| observation.captured.then_some(observation))
+        });
+        if let Some(detail) = self
+            .relocation_tern
+            .as_ref()
+            .and_then(|(_, observation)| observation.detail.as_ref())
+        {
+            let _ = writeln!(diagnostics, "Tern relocation observation: {detail}");
+        }
+        let relocation_unresolved = self.journal_error.is_some()
+            || self.standalone_operation.as_ref().is_some_and(|record| {
+                matches!(
+                    record.result.status,
+                    InstallStatus::Accepted
+                        | InstallStatus::Running
+                        | InstallStatus::Unknown
+                        | InstallStatus::InstalledNotApplied
+                )
+            });
+        let relocation_available = self.at_relocation_home()
+            && !self.relocation_waiting
+            && !self.relocation_busy
+            && active.is_none()
+            && !relocation_unresolved;
+        let primary_action =
+            if self.at_relocation_home() && active.is_none() && !relocation_unresolved {
+                if relocation_available {
+                    Some(UpdateCardPrimaryAction::Relocate)
+                } else {
+                    None
+                }
+            } else {
+                primary_action
+            };
         UpdateCardModel {
             auto_check: self.auto_check,
             receive_beta_updates: self.policy == UpdatePolicy::StableAndBeta,
             busy: self.migration_blocked
+                || self.relocation_busy
                 || self.check_busy
                 || self.launching.is_some()
                 || self.launch_plan.is_some()
@@ -1420,7 +1893,7 @@ impl AppUpdateService {
                     .as_ref()
                     .is_some_and(|record| !record.result.terminal())
                 || self.journal_error.is_some(),
-            settings_locked: !self.settings_admitted(),
+            settings_locked: self.relocation_busy || !self.settings_admitted(),
             status,
             status_text: text(locale, status_message).into(),
             running_version: self
@@ -1440,6 +1913,46 @@ impl AppUpdateService {
             migration_visible: desktop_pet_update_coordinator::identity::LEGACY,
             migration_available,
             migration_title: text(locale, Message::MigrationTitle).to_owned(),
+            relocation_available,
+            relocation_title: if relocation_tern.is_some() {
+                text(locale, Message::RelocationComplete).to_owned()
+            } else if self.at_relocation_home() {
+                text(locale, Message::RelocationAction).to_owned()
+            } else {
+                String::new()
+            },
+            relocation_detail: if self.at_relocation_home()
+                && active.is_none()
+                && !relocation_unresolved
+            {
+                text(
+                    locale,
+                    if self.relocation_waiting {
+                        Message::RelocationWaiting
+                    } else if self.relocation_busy {
+                        Message::RelocationPreparing
+                    } else {
+                        Message::RelocationReady
+                    },
+                )
+                .to_owned()
+            } else if let Some(observation) =
+                relocation_tern.filter(|_| active.is_none() && !relocation_unresolved)
+            {
+                let count = text(locale, Message::RelocationTernWindows)
+                    .replace("{}", &observation.windows.to_string());
+                if observation.pending {
+                    format!(
+                        "{}\n{}\n{count}",
+                        text(locale, Message::RelocationComplete),
+                        text(locale, Message::RelocationTernPending)
+                    )
+                } else {
+                    format!("{}\n{count}", text(locale, Message::RelocationComplete))
+                }
+            } else {
+                String::new()
+            },
             download_url: self.download_url(),
             release: self
                 .snapshot
@@ -1451,6 +1964,254 @@ impl AppUpdateService {
         }
     }
 }
+// Read-only projection of the helper's launch. The admission hashes all launch
+// bytes, including fields this observer does not interpret; this grants no Stop authority.
+#[derive(Deserialize)]
+struct RelocationLaunch {
+    version: u32,
+    operation_id: String,
+    original: desktop_pet_update_coordinator::installation::InstallationRecord,
+    profile: desktop_pet_update_coordinator::native_runtime::ProfilePaths,
+    helper: desktop_pet_update_coordinator::ExecutableIdentity,
+    request: desktop_pet_update_coordinator::installation::InstallRequest,
+    purpose: standalone_install::StandaloneInstallPurpose,
+    source: standalone_install::InstallSource,
+}
+
+fn relocation_evidence(
+    context: &UpdateContext,
+    id: &str,
+) -> Result<
+    (
+        RelocationLaunch,
+        standalone_install::StandaloneAdmissionRecord,
+        standalone_relocation::RelocationRequest,
+    ),
+    String,
+> {
+    use sha2::{Digest, Sha256};
+    desktop_pet_update_coordinator::protocol::validate_operation_id(id)?;
+    let root = context
+        .state_dir
+        .join(desktop_pet_update_coordinator::identity::UPDATES_DIRECTORY)
+        .join(format!("install-{id}.resources"));
+    let bytes =
+        desktop_pet_update_coordinator::owned_private_file(&root.join("launch.json"), 196608)?;
+    let launch: RelocationLaunch =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid relocation launch: {e}"))?;
+    let admission = standalone_install::read_admission(&context.state_dir, id)?
+        .ok_or("relocation admission is missing")?;
+    let request: standalone_relocation::RelocationRequest =
+        serde_json::from_slice(&desktop_pet_update_coordinator::owned_private_file(
+            &root.join("relocation-request.json"),
+            16384,
+        )?)
+        .map_err(|e| format!("invalid durable relocation request: {e}"))?;
+    request.parent.validate()?;
+    let standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+        target,
+        parent,
+        source_closure_sha256,
+        ..
+    } = &launch.purpose
+    else {
+        return Err("helper outcome is not a relocation".into());
+    };
+    let standalone_install::InstallSource::Running {
+        instance,
+        context: source,
+    } = &launch.source
+    else {
+        return Err("relocation launch has no running source".into());
+    };
+    let home = desktop_pet_update_coordinator::installation::os_home()?;
+    let original = InstallOrigin::Standalone {
+        bundle: home.join("Applications/DesktopPet.app"),
+    };
+    let expected_target = InstallOrigin::Standalone {
+        bundle: desktop_pet_update_coordinator::installation::standalone_bundle()?,
+    };
+    if launch.version != 1
+        || launch.operation_id != id
+        || admission.launch_sha256 != format!("{:x}", Sha256::digest(&bytes))
+        || request.version != 1
+        || request.context != *source
+        || request.parent != *parent
+        || launch.profile != parent.profile
+        || launch.profile.config_dir != context.config_dir
+        || launch.profile.state_dir != context.state_dir
+        || source.running != context.running
+        || source.executable != context.executable
+        || source.running_origin != context.running_origin
+        || source.config_dir != context.config_dir
+        || source.state_dir != context.state_dir
+        || source.instance_id != instance.instance_id
+        || source.running != instance.image
+        || launch.original.version != 1
+        || launch.original.origin != original
+        || launch.original.image != source.running
+        || launch.original.executable != source.executable
+        || source.executable != home.join("Applications/DesktopPet.app/Contents/MacOS/desktop-pet")
+        || launch.original.app_version != source.version
+        || source.running_origin.as_deref() != Some(&original)
+        || launch.original.kind
+            != desktop_pet_update_coordinator::installation::InstallationKind::Standalone
+        || parent.candidate_image != source.running
+        || parent.source_closure_sha256 != *source_closure_sha256
+        || parent.generation != admission.original_stop_generation
+        || target != &expected_target
+        || launch.helper.path != root.join("helper")
+        || launch.request.version != 1
+        || launch.request.staged_app != root.join("DesktopPet.app")
+        || launch.request.kind
+            != desktop_pet_update_coordinator::installation::InstallationKind::Standalone
+        || launch.request.source_root.is_some()
+    {
+        return Err("relocation outcome source, profile, parent or admission differs".into());
+    }
+    Ok((launch, admission, request))
+}
+
+fn preplan_relocation_record(
+    context: &UpdateContext,
+    id: &str,
+) -> Result<StandaloneInstallRecord, String> {
+    for path in [
+        standalone_install::stop_ack_path(&context.state_dir, id)?,
+        standalone_install::replacement_path(&context.state_dir, id)?,
+        standalone_install::relocation_commit_path(&context.state_dir, id)?,
+    ] {
+        if path.try_exists().map_err(|e| e.to_string())? {
+            return Err("pre-plan relocation contains post-Stop evidence".into());
+        }
+    }
+    let (_, admission, _) = relocation_evidence(context, id)?;
+    let result = admission
+        .result
+        .ok_or("relocation has no terminal admission outcome")?;
+    if admission.phase != standalone_install::StandaloneAdmissionPhase::Settled
+        || !matches!(
+            result.status,
+            InstallStatus::Cancelled | InstallStatus::Failed
+        )
+        || result.installed
+        || result.applied
+        || result.restart != standalone_install::InstallRestart::NotRequested
+    {
+        return Err("pre-plan relocation has no cleanup-only settlement".into());
+    }
+    let path = context
+        .state_dir
+        .join(desktop_pet_update_coordinator::identity::UPDATES_DIRECTORY)
+        .join(format!("install-{id}.resources/interrupted-result.json"));
+    let durable: standalone_install::StandaloneInstallResult = serde_json::from_slice(
+        &desktop_pet_update_coordinator::owned_private_file(&path, 32768)?,
+    )
+    .map_err(|e| format!("invalid interrupted relocation outcome: {e}"))?;
+    if durable != result {
+        return Err("pre-plan outcome differs from admission".into());
+    }
+    Ok(StandaloneInstallRecord {
+        version: 1,
+        operation_id: id.to_owned(),
+        phase: standalone_install::StandaloneInstallPhase::Failed,
+        result,
+    })
+}
+
+fn observe_app_operation(
+    context: &UpdateContext,
+    id: &str,
+) -> Result<Option<OperationObservation>, String> {
+    if !standalone_install::plan_path(&context.state_dir, id)?
+        .try_exists()
+        .map_err(|e| e.to_string())?
+        && standalone_install::read_admission(&context.state_dir, id)?.is_some()
+    {
+        return preplan_relocation_record(context, id)
+            .map(|record| Some(OperationObservation::StandaloneInstall(record)));
+    }
+    observe_operation(&context.state_dir, id)
+}
+
+fn authenticate_relocation_outcome(
+    request: &standalone_relocation::RelocationRequest,
+    previous_attempts: &[String],
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.len() > 32768 {
+        return Err("relocation helper outcome exceeds bound".into());
+    }
+    let outcome: standalone_install::StandaloneInstallResult = serde_json::from_slice(bytes)
+        .map_err(|e| format!("invalid relocation helper outcome: {e}"))?;
+    outcome.validate()?;
+    if outcome.state_dir != request.context.state_dir
+        || previous_attempts.contains(&outcome.operation_id)
+    {
+        return Err(
+            "relocation helper returned a different profile or an old manual attempt".into(),
+        );
+    }
+    let id = &outcome.operation_id;
+    let (launch, admission, durable_request) = relocation_evidence(&request.context, id)?;
+    if durable_request.version != request.version
+        || durable_request.context != request.context
+        || durable_request.parent != request.parent
+    {
+        return Err("relocation helper returned a stale request".into());
+    }
+    let record = match observe_app_operation(&request.context, id)? {
+        Some(OperationObservation::StandaloneInstall(record)) => record,
+        _ => return Err("relocation helper has no matching standalone journal".into()),
+    };
+    if standalone_install::plan_path(&request.context.state_dir, id)?
+        .try_exists()
+        .map_err(|e| e.to_string())?
+    {
+        let plan = standalone_install::read_plan(&request.context.state_dir, id)?;
+        if plan.source != launch.source
+            || plan.original != launch.original
+            || plan.profile != launch.profile
+            || plan.purpose != launch.purpose
+            || plan.helper_image != launch.helper
+            || plan.original_stop_generation != admission.original_stop_generation
+        {
+            return Err("relocation journal differs from admitted launch".into());
+        }
+    }
+    // A lost child ACK can return an ephemeral Unknown envelope. It identifies
+    // only this authenticated journal, never success or permission to release.
+    if outcome != record.result && outcome.status != InstallStatus::Unknown {
+        return Err("relocation helper outcome differs from durable journal".into());
+    }
+    if admission
+        .result
+        .as_ref()
+        .is_some_and(|result| result != &record.result)
+    {
+        return Err("relocation journal differs from settled admission".into());
+    }
+    Ok(id.clone())
+}
+
+fn read_relocation_helper(
+    mut child: std::process::Child,
+) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .ok_or("relocation helper stdout is missing")?
+        .take(32769)
+        .read_to_end(&mut bytes);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    read.map_err(|e| e.to_string())?;
+    if bytes.len() > 32768 {
+        return Err("relocation helper outcome exceeds bound".into());
+    }
+    Ok((status, bytes))
+}
+
 fn observation_id(observation: &OperationObservation) -> &str {
     match observation {
         OperationObservation::Update(record) => &record.operation_id,
@@ -1462,6 +2223,33 @@ fn standalone_settlement(
     context: &UpdateContext,
     record: &StandaloneInstallRecord,
 ) -> Result<(), String> {
+    if !standalone_install::plan_path(&context.state_dir, &record.operation_id)?
+        .try_exists()
+        .map_err(|e| e.to_string())?
+    {
+        if preplan_relocation_record(context, &record.operation_id)? != *record {
+            return Err("pre-plan relocation outcome changed".into());
+        }
+        let (launch, admission, _) = relocation_evidence(context, &record.operation_id)?;
+        let standalone_install::StandaloneInstallPurpose::PrivateRelocation { target, .. } =
+            &launch.purpose
+        else {
+            return Err("pre-plan settlement is not a relocation".into());
+        };
+        if desktop_pet_update_coordinator::protocol::stop_generation(&context.state_dir)?
+            != admission.original_stop_generation
+            || desktop_pet_update_coordinator::protocol::reservation_exists(
+                &launch.original.origin,
+                Some(target),
+                &context.state_dir,
+                &record.operation_id,
+            )?
+        {
+            return Err("pre-plan relocation is not released at its original generation".into());
+        }
+        start_allowed(&launch.original.origin, &context.state_dir, None, None)?;
+        return start_allowed(target, &context.state_dir, None, None);
+    }
     let plan = standalone_install::read_plan(&context.state_dir, &record.operation_id)?;
     record.validate(&plan)?;
     if plan.profile.config_dir != context.config_dir || plan.profile.state_dir != context.state_dir
@@ -1535,17 +2323,22 @@ fn settlement_proof(
         return Err("fresh check source is not the captured running installation".into());
     }
     let _lease = lock_operation(&context.state_dir, operation_id)?;
-    let observation = observe_operation(&context.state_dir, operation_id)?
+    let observation = observe_app_operation(context, operation_id)?
         .ok_or("previous operation journal is missing")?;
-    if observe_latest_operation(&context.state_dir)?.as_ref() != Some(&observation) {
+    let preplan = !standalone_install::plan_path(&context.state_dir, operation_id)?
+        .try_exists()
+        .map_err(|e| e.to_string())?
+        && matches!(&observation, OperationObservation::StandaloneInstall(_));
+    if !preplan && observe_latest_operation(&context.state_dir)?.as_ref() != Some(&observation) {
         return Err("previous operation journal changed during admission".into());
     }
     let record = match observation {
         OperationObservation::Update(record) => record,
         OperationObservation::StandaloneInstall(record) => {
             standalone_settlement(context, &record)?;
-            if snapshot.origin
-                != *standalone_install::read_plan(&context.state_dir, operation_id)?.origin()
+            if !preplan
+                && snapshot.origin
+                    != *standalone_install::read_plan(&context.state_dir, operation_id)?.origin()
             {
                 start_allowed(&snapshot.origin, &context.state_dir, None, None)?;
             }
@@ -1859,6 +2652,381 @@ mod tests {
                 retained_bundle: None,
                 error: None,
             },
+        }
+    }
+
+    fn relocation_outcome_fixture(
+        status: InstallStatus,
+        preplan: bool,
+    ) -> (
+        tempfile::TempDir,
+        standalone_relocation::RelocationRequest,
+        StandaloneInstallRecord,
+    ) {
+        use desktop_pet_update_coordinator::{
+            installation::*, native_runtime::ProfilePaths, standalone_install::*,
+        };
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let state = root.join("state");
+        let config = root.join("config");
+        for path in [&state, &config] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = os_home().unwrap();
+        let origin = InstallOrigin::Standalone {
+            bundle: home.join("Applications/DesktopPet.app"),
+        };
+        let executable = home.join("Applications/DesktopPet.app/Contents/MacOS/desktop-pet");
+        let mut context = local_check().plan.unwrap().context;
+        context.version = "0.4.13".into();
+        context.executable = executable.clone();
+        context.running = ExecutableIdentity {
+            path: executable,
+            sha256: "b".repeat(64),
+        };
+        context.running_origin = Some(Box::new(origin.clone()));
+        context.config_dir = config;
+        context.state_dir = state.clone();
+        let profile = ProfilePaths {
+            config_dir: context.config_dir.clone(),
+            state_dir: state.clone(),
+        };
+        let parent = SettledRelocationParent {
+            version: 1,
+            operation_id: "d".repeat(32),
+            plan_sha256: "e".repeat(64),
+            generation: 0,
+            candidate_image: context.running.clone(),
+            source_closure_sha256: "f".repeat(64),
+            profile: profile.clone(),
+            result_sha256: "1".repeat(64),
+        };
+        let request = standalone_relocation::RelocationRequest {
+            version: 1,
+            context: context.clone(),
+            parent: parent.clone(),
+        };
+        let id = "c".repeat(32);
+        let operation = private_updates(&state)
+            .unwrap()
+            .join(format!("install-{id}.resources"));
+        std::fs::create_dir(&operation).unwrap();
+        std::fs::set_permissions(&operation, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = InstallationRecord {
+            version: 1,
+            executable: context.executable.clone(),
+            kind: InstallationKind::Standalone,
+            app_version: context.version.clone(),
+            protocol: 4,
+            observation_mode: 2,
+            integration_api: 1,
+            origin,
+            image: context.running.clone(),
+        };
+        let helper = ExecutableIdentity {
+            path: operation.join("helper"),
+            sha256: "2".repeat(64),
+        };
+        let source = InstallSource::Running {
+            instance: StandaloneOriginalInstance {
+                pid: 42,
+                start_sec: 1,
+                start_usec: 0,
+                instance_id: context.instance_id.clone(),
+                image: context.running.clone(),
+            },
+            context: context.clone(),
+        };
+        let purpose = StandaloneInstallPurpose::PrivateRelocation {
+            target: InstallOrigin::Standalone {
+                bundle: standalone_bundle().unwrap(),
+            },
+            parent,
+            source_closure_sha256: "f".repeat(64),
+            tern: None,
+        };
+        let install_request = InstallRequest {
+            version: 1,
+            staged_app: operation.join("DesktopPet.app"),
+            kind: InstallationKind::Standalone,
+            source_root: None,
+        };
+        let launch = serde_json::to_vec(&serde_json::json!({
+            "version":1, "operation_id":id, "original":original, "profile":profile,
+            "helper":helper, "request":install_request, "source":source, "purpose":purpose,
+            "locale":"en", "original_evidence": {
+                "sidecar":"captured signed deployment", "locator":null,
+                "image_device":1, "image_inode":2, "bundle_device":1, "bundle_inode":3
+            },
+        }))
+        .unwrap();
+        let persist = |path: &Path, bytes: &[u8]| {
+            desktop_pet_update_coordinator::protocol::write_private_atomic_new(path, bytes, 0o600)
+                .unwrap();
+        };
+        persist(&operation.join("launch.json"), &launch);
+        persist(
+            &operation.join("relocation-request.json"),
+            &serde_json::to_vec(&request).unwrap(),
+        );
+        let mut record = standalone_observation(status);
+        record.operation_id = id.clone();
+        record.result.operation_id = id.clone();
+        record.result.state_dir = state.clone();
+        let admission = StandaloneAdmissionRecord {
+            version: 1,
+            operation_id: id.clone(),
+            launch_sha256: format!("{:x}", Sha256::digest(&launch)),
+            original_stop_generation: 0,
+            phase: StandaloneAdmissionPhase::Settled,
+            result: Some(record.result.clone()),
+        };
+        write_admission(&state, &admission).unwrap();
+        if preplan {
+            persist(
+                &operation.join("interrupted-result.json"),
+                &serde_json::to_vec(&record.result).unwrap(),
+            );
+        } else {
+            let plan = StandaloneInstallPlan {
+                version: 2,
+                purpose,
+                operation_id: id.clone(),
+                original,
+                candidate_bundle: install_request.staged_app.clone(),
+                candidate_image: ExecutableIdentity {
+                    path: install_request
+                        .staged_app
+                        .join("Contents/MacOS/desktop-pet"),
+                    sha256: context.running.sha256.clone(),
+                },
+                candidate_version: context.version.clone(),
+                helper_image: helper,
+                profile,
+                source,
+                original_stop_generation: 0,
+                control_token: "3".repeat(64),
+            };
+            plan.validate().unwrap();
+            // This is read-only journal evidence, not a signed-app execution fixture.
+            persist(
+                &plan_path(&state, &id).unwrap(),
+                &serde_json::to_vec(&plan).unwrap(),
+            );
+            write_record(&state, &record).unwrap();
+        }
+        let old_offer = RelocationOffer {
+            version: 1,
+            parent: request.parent.clone(),
+            operation_id: "a".repeat(32),
+        };
+        persist(
+            &relocation_offer_path(&state, &request.parent.operation_id).unwrap(),
+            &serde_json::to_vec(&old_offer).unwrap(),
+        );
+        (temporary, request, record)
+    }
+
+    #[test]
+    fn relocation_outcome_observes_manual_retry_not_immutable_automatic_offer() {
+        for status in [InstallStatus::Cancelled, InstallStatus::Failed] {
+            for preplan in [false, true] {
+                let (_temporary, request, record) = relocation_outcome_fixture(status, preplan);
+                let old = "a".repeat(32);
+                let id = authenticate_relocation_outcome(
+                    &request,
+                    &[old.clone()],
+                    &serde_json::to_vec(&record.result).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(id, record.operation_id);
+                let mut service =
+                    AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+                service.context = Some(request.context.clone());
+                service.latest_journal(Ok(Some(OperationObservation::StandaloneInstall(
+                    standalone_observation(InstallStatus::Cancelled),
+                ))));
+                service.relocation_finished(request.context.clone(), id.clone(), Ok(()));
+                match service
+                    .receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                {
+                    Event::Journal {
+                        operation_id,
+                        result,
+                        prepared_recovery,
+                    } => {
+                        assert_eq!(operation_id, id);
+                        service.journal(&operation_id, result, prepared_recovery);
+                    }
+                    _ => panic!("expected exact retry journal"),
+                }
+                assert_eq!(service.standalone_operation.as_ref(), Some(&record));
+                let mut snapshot = local_check_for_context(request.context.clone());
+                snapshot.origin = *request.context.running_origin.clone().unwrap();
+                snapshot.status = CheckStatus::Current;
+                snapshot.plan = None;
+                service.checked(
+                    Ok(snapshot),
+                    Some(SettledOperationProof::StandaloneInstall(record.clone())),
+                );
+                assert!(service.standalone_operation.is_none());
+                assert!(service.model(UiLocale::En).relocation_available);
+                assert_eq!(
+                    standalone_install::read_relocation_offer(
+                        &request.context.state_dir,
+                        &request.parent.operation_id
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .operation_id,
+                    old
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relocation_outcome_refuses_stale_malformed_and_mismatched_evidence() {
+        let (_temporary, request, record) =
+            relocation_outcome_fixture(InstallStatus::Cancelled, false);
+        let bytes = serde_json::to_vec(&record.result).unwrap();
+        assert!(
+            authenticate_relocation_outcome(&request, &[record.operation_id.clone()], &bytes)
+                .is_err()
+        );
+        for invalid in [
+            b"not json".as_slice(),
+            br#"{"version":1}"#.as_slice(),
+            &vec![b' '; 32769],
+        ] {
+            assert!(authenticate_relocation_outcome(&request, &[], invalid).is_err());
+        }
+        let mut stale = request.clone();
+        stale.context.instance_id.push_str("-stale");
+        assert!(authenticate_relocation_outcome(&stale, &[], &bytes).is_err());
+        stale = request.clone();
+        stale.parent.result_sha256 = "4".repeat(64);
+        assert!(authenticate_relocation_outcome(&stale, &[], &bytes).is_err());
+        for change in ["profile", "operation", "result"] {
+            let mut wrong = record.result.clone();
+            match change {
+                "profile" => wrong.state_dir = "/foreign/state".into(),
+                "operation" => wrong.operation_id = "b".repeat(32),
+                "result" => wrong.status = InstallStatus::Failed,
+                _ => unreachable!(),
+            }
+            assert!(authenticate_relocation_outcome(
+                &request,
+                &[],
+                &serde_json::to_vec(&wrong).unwrap()
+            )
+            .is_err());
+        }
+        let mut admission =
+            standalone_install::read_admission(&request.context.state_dir, &record.operation_id)
+                .unwrap()
+                .unwrap();
+        admission.launch_sha256 = "5".repeat(64);
+        desktop_pet_update_coordinator::protocol::write_private_bytes(
+            &standalone_install::admission_path(&request.context.state_dir, &record.operation_id)
+                .unwrap(),
+            &serde_json::to_vec(&admission).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        assert!(authenticate_relocation_outcome(&request, &[], &bytes).is_err());
+    }
+
+    #[test]
+    fn relocation_outcome_rejects_substituted_launch_journal_and_unsettled_preplan() {
+        use sha2::{Digest, Sha256};
+        for change in [
+            "source",
+            "profile",
+            "journal",
+            "preplan_unsettled",
+            "preplan_result",
+        ] {
+            let preplan = change.starts_with("preplan");
+            let (_temporary, request, record) =
+                relocation_outcome_fixture(InstallStatus::Failed, preplan);
+            let state = &request.context.state_dir;
+            let id = &record.operation_id;
+            let operation = state
+                .join(desktop_pet_update_coordinator::identity::UPDATES_DIRECTORY)
+                .join(format!("install-{id}.resources"));
+            let persist = |path: &Path, bytes: &[u8]| {
+                desktop_pet_update_coordinator::protocol::write_private_bytes(path, bytes, 0o600)
+                    .unwrap();
+            };
+            match change {
+                "source" | "profile" => {
+                    let launch_path = operation.join("launch.json");
+                    let mut launch: serde_json::Value = serde_json::from_slice(
+                        &desktop_pet_update_coordinator::owned_private_file(&launch_path, 196608)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    if change == "source" {
+                        launch["source"]["context"]["instance_id"] = "substituted-source".into();
+                    } else {
+                        launch["profile"]["config_dir"] = "/foreign/config".into();
+                    }
+                    let bytes = serde_json::to_vec(&launch).unwrap();
+                    persist(&launch_path, &bytes);
+                    let mut admission = standalone_install::read_admission(state, id)
+                        .unwrap()
+                        .unwrap();
+                    admission.launch_sha256 = format!("{:x}", Sha256::digest(&bytes));
+                    persist(
+                        &standalone_install::admission_path(state, id).unwrap(),
+                        &serde_json::to_vec(&admission).unwrap(),
+                    );
+                }
+                "journal" => {
+                    let mut changed = record.clone();
+                    changed.result.state_dir = "/foreign/state".into();
+                    persist(
+                        &standalone_install::record_path(state, id).unwrap(),
+                        &serde_json::to_vec(&changed).unwrap(),
+                    );
+                }
+                "preplan_unsettled" => {
+                    let mut admission = standalone_install::read_admission(state, id)
+                        .unwrap()
+                        .unwrap();
+                    admission.phase = standalone_install::StandaloneAdmissionPhase::Presenting;
+                    admission.result = None;
+                    persist(
+                        &standalone_install::admission_path(state, id).unwrap(),
+                        &serde_json::to_vec(&admission).unwrap(),
+                    );
+                }
+                "preplan_result" => {
+                    let mut changed = record.result.clone();
+                    changed.status = InstallStatus::Cancelled;
+                    persist(
+                        &operation.join("interrupted-result.json"),
+                        &serde_json::to_vec(&changed).unwrap(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                authenticate_relocation_outcome(
+                    &request,
+                    &[],
+                    &serde_json::to_vec(&record.result).unwrap()
+                )
+                .is_err(),
+                "{change}"
+            );
         }
     }
 
@@ -4164,5 +5332,249 @@ mod tests {
         assert!(service.pending_request.is_none());
         assert!(!service.check_busy);
         assert!(service.plan().is_none());
+    }
+
+    #[test]
+    fn relocation_observation_retires_terminal_parent_and_settles_cancelled_attempt() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let home = desktop_pet_update_coordinator::installation::os_home().unwrap();
+        service.context.as_mut().unwrap().running_origin =
+            Some(Box::new(InstallOrigin::Standalone {
+                bundle: home.join("Applications/DesktopPet.app"),
+            }));
+        let context = service.context.clone().unwrap();
+        let mut parent = failed_record('b');
+        parent.phase = OperationPhase::Completed;
+        parent.execution_fence = ExecutionFence::ManagerExited;
+        parent.installed = true;
+        parent.applied = true;
+        service.latest_journal(Ok(Some(OperationObservation::Update(parent.clone()))));
+        let cancelled = standalone_observation(InstallStatus::Cancelled);
+        // Do not spawn an observer: deliver its real journal event below.
+        service.journal_in_flight = Some(parent.operation_id.clone());
+        service.relocation_finished(context.clone(), cancelled.operation_id.clone(), Ok(()));
+        service.journal(
+            &cancelled.operation_id,
+            Ok(Some(OperationObservation::StandaloneInstall(
+                cancelled.clone(),
+            ))),
+            None,
+        );
+        assert_eq!(service.standalone_operation.as_ref(), Some(&cancelled));
+        assert_eq!(service.previous_outcome.as_ref(), Some(&parent));
+        assert!(service.operation.is_none());
+        assert!(service.begin_check().is_some());
+        let mut snapshot = local_check_for_context(context);
+        snapshot.origin = *service
+            .context
+            .as_ref()
+            .unwrap()
+            .running_origin
+            .clone()
+            .unwrap();
+        snapshot.plan = None;
+        snapshot.status = CheckStatus::Current;
+        service.checked(
+            Ok(snapshot),
+            Some(SettledOperationProof::StandaloneInstall(cancelled.clone())),
+        );
+        assert!(service.standalone_operation.is_none());
+        assert_eq!(
+            service.previous_standalone_outcome.as_ref(),
+            Some(&cancelled)
+        );
+        assert!(service.settings_admitted());
+        assert!(service.model(UiLocale::En).relocation_available);
+    }
+
+    #[test]
+    fn relocation_observation_does_not_displace_unresolved_parent_or_stale_context() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let context = service.context.clone().unwrap();
+        let mut parent = failed_record('b');
+        parent.phase = OperationPhase::Starting;
+        service.latest_journal(Ok(Some(OperationObservation::Update(parent.clone()))));
+        service.journal_in_flight = Some(parent.operation_id.clone());
+        service.relocation_finished(context.clone(), "a".repeat(32), Ok(()));
+        assert_eq!(
+            service.observed_operation_id.as_deref(),
+            Some(parent.operation_id.as_str())
+        );
+        assert_eq!(service.operation.as_ref(), Some(&parent));
+        let mut stale = context;
+        stale.instance_id.push_str("-stale");
+        service.relocation_finished(stale, "c".repeat(32), Err("stale helper".into()));
+        assert_eq!(
+            service.observed_operation_id.as_deref(),
+            Some(parent.operation_id.as_str())
+        );
+        assert!(service.problem.is_none());
+    }
+
+    #[test]
+    fn relocation_observation_preserves_unresolved_standalone_priority() {
+        for status in [
+            InstallStatus::Running,
+            InstallStatus::Unknown,
+            InstallStatus::InstalledNotApplied,
+        ] {
+            let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+            let context = service.context.clone().unwrap();
+            let unresolved = standalone_observation(status);
+            service.latest_journal(Ok(Some(OperationObservation::StandaloneInstall(
+                unresolved.clone(),
+            ))));
+            service.journal_in_flight = Some(unresolved.operation_id.clone());
+            service.relocation_finished(context, "c".repeat(32), Ok(()));
+            assert_eq!(
+                service.observed_operation_id.as_deref(),
+                Some(unresolved.operation_id.as_str())
+            );
+            assert_eq!(service.standalone_operation.as_ref(), Some(&unresolved));
+        }
+    }
+
+    #[test]
+    fn relocation_supersession_cancels_automatic_continuation() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let context = local_check().plan.unwrap().context;
+        service.context = Some(context.clone());
+        service.relocation_waiting = true;
+        service.relocation_admission(context, Ok(RelocationAdmission::Superseded));
+        assert!(!service.relocation_waiting);
+        assert!(service.relocation_auto_attempted);
+        assert!(service.relocation_parent.is_none());
+    }
+
+    #[test]
+    fn stale_relocation_events_cannot_change_current_admission() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        let context = local_check().plan.unwrap().context;
+        service.relocation_admission(context.clone(), Ok(RelocationAdmission::Waiting));
+        assert!(!service.relocation_waiting);
+        service.relocation_finished(context, "a".repeat(32), Err("stale".into()));
+        assert!(service.problem.is_none());
+        assert!(service.observed_operation_id.is_none());
+    }
+
+    #[test]
+    fn claimed_automatic_relocation_is_not_launched_again_by_ui_ticks() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let home = desktop_pet_update_coordinator::installation::os_home().unwrap();
+        service.context.as_mut().unwrap().running_origin =
+            Some(Box::new(InstallOrigin::Standalone {
+                bundle: home.join("Applications/DesktopPet.app"),
+            }));
+        let context = service.context.as_ref().unwrap();
+        service.relocation_parent = Some(SettledRelocationParent {
+            version: 1,
+            operation_id: "a".repeat(32),
+            plan_sha256: "b".repeat(64),
+            generation: 0,
+            candidate_image: context.running.clone(),
+            source_closure_sha256: "c".repeat(64),
+            profile: desktop_pet_update_coordinator::native_runtime::ProfilePaths {
+                config_dir: context.config_dir.clone(),
+                state_dir: context.state_dir.clone(),
+            },
+            result_sha256: "d".repeat(64),
+        });
+        service.relocation_auto_attempted = true;
+        service.relocation_polled = true;
+        for _ in 0..3 {
+            service.poll_relocation();
+        }
+        assert!(!service.relocation_busy);
+        assert!(service.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_success_remains_success_when_tern_is_pending_then_counts_fresh_windows() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let context = service.context.clone().unwrap();
+        let mut record = standalone_observation(InstallStatus::Applied);
+        record.result.installed = true;
+        record.result.applied = true;
+        let id = record.operation_id.clone();
+        service.standalone_operation = Some(record.clone());
+        service.relocation_tern_observed(
+            context.clone(),
+            id.clone(),
+            Ok(RelocationTernObservation {
+                captured: true,
+                windows: 0,
+                pending: true,
+                detail: Some("consumer disconnected".into()),
+            }),
+        );
+        assert_eq!(service.standalone_operation.as_ref(), Some(&record));
+        assert!(service.problem.is_none());
+        let pending = service.model(UiLocale::Ko);
+        assert!(pending
+            .relocation_detail
+            .contains(text(UiLocale::Ko, Message::RelocationComplete)));
+        assert!(pending
+            .relocation_detail
+            .contains(text(UiLocale::Ko, Message::RelocationTernPending)));
+        service.relocation_tern_observed(
+            context.clone(),
+            id.clone(),
+            Ok(RelocationTernObservation {
+                captured: true,
+                windows: 2,
+                pending: false,
+                detail: None,
+            }),
+        );
+        let confirmed = service.model(UiLocale::Ko);
+        assert!(confirmed
+            .relocation_detail
+            .contains(&text(UiLocale::Ko, Message::RelocationTernWindows).replace("{}", "2")));
+        assert!(!confirmed
+            .relocation_detail
+            .contains(text(UiLocale::Ko, Message::RelocationTernPending)));
+        assert_eq!(service.standalone_operation.as_ref(), Some(&record));
+        let mut stale = context;
+        stale.instance_id.push_str("-stale");
+        service.relocation_tern_observed(
+            stale,
+            id,
+            Ok(RelocationTernObservation {
+                captured: true,
+                windows: 99,
+                pending: false,
+                detail: None,
+            }),
+        );
+        assert_eq!(service.relocation_tern.as_ref().unwrap().1.windows, 2);
+    }
+
+    #[test]
+    fn waiting_and_eligible_events_never_launch_a_helper_from_event_delivery() {
+        let mut service = admitted_card_service(UpdatePolicy::StableOnly);
+        let context = service.context.clone().unwrap();
+        service.relocation_admission(context.clone(), Ok(RelocationAdmission::Waiting));
+        assert!(service.relocation_waiting);
+        assert!(!service.relocation_busy);
+        assert!(service.relocation_parent.is_none());
+        assert!(service.receiver.try_recv().is_err());
+        let parent = SettledRelocationParent {
+            version: 1,
+            operation_id: "a".repeat(32),
+            plan_sha256: "b".repeat(64),
+            generation: 0,
+            candidate_image: context.running.clone(),
+            source_closure_sha256: "c".repeat(64),
+            profile: desktop_pet_update_coordinator::native_runtime::ProfilePaths {
+                config_dir: context.config_dir.clone(),
+                state_dir: context.state_dir.clone(),
+            },
+            result_sha256: "d".repeat(64),
+        };
+        service.relocation_admission(context, Ok(RelocationAdmission::Eligible(parent.clone())));
+        assert_eq!(service.relocation_parent, Some(parent));
+        assert!(!service.relocation_busy);
+        assert!(!service.relocation_auto_attempted);
+        assert!(service.receiver.try_recv().is_err());
     }
 }

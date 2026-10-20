@@ -280,6 +280,16 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
         updater_generation,
         updater_token.as_deref(),
     )?;
+    if let (Some(generation), Some(token)) = (updater_generation, updater_token.as_deref()) {
+        // Provenance failure must never prevent the old helper observing ready.
+        if let Err(error) =
+            desktop_pet_update_coordinator::standalone_relocation::capture_relocation_parent(
+                &context, generation, token,
+            )
+        {
+            eprintln!("private relocation parent capture: {error}");
+        }
+    }
     config.composition.configure_profile(profile.clone())?;
     prefs.refresh_owner_snapshot(&config.paths.config_dir)?;
     if migration.is_none() {

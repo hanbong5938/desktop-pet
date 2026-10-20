@@ -27,15 +27,18 @@ pub use approval::{
 #[path = "migration_integrations.rs"]
 mod integrations;
 pub use integrations::{
-    committed_route, integration_handover, observe_for_context, refresh_committed_integrations,
-    verify_standalone_settlement, MigrationIntegrationStatus, TernDelivery,
+    committed_route, integration_handover, observe_for_context, observe_relocation_tern,
+    observe_relocation_tern_windows, refresh_committed_integrations, verify_standalone_settlement,
+    MigrationIntegrationStatus, TernDelivery,
 };
 #[path = "migration_ancestry.rs"]
 mod ancestry;
 pub use ancestry::LegacySourceAncestor;
 #[path = "migration_tern_config.rs"]
 mod tern_config;
-pub use tern_config::{TernConfiguration, TernConnection};
+pub use tern_config::{
+    capture_relocation_tern, verify_relocation_tern_unchanged, TernConfiguration, TernConnection,
+};
 
 const MAX_PLAN: u64 = 256 * 1024;
 const MAX_FRAME: usize = 16 * 1024;

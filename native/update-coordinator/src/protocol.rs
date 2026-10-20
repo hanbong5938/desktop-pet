@@ -121,6 +121,77 @@ pub fn lock_operation(state_dir: &Path, op: &str) -> Result<OperationLease, Stri
     )?;
     Ok(OperationLease { _file: file })
 }
+/// Nonblocking lease discovery: unsafe files and I/O failures are not "busy".
+pub fn try_lock_operation(state_dir: &Path, op: &str) -> Result<Option<OperationLease>, String> {
+    validate_operation_id(op)?;
+    let global = global_updates()?;
+    let _gates = lock_gates(&global)?;
+    reject_old_evidence(&global, None, None, Some(state_dir), false)?;
+    Ok(try_lock_with_mode(
+        &private_updates(state_dir)?.join(format!("{op}.operation.lock")),
+        libc::LOCK_EX | libc::LOCK_NB,
+    )?
+    .map(|file| OperationLease { _file: file }))
+}
+
+#[cfg(test)]
+pub(crate) mod test_scope {
+    use super::*;
+    pub(crate) fn reserve_install_at(
+        global: &Path,
+        source: &InstallOrigin,
+        target: Option<&InstallOrigin>,
+        state: &Path,
+        id: &str,
+    ) -> Result<InstallationReservation, String> {
+        super::reserve_install_at(global, source, target, state, id)
+    }
+    pub(crate) fn start_allowed_at(
+        global: &Path,
+        origin: &InstallOrigin,
+        state: &Path,
+        generation: Option<u64>,
+        token: Option<&str>,
+    ) -> Result<(), String> {
+        super::start_allowed_at(global, origin, state, generation, token)
+    }
+    pub(crate) fn reservation_snapshot_at(
+        global: &Path,
+        source: &InstallOrigin,
+        target: Option<&InstallOrigin>,
+        state: &Path,
+        id: &str,
+    ) -> Result<Option<ReservationSnapshot>, String> {
+        super::reservation_snapshot_at(global, source, target, state, id)
+    }
+    pub(crate) fn reservation_exists_at(
+        global: &Path,
+        source: &InstallOrigin,
+        target: Option<&InstallOrigin>,
+        state: &Path,
+        id: &str,
+    ) -> Result<bool, String> {
+        super::reservation_exists_at(global, source, target, state, id)
+    }
+    pub(crate) fn stop_generation_at(global: &Path, state: &Path) -> Result<u64, String> {
+        let _gates = lock_gates(global)?;
+        generation(state)
+    }
+    pub(crate) fn lock_operation_at(
+        global: &Path,
+        state: &Path,
+        id: &str,
+    ) -> Result<Option<OperationLease>, String> {
+        validate_operation_id(id)?;
+        let _gates = lock_gates(global)?;
+        reject_old_evidence(global, None, None, Some(state), false)?;
+        Ok(try_lock_with_mode(
+            &private_updates(state)?.join(format!("{id}.operation.lock")),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?
+        .map(|file| OperationLease { _file: file }))
+    }
+}
 pub fn private_updates(state_dir: &Path) -> Result<PathBuf, String> {
     check_dir(state_dir, false)?;
     let updates = state_dir.join(UPDATES_DIR);
@@ -218,6 +289,65 @@ pub fn write_private_new(path: &Path, data: &[u8], mode: u32) -> Result<(), Stri
         let _ = fs::remove_file(path);
     }
     result
+}
+
+/// Publish complete immutable evidence without ever exposing a partial final file.
+/// An error after the exclusive rename leaves the final evidence in place: callers
+/// must classify and sync it before acting, not infer absence from this return value.
+pub fn write_private_atomic_new(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
+    ensure_absolute(path)?;
+    if data.len() > 1024 * 1024 || mode != 0o600 {
+        return Err("invalid atomic evidence size/mode".into());
+    }
+    let parent = path.parent().ok_or("missing parent")?;
+    check_dir(parent, false)?;
+    let temporary = parent.join(format!(".publish-{}", new_token()?));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        file.write_all(data)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        publish_exclusive(&temporary, path)?;
+        sync_parent(path)
+    })();
+    // Only the unpublished temporary name may be cleaned up. In particular,
+    // parent fsync failure must never erase an already-published commit receipt.
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn publish_exclusive(source: &Path, target: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn renamex_np(
+            from: *const libc::c_char,
+            to: *const libc::c_char,
+            flags: libc::c_uint,
+        ) -> libc::c_int;
+    }
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| "invalid publication path")?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| "invalid publication path")?;
+    if unsafe { renamex_np(source.as_ptr(), target.as_ptr(), 4) } != 0 {
+        return Err(format!(
+            "exclusive evidence publication: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn publish_exclusive(_: &Path, _: &Path) -> Result<(), String> {
+    Err("atomic native evidence publication requires macOS".into())
 }
 pub fn write_operation(state_dir: &Path, record: &OperationRecord) -> Result<PathBuf, String> {
     validate_operation_id(&record.operation_id)?;
@@ -2429,6 +2559,10 @@ fn lock(path: &Path) -> Result<FileLock, String> {
     lock_with_mode(path, libc::LOCK_EX)
 }
 fn lock_with_mode(path: &Path, mode: libc::c_int) -> Result<FileLock, String> {
+    try_lock_with_mode(path, mode)?
+        .ok_or_else(|| "installation busy: operation lease is held".into())
+}
+fn try_lock_with_mode(path: &Path, mode: libc::c_int) -> Result<Option<FileLock>, String> {
     check_dir(path.parent().ok_or("lock without parent")?, false)?;
     let file = OpenOptions::new()
         .read(true)
@@ -2447,15 +2581,16 @@ fn lock_with_mode(path: &Path, mode: libc::c_int) -> Result<FileLock, String> {
         return Err("unsafe update lock".into());
     }
     if unsafe { libc::flock(file.as_raw_fd(), mode) } != 0 {
-        return Err(format!(
-            "installation busy: {}",
-            std::io::Error::last_os_error()
-        ));
+        let error = std::io::Error::last_os_error();
+        if mode & libc::LOCK_NB != 0 && error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        return Err(format!("installation lock failed: {error}"));
     }
-    Ok(FileLock {
+    Ok(Some(FileLock {
         file,
         owner_pid: unsafe { libc::getpid() },
-    })
+    }))
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3411,6 +3546,11 @@ fn bootstrap_start_fence(data: &Reservation) -> Result<(), String> {
         return Ok(());
     }
     let plan = crate::standalone_install::read_plan(&data.state_dir, &data.operation_id)?;
+    if plan.version != 2 || crate::identity::LEGACY {
+        return Err(
+            "historical standalone approval has no startup authority in this helper".into(),
+        );
+    }
     if plan.running().is_none() {
         return Err("stopped standalone approval does not authorize startup".into());
     }
@@ -3422,7 +3562,7 @@ fn bootstrap_start_fence(data: &Reservation) -> Result<(), String> {
         .checked_add(1)
         .ok_or("stop generation overflow")?;
     if data.source != *plan.origin()
-        || data.target.is_some()
+        || data.target.as_ref() != plan.reservation_target()
         || data.control_token != plan.control_token
         || data.stop_generation != next
     {
@@ -3462,22 +3602,138 @@ pub fn recover_bootstrap_release(
     })
 }
 
+/// Reattach only to release an unadvanced admission. This handle deliberately
+/// exposes no token/start methods and cannot turn partial publication into Stop authority.
+pub fn recover_unstarted_installation(
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+    state: &Path,
+    id: &str,
+    expected_generation: u64,
+) -> Result<BootstrapReleaseReservation, String> {
+    recover_unstarted_installation_at(
+        &global_updates()?,
+        source,
+        target,
+        state,
+        id,
+        expected_generation,
+    )
+}
+fn recover_unstarted_installation_at(
+    global: &Path,
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+    state: &Path,
+    id: &str,
+    expected_generation: u64,
+) -> Result<BootstrapReleaseReservation, String> {
+    validate_operation_id(id)?;
+    if !missing_file(&crate::standalone_install::plan_path(state, id)?) {
+        let plan = crate::standalone_install::read_plan(state, id)?;
+        if plan.origin() != source
+            || plan.reservation_target() != target
+            || plan.original_stop_generation != expected_generation
+            || crate::standalone_install::read_stop_ack(&plan)?.is_some()
+        {
+            return Err("unstarted approval scope differs".into());
+        }
+        if let Some(record) = crate::standalone_install::read_record(state, id)? {
+            if !matches!(
+                record.phase,
+                crate::standalone_install::StandaloneInstallPhase::Approved
+                    | crate::standalone_install::StandaloneInstallPhase::Failed
+            ) {
+                return Err("Stop may already have been requested".into());
+            }
+        }
+    }
+    for path in [
+        crate::standalone_install::stop_ack_path(state, id)?,
+        crate::standalone_install::replacement_path(state, id)?,
+        crate::standalone_install::relocation_commit_path(state, id)?,
+    ] {
+        if !missing_file(&path) {
+            return Err("unstarted release contains mutation evidence".into());
+        }
+    }
+    let keys = installation_keys(source, target)?;
+    let _gates = lock_gates(global)?;
+    reject_migration_for_origins(global, source, target, state)?;
+    reject_old_evidence(global, Some(source), target, Some(state), false)?;
+    let locks = lock_scope(global, source, target, &keys)?;
+    let profile_lock = lock_with_mode(
+        &private_updates(state)?.join("profile.lock"),
+        libc::LOCK_EX | libc::LOCK_NB,
+    )?;
+    for origin in std::iter::once(source).chain(target) {
+        reject_legacy_marker(global, origin)?;
+    }
+    let entries = scopes(global)?;
+    let data = scope_for(&entries, id, state)?;
+    if data.source != *source
+        || data.target.as_ref() != target
+        || data.keys != keys
+        || data.stop_generation != expected_generation
+        || generation(state)? != expected_generation
+        || data.startup_origin.is_some()
+        || data.startup_token.is_some()
+    {
+        return Err("unstarted release generation, scope or startup authority differs".into());
+    }
+    for path in std::iter::once(profile_marker(state)?)
+        .chain(keys.iter().map(|key| marker_path(global, key)))
+    {
+        if let Some(marker) = marker_at(&path)? {
+            if marker != *data {
+                return Err("unstarted marker differs from exact unadvanced scope".into());
+            }
+        }
+    }
+    write_markers(global, data)?;
+    Ok(BootstrapReleaseReservation {
+        reservation: InstallationReservation {
+            _locks: locks,
+            _profile_lock: profile_lock,
+            source: source.clone(),
+            target: target.cloned(),
+            operation_id: id.into(),
+            state_dir: state.into(),
+            global_dir: global.into(),
+            control_token: data.control_token.clone(),
+            stop_generation: expected_generation,
+        },
+    })
+}
+
 fn recover_bootstrap_scope_at(
     global: &Path,
     plan: &crate::standalone_install::StandaloneInstallPlan,
     release_only: bool,
 ) -> Result<InstallationReservation, String> {
     plan.validate()?;
+    if plan.version != 2 || crate::identity::LEGACY {
+        return Err("historical standalone approval requires its recorded matching helper".into());
+    }
     let state = &plan.profile.state_dir;
     if crate::standalone_install::read_plan(state, &plan.operation_id)? != *plan {
         return Err("bootstrap recovery approval differs from durable approval".into());
     }
     let _gates = lock_gates(global)?;
-    reject_migration_for_origins(global, plan.origin(), None, state)?;
-    reject_old_evidence(global, Some(plan.origin()), None, Some(state), false)?;
+    reject_migration_for_origins(global, plan.origin(), plan.reservation_target(), state)?;
+    reject_old_evidence(
+        global,
+        Some(plan.origin()),
+        plan.reservation_target(),
+        Some(state),
+        false,
+    )?;
     reject_legacy_marker(global, plan.origin())?;
-    let keys = installation_keys(plan.origin(), None)?;
-    let locks = lock_scope(global, plan.origin(), None, &keys)?;
+    if let Some(target) = plan.reservation_target() {
+        reject_legacy_marker(global, target)?;
+    }
+    let keys = installation_keys(plan.origin(), plan.reservation_target())?;
+    let locks = lock_scope(global, plan.origin(), plan.reservation_target(), &keys)?;
     let profile_lock = lock_with_mode(
         &private_updates(state)?.join("profile.lock"),
         libc::LOCK_EX | libc::LOCK_NB,
@@ -3485,7 +3741,7 @@ fn recover_bootstrap_scope_at(
     let entries = scopes(global)?;
     let data = scope_for(&entries, &plan.operation_id, state)?;
     if data.source != *plan.origin()
-        || data.target.is_some()
+        || data.target.as_ref() != plan.reservation_target()
         || data.keys != keys
         || data.control_token != plan.control_token
     {
@@ -3559,7 +3815,7 @@ fn recover_bootstrap_scope_at(
         _locks: locks,
         _profile_lock: profile_lock,
         source: data.source.clone(),
-        target: None,
+        target: data.target.clone(),
         operation_id: data.operation_id.clone(),
         state_dir: state.clone(),
         global_dir: global.into(),
@@ -3583,6 +3839,11 @@ impl InstallationReservation {
     ) -> Result<(), String> {
         let _gates = lock_gates(&self.global_dir)?;
         let plan = crate::standalone_install::read_plan(&self.state_dir, &self.operation_id)?;
+        if plan.version != 2 || crate::identity::LEGACY {
+            return Err(
+                "historical standalone approval has no Stop authority in this helper".into(),
+            );
+        }
         ack.validate(&plan)?;
         let next = plan
             .original_stop_generation
@@ -3591,7 +3852,7 @@ impl InstallationReservation {
         let mut entries = scopes(&self.global_dir)?;
         let data = self.checked_scope(&entries)?;
         if data.source != *plan.origin()
-            || data.target.is_some()
+            || data.target.as_ref() != plan.reservation_target()
             || data.control_token != plan.control_token
             || data.stop_generation != plan.original_stop_generation
             || data.startup_origin.is_some()
@@ -3752,6 +4013,51 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn immutable_publication_supports_full_length_evidence_basename() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join(format!("{}.json", "a".repeat(250)));
+        write_private_atomic_new(&path, b"complete evidence", 0o600).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"complete evidence");
+        assert!(write_private_atomic_new(&path, b"foreign evidence", 0o600).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"complete evidence");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn immutable_publication_preserves_winner_and_rejects_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("commit.json");
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| write_private_atomic_new(&path, b"first", 0o600));
+            let second = scope.spawn(|| write_private_atomic_new(&path, b"second", 0o600));
+            let first = first.join().unwrap();
+            let second = second.join().unwrap();
+            assert_ne!(first.is_ok(), second.is_ok());
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                if first.is_ok() {
+                    b"first".as_slice()
+                } else {
+                    b"second".as_slice()
+                }
+            );
+        });
+        let untouched = directory.path().join("foreign");
+        fs::write(&untouched, b"foreign evidence").unwrap();
+        let link = directory.path().join("linked-commit.json");
+        symlink(&untouched, &link).unwrap();
+        assert!(write_private_atomic_new(&link, b"replacement", 0o600).is_err());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(untouched).unwrap(), b"foreign evidence");
+    }
+
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, InstallOrigin) {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join(crate::identity::GLOBAL_UPDATES_DIRECTORY);
@@ -3766,6 +4072,31 @@ mod tests {
         (dir, global, state, origin)
     }
 
+    #[test]
+    fn operation_lease_observation_distinguishes_busy_from_unsafe_evidence() {
+        let (_directory, global, state, _) = fixture();
+        let id = "9".repeat(32);
+        let lease = test_scope::lock_operation_at(&global, &state, &id)
+            .unwrap()
+            .unwrap();
+        assert!(test_scope::lock_operation_at(&global, &state, &id)
+            .unwrap()
+            .is_none());
+        drop(lease);
+        assert!(test_scope::lock_operation_at(&global, &state, &id)
+            .unwrap()
+            .is_some());
+        let path = private_updates(&state)
+            .unwrap()
+            .join(format!("{id}.operation.lock"));
+        fs::remove_file(&path).unwrap();
+        let foreign = state.join("foreign");
+        write_private_new(&foreign, b"unchanged", 0o600).unwrap();
+        std::os::unix::fs::symlink(&foreign, &path).unwrap();
+        assert!(test_scope::lock_operation_at(&global, &state, &id).is_err());
+        assert_eq!(fs::read(&foreign).unwrap(), b"unchanged");
+    }
+
     #[cfg(not(desktop_pet_legacy))]
     fn bootstrap_fixture(
         running: bool,
@@ -3778,10 +4109,12 @@ mod tests {
         use crate::standalone_install::*;
         let (dir, global, state, _) = fixture();
         let origin = InstallOrigin::Standalone {
-            bundle: dir.path().join("DesktopPet.app"),
+            bundle: crate::installation::standalone_bundle().unwrap(),
         };
         let image = crate::ExecutableIdentity {
-            path: dir.path().join("DesktopPet.app/Contents/MacOS/desktop-pet"),
+            path: crate::physical_install_root(&origin)
+                .unwrap()
+                .join("Contents/MacOS/desktop-pet"),
             sha256: "a".repeat(64),
         };
         let id = "0123456789abcdef0123456789abcdef";
@@ -3819,7 +4152,8 @@ mod tests {
         };
         let candidate_bundle = dir.path().join("operation/stage/DesktopPet.app");
         let plan = StandaloneInstallPlan {
-            version: 1,
+            version: 2,
+            purpose: StandaloneInstallPurpose::Upgrade,
             operation_id: id.into(),
             original: crate::installation::InstallationRecord {
                 version: 1,
@@ -3898,6 +4232,271 @@ mod tests {
             original_stop_generation: plan.original_stop_generation,
             control_token: plan.control_token.clone(),
         }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn unstarted_release_recovers_index_only_and_partial_markers_without_plan() {
+        use crate::standalone_install::*;
+        for partial in [false, true] {
+            let (_dir, global, plan, reservation) = bootstrap_fixture(true);
+            let state = &plan.profile.state_dir;
+            fs::remove_file(plan_path(state, &plan.operation_id).unwrap()).unwrap();
+            fs::remove_file(record_path(state, &plan.operation_id).unwrap()).unwrap();
+            let keys = installation_keys(plan.origin(), plan.reservation_target()).unwrap();
+            fs::remove_file(profile_marker(state).unwrap()).unwrap();
+            if !partial {
+                for key in &keys {
+                    fs::remove_file(marker_path(&global, key)).unwrap();
+                }
+            }
+            drop(reservation);
+            recover_unstarted_installation_at(
+                &global,
+                plan.origin(),
+                plan.reservation_target(),
+                state,
+                &plan.operation_id,
+                plan.original_stop_generation,
+            )
+            .unwrap()
+            .release()
+            .unwrap();
+            assert!(!reservation_exists_at(
+                &global,
+                plan.origin(),
+                plan.reservation_target(),
+                state,
+                &plan.operation_id
+            )
+            .unwrap());
+            assert_eq!(generation(state).unwrap(), plan.original_stop_generation);
+            assert!(!plan_path(state, &plan.operation_id).unwrap().exists());
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn cancelled_before_release_keeps_live_process_and_durable_winner_unchanged() {
+        use crate::standalone_install::*;
+        let (_directory, global, plan, reservation) = bootstrap_fixture(true);
+        let state = &plan.profile.state_dir;
+        let mut cancelled = bootstrap_record(&plan, StandaloneInstallPhase::Failed);
+        cancelled.result.status = InstallStatus::Cancelled;
+        cancelled.result.restart = InstallRestart::NotRequested;
+        write_record(state, &cancelled).unwrap();
+        let result_path = record_path(state, &plan.operation_id).unwrap();
+        let original_bytes = fs::read(&result_path).unwrap();
+        let mut original = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(original.try_wait().unwrap().is_none());
+        drop(reservation);
+        let release = recover_unstarted_installation_at(
+            &global,
+            plan.origin(),
+            plan.reservation_target(),
+            state,
+            &plan.operation_id,
+            plan.original_stop_generation,
+        )
+        .unwrap();
+        // Durable cancellation is not release proof. The exact scope remains
+        // until cleanup explicitly releases it; cleanup neither waits nor Stops.
+        assert!(reservation_exists_at(
+            &global,
+            plan.origin(),
+            plan.reservation_target(),
+            state,
+            &plan.operation_id
+        )
+        .unwrap());
+        release.release().unwrap();
+        assert!(original.try_wait().unwrap().is_none());
+        assert_eq!(fs::read(&result_path).unwrap(), original_bytes);
+        assert_eq!(
+            read_record(state, &plan.operation_id).unwrap().unwrap(),
+            cancelled
+        );
+        assert_eq!(generation(state).unwrap(), plan.original_stop_generation);
+        assert!(read_stop_ack(&plan).unwrap().is_none());
+        assert!(!reservation_exists_at(
+            &global,
+            plan.origin(),
+            plan.reservation_target(),
+            state,
+            &plan.operation_id
+        )
+        .unwrap());
+        original.kill().unwrap();
+        original.wait().unwrap();
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn unstarted_release_rejects_stop_intent_later_generation_and_startup_authority() {
+        use crate::standalone_install::*;
+        for boundary in 0..3 {
+            let (_dir, global, plan, reservation) = bootstrap_fixture(true);
+            let state = &plan.profile.state_dir;
+            if boundary == 0 {
+                write_record(
+                    state,
+                    &bootstrap_record(&plan, StandaloneInstallPhase::StopIntent),
+                )
+                .unwrap();
+            } else if boundary == 1 {
+                record_user_stop_at(&global, state).unwrap();
+            } else {
+                let mut entries = scopes(&global).unwrap();
+                entries[0].startup_origin = Some(plan.origin().clone());
+                entries[0].startup_token = Some("f".repeat(64));
+                write_scopes(&global, &entries).unwrap();
+                write_markers(&global, &entries[0]).unwrap();
+            }
+            drop(reservation);
+            assert!(recover_unstarted_installation_at(
+                &global,
+                plan.origin(),
+                plan.reservation_target(),
+                state,
+                &plan.operation_id,
+                plan.original_stop_generation
+            )
+            .is_err());
+            assert!(reservation_exists_at(
+                &global,
+                plan.origin(),
+                plan.reservation_target(),
+                state,
+                &plan.operation_id
+            )
+            .unwrap());
+        }
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn historical_bootstrap_is_observable_but_cannot_stop_start_or_recover_with_new_helper() {
+        use crate::standalone_install::*;
+        let (_dir, global, mut plan, mut reservation) = bootstrap_fixture(true);
+        plan.version = 1;
+        let state = &plan.profile.state_dir;
+        write_private_bytes(
+            &plan_path(state, &plan.operation_id).unwrap(),
+            &serde_json::to_vec(&plan).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let record = bootstrap_record(&plan, StandaloneInstallPhase::StopIntent);
+        write_private_bytes(
+            &record_path(state, &plan.operation_id).unwrap(),
+            &serde_json::to_vec(&record).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        assert_eq!(read_plan(state, &plan.operation_id).unwrap(), plan);
+        assert!(matches!(
+            observe_operation(state, &plan.operation_id).unwrap(),
+            Some(OperationObservation::StandaloneInstall(_))
+        ));
+        record_user_stop_at(&global, state).unwrap();
+        let ack = bootstrap_ack(&plan);
+        assert!(reservation.acknowledge_bootstrap_stop_record(&ack).is_err());
+        assert!(read_stop_ack(&plan).unwrap().is_none());
+        // Even a historical helper's genuine completed ACK/index is not fresh
+        // execution authority for the new helper.
+        write_private_new(
+            &stop_ack_path(state, &plan.operation_id).unwrap(),
+            &serde_json::to_vec(&ack).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let mut entries = scopes(&global).unwrap();
+        entries[0].stop_generation = 1;
+        write_scopes(&global, &entries).unwrap();
+        write_markers(&global, &entries[0]).unwrap();
+        assert!(bootstrap_start_fence(&entries[0]).is_err());
+        assert_eq!(read_stop_ack(&plan).unwrap(), Some(ack));
+        drop(reservation);
+        assert!(recover_bootstrap_reservation_at(&global, &plan).is_err());
+        assert!(recover_bootstrap_scope_at(&global, &plan, true).is_err());
+        assert_eq!(
+            read_record(state, &plan.operation_id).unwrap(),
+            Some(record)
+        );
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn relocation_reserves_both_roots_and_recovers_target_without_rebinding_source_ack() {
+        use crate::standalone_install::*;
+        let (_dir, global, state, _) = fixture();
+        let profile = crate::native_runtime::ProfilePaths {
+            config_dir: state.clone(),
+            state_dir: state.clone(),
+        };
+        let mut plan = crate::standalone_install::tests::relocation_plan(profile);
+        let mut reservation = reserve_install_at(
+            &global,
+            plan.origin(),
+            plan.reservation_target(),
+            &state,
+            &plan.operation_id,
+        )
+        .unwrap();
+        plan.original_stop_generation = reservation.stop_generation;
+        plan.control_token = reservation.control_token().into();
+        if let StandaloneInstallPurpose::PrivateRelocation { parent, .. } = &mut plan.purpose {
+            parent.generation = plan.original_stop_generation;
+        }
+        plan.validate().unwrap();
+        // Fixture publication intentionally bypasses fresh signed-app execution
+        // admission. This test exercises protocol scope and ACK boundaries only.
+        write_private_new(
+            &plan_path(&state, &plan.operation_id).unwrap(),
+            &serde_json::to_vec(&plan).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        write_record(
+            &state,
+            &bootstrap_record(&plan, StandaloneInstallPhase::StopIntent),
+        )
+        .unwrap();
+        assert_eq!(scopes(&global).unwrap()[0].keys.len(), 2);
+        assert!(reservation
+            .authorize_start_for(plan.installed_origin())
+            .is_err());
+        record_user_stop_at(&global, &state).unwrap();
+        let mut wrong = bootstrap_ack(&plan);
+        wrong.origin = plan.installed_origin().clone();
+        assert!(reservation
+            .acknowledge_bootstrap_stop_record(&wrong)
+            .is_err());
+        reservation
+            .acknowledge_bootstrap_stop_record(&bootstrap_ack(&plan))
+            .unwrap();
+        assert_eq!(
+            read_stop_ack(&plan).unwrap().unwrap().origin,
+            *plan.origin()
+        );
+        drop(reservation);
+        let recovered = recover_bootstrap_reservation_at(&global, &plan).unwrap();
+        assert_eq!(recovered.target.as_ref(), plan.reservation_target());
+        let token = recovered
+            .authorize_start_for(plan.installed_origin())
+            .unwrap();
+        start_allowed_at(
+            &global,
+            plan.installed_origin(),
+            &state,
+            Some(1),
+            Some(&token),
+        )
+        .unwrap();
+        assert!(start_allowed_at(&global, plan.origin(), &state, Some(1), Some(&token),).is_err());
     }
 
     #[cfg(not(desktop_pet_legacy))]

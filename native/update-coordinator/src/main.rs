@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install/install-coordinated --request ABS | install-status/install-recover --state-dir ABS --operation-id ID | migrate-legacy --plan ABS [--resume-retirement] | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
+    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install/install-coordinated/install-relocate/install-relocate-manual --request ABS | install-status/install-recover --state-dir ABS --operation-id ID | migrate-legacy --plan ABS [--resume-retirement] | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
     if command == "update-capabilities" || command == "distribution-identity" {
         if args.next().is_some() {
             return Err("identity commands accept no arguments".into());
@@ -25,7 +25,14 @@ fn run() -> Result<(), String> {
     }
     if matches!(
         command.to_str(),
-        Some("install-coordinated" | "install-status" | "install-recover" | "install-run")
+        Some(
+            "install-coordinated"
+                | "install-relocate"
+                | "install-relocate-manual"
+                | "install-status"
+                | "install-recover"
+                | "install-run"
+        )
     ) {
         let code = install_runner::dispatch(
             command.to_str().ok_or("invalid install command")?,

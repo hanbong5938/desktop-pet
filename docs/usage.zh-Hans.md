@@ -70,17 +70,17 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
-**当前 beta.11 所有者策略：**全新 Standalone 安装使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 影响。完全验证的原有 OS-home `Applications/DesktopPet.app` **原位升级**，不迁移。禁止新增 Applications 安装或接管任意 home/custom/system 路径及 symlink 绕过。Brew/source 保留所有者，旧安装器与冻结记录保留历史范围。
+**当前稳定版候选所有者策略：**全新 Standalone 与普通更新使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 影响。原有 `Applications/DesktopPet.app` 仅用于旧 helper 完成确认、单独批准的迁移及恢复，不再永久支持原位更新。禁止接管任意 home/custom/system 路径或 symlink。Brew/source 所有者及历史冻结说明不变。
 
-### 现有 Applications 所有者：明确 beta.11 bootstrap
+### 现有 Applications 所有者：beta.7 应用内更新后单独迁移
 
-Beta.10 **没有修复**现有 Applications 所有者问题。已发布 beta.7 checker 无法自行修改代码，必须明确执行一次 beta.11 安装器 bootstrap。beta.11 实际发布后，请按 [beta.11 发行说明](releases/v0.4.13-beta.11.md#explicit-bootstrap-from-beta7-or-another-old-version)下载、验证 checksum，再明确执行 Bash 命令。不要重跑旧安装器。已撤回 Python 恢复脚本仍保持撤回。
+候选路径从真正 beta.7 应用的**更新按钮**开始，不需要安装器或终端 bootstrap。未修改的旧 helper 选择真正稳定版 `0.4.13`，在原 Applications 完成 readiness、Completed、helper 退出及释放预约后，才另行显示 native 批准窗口，将**相同签名版本**移至专用位置。请查看[验证范围与限制](releases/v0.4.13.md)。
 
-保留原执行路径、已保存 Tern SDK KV 的精确 config/state 对、locator、KV bytes、角色和 profile 数据。不要无参数启动、猜测默认值、adopt/合并配置或使用 Configure/Connect。保留签名旧 app 和 transaction backup。
+保留已认证的原 config/state、角色、设置及用户资料。既有 Tern SDK 在 native 事务结算后仅更改保存的 executable，native 不覆盖 KV。不要猜测默认值、合并 profile，或用 Configure/Connect、Tern 重启、plugin reload 隐藏失败。签名原件及事务证据保留在 private retention。
 
-**先保存 Pet 未保存编辑。** 仍需单独明确 native 同意及全部 version/signature/owner/client-contract/reservation/profile 检查。用户 **Stop** 优先并阻止重启。Tern、窗口、terminal、agent 与工作继续运行；不重启 Tern 或 reload 插件。
+**先保存 Pet 未保存编辑。** 首次更新同意不是迁移同意。取消后稳定版继续在 Applications 运行，应用重启也不重复自动窗口；新尝试应使用 Updates 的明确迁移操作。后续用户 **Stop**、不明确 ACK 或 scope 变化禁止自动重启。只重启 Pet，Tern 窗口、终端与工作保持运行。
 
-安装、native readiness 和实际同一 Tern 窗口连续性是不同结果。最终 beta.11 验证与受影响用户验收仍**待完成**，实际观察前不声称 beta.7 升级或恢复成功。失败时保留证据与备份，不覆盖 KV 或用重新连接掩盖失败。
+native 安装／就绪与逐窗口 fresh Tern 确认是不同结果。未连接或不兼容 consumer 表示集成待确认，并非 native 安装失败。disposable macOS GUI 和官方网络验证仍**待完成**，不声称真实用户已恢复或稳定版已公开。
 
 ### 历史固定安装示例
 
@@ -268,7 +268,7 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 应用内更新
 
-**Beta.11 修正：**已验证 private Standalone 与精确原有 OS-home Applications 所有者使用同一明确同意的签名更新 transaction，Applications 原位升级。仍需开启测试版更新并另行 native 同意，稳定版及 Homebrew 限制不变。beta.7 代码不能自行修改，实际发布后须执行上述已验证 beta.11 安装器 bootstrap。路径/config/state/KV 不变，不重启或 reload Tern。最终验证与真实用户成功仍待完成。
+**稳定版候选恢复：**Applications 所有者使用[上述两阶段应用内路径](#现有-applications-所有者beta7-应用内更新后单独迁移)。迁移后普通更新仍在 private 所有者位置。beta opt-in、仅稳定版及 Homebrew 限制不变。源码契约不等于真实恢复成功。
 
 应用内更新不可用时，请保留现有设置和角色。**打开官方安装说明**会打开已验证版本的官方页面，不会只下载没有说明的压缩包或自动执行安装器。请按实际安装方式操作，不要删除配置、重跑旧安装器或猜测默认路径。Tern 控制错误现在显示实际后端诊断，而非 `alpha_passthrough` 模式错误；普通状态／错误响应绝不作为 fresh binding 证据。
 

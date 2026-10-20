@@ -7,13 +7,15 @@ use desktop_pet_update_coordinator::{
     protocol,
     standalone_install::{
         self as journal, InstallRestart, InstallSource, InstallStatus,
-        StandaloneInstallPhase as Phase, StandaloneInstallPlan as Plan,
+        StandaloneInstallPhase as Phase, StandaloneInstallPlan as Plan, StandaloneInstallPurpose,
         StandaloneInstallRecord as Record, StandaloneInstallResult as Outcome,
         StandaloneOriginalInstance,
     },
     ExecutableIdentity, InstallOrigin, VerifiedInstallation,
 };
+use journal::{StandaloneAdmissionPhase as AdmissionPhase, StandaloneAdmissionRecord as Admission};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -35,6 +37,11 @@ struct Launch {
     helper: ExecutableIdentity,
     request: InstallRequest,
     original_evidence: OriginalEvidence,
+    #[serde(default)]
+    purpose: StandaloneInstallPurpose,
+    #[serde(default)]
+    locale: String,
+    source: InstallSource,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -156,7 +163,168 @@ fn read_launch(state: &Path, id: &str) -> Result<Launch, String> {
     {
         return Err("durable install launch scope mismatch".into());
     }
+    match &launch.source {
+        InstallSource::Running { instance, context } => {
+            if instance.image != launch.original.image
+                || context.running != instance.image
+                || context.instance_id != instance.instance_id
+                || context.executable != launch.original.executable
+                || context.config_dir != launch.profile.config_dir
+                || context.state_dir != launch.profile.state_dir
+            {
+                return Err("durable launch source instance/profile differs".into());
+            }
+        }
+        InstallSource::Stopped { profile } if profile != &launch.profile => {
+            return Err("durable stopped launch profile differs".into());
+        }
+        InstallSource::Stopped { .. } => {}
+    }
     Ok(launch)
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+fn missing(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+fn launch_digest(state: &Path, id: &str) -> Result<String, String> {
+    Ok(digest(&coordinator::owned_private_file(
+        &operation_dir(state, id)?.join("launch.json"),
+        196608,
+    )?))
+}
+fn prepare_admission(state: &Path, id: &str) -> Result<(), String> {
+    journal::write_admission(
+        state,
+        &Admission {
+            version: 1,
+            operation_id: id.into(),
+            launch_sha256: launch_digest(state, id)?,
+            original_stop_generation: protocol::stop_generation(state)?,
+            phase: AdmissionPhase::Prepared,
+            result: None,
+        },
+    )
+}
+fn admission_for_launch(state: &Path, id: &str) -> Result<Admission, String> {
+    let admission = journal::read_admission(state, id)?.ok_or("install admission is missing")?;
+    if admission.launch_sha256 != launch_digest(state, id)? {
+        return Err("install launch differs from durable admission".into());
+    }
+    Ok(admission)
+}
+fn settle_admission(plan: &Plan, result: &Outcome) -> Result<(), String> {
+    settle_launch(
+        &plan.profile.state_dir,
+        &plan.operation_id,
+        plan.origin(),
+        plan.reservation_target(),
+        result,
+    )
+}
+fn settle_launch(
+    state: &Path,
+    id: &str,
+    source: &InstallOrigin,
+    target: Option<&InstallOrigin>,
+    result: &Outcome,
+) -> Result<(), String> {
+    if !result.terminal() || protocol::reservation_exists(source, target, state, id)? {
+        return Err(
+            "admission cannot settle before durable terminal outcome and reservation release"
+                .into(),
+        );
+    }
+    let durable = if !missing(&journal::plan_path(state, id)?) {
+        journal::read_record(state, id)?
+            .ok_or("terminal result has not been published")?
+            .result
+    } else {
+        serde_json::from_slice::<Outcome>(&coordinator::owned_private_file(
+            &operation_dir(state, id)?.join("interrupted-result.json"),
+            32768,
+        )?)
+        .map_err(|e| format!("invalid interrupted admission result: {e}"))?
+    };
+    if durable != *result {
+        return Err("settlement differs from durable terminal result".into());
+    }
+    let mut admission = admission_for_launch(state, id)?;
+    admission.phase = AdmissionPhase::Settled;
+    admission.result = Some(result.clone());
+    journal::write_admission(state, &admission)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Consent {
+    version: u32,
+    operation_id: String,
+    plan_sha256: String,
+}
+fn plan_digest(plan: &Plan) -> Result<String, String> {
+    let bytes = coordinator::owned_private_file(
+        &journal::plan_path(&plan.profile.state_dir, &plan.operation_id)?,
+        65536,
+    )?;
+    let durable: Plan = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid immutable consent plan: {e}"))?;
+    if durable != *plan {
+        return Err("visible approval differs from durable plan bytes".into());
+    }
+    Ok(digest(&bytes))
+}
+fn verify_consent(plan: &Plan) -> Result<(), String> {
+    if plan.purpose.is_upgrade() {
+        return Ok(());
+    }
+    let consent: Consent = serde_json::from_slice(&coordinator::owned_private_file(
+        &journal::consent_path(&plan.profile.state_dir, &plan.operation_id)?,
+        16384,
+    )?)
+    .map_err(|e| format!("invalid relocation consent: {e}"))?;
+    if consent.version != 1
+        || consent.operation_id != plan.operation_id
+        || consent.plan_sha256 != plan_digest(plan)?
+    {
+        return Err("relocation consent differs from immutable approval".into());
+    }
+    Ok(())
+}
+fn save_consent(plan: &Plan) -> Result<(), String> {
+    if plan.purpose.is_upgrade() {
+        return Ok(());
+    }
+    protocol::write_private_atomic_new(
+        &journal::consent_path(&plan.profile.state_dir, &plan.operation_id)?,
+        &serde_json::to_vec(&Consent {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            plan_sha256: plan_digest(plan)?,
+        })
+        .map_err(|e| e.to_string())?,
+        0o600,
+    )
+}
+
+fn approved_source(profile: &ProfilePaths, instance: Option<&NativeInstance>) -> InstallSource {
+    match instance {
+        Some(instance) => InstallSource::Running {
+            instance: StandaloneOriginalInstance {
+                pid: instance.incarnation.pid,
+                start_sec: instance.incarnation.start_sec,
+                start_usec: instance.incarnation.start_usec,
+                instance_id: instance.instance_id.clone(),
+                image: instance.image.clone(),
+            },
+            context: instance.context.clone(),
+        },
+        None => InstallSource::Stopped {
+            profile: profile.clone(),
+        },
+    }
 }
 
 fn select_source(
@@ -199,14 +367,12 @@ fn select_source(
         {
             return Err("active profile changed during authenticated capture".into());
         }
-        NativeInstallScope::capture(app, &pair)?.admit(Some(&instance))?;
         return Ok(Some((pair, Some(instance))));
     }
     let (clients, pairs) = native_runtime::compatible_client_profiles(app)?;
     let pair = stopped_profile(clients, &pairs)?;
     if let Some(pair) = &pair {
         pair.validate()?;
-        NativeInstallScope::capture(app, pair)?.admit(None)?;
     }
     Ok(pair.map(|pair| (pair, None)))
 }
@@ -300,7 +466,7 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
     }
     let app =
         installation::validate_staged_app(coordinator::physical_install_root(&original.origin)?)?;
-    let Some((profile, _)) = select_source(&original, &app)? else {
+    let Some((profile, instance)) = select_source(&original, &app)? else {
         return raw(&request, false);
     };
     let id = random_id()?;
@@ -337,6 +503,9 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
             helper: helper.clone(),
             request,
             original_evidence,
+            purpose: StandaloneInstallPurpose::Upgrade,
+            locale: String::new(),
+            source: approved_source(&profile, instance.as_ref()),
         },
     )?;
     File::open(&root)
@@ -345,7 +514,232 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
     File::open(&updates)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
+    prepare_admission(&profile.state_dir, &id)?;
     detached(&profile.state_dir, &id, &helper, false)
+}
+
+pub fn relocate(request_path: &Path) -> Result<Outcome, String> {
+    relocate_request(request_path, false)
+}
+pub fn relocate_manual(request_path: &Path) -> Result<Outcome, String> {
+    relocate_request(request_path, true)
+}
+fn relocate_request(request_path: &Path, manual: bool) -> Result<Outcome, String> {
+    let request: coordinator::standalone_relocation::RelocationRequest =
+        serde_json::from_slice(&coordinator::owned_private_file(request_path, 16384)?)
+            .map_err(|e| format!("invalid private relocation request: {e}"))?;
+    if request.version != 1 || coordinator::identity::LEGACY {
+        return Err("unsupported relocation request".into());
+    }
+    let state = &request.parent.profile.state_dir;
+    request.parent.validate()?;
+    if request.context.state_dir != *state
+        || request.context.config_dir != request.parent.profile.config_dir
+    {
+        return Err("relocation request profile differs from parent".into());
+    }
+    // A separate, deterministic lease serializes attempt preparation only. It
+    // is never used as installation or restart authority.
+    let preparation_id =
+        digest(format!("relocation-admission:{}", request.parent.operation_id).as_bytes());
+    let _preparation = protocol::lock_operation(state, &preparation_id[..32])?;
+    for id in journal::relocation_attempts(state, &request.parent.operation_id)? {
+        let launch = read_launch(state, &id)?;
+        if !matches!(&launch.purpose, StandaloneInstallPurpose::PrivateRelocation { parent, .. } if parent == &request.parent)
+        {
+            return Err("relocation attempt belongs to different parent evidence".into());
+        }
+        let admission = admission_for_launch(state, &id)?;
+        if admission.phase != AdmissionPhase::Settled
+            || protocol::reservation_exists(
+                &launch.original.origin,
+                launch.purpose_target(),
+                state,
+                &id,
+            )?
+        {
+            return detached(state, &id, &launch.helper, manual);
+        }
+    }
+    if let Some(offer) = journal::read_relocation_offer(state, &request.parent.operation_id)? {
+        if offer.parent != request.parent {
+            return Err("relocation offer parent differs".into());
+        }
+        let launch = read_launch(state, &offer.operation_id)?;
+        let admission = admission_for_launch(state, &offer.operation_id)?;
+        if !manual {
+            return detached(state, &offer.operation_id, &launch.helper, false);
+        }
+        if admission.phase != AdmissionPhase::Settled
+            || protocol::reservation_exists(
+                &launch.original.origin,
+                launch.purpose_target(),
+                state,
+                &offer.operation_id,
+            )?
+        {
+            return detached(state, &offer.operation_id, &launch.helper, true);
+        }
+    }
+    coordinator::standalone_relocation::validate_settled_parent(&request.context, &request.parent)?;
+    let original = installation::inspect(&request.context.executable)?;
+    if original.image != request.parent.candidate_image {
+        return Err("relocation source differs from settled parent".into());
+    }
+    installation::preflight_standalone_relocation_source(&original, &request.parent.profile)?;
+    let target = InstallOrigin::Standalone {
+        bundle: installation::standalone_bundle()?,
+    };
+    let tern = coordinator::migration::capture_relocation_tern(&request.context, &target)?;
+    let source =
+        installation::validate_staged_app(coordinator::physical_install_root(&original.origin)?)?;
+    let id = random_id()?;
+    let updates = protocol::private_updates(state)?;
+    let root = operation_dir(state, &id)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(|e| e.to_string())?;
+    let staged =
+        installation::copy_standalone_install_stage(&source, &root.join("DesktopPet.app"))?;
+    let source_helper = coordinator::executable_identity(
+        &staged
+            .bundle
+            .join("Contents/MacOS/desktop-pet-update-coordinator"),
+    )?;
+    coordinator::stage_verified_helper(&source_helper, &root.join("helper"))?;
+    let helper = coordinator::executable_identity(&root.join("helper"))?;
+    let install_request = InstallRequest {
+        version: 1,
+        staged_app: staged.bundle,
+        kind: InstallationKind::Standalone,
+        source_root: None,
+    };
+    persist_new(&root.join("request.json"), &install_request)?;
+    persist_new(&root.join("relocation-request.json"), &request)?;
+    let instance = native_runtime::capture_instance(&original.origin, &request.parent.profile)?;
+    if instance.context != request.context {
+        return Err("relocation request differs from authenticated running context".into());
+    }
+    let launch = Launch {
+        version: 1,
+        operation_id: id.clone(),
+        original_evidence: original_evidence(&original)?,
+        original,
+        profile: request.parent.profile.clone(),
+        helper: helper.clone(),
+        request: install_request,
+        purpose: StandaloneInstallPurpose::PrivateRelocation {
+            target,
+            parent: request.parent.clone(),
+            source_closure_sha256: request.parent.source_closure_sha256.clone(),
+            tern,
+        },
+        locale: request.context.locale.clone(),
+        source: approved_source(&request.parent.profile, Some(&instance)),
+    };
+    persist_new(&root.join("launch.json"), &launch)?;
+    File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    prepare_admission(state, &id)?;
+    File::open(&updates)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    if !manual || journal::read_relocation_offer(state, &request.parent.operation_id)?.is_none() {
+        let winner = claim_relocation_offer(state, &request.parent, &id)?;
+        if winner.operation_id != id {
+            let winner_launch = read_launch(state, &winner.operation_id)?;
+            return detached(state, &winner.operation_id, &winner_launch.helper, false);
+        }
+    }
+    let attempt = journal::RelocationOffer {
+        version: 1,
+        parent: request.parent.clone(),
+        operation_id: id.clone(),
+    };
+    protocol::write_private_atomic_new(
+        &journal::relocation_attempt_path(state, &id)?,
+        &serde_json::to_vec(&attempt).map_err(|e| e.to_string())?,
+        0o600,
+    )?;
+    detached(state, &id, &helper, false)
+}
+
+fn claim_relocation_offer(
+    state: &Path,
+    parent: &coordinator::standalone_relocation::SettledRelocationParent,
+    id: &str,
+) -> Result<journal::RelocationOffer, String> {
+    parent.validate()?;
+    if parent.profile.state_dir != state {
+        return Err("relocation claim profile differs".into());
+    }
+    let path = journal::relocation_offer_path(state, &parent.operation_id)?;
+    if let Some(winner) = journal::read_relocation_offer(state, &parent.operation_id)? {
+        if winner.parent != *parent {
+            return Err("competing relocation offer parent differs".into());
+        }
+        File::open(protocol::private_updates(state)?)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        return Ok(winner);
+    }
+    let prepared = admission_for_launch(state, id)?;
+    if prepared.phase != AdmissionPhase::Prepared {
+        return Err("new relocation offer requires a completely prepared admission".into());
+    }
+    let offer = journal::RelocationOffer {
+        version: 1,
+        parent: parent.clone(),
+        operation_id: id.into(),
+    };
+    let bytes = serde_json::to_vec(&offer).map_err(|e| e.to_string())?;
+    let publication = protocol::write_private_atomic_new(&path, &bytes, 0o600);
+    let winner = journal::read_relocation_offer(state, &parent.operation_id)?.ok_or_else(|| {
+        publication
+            .err()
+            .unwrap_or_else(|| "relocation offer publication disappeared".into())
+    })?;
+    if winner.parent != *parent {
+        return Err("competing relocation offer parent differs".into());
+    }
+    File::open(protocol::private_updates(state)?)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    Ok(winner)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AdmissionDisposition {
+    Settled,
+    ExistingPlan,
+    CleanupLaunch,
+    FirstAdmission,
+}
+fn admission_disposition(
+    admission: &Admission,
+    has_plan: bool,
+    has_reservation: bool,
+    recovery: bool,
+) -> AdmissionDisposition {
+    if admission.phase == AdmissionPhase::Settled {
+        AdmissionDisposition::Settled
+    } else if has_plan {
+        AdmissionDisposition::ExistingPlan
+    } else if has_reservation || admission.phase != AdmissionPhase::Prepared || recovery {
+        AdmissionDisposition::CleanupLaunch
+    } else {
+        AdmissionDisposition::FirstAdmission
+    }
+}
+impl Launch {
+    fn purpose_target(&self) -> Option<&InstallOrigin> {
+        match &self.purpose {
+            StandaloneInstallPurpose::Upgrade => None,
+            StandaloneInstallPurpose::PrivateRelocation { target, .. } => Some(target),
+        }
+    }
 }
 
 fn configure_detached_session(command: &mut Command, ack_fd: i32) {
@@ -371,6 +765,14 @@ fn detached(
         return Err("durable install helper changed".into());
     }
     let root = operation_dir(state, id)?;
+    // Reestablish publication durability on same-ID reentry, including a prior
+    // exclusive rename whose directory sync was interrupted.
+    File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    File::open(protocol::private_updates(state)?)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
     let log = OpenOptions::new()
         .write(true)
         .append(true)
@@ -446,29 +848,48 @@ fn detached(
     }
     loop {
         if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
-            if exit.success() {
-                if let Some(record) = journal::read_record(state, id)? {
-                    if record.result.terminal() {
-                        return Ok(record.result);
+            if missing(&journal::admission_path(state, id)?) {
+                let plan = journal::read_plan(state, id)?;
+                if plan.version == 1 {
+                    let result = inspect(state, id)?;
+                    if result.terminal()
+                        && (exit.success() || exit.code() == Some(result.exit_code()))
+                    {
+                        return Ok(result);
                     }
                 }
             }
-            let plan = journal::read_plan(state, id)?;
-            let mut result = journal::read_record(state, id)?
-                .map(|r| r.result)
-                .unwrap_or_else(|| outcome(id, state, plan.running().is_some()));
+            if let Some(admission) = journal::read_admission(state, id)? {
+                if admission.phase == AdmissionPhase::Settled {
+                    let result = admission.result.ok_or("settled admission omitted result")?;
+                    if exit.code() == Some(result.exit_code()) || exit.code() == Some(75) {
+                        return Ok(result);
+                    }
+                    return Err("helper did not authenticate the settled operation; durable winner evidence was not changed".into());
+                }
+            }
+            if let Ok(result) = inspect(state, id) {
+                if matches!(
+                    result.status,
+                    InstallStatus::Unknown | InstallStatus::InstalledNotApplied
+                ) {
+                    return Ok(result);
+                }
+            }
+            match protocol::try_lock_operation(state, id)? {
+                None => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Some(_lease) => {}
+            }
+            let launch = read_launch(state, id)?;
+            let mut result = outcome(id, state, !launch.purpose.is_upgrade());
             result.status = InstallStatus::Unknown;
-            result.applied = false;
-            if plan.running().is_some() {
-                result.restart = InstallRestart::Unknown;
-            }
-            result.error = Some("install helper exited without a terminal outcome; retain evidence and use install-recover".into());
-            if recover {
-                return Ok(result);
-            }
-            // Child is gone; take its lease before publishing reconciliation.
-            let _lease = protocol::lock_operation(state, id)?;
-            write(&plan, Phase::Unknown, &result)?;
+            result.restart = InstallRestart::Unknown;
+            result.error = Some("install helper exited without verified settlement; retain evidence and use install-recover".into());
+            // This process owns neither the child lease nor its admission. It
+            // may report uncertainty, but must never publish over the winner.
             return Ok(result);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -516,33 +937,197 @@ fn tick(panel: &Panel, reservation: &protocol::InstallationReservation) -> Resul
 }
 
 pub fn run_child(state: &Path, id: &str) -> Result<(), String> {
-    let result = run_child_owned(state, id);
-    if std::env::var_os("DESKTOP_PET_INSTALL_RECOVER").as_deref() == Some(std::ffi::OsStr::new("1"))
-    {
-        // Failed recovery admission cannot rewrite history over a newer operation.
-        return result;
+    // Publication belongs exclusively to the lease-owning state machine. A late
+    // child or failed lease admission must never rewrite the winner's result.
+    run_child_owned(state, id)
+}
+
+fn validate_released_outcome(plan: &Plan, result: &Outcome) -> Result<(), String> {
+    if result.installed {
+        let installed = result
+            .installation
+            .as_ref()
+            .ok_or("installed outcome omitted installation")?;
+        if installed.origin != *plan.installed_origin()
+            || installation::inspect(&installed.executable)? != *installed
+        {
+            return Err("released installed outcome differs from current installation".into());
+        }
+    } else if matches!(
+        result.status,
+        InstallStatus::Cancelled | InstallStatus::Failed
+    ) {
+        unchanged_original(plan)?;
+    } else {
+        return Err("released outcome has no verified settlement".into());
     }
-    if let Err(error) = &result {
-        if let Ok(plan) = journal::read_plan(state, id) {
-            if let Ok(_lease) = protocol::lock_operation(state, id) {
-                let mut observed = journal::read_record(state, id)?
-                    .map(|r| r.result)
-                    .unwrap_or_else(|| outcome(id, state, plan.running().is_some()));
-                observed.applied = false;
-                observed.status = if observed.installed {
-                    InstallStatus::InstalledNotApplied
-                } else {
-                    InstallStatus::Unknown
-                };
-                if plan.running().is_some() {
-                    observed.restart = InstallRestart::Unknown;
-                }
-                observed.error = Some(error.clone());
-                write(&plan, Phase::Unknown, &observed)?;
-            }
+    Ok(())
+}
+
+fn unstarted_evidence_allows_cleanup(
+    phase: Option<Phase>,
+    mutation_evidence: bool,
+    current_generation: u64,
+    original_generation: u64,
+) -> bool {
+    phase.is_none_or(|phase| matches!(phase, Phase::Approved | Phase::Failed))
+        && !mutation_evidence
+        && current_generation == original_generation
+}
+fn interrupted_outcome(result: &mut Outcome) {
+    if !result.terminal() {
+        result.status = InstallStatus::Failed;
+        result.error =
+            Some("Installation confirmation was interrupted; no app was stopped.".into());
+    }
+    result.restart = InstallRestart::NotRequested;
+    result.installed = false;
+    result.applied = false;
+    result.installation = None;
+}
+fn publish_consent_failure(plan: &Plan, result: &mut Outcome, error: String) -> Result<(), String> {
+    if result.terminal() {
+        return Err(error);
+    }
+    result.status = InstallStatus::Unknown;
+    result.applied = false;
+    result.restart = if plan.running().is_some() {
+        InstallRestart::Unknown
+    } else {
+        InstallRestart::NotRequested
+    };
+    result.error = Some(error);
+    write(plan, Phase::Unknown, result)
+}
+
+fn cleanup_unstarted(plan: &Plan) -> Result<bool, String> {
+    let state = &plan.profile.state_dir;
+    let record = journal::read_record(state, &plan.operation_id)?;
+    let mutation_evidence = [
+        journal::stop_ack_path(state, &plan.operation_id)?,
+        journal::replacement_path(state, &plan.operation_id)?,
+        journal::relocation_commit_path(state, &plan.operation_id)?,
+    ]
+    .iter()
+    .any(|path| !missing(path));
+    if !unstarted_evidence_allows_cleanup(
+        record.as_ref().map(|r| r.phase),
+        mutation_evidence,
+        protocol::stop_generation(state)?,
+        plan.original_stop_generation,
+    ) {
+        return Ok(false);
+    }
+    unchanged_original(plan)?;
+    let original =
+        installation::validate_staged_app(coordinator::physical_install_root(plan.origin())?)?;
+    let mut scope = NativeInstallScope::capture(&original, &plan.profile)?;
+    if let Some(target) = plan.reservation_target() {
+        scope.reserve_target_scope(target)?;
+    }
+    if plan.running().is_some() {
+        let live = native_runtime::capture_instance(plan.origin(), &plan.profile)?;
+        if !source_matches(plan, &live) {
+            return Err("unstarted admission source identity changed".into());
+        }
+        scope.admit(Some(&live))?;
+    } else {
+        scope.admit(None)?;
+    }
+    let snapshot = protocol::reservation_snapshot(
+        plan.origin(),
+        plan.reservation_target(),
+        state,
+        &plan.operation_id,
+    )?;
+    if let Some(snapshot) = &snapshot {
+        if snapshot.startup_origin.is_some() {
+            return Ok(false);
         }
     }
-    result
+    let release = if snapshot.is_some() {
+        Some(protocol::recover_unstarted_installation(
+            plan.origin(),
+            plan.reservation_target(),
+            state,
+            &plan.operation_id,
+            plan.original_stop_generation,
+        )?)
+    } else {
+        None
+    };
+    let mut result = record
+        .map(|r| r.result)
+        .unwrap_or_else(|| outcome(&plan.operation_id, state, plan.running().is_some()));
+    interrupted_outcome(&mut result);
+    write(plan, Phase::Failed, &result)?;
+    if let Some(release) = release {
+        release.release()?;
+    }
+    settle_admission(plan, &result)?;
+    Ok(true)
+}
+
+fn cleanup_unstarted_launch(launch: &Launch, admission: &Admission) -> Result<(), String> {
+    let state = &launch.profile.state_dir;
+    let id = &launch.operation_id;
+    if launch.original != installation::inspect(&launch.original.executable)?
+        || original_evidence(&launch.original)? != launch.original_evidence
+        || protocol::stop_generation(state)? != admission.original_stop_generation
+    {
+        return Err("unstarted launch source or generation changed; evidence retained".into());
+    }
+    let app = installation::validate_staged_app(coordinator::physical_install_root(
+        &launch.original.origin,
+    )?)?;
+    let mut scope = NativeInstallScope::capture(&app, &launch.profile)?;
+    if let Some(target) = launch.purpose_target() {
+        scope.reserve_target_scope(target)?;
+    }
+    match &launch.source {
+        InstallSource::Running { .. } => {
+            let instance =
+                native_runtime::capture_instance(&launch.original.origin, &launch.profile)?;
+            if approved_source(&launch.profile, Some(&instance)) != launch.source {
+                return Err("unstarted launch live identity differs".into());
+            }
+            scope.admit(Some(&instance))?;
+        }
+        InstallSource::Stopped { .. } => {
+            if !native_runtime::profile_quiescent(&launch.profile)? {
+                return Err("unstarted stopped profile became active".into());
+            }
+            scope.admit(None)?;
+        }
+    }
+    let mut result = outcome(id, state, false);
+    result.status = InstallStatus::Failed;
+    result.restart = InstallRestart::NotRequested;
+    result.error = Some("Installation confirmation was interrupted; no app was stopped.".into());
+    let result_path = operation_dir(state, id)?.join("interrupted-result.json");
+    let bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
+    if missing(&result_path) {
+        protocol::write_private_atomic_new(&result_path, &bytes, 0o600)?;
+    } else if coordinator::owned_private_file(&result_path, 32768)? != bytes {
+        return Err("pre-plan interruption result differs; evidence retained".into());
+    }
+    if protocol::reservation_exists(&launch.original.origin, launch.purpose_target(), state, id)? {
+        protocol::recover_unstarted_installation(
+            &launch.original.origin,
+            launch.purpose_target(),
+            state,
+            id,
+            admission.original_stop_generation,
+        )?
+        .release()?;
+    }
+    settle_launch(
+        state,
+        id,
+        &launch.original.origin,
+        launch.purpose_target(),
+        &result,
+    )
 }
 fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
     let launch = read_launch(state, id)?;
@@ -550,15 +1135,69 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
     if executing != launch.helper {
         return Err("executing install helper differs from durable ownership".into());
     }
-    let _lease = protocol::lock_operation(state, id)?;
-    if std::env::var_os("DESKTOP_PET_INSTALL_RECOVER").as_deref() == Some(std::ffi::OsStr::new("1"))
-    {
-        let plan = journal::read_plan(state, id)?;
-        if plan.helper_image != executing {
-            return Err("recovery helper differs from approval".into());
+    let _lease = match protocol::try_lock_operation(state, id)? {
+        Some(lease) => lease,
+        None => {
+            ownership_ack();
+            admission_for_launch(state, id)?;
+            return Ok(());
+        }
+    };
+    let mut admission = admission_for_launch(state, id)?;
+    let snapshot = protocol::reservation_snapshot(
+        &launch.original.origin,
+        launch.purpose_target(),
+        state,
+        id,
+    )?;
+    let has_plan = !missing(&journal::plan_path(state, id)?);
+    let existing = if has_plan {
+        journal::read_record(state, id)?
+    } else {
+        None
+    };
+    let recovery = std::env::var_os("DESKTOP_PET_INSTALL_RECOVER").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
+    let disposition = admission_disposition(&admission, has_plan, snapshot.is_some(), recovery);
+    if disposition == AdmissionDisposition::Settled {
+        if snapshot.is_some() {
+            return Err("settled admission retains a reservation".into());
+        }
+        if has_plan {
+            let plan = journal::read_plan(state, id)?;
+            validate_released_outcome(
+                &plan,
+                admission
+                    .result
+                    .as_ref()
+                    .ok_or("settled admission omitted outcome")?,
+            )?;
         }
         ownership_ack();
+        return Ok(());
+    }
+    if disposition == AdmissionDisposition::ExistingPlan {
+        let plan = journal::read_plan(state, id)?;
+        if plan.version != 2 || plan.helper_image != executing {
+            return Err("recovery requires the approval's matching v2 helper".into());
+        }
+        ownership_ack();
+        if cleanup_unstarted(&plan)? {
+            return Ok(());
+        }
+        if snapshot.is_none() && existing.as_ref().is_some_and(|r| r.result.terminal()) {
+            let result = existing.ok_or("missing terminal result")?.result;
+            validate_released_outcome(&plan, &result)?;
+            return settle_admission(&plan, &result);
+        }
+        if !recovery {
+            return Ok(());
+        }
         return recover_owned(&plan);
+    }
+    if disposition == AdmissionDisposition::CleanupLaunch {
+        ownership_ack();
+        return cleanup_unstarted_launch(&launch, &admission);
     }
     let candidate = installation::validate_staged_app(&launch.request.staged_app)?;
     if installation::inspect(&launch.original.executable)? != launch.original {
@@ -577,28 +1216,33 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         coordinator::validate_candidate_for_context(&candidate.image.path, &instance.context)?;
     }
     let mut scope = NativeInstallScope::capture(&original, &profile)?;
-    let mut reservation = protocol::reserve_install(&launch.original.origin, None, state, id)?;
+    if let StandaloneInstallPurpose::PrivateRelocation { target, parent, .. } = &launch.purpose {
+        let current = instance
+            .as_ref()
+            .ok_or("relocation requires the original running profile")?;
+        coordinator::standalone_relocation::validate_settled_parent(&current.context, parent)?;
+        installation::preflight_standalone_relocation_source(&launch.original, &profile)?;
+        scope.reserve_target_scope(target)?;
+    }
+    scope.admit(instance.as_ref())?;
+    let mut reservation =
+        protocol::reserve_install(&launch.original.origin, launch.purpose_target(), state, id)?;
+    if reservation.stop_generation != admission.original_stop_generation {
+        reservation.release()?;
+        return Err("Stop generation changed before installation admission".into());
+    }
     if instance.is_some() && reservation.stop_generation.checked_add(1).is_none() {
         reservation.release()?;
         return Err("Stop generation overflow forbids coordinated running install".into());
     }
-    let source = match &instance {
-        Some(instance) => InstallSource::Running {
-            instance: StandaloneOriginalInstance {
-                pid: instance.incarnation.pid,
-                start_sec: instance.incarnation.start_sec,
-                start_usec: instance.incarnation.start_usec,
-                instance_id: instance.instance_id.clone(),
-                image: instance.image.clone(),
-            },
-            context: instance.context.clone(),
-        },
-        None => InstallSource::Stopped {
-            profile: profile.clone(),
-        },
-    };
+    let source = approved_source(&profile, instance.as_ref());
+    if source != launch.source {
+        reservation.release()?;
+        return Err("source identity changed after durable launch capture".into());
+    }
     let plan = Plan {
-        version: 1,
+        version: 2,
+        purpose: launch.purpose.clone(),
         operation_id: id.into(),
         original: launch.original,
         candidate_bundle: candidate.bundle.clone(),
@@ -613,9 +1257,11 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
     journal::write_plan(&plan)?;
     let mut result = outcome(id, state, instance.is_some());
     write(&plan, Phase::Approved, &result)?;
+    admission.phase = AdmissionPhase::Presenting;
+    journal::write_admission(state, &admission)?;
     ownership_ack();
     // No mutation or Stop has occurred. Any UI/consent failure releases cleanly.
-    let consent = Panel::for_install(&plan).and_then(|panel| {
+    let consent = Panel::for_install(&launch.locale, &plan).and_then(|panel| {
         let approved = panel.confirm_install(&plan, false)?;
         Ok((panel, approved))
     });
@@ -641,9 +1287,11 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
             }
             write(&plan, Phase::Failed, &result)?;
             reservation.release()?;
+            settle_admission(&plan, &result)?;
             return Ok(());
         }
     };
+    save_consent(&plan)?;
     let execution = execute(
         &plan,
         &candidate,
@@ -657,13 +1305,19 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         Ok(()) => {
             write(&plan, Phase::Completed, &result)?;
             reservation.release()?;
+            settle_admission(&plan, &result)?;
         }
         Err(error) => {
+            let mut rollback_safe = missing(&journal::replacement_path(state, id)?)
+                && missing(&journal::relocation_commit_path(state, id)?);
             if let Ok(recovered) = installation::recover_replacement(
                 &journal::replacement_path(state, id)?,
                 id,
                 &plan.original,
+                plan.installed_origin(),
             ) {
+                rollback_safe =
+                    recovered.disk_state == installation::ReplacementDiskState::Original;
                 result.retained_bundle = recovered.retained_bundle;
                 if let Some(installed) = recovered.installation {
                     result.installed = true;
@@ -679,9 +1333,11 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
                 }
                 write(&plan, Phase::Failed, &result)?;
                 panel.close();
-                return reservation.release();
+                reservation.release()?;
+                return settle_admission(&plan, &result);
             }
             if !result.installed
+                && rollback_safe
                 && matches!(phase, Some(Phase::OriginalStopped | Phase::Replacing))
                 && restore_original_precommit(&plan, &scope, &reservation, &panel).is_ok()
             {
@@ -692,7 +1348,8 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
                 }
                 write(&plan, Phase::Failed, &result)?;
                 panel.close();
-                return reservation.release();
+                reservation.release()?;
+                return settle_admission(&plan, &result);
             }
             let user_stopped = later_user_stop(&plan).unwrap_or(false);
             result.status = if result.installed {
@@ -732,6 +1389,16 @@ fn restore_original_precommit(
     panel: &Panel,
 ) -> Result<(), String> {
     tick(panel, reservation)?;
+    if !plan.purpose.is_upgrade()
+        && !missing(&journal::relocation_commit_path(
+            &plan.profile.state_dir,
+            &plan.operation_id,
+        )?)
+    {
+        return Err(
+            "relocation commit evidence forbids restarting the original installation".into(),
+        );
+    }
     unchanged_original(plan)?;
     native_runtime::wait_install_source_stopped(plan, Duration::from_secs(45), || {
         tick(panel, reservation)
@@ -775,6 +1442,13 @@ fn execute(
     panel: &Panel,
     result: &mut Outcome,
 ) -> Result<(), String> {
+    verify_consent(plan)?;
+    panel.require_install_visible(plan)?;
+    plan.validate_for_execution()?;
+    if !plan.purpose.is_upgrade() {
+        installation::preflight_standalone_relocation(plan)?;
+        coordinator::migration::verify_relocation_tern_unchanged(plan)?;
+    }
     unchanged_original(plan)?;
     tick(panel, reservation)?;
     if let Some(instance) = instance {
@@ -806,20 +1480,14 @@ fn execute(
         "The original signed bundle is retained for existing clients.",
     );
     write(plan, Phase::Replacing, result)?;
-    let replaced = installation::replace_standalone_coordinated(
-        candidate,
-        &plan.original,
-        scope,
-        &plan.operation_id,
-        &journal::replacement_path(&plan.profile.state_dir, &plan.operation_id)?,
-    )?;
+    let replaced = installation::replace_standalone_coordinated(candidate, plan, scope)?;
     result.installed = true;
     result.installation = Some(replaced.installation.clone());
     result.retained_bundle = Some(replaced.retained_bundle);
     write(plan, Phase::Installed, result)?;
     if let Some((_, context)) = plan.running() {
         tick(panel, reservation)?;
-        let token = reservation.authorize_start_for(plan.origin())?;
+        let token = reservation.authorize_start_for(plan.installed_origin())?;
         write(plan, Phase::Starting, result)?;
         panel.set_status(
             "Starting Desktop Pet",
@@ -867,31 +1535,51 @@ fn drain(
 }
 
 pub fn inspect(state: &Path, id: &str) -> Result<Outcome, String> {
-    journal::read_record(state, id)?
-        .map(|r| r.result)
+    if !missing(&journal::plan_path(state, id)?) {
+        if let Some(record) = journal::read_record(state, id)? {
+            return Ok(record.result);
+        }
+    }
+    journal::read_admission(state, id)?
+        .and_then(|a| a.result)
         .ok_or_else(|| "standalone install has no durable observation".into())
 }
 pub fn recover(state: &Path, id: &str) -> Result<Outcome, String> {
-    let plan = journal::read_plan(state, id)?;
-    detached(state, id, &plan.helper_image, true)
+    if !missing(&journal::plan_path(state, id)?) {
+        let plan = journal::read_plan(state, id)?;
+        if plan.version == 1 {
+            return detached(state, id, &plan.helper_image, true);
+        }
+    }
+    let launch = read_launch(state, id)?;
+    detached(state, id, &launch.helper, true)
 }
 fn recover_owned(plan: &Plan) -> Result<(), String> {
+    if cleanup_unstarted(plan)? {
+        return Ok(());
+    }
     let mut result = inspect(&plan.profile.state_dir, &plan.operation_id)?;
+    let previous_terminal = result.terminal();
+    if let Err(error) = verify_consent(plan) {
+        publish_consent_failure(plan, &mut result, error)?;
+        return Ok(());
+    }
     let reservation_present = protocol::reservation_snapshot(
         plan.origin(),
-        None,
+        plan.reservation_target(),
         &plan.profile.state_dir,
         &plan.operation_id,
     )?
     .is_some();
-    let panel = Panel::for_install(plan)?;
+    let locale = read_launch(&plan.profile.state_dir, &plan.operation_id)?.locale;
+    let panel = Panel::for_install(&locale, plan)?;
     if !panel.confirm_install(plan, true)? {
         panel.close();
         return Ok(());
     }
     let attempt = reconcile(plan, &panel, &mut result);
     if let Err(error) = attempt {
-        if !reservation_present {
+        if !reservation_present || previous_terminal {
             panel.close();
             return Err(error);
         }
@@ -920,6 +1608,14 @@ fn recover_owned(plan: &Plan) -> Result<(), String> {
             &result,
         )?;
     }
+    if !protocol::reservation_exists(
+        plan.origin(),
+        plan.reservation_target(),
+        &plan.profile.state_dir,
+        &plan.operation_id,
+    )? {
+        settle_admission(plan, &result)?;
+    }
     panel.close();
     Ok(())
 }
@@ -934,15 +1630,22 @@ fn later_user_stop(plan: &Plan) -> Result<bool, String> {
 }
 fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), String> {
     let state = &plan.profile.state_dir;
-    let snapshot = protocol::reservation_snapshot(plan.origin(), None, state, &plan.operation_id)?;
+    let snapshot = protocol::reservation_snapshot(
+        plan.origin(),
+        plan.reservation_target(),
+        state,
+        &plan.operation_id,
+    )?;
     if snapshot.is_none() {
         // Released operations are observation only, never renewed restart authority.
         if result.installed
-            && installation::inspect(&plan.original.executable)?
-                == *result
-                    .installation
-                    .as_ref()
-                    .ok_or("missing installed outcome")?
+            && installation::inspect(
+                &coordinator::physical_install_root(plan.installed_origin())?
+                    .join("Contents/MacOS/desktop-pet"),
+            )? == *result
+                .installation
+                .as_ref()
+                .ok_or("missing installed outcome")?
         {
             return Ok(());
         }
@@ -962,6 +1665,52 @@ fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), Str
         Err(error) => return reconcile_release_only(plan, panel, result, &error),
     };
     let intent = journal::replacement_path(state, &plan.operation_id)?;
+    if missing(&intent) && !missing(&journal::relocation_commit_path(state, &plan.operation_id)?) {
+        return Err("relocation commit has no replacement intent; evidence retained".into());
+    }
+    if !result.installed
+        && result.status == InstallStatus::Failed
+        && result.restart == InstallRestart::Failed
+        && reservation.issued_start_token_for(plan.origin())?.is_some()
+    {
+        // A previous rollback already issued its one startup authorization.
+        // Authenticate the ready original; never replay that token or Stop it.
+        unchanged_original(plan)?;
+        if !missing(&intent) {
+            let proof = installation::recover_replacement(
+                &intent,
+                &plan.operation_id,
+                &plan.original,
+                plan.installed_origin(),
+            )?;
+            approved_replacement(plan, &proof)?;
+            if proof.disk_state != installation::ReplacementDiskState::Original {
+                return Err("original restart conflicts with committed replacement".into());
+            }
+        }
+        let context = plan
+            .running()
+            .ok_or("original restart has no running approval")?
+            .1;
+        let original =
+            installation::validate_staged_app(coordinator::physical_install_root(plan.origin())?)?;
+        let mut scope = NativeInstallScope::capture(&original, &plan.profile)?;
+        if let Some(target) = plan.reservation_target() {
+            scope.reserve_target_scope(target)?;
+        }
+        let ready = native_runtime::verify_installed_ready(
+            context,
+            &VerifiedInstallation {
+                image: plan.original.image.clone(),
+                origin: plan.origin().clone(),
+            },
+            reservation.stop_generation,
+        )?;
+        scope.admit(Some(&ready))?;
+        tick(panel, &reservation)?;
+        write(plan, Phase::Failed, result)?;
+        return reservation.release();
+    }
     if fs::symlink_metadata(&intent).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
         let original =
             installation::validate_staged_app(coordinator::physical_install_root(plan.origin())?)?;
@@ -975,23 +1724,28 @@ fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), Str
         write(plan, Phase::Failed, result)?;
         return reservation.release();
     }
-    let mut recovered =
-        installation::recover_replacement(&intent, &plan.operation_id, &plan.original)?;
+    let mut recovered = installation::recover_replacement(
+        &intent,
+        &plan.operation_id,
+        &plan.original,
+        plan.installed_origin(),
+    )?;
     approved_replacement(plan, &recovered)?;
     let mut scope = native_runtime::recover_install_scope(&recovered, &plan.profile)?;
-    if recovered.installation.is_none() {
+    if recovered.disk_state != installation::ReplacementDiskState::Installed {
         // Metadata repair requires quiescence. A fully committed candidate may
         // already be alive and is instead authenticated below without mutation.
         recovered = installation::reconcile_replacement(
             &intent,
             &plan.operation_id,
             &plan.original,
+            plan.installed_origin(),
             &plan.profile,
             &mut scope,
         )?;
     }
     result.retained_bundle = recovered.retained_bundle;
-    let Some(installation) = recovered.installation else {
+    if recovered.disk_state == installation::ReplacementDiskState::Original {
         restore_original_precommit(plan, &scope, &reservation, panel)?;
         result.status = InstallStatus::Failed;
         result.error = Some("replacement did not commit; unchanged original reconciled".into());
@@ -1000,7 +1754,10 @@ fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), Str
         }
         write(plan, Phase::Failed, result)?;
         return reservation.release();
-    };
+    }
+    let installation = recovered
+        .installation
+        .ok_or("committed replacement lacks installed evidence")?;
     result.installed = true;
     result.installation = Some(installation.clone());
     let installed = VerifiedInstallation {
@@ -1009,7 +1766,8 @@ fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), Str
     };
     if let Some((_, context)) = plan.running() {
         tick(panel, &reservation)?;
-        let started = match native_runtime::capture_instance(plan.origin(), &plan.profile) {
+        let started = match native_runtime::capture_instance(plan.installed_origin(), &plan.profile)
+        {
             Ok(_) => native_runtime::verify_installed_ready(
                 context,
                 &installed,
@@ -1022,13 +1780,16 @@ fn reconcile(plan: &Plan, panel: &Panel, result: &mut Outcome) -> Result<(), Str
                 scope.admit(None)?;
                 // An already-issued token is never reissued/replayed: an uncertain
                 // launcher may still be pending even when its daemon is absent.
-                if reservation.issued_start_token_for(plan.origin())?.is_some() {
+                if reservation
+                    .issued_start_token_for(plan.installed_origin())?
+                    .is_some()
+                {
                     return Err(
                         "issued start has no verified ready instance; launch will not be replayed"
                             .into(),
                     );
                 }
-                let token = reservation.authorize_start_for(plan.origin())?;
+                let token = reservation.authorize_start_for(plan.installed_origin())?;
                 native_runtime::start_verified(
                     context,
                     &installed,
@@ -1083,6 +1844,14 @@ fn reconcile_release_only(
         Ok(())
     })?;
     let intent = journal::replacement_path(&plan.profile.state_dir, &plan.operation_id)?;
+    if missing(&intent)
+        && !missing(&journal::relocation_commit_path(
+            &plan.profile.state_dir,
+            &plan.operation_id,
+        )?)
+    {
+        return Err("relocation commit has no replacement intent; evidence retained".into());
+    }
     let scope;
     let installation;
     if fs::symlink_metadata(&intent).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
@@ -1094,22 +1863,27 @@ fn reconcile_release_only(
         installation = None;
         result.retained_bundle = None;
     } else {
-        let mut recovered =
-            installation::recover_replacement(&intent, &plan.operation_id, &plan.original)?;
+        let mut recovered = installation::recover_replacement(
+            &intent,
+            &plan.operation_id,
+            &plan.original,
+            plan.installed_origin(),
+        )?;
         approved_replacement(plan, &recovered)?;
         let mut recovered_scope = native_runtime::recover_install_scope(&recovered, &plan.profile)?;
         recovered_scope.admit(None)?;
-        if recovered.installation.is_none() {
+        if recovered.disk_state != installation::ReplacementDiskState::Installed {
             recovered = installation::reconcile_replacement(
                 &intent,
                 &plan.operation_id,
                 &plan.original,
+                plan.installed_origin(),
                 &plan.profile,
                 &mut recovered_scope,
             )?;
             approved_replacement(plan, &recovered)?;
         }
-        if recovered.installation.is_none() {
+        if recovered.disk_state == installation::ReplacementDiskState::Original {
             unchanged_original(plan)?;
         }
         result.retained_bundle = recovered.retained_bundle;
@@ -1166,11 +1940,18 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> Result<i32, String> {
     if coordinator::identity::LEGACY {
         return Err("legacy distribution cannot run neutral standalone installation".into());
     }
-    if command == "install-coordinated" {
-        if args.len() != 2 || args[0] != "--request" {
-            return Err("install-coordinated requires only --request ABS".into());
+    if matches!(
+        command,
+        "install-coordinated" | "install-relocate" | "install-relocate-manual"
+    ) {
+        if args.len() != 2 || args[0] != "--request" || !Path::new(&args[1]).is_absolute() {
+            return Err(format!("{command} requires only --request ABS"));
         }
-        let result = coordinated(Path::new(&args[1]))?;
+        let result = match command {
+            "install-relocate" => relocate(Path::new(&args[1]))?,
+            "install-relocate-manual" => relocate_manual(Path::new(&args[1]))?,
+            _ => coordinated(Path::new(&args[1]))?,
+        };
         emit(&result)?;
         return Ok(result.exit_code());
     }
@@ -1187,7 +1968,9 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> Result<i32, String> {
         }
         "install-run" => {
             run_child(&state, &id)?;
-            Ok(0)
+            Ok(inspect(&state, &id)
+                .map(|r| if r.terminal() { r.exit_code() } else { 75 })
+                .unwrap_or(75))
         }
         _ => Err("unknown standalone install command".into()),
     }
@@ -1225,6 +2008,416 @@ fn parse_scope(args: &[OsString]) -> Result<(PathBuf, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn private_admission_fixture(state: &Path, id: &str) -> Admission {
+        let resources = operation_dir(state, id).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&resources)
+            .unwrap();
+        protocol::write_private_new(
+            &resources.join("launch.json"),
+            br#"{"captured":"immutable source scope"}"#,
+            0o600,
+        )
+        .unwrap();
+        let admission = Admission {
+            version: 1,
+            operation_id: id.into(),
+            launch_sha256: launch_digest(state, id).unwrap(),
+            original_stop_generation: 7,
+            phase: AdmissionPhase::Prepared,
+            result: None,
+        };
+        journal::write_admission(state, &admission).unwrap();
+        admission
+    }
+
+    #[test]
+    fn persisted_offer_claim_and_spawn_before_lease_reenter_same_id_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path();
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(state).unwrap();
+        let parent = coordinator::standalone_relocation::SettledRelocationParent {
+            version: 1,
+            operation_id: "a".repeat(32),
+            plan_sha256: "b".repeat(64),
+            result_sha256: "c".repeat(64),
+            generation: 7,
+            candidate_image: ExecutableIdentity {
+                path: state.join("source/DesktopPet.app/Contents/MacOS/desktop-pet"),
+                sha256: "d".repeat(64),
+            },
+            source_closure_sha256: "e".repeat(64),
+            profile: ProfilePaths {
+                config_dir: state.into(),
+                state_dir: state.into(),
+            },
+        };
+        let id = "1".repeat(32);
+        let other_id = "2".repeat(32);
+        private_admission_fixture(state, &id);
+        private_admission_fixture(state, &other_id);
+        let winner = claim_relocation_offer(state, &parent, &id).unwrap();
+        let path = journal::relocation_offer_path(state, &parent.operation_id).unwrap();
+        let original_bytes = coordinator::owned_private_file(&path, 65536).unwrap();
+        // Claim-before-spawn and spawn-before-child-lease have the same durable
+        // state. Neither guessing a process's existence nor a fresh ID is needed.
+        for _interruption in ["claim_before_spawn", "spawn_before_child_lease"] {
+            let reloaded = journal::read_relocation_offer(state, &parent.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(reloaded, winner);
+            let prepared = admission_for_launch(state, &reloaded.operation_id).unwrap();
+            assert_eq!(
+                admission_disposition(&prepared, false, false, false),
+                AdmissionDisposition::FirstAdmission
+            );
+            assert_eq!(
+                claim_relocation_offer(state, &parent, &other_id).unwrap(),
+                winner
+            );
+        }
+        let mut presenting = admission_for_launch(state, &id).unwrap();
+        presenting.phase = AdmissionPhase::Presenting;
+        journal::write_admission(state, &presenting).unwrap();
+        let reloaded = admission_for_launch(state, &id).unwrap();
+        assert_eq!(
+            admission_disposition(&reloaded, true, true, false),
+            AdmissionDisposition::ExistingPlan
+        );
+        assert_eq!(
+            admission_disposition(&reloaded, false, true, false),
+            AdmissionDisposition::CleanupLaunch
+        );
+        let mut cancellation = outcome(&id, state, false);
+        cancellation.status = InstallStatus::Cancelled;
+        presenting.phase = AdmissionPhase::Settled;
+        presenting.result = Some(cancellation.clone());
+        journal::write_admission(state, &presenting).unwrap();
+        // A reboot or late competing helper observes the immutable cancelled
+        // winner; another automatic operation/dialog cannot be claimed.
+        assert_eq!(
+            claim_relocation_offer(state, &parent, &other_id).unwrap(),
+            winner
+        );
+        let settled = admission_for_launch(state, &winner.operation_id).unwrap();
+        assert_eq!(
+            admission_disposition(&settled, true, false, false),
+            AdmissionDisposition::Settled
+        );
+        assert_eq!(settled.result, Some(cancellation));
+        assert_eq!(
+            coordinator::owned_private_file(&path, 65536).unwrap(),
+            original_bytes
+        );
+    }
+
+    #[test]
+    fn preplan_partial_scope_and_dead_presenting_are_cleanup_only_without_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path();
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(state).unwrap();
+        let id = "3".repeat(32);
+        let mut admission = private_admission_fixture(state, &id);
+        assert_eq!(
+            admission_disposition(&admission, false, true, false),
+            AdmissionDisposition::CleanupLaunch
+        );
+        admission.phase = AdmissionPhase::Presenting;
+        journal::write_admission(state, &admission).unwrap();
+        let reloaded = admission_for_launch(state, &id).unwrap();
+        assert_eq!(
+            admission_disposition(&reloaded, true, true, false),
+            AdmissionDisposition::ExistingPlan
+        );
+        assert!(unstarted_evidence_allows_cleanup(
+            Some(Phase::Approved),
+            false,
+            7,
+            7
+        ));
+        for phase in [
+            Phase::StopIntent,
+            Phase::StopAcknowledged,
+            Phase::OriginalStopped,
+            Phase::Replacing,
+            Phase::Installed,
+            Phase::Starting,
+            Phase::Completed,
+            Phase::Unknown,
+            Phase::UserStopped,
+        ] {
+            assert!(!unstarted_evidence_allows_cleanup(Some(phase), false, 7, 7));
+        }
+        assert!(!unstarted_evidence_allows_cleanup(
+            Some(Phase::Approved),
+            true,
+            7,
+            7
+        ));
+        assert!(!unstarted_evidence_allows_cleanup(
+            Some(Phase::Approved),
+            false,
+            8,
+            7
+        ));
+        let mut interrupted = outcome(&id, state, true);
+        interrupted_outcome(&mut interrupted);
+        assert_eq!(interrupted.status, InstallStatus::Failed);
+        assert_eq!(interrupted.restart, InstallRestart::NotRequested);
+        assert_eq!(
+            interrupted.error.as_deref(),
+            Some("Installation confirmation was interrupted; no app was stopped.")
+        );
+        let mut cancelled = outcome(&id, state, true);
+        cancelled.status = InstallStatus::Cancelled;
+        cancelled.restart = InstallRestart::NotRequested;
+        let durable_cancelled = cancelled.clone();
+        interrupted_outcome(&mut cancelled);
+        assert_eq!(cancelled, durable_cancelled);
+        assert!(!journal::stop_ack_path(state, &id).unwrap().exists());
+        assert!(!journal::replacement_path(state, &id).unwrap().exists());
+        assert!(!journal::relocation_commit_path(state, &id)
+            .unwrap()
+            .exists());
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn relocation_consent_is_immutable_and_binds_actual_plan_bytes_before_stop() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().to_path_buf();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(&state).unwrap();
+        let profile = ProfilePaths {
+            config_dir: state.clone(),
+            state_dir: state.clone(),
+        };
+        let private = installation::standalone_bundle().unwrap();
+        let historical = installation::os_home()
+            .unwrap()
+            .join("Applications/DesktopPet.app");
+        let origin = InstallOrigin::Standalone {
+            bundle: historical.clone(),
+        };
+        let image = ExecutableIdentity {
+            path: historical.join("Contents/MacOS/desktop-pet"),
+            sha256: "a".repeat(64),
+        };
+        let context = coordinator::UpdateContext {
+            executable: image.path.clone(),
+            version: coordinator::identity::VERSION.into(),
+            instance_id: "approved-source".into(),
+            config_dir: state.clone(),
+            state_dir: state.clone(),
+            running: image.clone(),
+            running_origin: Some(Box::new(origin.clone())),
+            assets_override: None,
+            environment: Default::default(),
+            locale: "ko".into(),
+        };
+        let id = "e".repeat(32);
+        let candidate_bundle = state.join("stage/DesktopPet.app");
+        let plan = Plan {
+            version: 2,
+            operation_id: id.clone(),
+            original: InstallationRecord {
+                version: 1,
+                executable: image.path.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: coordinator::identity::VERSION.into(),
+                protocol: 4,
+                observation_mode: 2,
+                integration_api: 1,
+                origin,
+                image: image.clone(),
+            },
+            purpose: StandaloneInstallPurpose::PrivateRelocation {
+                target: InstallOrigin::Standalone { bundle: private },
+                parent: coordinator::standalone_relocation::SettledRelocationParent {
+                    version: 1,
+                    operation_id: "f".repeat(32),
+                    plan_sha256: "b".repeat(64),
+                    result_sha256: "c".repeat(64),
+                    generation: 7,
+                    candidate_image: image.clone(),
+                    source_closure_sha256: "d".repeat(64),
+                    profile: profile.clone(),
+                },
+                source_closure_sha256: "d".repeat(64),
+                tern: None,
+            },
+            candidate_image: ExecutableIdentity {
+                path: candidate_bundle.join("Contents/MacOS/desktop-pet"),
+                sha256: image.sha256.clone(),
+            },
+            candidate_bundle,
+            candidate_version: coordinator::identity::VERSION.into(),
+            helper_image: ExecutableIdentity {
+                path: state.join("helper"),
+                sha256: "b".repeat(64),
+            },
+            profile,
+            source: InstallSource::Running {
+                instance: StandaloneOriginalInstance {
+                    pid: 42,
+                    start_sec: 123,
+                    start_usec: 456,
+                    instance_id: context.instance_id.clone(),
+                    image,
+                },
+                context,
+            },
+            original_stop_generation: 7,
+            control_token: "a".repeat(64),
+        };
+        let path = journal::plan_path(&state, &id).unwrap();
+        protocol::write_private_new(&path, &serde_json::to_vec(&plan).unwrap(), 0o600).unwrap();
+        assert!(verify_consent(&plan).is_err());
+        let mut missing_consent = outcome(&id, &state, true);
+        write(&plan, Phase::StopIntent, &missing_consent).unwrap();
+        let error = verify_consent(&plan).unwrap_err();
+        publish_consent_failure(&plan, &mut missing_consent, error).unwrap();
+        let unknown = journal::read_record(&state, &id).unwrap().unwrap();
+        assert_eq!(unknown.phase, Phase::Unknown);
+        assert_eq!(unknown.result.status, InstallStatus::Unknown);
+        let winner_bytes =
+            coordinator::owned_private_file(&journal::record_path(&state, &id).unwrap(), 32768)
+                .unwrap();
+        assert!(
+            publish_consent_failure(&plan, &mut missing_consent, "late duplicate".into()).is_err()
+        );
+        assert_eq!(
+            coordinator::owned_private_file(&journal::record_path(&state, &id).unwrap(), 32768)
+                .unwrap(),
+            winner_bytes
+        );
+        save_consent(&plan).unwrap();
+        verify_consent(&plan).unwrap();
+        assert!(save_consent(&plan).is_err());
+        let consent =
+            coordinator::owned_private_file(&journal::consent_path(&state, &id).unwrap(), 16384)
+                .unwrap();
+        let mut changed = plan.clone();
+        changed.original_stop_generation += 1;
+        protocol::write_private_bytes(&path, &serde_json::to_vec(&changed).unwrap(), 0o600)
+            .unwrap();
+        assert!(verify_consent(&changed).is_err());
+        assert_eq!(
+            coordinator::owned_private_file(&journal::consent_path(&state, &id).unwrap(), 16384)
+                .unwrap(),
+            consent
+        );
+        let mut reformatted = serde_json::to_vec(&plan).unwrap();
+        reformatted.push(b'\n');
+        protocol::write_private_bytes(&path, &reformatted, 0o600).unwrap();
+        let mut mismatch = outcome(&id, &state, true);
+        write(&plan, Phase::StopIntent, &mismatch).unwrap();
+        let error = verify_consent(&plan).unwrap_err();
+        publish_consent_failure(&plan, &mut mismatch, error).unwrap();
+        assert_eq!(
+            journal::read_record(&state, &id)
+                .unwrap()
+                .unwrap()
+                .result
+                .status,
+            InstallStatus::Unknown
+        );
+        assert!(!journal::stop_ack_path(&state, &id).unwrap().exists());
+        assert!(!journal::replacement_path(&state, &id).unwrap().exists());
+        assert!(!journal::relocation_commit_path(&state, &id)
+            .unwrap()
+            .exists());
+    }
+
+    #[test]
+    fn admission_binds_actual_launch_bytes_and_settlement_is_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path();
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(state).unwrap();
+        let id = "a".repeat(32);
+        let resources = operation_dir(state, &id).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&resources)
+            .unwrap();
+        protocol::write_private_new(
+            &resources.join("launch.json"),
+            b"{\"captured\":\"exact bytes\"}",
+            0o600,
+        )
+        .unwrap();
+        let mut admission = Admission {
+            version: 1,
+            operation_id: id.clone(),
+            launch_sha256: launch_digest(state, &id).unwrap(),
+            original_stop_generation: 7,
+            phase: AdmissionPhase::Prepared,
+            result: None,
+        };
+        journal::write_admission(state, &admission).unwrap();
+        assert_eq!(admission_for_launch(state, &id).unwrap(), admission);
+        admission.phase = AdmissionPhase::Presenting;
+        journal::write_admission(state, &admission).unwrap();
+        let mut rollback = admission.clone();
+        rollback.phase = AdmissionPhase::Prepared;
+        assert!(journal::write_admission(state, &rollback).is_err());
+        protocol::write_private_bytes(
+            &resources.join("launch.json"),
+            b"{\"captured\":\"substituted\"}",
+            0o600,
+        )
+        .unwrap();
+        assert!(admission_for_launch(state, &id).is_err());
+        let mut result = outcome(&id, state, false);
+        result.status = InstallStatus::Cancelled;
+        admission.phase = AdmissionPhase::Settled;
+        admission.result = Some(result.clone());
+        journal::write_admission(state, &admission).unwrap();
+        assert_eq!(inspect(state, &id).unwrap(), result);
+        let saved =
+            coordinator::owned_private_file(&journal::admission_path(state, &id).unwrap(), 65536)
+                .unwrap();
+        result.status = InstallStatus::Unknown;
+        admission.result = Some(result);
+        assert!(journal::write_admission(state, &admission).is_err());
+        assert_eq!(
+            coordinator::owned_private_file(&journal::admission_path(state, &id).unwrap(), 65536)
+                .unwrap(),
+            saved
+        );
+    }
+
+    #[test]
+    fn admission_rejects_terminal_result_before_settlement_and_scope_substitution() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path();
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(state).unwrap();
+        let id = "b".repeat(32);
+        let mut result = outcome(&id, state, false);
+        result.status = InstallStatus::Failed;
+        let mut admission = Admission {
+            version: 1,
+            operation_id: id.clone(),
+            launch_sha256: "c".repeat(64),
+            original_stop_generation: 1,
+            phase: AdmissionPhase::Prepared,
+            result: Some(result),
+        };
+        assert!(journal::write_admission(state, &admission).is_err());
+        admission.phase = AdmissionPhase::Settled;
+        admission.result.as_mut().unwrap().operation_id = "d".repeat(32);
+        assert!(journal::write_admission(state, &admission).is_err());
+        admission.result.as_mut().unwrap().operation_id = id.clone();
+        admission.result.as_mut().unwrap().status = InstallStatus::Running;
+        assert!(journal::write_admission(state, &admission).is_err());
+        assert!(!journal::admission_path(state, &id).unwrap().exists());
+    }
     #[test]
     fn install_status_rejects_ambiguous_or_relative_scope() {
         let id = "a".repeat(32);

@@ -268,13 +268,14 @@ struct PinnedClientImage {
     compatible: bool,
 }
 
-/// Opt-in admission for a single physical installation and exact profile pair.
-/// Raw install, cleanup and migration keep using the strict APIs above.
+/// Opt-in admission for pinned images, explicitly approved physical roots, and one exact profile.
+/// Recovery retains root scope independently of the relocated/retained pinned inode paths.
 pub(crate) struct CompatibleClientScope {
     original: PinnedClientImage,
     candidate: Option<PinnedClientImage>,
     config: PathBuf,
     state: PathBuf,
+    approved_roots: Vec<PathBuf>,
 }
 
 const PUBLIC_BETA_ONE_SHA256: &str =
@@ -411,6 +412,7 @@ impl CompatibleClientScope {
             candidate: None,
             config: config.to_path_buf(),
             state: state.to_path_buf(),
+            approved_roots: vec![original.bundle.clone()],
         })
     }
 
@@ -432,7 +434,25 @@ impl CompatibleClientScope {
             candidate: Some(candidate),
             config: config.to_path_buf(),
             state: state.to_path_buf(),
+            approved_roots: recovered.approved_roots.clone(),
         })
+    }
+
+    pub(crate) fn reserve_target_scope(
+        &mut self,
+        target: &crate::InstallOrigin,
+    ) -> Result<(), String> {
+        let crate::InstallOrigin::Standalone { bundle } = target else {
+            return Err("additional client scope must be a standalone owner".into());
+        };
+        if *bundle != crate::installation::standalone_bundle()? {
+            return Err("additional client scope is not the OS-account private owner".into());
+        }
+        crate::installation::validate_standalone_owner(bundle)?;
+        if !self.approved_roots.contains(bundle) {
+            self.approved_roots.push(bundle.clone());
+        }
+        Ok(())
     }
 
     pub(crate) fn pin_prepared_candidate(
@@ -482,9 +502,11 @@ impl CompatibleClientScope {
     }
 
     fn path_in_scope(&self, path: &std::path::Path) -> bool {
-        std::iter::once(&self.original)
-            .chain(self.candidate.iter())
-            .any(|image| path.starts_with(&image.bundle))
+        self.approved_roots
+            .iter()
+            .chain(std::iter::once(&self.original.bundle))
+            .chain(self.candidate.iter().map(|image| &image.bundle))
+            .any(|root| path.starts_with(root))
     }
 
     fn classify(
@@ -1625,6 +1647,7 @@ mod coordinated_process_tests {
             candidate: None,
             config: "/private/profile/config".into(),
             state: "/private/profile/state".into(),
+            approved_roots: vec!["/Applications/DesktopPet.app".into()],
         }
     }
 
@@ -1786,6 +1809,35 @@ mod coordinated_process_tests {
             Some(Some(("/config".into(), "/state".into())))
         );
         assert_eq!(compatible_cli(&argv(&["tern-exchange"])), None);
+    }
+
+    #[test]
+    fn recovered_retention_pins_do_not_forget_either_approved_installation_root() {
+        let mut scope = scope(true);
+        let historical = PathBuf::from("/private/account/Applications/DesktopPet.app");
+        let private =
+            PathBuf::from("/private/account/.local/share/desktop-pet/libexec/DesktopPet.app");
+        scope.approved_roots = vec![historical.clone(), private.clone()];
+        scope.original.bundle = "/private/retention/original/DesktopPet.app".into();
+        let mut candidate = image(true, 20);
+        candidate.bundle = private.clone();
+        scope.candidate = Some(candidate);
+        let mut unknown = evidence();
+        unknown.mapped_file.inode = 999;
+        for root in [historical, private, scope.original.bundle.clone()] {
+            unknown.path = root.join("Contents/MacOS/desktop-pet");
+            assert_eq!(
+                scope.classify(&unknown, Some(&arguments(&["--version"])), None),
+                InstallationProcessRole::BlockingUser
+            );
+        }
+        // Identical-byte copies are not grandfathered by path or release capabilities.
+        unknown.path = scope.original.bundle.join("Contents/MacOS/desktop-pet");
+        unknown.mapped_file = scope.original.mapped_file;
+        assert_eq!(
+            scope.classify(&unknown, Some(&arguments(&["--version"])), None),
+            InstallationProcessRole::CompatibleClient
+        );
     }
 
     #[test]

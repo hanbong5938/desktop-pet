@@ -3,7 +3,7 @@ name: Release Desktop Pet
 on:
   push:
     tags:
-      - "v0.4.13-beta.11"
+      - "v0.4.13"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.13-beta.11'
+    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.13'
     runs-on: macos-15
     permissions:
       contents: write
@@ -54,7 +54,7 @@ jobs:
           version="${tag#v}"
           # This approved self-contained installer is pinned, never a mutable
           # latest script or a host manifest-derived app version.
-          [[ "$tag" == v0.4.13-beta.11 && "$version" == 0.4.13-beta.11 ]]
+          [[ "$tag" == v0.4.13 && "$version" == 0.4.13 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
@@ -152,7 +152,7 @@ jobs:
           for(const p of paths){if(createHash('sha256').update(await readFile(join(root,p))).digest('hex')!==record.deployed_sha256[p])throw Error(`deployed hash mismatch: ${p}`);}
           NODE
 
-      - name: Publish only the neutral complete beta prerelease
+      - name: Prepare the complete neutral stable draft for qualification
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
@@ -161,7 +161,8 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: false
           body_path: ${{ runner.temp }}/desktop-pet-release-notes.md
-          prerelease: true
+          draft: true
+          prerelease: false
           make_latest: false
           files: |
             ${{ env.DESKTOP_PET_ASSET_NAME }}
@@ -171,13 +172,3 @@ jobs:
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}.sha256
 
-  wiki_sync:
-    if: ${{ !contains(github.ref_name, '-') }}
-    needs: release
-    permissions:
-      contents: read
-    uses: ./.github/workflows/wiki.yml
-    with:
-      required_release: ${{ github.ref_name }}
-    secrets:
-      WIKI_PUBLISH_TOKEN: ${{ secrets.WIKI_PUBLISH_TOKEN }}

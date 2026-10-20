@@ -70,17 +70,17 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 ## インストールと任意の連携
 
-**現行 beta.11 の所有者方針:** 新規 Standalone は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG に依存しません。完全に検証した既存の元の OS-home `Applications/DesktopPet.app` は移動せず**同じ場所で更新**します。Applications への新規導入、任意の home/custom/system パスや symlink による引継ぎは禁止です。Brew/source の所有者と過去の凍結記録は維持します。
+**現行の安定版候補の所有者方針:** 新規 Standalone と通常更新は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使い、`HOME`/XDG に依存しません。元の `Applications/DesktopPet.app` は旧 helper の完了確認、別途承認した移動、復旧のためだけに認識し、恒久的な同じ場所での更新先にはしません。任意の home/custom/system パスや symlink の引継ぎは禁止です。Brew/source 所有者と過去の凍結ノートは変更しません。
 
-### 既存 Applications 所有者: 明示的 beta.11 bootstrap
+### 既存 Applications 所有者: beta.7 のアプリ更新後に別途移動
 
-Beta.10 は既存 Applications 所有者の問題を**解決していません**。公開済み beta.7 checker は自身のコードを書き換えられず、明示的 beta.11 installer bootstrap が一度必要です。beta.11 の実際の公開後、[beta.11 リリースノート](releases/v0.4.13-beta.11.md#explicit-bootstrap-from-beta7-or-another-old-version)のダウンロード・checksum 検証・明示的 Bash 実行コマンドを使ってください。古い installer を再実行しないでください。撤回済み Python 修復スクリプトは復活しません。
+候補経路は installer や terminal ではなく、本物の beta.7 アプリの**更新ボタン**から開始します。変更していない旧 helper が本物の安定版 `0.4.13` を選び、元の Applications で readiness、Completed、helper 終了、予約解放を完了してから、**同じ署名済みバージョン**を専用位置へ移す別の native 承認を提示します。[検証範囲と制限](releases/v0.4.13.md)を確認してください。
 
-元の実行パス、保存済み Tern SDK KV の正確な config/state、locator、KV bytes、キャラクターと profile データを保持します。引数なし起動、既定値の推測、adopt/結合、Configure/Connect は行いません。署名済み旧 app と transaction backup も保持します。
+認証した元の config/state、キャラクター、設定、ユーザーデータを保持します。既存 Tern SDK が native 処理の確定後に保存済み executable だけを変更し、native は KV を上書きしません。既定値の推測、profile 結合、Configure/Connect、Tern 再起動、plugin reload で失敗を隠さないでください。署名済み原本と証拠は private retention に保持します。
 
-**Pet の未保存編集を先に保存してください。** 別途明示的 native 同意と version/signature/owner/client-contract/reservation/profile 検証は必須です。ユーザー **Stop** が優先し再起動を防ぎます。Tern/窓/terminal/agent と作業は継続し、Tern 再起動や plugin reload は不要です。
+**Pet の未保存編集を先に保存してください。** 最初の更新承認は移動承認ではありません。取消では安定版が Applications で動作を続け、再起動しても自動承認窓は繰り返しません。再試行は Updates の明示的な移動操作から行います。後のユーザー **Stop**、不明な ACK、scope 変更は自動再起動を禁止します。Pet だけを再起動し、Tern の窓、terminal、作業を保持します。
 
-導入、native readiness、実際の同じ Tern 窓での継続性は別の結果です。最終 beta.11 検証と対象ユーザー受入れは**未完了**で、観測前に beta.7 更新や復旧成功を主張しません。失敗時は証拠と backup を保持し、KV 上書きや再接続による失敗の隠蔽をしないでください。
+native 導入・準備と窓ごとの fresh Tern 確認は別です。未接続・非互換 consumer は連携待ちであり native 導入失敗ではありません。disposable macOS GUI と公式ネットワーク検証は**未完了**で、実ユーザー復旧や安定版公開の完了は主張しません。
 
 ### 過去の固定インストール例
 
@@ -268,7 +268,7 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 
 ## アプリ内更新
 
-**Beta.11 修正:** 検証済み private Standalone と正確な既存の元の OS-home Applications 所有者は同じ同意済み署名更新 transaction を使い、Applications はその場で更新します。ベータ更新の有効化と別途 native 同意が必要で、安定版限定・Homebrew 制限は維持します。beta.7 コードは自動修正できず、実際の公開後に上記の検証済み beta.11 installer bootstrap が必要です。パス/config/state/KV は不変、Tern 再起動・reload は行いません。最終検証と実ユーザー成功は未確認です。
+**安定版候補の復旧:** Applications 所有者は[上記の二段階アプリ内経路](#既存-applications-所有者-beta7-のアプリ更新後に別途移動)を使用します。移動後の通常更新は private 所有者で行います。beta opt-in、安定版限定、Homebrew 制限は不変です。ソース契約だけでは実物の復旧成功を証明しません。
 
 アプリ内更新が利用できなくても既存の設定とキャラクターを削除しないでください。**公式のインストール手順を開く**は検証済みリリースの公式ページを開き、説明なしのアーカイブ取得やインストーラの自動実行はしません。実際の導入方式に合う手順を使い、古いインストーラや推測した既定パスを使わないでください。Tern 制御エラーは `alpha_passthrough` スキーマエラーではなく実際のバックエンド診断を表示し、通常の状態／エラー応答を fresh binding の証明には使いません。
 

@@ -2,6 +2,7 @@
 use desktop_pet_update_coordinator::migration::{
     MigrationPhase, MigrationPlan, MigrationPresentation,
 };
+use desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan;
 use desktop_pet_update_coordinator::{identity, InstallOrigin, UpdatePlan};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +17,177 @@ fn migration_confirmation_response(response: isize) -> Result<bool, String> {
         _ => Err(format!(
             "native migration consent ended without an explicit decision: {response}"
         )),
+    }
+}
+
+fn install_digest(plan: &StandaloneInstallPlan) -> Result<[u8; 32], String> {
+    Ok(Sha256::digest(serde_json::to_vec(plan).map_err(|e| e.to_string())?).into())
+}
+
+fn require_install_authorization(
+    expected: Option<[u8; 32]>,
+    actual: [u8; 32],
+    visible: bool,
+) -> Result<(), String> {
+    if expected != Some(actual) {
+        return Err("install window is not bound to this source/target/profile approval".into());
+    }
+    if !visible {
+        return Err("independent native install window is not visible".into());
+    }
+    Ok(())
+}
+
+fn install_confirmation_response(
+    expected: Option<[u8; 32]>,
+    actual: [u8; 32],
+    visible: bool,
+    response: isize,
+) -> Result<bool, String> {
+    require_install_authorization(expected, actual, visible)?;
+    match response {
+        1000 => Ok(true),
+        1001 => Ok(false),
+        _ => Err(format!(
+            "native install consent ended without an explicit decision: {response}"
+        )),
+    }
+}
+
+fn install_summary(
+    plan: &StandaloneInstallPlan,
+    locale: Locale,
+    recovery: bool,
+) -> Result<String, String> {
+    let source = desktop_pet_update_coordinator::physical_install_root(plan.origin())?;
+    let target = desktop_pet_update_coordinator::physical_install_root(plan.installed_origin())?;
+    let relocation = !plan.purpose.is_upgrade();
+    let (version_label, config_label, state_label, action) = match locale {
+        Locale::Ko => (
+            "버전",
+            "설정",
+            "상태",
+            if recovery {
+                "복구는 원래 승인만 조정합니다. 새 위치 이관 동의가 아니며 종료를 재전송하거나 이후의 중지를 무시하거나 새 재시작 권한을 부여하지 않습니다."
+            } else if plan.running().is_some() {
+                "Desktop Pet만 종료하고 이 정확한 프로필로 다시 시작합니다. 계속하기 전에 저장하지 않은 Pet 편집 내용을 저장하세요. Tern과 창, 터미널, 작업은 계속 유지됩니다."
+            } else {
+                "Desktop Pet은 중지된 상태를 유지합니다. Tern과 창, 터미널, 작업은 계속 유지됩니다."
+            },
+        ),
+        Locale::En => (
+            "Version",
+            "Config",
+            "State",
+            if recovery {
+                "Recovery only reconciles the original approval; it is not new relocation consent. It cannot replay Quit, override a later Stop, or grant new restart permission."
+            } else if plan.running().is_some() {
+                "Only Desktop Pet quits and restarts with this exact profile. Save any unsaved Pet edits before continuing. Tern, its windows, terminals and work stay running."
+            } else {
+                "Desktop Pet is stopped and will remain stopped. Tern, its windows, terminals and work stay running."
+            },
+        ),
+        Locale::Ja => (
+            "バージョン",
+            "設定",
+            "状態",
+            if recovery {
+                "復旧は元の承認内容のみを照合します。新たな移動の同意ではありません。終了の再送、後の停止の無視、新たな再起動権限の付与はできません。"
+            } else if plan.running().is_some() {
+                "Desktop Pet だけを終了し、この同じプロファイルで再起動します。続行する前に未保存の Pet の編集を保存してください。Tern、ウィンドウ、ターミナル、作業はそのまま維持されます。"
+            } else {
+                "Desktop Pet は停止したままです。Tern、ウィンドウ、ターミナル、作業はそのまま維持されます。"
+            },
+        ),
+        Locale::ZhHans => (
+            "版本",
+            "设置",
+            "状态",
+            if recovery {
+                "恢复仅核对原批准内容，不是新的迁移同意。不能再次发送退出、忽略之后的停止或授予新的重启权限。"
+            } else if plan.running().is_some() {
+                "仅退出 Desktop Pet 并使用完全相同的配置重启。继续前请保存未保存的 Pet 编辑。Tern、窗口、终端和工作保持运行。"
+            } else {
+                "Desktop Pet 将保持停止状态。Tern、窗口、终端和工作保持运行。"
+            },
+        ),
+    };
+    let version = if relocation {
+        match locale {
+            Locale::Ko => format!("{} (같은 버전 · 서명된 동일한 앱)", plan.candidate_version),
+            Locale::En => format!(
+                "{} (same version · identical signed app)",
+                plan.candidate_version
+            ),
+            Locale::Ja => format!(
+                "{}（同じバージョン・同一の署名済みアプリ）",
+                plan.candidate_version
+            ),
+            Locale::ZhHans => format!(
+                "{}（相同版本 · 完全相同的已签名应用）",
+                plan.candidate_version
+            ),
+        }
+    } else {
+        format!("{} → {}", plan.original.app_version, plan.candidate_version)
+    };
+    Ok(format!(
+        "{}\n→ {}\n{version_label}: {version}\n{config_label}: {}\n{state_label}: {}\n\n{action}",
+        source.display(),
+        target.display(),
+        plan.profile.config_dir.display(),
+        plan.profile.state_dir.display()
+    ))
+}
+
+fn install_buttons(
+    locale: Locale,
+    relocation: bool,
+    recovery: bool,
+) -> (&'static str, &'static str, &'static str) {
+    match (locale, relocation, recovery) {
+        (Locale::Ko, _, true) => ("승인된 Desktop Pet 설치를 조정할까요?", "조정", "취소"),
+        (Locale::En, _, true) => (
+            "Reconcile approved Desktop Pet installation?",
+            "Reconcile",
+            "Cancel",
+        ),
+        (Locale::Ja, _, true) => (
+            "承認済みの Desktop Pet インストールを照合しますか？",
+            "照合",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, _, true) => ("核对已批准的 Desktop Pet 安装？", "核对", "取消"),
+        (Locale::Ko, true, false) => (
+            "Desktop Pet을 전용 업데이트 위치로 옮길까요?",
+            "이동하고 다시 시작",
+            "취소",
+        ),
+        (Locale::En, true, false) => (
+            "Move Desktop Pet to its private update location?",
+            "Move and restart",
+            "Cancel",
+        ),
+        (Locale::Ja, true, false) => (
+            "Desktop Pet を専用の更新場所へ移動しますか？",
+            "移動して再起動",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, true, false) => {
+            ("将 Desktop Pet 移至专用更新位置？", "移动并重启", "取消")
+        }
+        (Locale::Ko, false, false) => (
+            "Desktop Pet만 업데이트할까요?",
+            "Desktop Pet 업데이트",
+            "취소",
+        ),
+        (Locale::En, false, false) => ("Update only Desktop Pet?", "Update Desktop Pet", "Cancel"),
+        (Locale::Ja, false, false) => (
+            "Desktop Pet だけを更新しますか？",
+            "Desktop Pet を更新",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, false, false) => ("仅更新 Desktop Pet？", "更新 Desktop Pet", "取消"),
     }
 }
 
@@ -302,6 +474,58 @@ mod mac {
         let call: unsafe extern "C" fn(Obj, Obj, i8) =
             std::mem::transmute(objc_msgSend as *const ());
         call(receiver, selector(message), value as i8);
+    }
+    // Keep exact paths and multi-profile details scrollable, without moving
+    // affirmative/cancel controls beyond a small display's available height.
+    unsafe fn set_consent_details(alert: Obj, summary: &str) {
+        let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
+            std::mem::transmute(objc_msgSend as *const ());
+        let frame = Rect {
+            origin: Point { x: 0., y: 0. },
+            size: Size {
+                width: 520.,
+                height: 320.,
+            },
+        };
+        let details = init_view(
+            object(class("NSTextView"), "alloc"),
+            selector("initWithFrame:"),
+            frame,
+        );
+        send_bool(details, "setEditable:", false);
+        send_bool(details, "setSelectable:", true);
+        send_bool(details, "setRichText:", false);
+        send_object(
+            details,
+            "setTextColor:",
+            object(class("NSColor"), "labelColor"),
+        );
+        send_bool(details, "setDrawsBackground:", false);
+        send_bool(details, "setHorizontallyResizable:", false);
+        send_bool(details, "setVerticallyResizable:", true);
+        let set_size: unsafe extern "C" fn(Obj, Obj, Size) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let maximum = Size {
+            width: 520.,
+            height: f64::MAX,
+        };
+        set_size(details, selector("setMaxSize:"), maximum);
+        let container = object(details, "textContainer");
+        set_size(container, selector("setContainerSize:"), maximum);
+        send_bool(container, "setWidthTracksTextView:", true);
+        send_object(details, "setString:", string(summary));
+        let scroll = init_view(
+            object(class("NSScrollView"), "alloc"),
+            selector("initWithFrame:"),
+            frame,
+        );
+        send_object(scroll, "setDocumentView:", details);
+        send_bool(scroll, "setHasVerticalScroller:", true);
+        send_bool(scroll, "setAutohidesScrollers:", true);
+        send_bool(scroll, "setDrawsBackground:", false);
+        send_object(alert, "setAccessoryView:", scroll);
+        send_void(details, "release");
+        send_void(scroll, "release");
     }
     struct AutoreleasePool(Obj);
     impl AutoreleasePool {
@@ -651,6 +875,7 @@ mod mac {
         expanded: std::cell::Cell<bool>,
         migration_authorization: Option<[u8; 32]>,
         migration_description: Option<String>,
+        install_authorization: Option<[u8; 32]>,
     }
     impl Panel {
         pub fn new(locale: &str, plan: &UpdatePlan) -> Result<Self, String> {
@@ -676,18 +901,14 @@ mod mac {
             Ok(panel)
         }
         pub fn for_install(
-            plan: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+            locale: &str,
+            plan: &super::StandaloneInstallPlan,
         ) -> Result<Self, String> {
             plan.validate()?;
-            let summary = format!(
-                "Desktop Pet {} → {}\n{}\nConfig: {}\nState: {}\nTern and your work stay running.",
-                plan.original.app_version,
-                plan.candidate_version,
-                plan.original.executable.display(),
-                plan.profile.config_dir.display(),
-                plan.profile.state_dir.display()
-            );
-            Self::new_summary("en", &summary, None)
+            let summary = super::install_summary(plan, super::Locale::from_token(locale), false)?;
+            let mut panel = Self::new_summary(locale, &summary, None)?;
+            panel.install_authorization = Some(super::install_digest(plan)?);
+            Ok(panel)
         }
         pub fn confirm_install(
             &self,
@@ -695,6 +916,7 @@ mod mac {
             recovery: bool,
         ) -> Result<bool, String> {
             plan.validate()?;
+            self.require_install_visible(plan)?;
             self.activate();
             unsafe {
                 let _pool = AutoreleasePool::new();
@@ -702,51 +924,35 @@ mod mac {
                 if alert.is_null() {
                     return Err("native install consent alert unavailable".into());
                 }
-                send_object(
-                    alert,
-                    "setMessageText:",
-                    string(if recovery {
-                        "Reconcile approved Desktop Pet installation?"
-                    } else {
-                        "Update only Desktop Pet?"
-                    }),
-                );
-                let action = if recovery {
-                    "Recovery only reconciles the original approval. It cannot replay Quit, override a later Stop, or grant new restart permission."
-                } else if plan.running().is_some() {
-                    "Only Desktop Pet will quit and restart with this exact profile. This is a normal Quit, not draft-aware update preparation: save any unsaved Pet edits before continuing. Tern, its windows, terminals and work remain running."
-                } else {
-                    "Desktop Pet is stopped and will remain stopped. Tern, its windows, terminals and work remain running."
-                };
-                send_object(
-                    alert,
-                    "setInformativeText:",
-                    string(&format!(
-                        "{} → {}\n{}\nConfig: {}\nState: {}\n\n{action}",
-                        plan.original.app_version,
-                        plan.candidate_version,
-                        plan.original.executable.display(),
-                        plan.profile.config_dir.display(),
-                        plan.profile.state_dir.display()
-                    )),
-                );
-                send_object(
-                    alert,
-                    "addButtonWithTitle:",
-                    string(if recovery {
-                        "Reconcile"
-                    } else {
-                        "Update Desktop Pet"
-                    }),
-                );
-                send_object(alert, "addButtonWithTitle:", string("Cancel"));
+                let (title, affirmative, cancel) =
+                    super::install_buttons(self.locale, !plan.purpose.is_upgrade(), recovery);
+                send_object(alert, "setMessageText:", string(title));
+                set_consent_details(alert, &super::install_summary(plan, self.locale, recovery)?);
+                send_object(alert, "addButtonWithTitle:", string(affirmative));
+                send_object(alert, "addButtonWithTitle:", string(cancel));
                 let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
                     std::mem::transmute(objc_msgSend as *const ());
                 let response = modal(alert, selector("runModal"));
                 send_void(alert, "release");
                 self.pump();
-                super::migration_confirmation_response(response)
+                super::install_confirmation_response(
+                    self.install_authorization,
+                    super::install_digest(plan)?,
+                    self.visible(),
+                    response,
+                )
             }
+        }
+        pub fn require_install_visible(
+            &self,
+            plan: &super::StandaloneInstallPlan,
+        ) -> Result<(), String> {
+            self.pump();
+            super::require_install_authorization(
+                self.install_authorization,
+                super::install_digest(plan)?,
+                self.visible(),
+            )
         }
         fn new_summary(
             locale: &str,
@@ -899,6 +1105,7 @@ mod mac {
                     expanded: std::cell::Cell::new(false),
                     migration_authorization,
                     migration_description: None,
+                    install_authorization: None,
                 };
                 panel.show(Phase::Preparing, None);
                 send_void(window, "center");
@@ -936,60 +1143,7 @@ mod mac {
                         "Migrate Herdr to Desktop Pet?"
                     }),
                 );
-                // Exact details for up to 64 profiles must not push the
-                // confirmation controls beyond the available screen.
-                let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
-                    std::mem::transmute(objc_msgSend as *const ());
-                let frame = Rect {
-                    origin: Point { x: 0., y: 0. },
-                    size: Size {
-                        width: 520.,
-                        height: 320.,
-                    },
-                };
-                let details = init_view(
-                    object(class("NSTextView"), "alloc"),
-                    selector("initWithFrame:"),
-                    frame,
-                );
-                send_bool(details, "setEditable:", false);
-                send_bool(details, "setSelectable:", true);
-                send_bool(details, "setRichText:", false);
-                send_object(
-                    details,
-                    "setTextColor:",
-                    object(class("NSColor"), "labelColor"),
-                );
-                send_bool(details, "setDrawsBackground:", false);
-                send_bool(details, "setHorizontallyResizable:", false);
-                send_bool(details, "setVerticallyResizable:", true);
-                let set_size: unsafe extern "C" fn(Obj, Obj, Size) =
-                    std::mem::transmute(objc_msgSend as *const ());
-                let maximum = Size {
-                    width: 520.,
-                    height: f64::MAX,
-                };
-                set_size(details, selector("setMaxSize:"), maximum);
-                let container = object(details, "textContainer");
-                set_size(container, selector("setContainerSize:"), maximum);
-                send_bool(container, "setWidthTracksTextView:", true);
-                send_object(
-                    details,
-                    "setString:",
-                    string(&super::migration_summary(plan)),
-                );
-                let scroll = init_view(
-                    object(class("NSScrollView"), "alloc"),
-                    selector("initWithFrame:"),
-                    frame,
-                );
-                send_object(scroll, "setDocumentView:", details);
-                send_bool(scroll, "setHasVerticalScroller:", true);
-                send_bool(scroll, "setAutohidesScrollers:", true);
-                send_bool(scroll, "setDrawsBackground:", false);
-                send_object(alert, "setAccessoryView:", scroll);
-                send_void(details, "release");
-                send_void(scroll, "release");
+                set_consent_details(alert, &super::migration_summary(plan));
                 send_object(
                     alert,
                     "addButtonWithTitle:",
@@ -1219,6 +1373,7 @@ impl Panel {
         Err("native migration requires macOS AppKit".into())
     }
     pub fn for_install(
+        _: &str,
         _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
     ) -> Result<Self, String> {
         Err("native install requires macOS AppKit".into())
@@ -1228,6 +1383,9 @@ impl Panel {
         _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
         _: bool,
     ) -> Result<bool, String> {
+        Err("native install requires macOS AppKit".into())
+    }
+    pub fn require_install_visible(&self, _: &StandaloneInstallPlan) -> Result<(), String> {
         Err("native install requires macOS AppKit".into())
     }
     pub fn confirm_migration(&self, _: &MigrationPlan, _: bool) -> Result<bool, String> {
@@ -1356,7 +1514,10 @@ impl MigrationPresentation for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::migration_confirmation_response;
+    use super::{
+        install_confirmation_response, migration_confirmation_response,
+        require_install_authorization,
+    };
 
     #[test]
     fn native_final_consent_only_accepts_real_approve_or_cancel_responses() {
@@ -1365,5 +1526,127 @@ mod tests {
         for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
             assert!(migration_confirmation_response(response).is_err());
         }
+    }
+
+    #[test]
+    fn install_consent_requires_exact_approval_and_visible_window() {
+        let digest = [7; 32];
+        assert!(require_install_authorization(Some(digest), digest, true).is_ok());
+        assert!(require_install_authorization(None, digest, true).is_err());
+        assert!(require_install_authorization(Some([8; 32]), digest, true).is_err());
+        assert!(require_install_authorization(Some(digest), digest, false).is_err());
+        assert!(install_confirmation_response(Some(digest), digest, true, 1000).unwrap());
+        assert!(!install_confirmation_response(Some(digest), digest, true, 1001).unwrap());
+        assert!(install_confirmation_response(Some(digest), digest, false, 1000).is_err());
+        assert!(install_confirmation_response(Some([8; 32]), digest, true, 1000).is_err());
+        for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
+            assert!(install_confirmation_response(Some(digest), digest, true, response).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod install_authorization_tests {
+    use super::*;
+    use desktop_pet_update_coordinator::installation::{InstallationKind, InstallationRecord};
+    use desktop_pet_update_coordinator::native_runtime::ProfilePaths;
+    use desktop_pet_update_coordinator::standalone_install::{
+        InstallSource, StandaloneInstallPurpose,
+    };
+    use desktop_pet_update_coordinator::standalone_relocation::SettledRelocationParent;
+    use desktop_pet_update_coordinator::ExecutableIdentity;
+    use std::path::PathBuf;
+
+    #[test]
+    fn displayed_approval_digest_binds_source_target_profile_and_purpose() {
+        let source = PathBuf::from("/approval-fixture/Applications/DesktopPet.app");
+        let image = ExecutableIdentity {
+            path: source.join("Contents/MacOS/desktop-pet"),
+            sha256: "a".repeat(64),
+        };
+        let profile = ProfilePaths {
+            config_dir: "/approval-fixture/config".into(),
+            state_dir: "/approval-fixture/state".into(),
+        };
+        let parent = SettledRelocationParent {
+            version: 1,
+            operation_id: "2".repeat(32),
+            plan_sha256: "b".repeat(64),
+            generation: 7,
+            candidate_image: image.clone(),
+            source_closure_sha256: "c".repeat(64),
+            profile: profile.clone(),
+            result_sha256: "d".repeat(64),
+        };
+        let mut plan = StandaloneInstallPlan {
+            version: 2,
+            operation_id: "1".repeat(32),
+            purpose: StandaloneInstallPurpose::PrivateRelocation {
+                target: InstallOrigin::Standalone {
+                    bundle: "/approval-fixture/private/DesktopPet.app".into(),
+                },
+                parent,
+                source_closure_sha256: "c".repeat(64),
+                tern: None,
+            },
+            original: InstallationRecord {
+                version: 1,
+                executable: image.path.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: "0.4.13".into(),
+                protocol: 4,
+                observation_mode: 2,
+                integration_api: 1,
+                origin: InstallOrigin::Standalone { bundle: source },
+                image: image.clone(),
+            },
+            candidate_bundle: "/approval-fixture/stage/DesktopPet.app".into(),
+            candidate_image: image.clone(),
+            candidate_version: "0.4.13".into(),
+            helper_image: image,
+            source: InstallSource::Stopped {
+                profile: profile.clone(),
+            },
+            profile,
+            original_stop_generation: 7,
+            control_token: "e".repeat(64),
+        };
+        let displayed = install_digest(&plan).unwrap();
+        let original = plan.clone();
+        plan.profile.state_dir = "/approval-fixture/other-state".into();
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original.clone();
+        plan.original.image.sha256 = "f".repeat(64);
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original.clone();
+        if let StandaloneInstallPurpose::PrivateRelocation { target, .. } = &mut plan.purpose {
+            *target = InstallOrigin::Standalone {
+                bundle: "/approval-fixture/other-target/DesktopPet.app".into(),
+            };
+        }
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original;
+        plan.purpose = StandaloneInstallPurpose::Upgrade;
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
     }
 }

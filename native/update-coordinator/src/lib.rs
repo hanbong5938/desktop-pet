@@ -19,6 +19,7 @@ mod processes;
 pub mod protocol;
 pub mod releases;
 pub mod standalone_install;
+pub mod standalone_relocation;
 
 /// Additive release contract. Historical absence is valid, not authorization.
 pub fn installation_client_contract(value: &serde_json::Value) -> Result<Option<u32>, String> {

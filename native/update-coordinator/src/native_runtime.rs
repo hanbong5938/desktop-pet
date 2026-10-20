@@ -105,6 +105,7 @@ impl NativeInstallScope {
         profile: &ProfilePaths,
     ) -> Result<Self, String> {
         profile.validate()?;
+        installation::validate_fresh_standalone_scope(&original.bundle)?;
         Ok(Self {
             scope: processes::CompatibleClientScope::capture(
                 original,
@@ -112,6 +113,9 @@ impl NativeInstallScope {
                 &profile.state_dir,
             )?,
         })
+    }
+    pub fn reserve_target_scope(&mut self, target: &crate::InstallOrigin) -> Result<(), String> {
+        self.scope.reserve_target_scope(target)
     }
     pub fn pin_prepared_candidate(
         &mut self,
@@ -788,6 +792,47 @@ pub fn wait_install_source_stopped(
     }
 }
 
+/// Authenticate the current owner without inheriting an earlier instance's mutable UI/settings
+/// context. This is observation only: it does not issue a startup token or start a daemon.
+pub fn verify_current_ready(instance: &NativeInstance, generation: u64) -> Result<(), String> {
+    instance.profile.validate()?;
+    let installed = installation::inspect(&instance.image.path)?;
+    if installed.image != instance.image
+        || instance.context.running_origin.as_deref() != Some(&installed.origin)
+    {
+        return Err("current runtime does not match its signed installation owner".into());
+    }
+    let evidence = processes::capture_process(instance.incarnation.pid)?;
+    if evidence.incarnation != instance.incarnation
+        || evidence.mapped_file != instance.mapped_file
+        || evidence.path != instance.image.path
+    {
+        return Err("current runtime process incarnation/image changed".into());
+    }
+    let live = status(&instance.profile, Some(&evidence), Duration::from_secs(3))?;
+    verify_reply(&live, "status", &instance.image, &instance.profile)?;
+    if live.instance_id != instance.instance_id
+        || !live.running
+        || live.shutdown
+        || live.app_version != installed.app_version
+        || !live.ready
+        || !live.ui_ready
+        || !live.control_ready
+        || !startup_quiescent(&instance.profile)?
+        || protocol::stop_generation(&instance.profile.state_dir)? != generation
+        || protocol::verified_runtime_start_fence(
+            &installed.origin,
+            &instance.profile.state_dir,
+            instance.incarnation.pid,
+            &instance.instance_id,
+            &instance.image,
+        )? != generation
+    {
+        return Err("current runtime UI/control/startup/Stop readiness is unproved".into());
+    }
+    Ok(())
+}
+
 pub fn verify_installed_ready(
     context: &UpdateContext,
     installed: &VerifiedInstallation,
@@ -950,6 +995,7 @@ pub fn stop_for_install(
     instance: &NativeInstance,
 ) -> Result<VerifiedBootstrapStopAck, String> {
     use crate::standalone_install::{BootstrapStopAck, InstallSource, StandaloneOriginalInstance};
+    plan.validate_for_execution()?;
     let InstallSource::Running {
         instance: approved,
         context,

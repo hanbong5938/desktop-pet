@@ -325,6 +325,15 @@ pub fn check(c: &UpdateContext, policy: UpdatePolicy) -> Result<CheckSnapshot, S
         release: None,
         checked_at: Some(now()?),
     };
+    if !identity::LEGACY
+        && matches!(&origin, InstallOrigin::Standalone { bundle }
+        if crate::installation::standalone_bundle().is_ok_and(|private| private != *bundle))
+    {
+        view.detail =
+            "This installation must move to the private update location before another update."
+                .into();
+        return Ok(view);
+    }
     if let Ok(candidates) = releases::fetch_candidates() {
         view.release = releases::select_candidate(&candidates, &c.version, policy)?;
     }
@@ -420,6 +429,9 @@ pub fn validate_plan_target(plan: &UpdatePlan) -> Result<(), String> {
     }
     match (&plan.origin, &plan.action) {
         (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace) => {
+            if !identity::LEGACY && *bundle != crate::installation::standalone_bundle()? {
+                return Err("historical Applications owner requires private relocation, not an in-place update".into());
+            }
             crate::installation::validate_standalone_owner(bundle)
         }
         (InstallOrigin::Homebrew { formula, .. }, UpdateAction::HomebrewUpgrade)
@@ -1121,6 +1133,9 @@ mod tests {
         assert!(validate_plan_target(&plan).is_err());
         plan = approved.clone();
         plan.origin = original;
+        assert!(validate_plan_target(&plan).is_err());
+        // Neither changing both ends together nor equal ownership can reopen H for new updates.
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
         assert!(validate_plan_target(&plan).is_err());
         for forbidden in [
             "/Applications/DesktopPet.app",

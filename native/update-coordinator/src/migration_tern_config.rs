@@ -25,12 +25,17 @@ pub struct TernConfiguration {
     source_binding_sha256: Option<String>,
 }
 fn roots(profile: &LegacyProfile) -> Result<(PathBuf, PathBuf), String> {
-    if let Some(path) = profile.environment.get("TERN_CONFIG_DIR") {
+    roots_for_environment(&profile.environment)
+}
+fn roots_for_environment(
+    environment: &BTreeMap<String, String>,
+) -> Result<(PathBuf, PathBuf), String> {
+    if let Some(path) = environment.get("TERN_CONFIG_DIR") {
         let path = PathBuf::from(path);
         crate::ensure_absolute(&path)?;
         return Ok((path.clone(), path));
     }
-    let home = profile_home(&profile.environment, &crate::origin::os_home()?)?;
+    let home = profile_home(environment, &crate::installation::os_home()?)?;
     #[cfg(target_os = "macos")]
     {
         let root = home.join("Library/Application Support/Tern");
@@ -39,20 +44,26 @@ fn roots(profile: &LegacyProfile) -> Result<(PathBuf, PathBuf), String> {
     #[cfg(not(target_os = "macos"))]
     {
         Ok((
-            profile
-                .environment
+            environment
                 .get("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".config"))
                 .join("tern"),
-            profile
-                .environment
+            environment
                 .get("XDG_STATE_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".local/state"))
                 .join("tern"),
         ))
     }
+}
+pub(super) fn relocation_installed_package(
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
+    let (config, _) = roots_for_environment(environment)?;
+    owned_directory(&config)?;
+    owned_directory(&config.join("plugins"))?;
+    Ok(config.join("plugins/tern-desktop-pet"))
 }
 fn connection(bytes: &[u8]) -> Result<Option<TernConnection>, String> {
     let value: serde_json::Value =
@@ -114,6 +125,155 @@ pub(super) fn verify_configuration(configuration: &TernConfiguration) -> Result<
         ) != configuration.sha256
     {
         return Err("Tern saved connection changed after update approval; no consumer or KV mutation was attempted".into());
+    }
+    Ok(())
+}
+fn configuration_snapshot(
+    path: PathBuf,
+    bytes: Vec<u8>,
+    connection: TernConnection,
+    bound_source: ExecutableIdentity,
+    source_binding_sha256: Option<String>,
+    meta: &fs::Metadata,
+) -> Result<TernConfiguration, String> {
+    let configuration = TernConfiguration {
+        path,
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        connection,
+        device: meta.dev(),
+        inode: meta.ino(),
+        length: meta.len(),
+        modified_seconds: meta.mtime(),
+        modified_nanoseconds: meta.mtime_nsec(),
+        bound_source,
+        source_binding_sha256,
+    };
+    verify_configuration(&configuration)?;
+    Ok(configuration)
+}
+
+/// Captures immutable saved SDK routing, not consumer installation or a live
+/// window. Disconnected Tern must not lose the original route's ancestry.
+pub fn capture_relocation_tern(
+    context: &UpdateContext,
+    target: &InstallOrigin,
+) -> Result<Option<crate::standalone_relocation::RelocationTernApproval>, String> {
+    if crate::identity::LEGACY {
+        return Err("legacy envelopes cannot approve private relocation".into());
+    }
+    let source = crate::installation::os_home()?.join("Applications/DesktopPet.app");
+    if context.running_origin.as_deref()
+        != Some(&InstallOrigin::Standalone {
+            bundle: source.clone(),
+        })
+        || context.running.path != source.join("Contents/MacOS/desktop-pet")
+        || executable_identity(&context.running.path)? != context.running
+        || target
+            != &(InstallOrigin::Standalone {
+                bundle: crate::installation::standalone_bundle()?,
+            })
+    {
+        return Err("Tern relocation capture requires the exact authenticated H-to-C owner".into());
+    }
+    let Some(configuration) = capture_relocation_configuration(context)? else {
+        return Ok(None);
+    };
+    let original = configuration.connection.clone();
+    let target = TernConnection {
+        executable: crate::physical_install_root(target)?.join("Contents/MacOS/desktop-pet"),
+        ..original.clone()
+    };
+    Ok(Some(crate::standalone_relocation::RelocationTernApproval {
+        configuration,
+        original,
+        target,
+    }))
+}
+fn capture_relocation_configuration(
+    context: &UpdateContext,
+) -> Result<Option<TernConfiguration>, String> {
+    let (_, state) = roots_for_environment(&context.environment)?;
+    let path = state.join("plugin-data/tern-desktop-pet/kv.json");
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    owned_directory(&state)?;
+    owned_directory(path.parent().ok_or("Tern KV has no parent")?)?;
+    let meta = metadata(&path)?;
+    let bytes = crate::owned_file(&path, MAX_PLAN)?;
+    let Some(original) = connection(&bytes)? else {
+        return Ok(None);
+    };
+    if original.executable != context.running.path
+        || original.config_dir != context.config_dir
+        || original.state_dir != context.state_dir
+    {
+        return Err("Tern saved route conflicts with the exact original relocation profile/image; its bytes were preserved".into());
+    }
+    Ok(Some(configuration_snapshot(
+        path,
+        bytes,
+        original,
+        context.running.clone(),
+        None,
+        &meta,
+    )?))
+}
+
+pub(super) fn validate_relocation_configuration(
+    context: &UpdateContext,
+    approval: &crate::standalone_relocation::RelocationTernApproval,
+) -> Result<(), String> {
+    validate_configuration_shape(&approval.configuration)?;
+    let (_, state) = roots_for_environment(&context.environment)?;
+    if approval.configuration.path != state.join("plugin-data/tern-desktop-pet/kv.json")
+        || approval.configuration.connection != approval.original
+        || approval.configuration.bound_source != context.running
+        || approval.configuration.source_binding_sha256.is_some()
+        || approval.original.executable != context.running.path
+        || approval.original.config_dir != context.config_dir
+        || approval.original.state_dir != context.state_dir
+        || approval.target
+            != (TernConnection {
+                executable: crate::installation::standalone_bundle()?
+                    .join("Contents/MacOS/desktop-pet"),
+                ..approval.original.clone()
+            })
+    {
+        return Err(
+            "Tern relocation saved route escaped its immutable original profile/image".into(),
+        );
+    }
+    Ok(())
+}
+/// Called before Stop; historical route observation deliberately does not call
+/// this because the SDK is allowed to replace its saved H tuple with C.
+pub fn verify_relocation_tern_unchanged(
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+) -> Result<(), String> {
+    if let crate::standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+        tern: Some(approval),
+        ..
+    } = &plan.purpose
+    {
+        let (_, context) = plan
+            .running()
+            .ok_or("Tern relocation requires Running approval")?;
+        validate_relocation_configuration(context, approval)?;
+        verify_configuration(&approval.configuration)?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_relocation_routing(
+    context: &UpdateContext,
+    approval: &crate::standalone_relocation::RelocationTernApproval,
+) -> Result<(), String> {
+    let (_, state) = roots_for_environment(&context.environment)?;
+    if approval.configuration.path != state.join("plugin-data/tern-desktop-pet/kv.json") {
+        return Err("current owner changed the captured Tern configuration routing".into());
     }
     Ok(())
 }
@@ -191,20 +351,14 @@ fn capture(
     } else {
         return Err("Tern saved executable has no exact approved source/owning-manager ancestry; its route was preserved".into());
     };
-    let configuration = TernConfiguration {
+    Ok(Some(configuration_snapshot(
         path,
-        sha256: format!("{:x}", Sha256::digest(bytes)),
+        bytes,
         connection,
-        device: meta.dev(),
-        inode: meta.ino(),
-        length: meta.len(),
-        modified_seconds: meta.mtime(),
-        modified_nanoseconds: meta.mtime_nsec(),
         bound_source,
         source_binding_sha256,
-    };
-    verify_configuration(&configuration)?;
-    Ok(Some(configuration))
+        &meta,
+    )?))
 }
 pub(super) fn configure_delivery(plan: &mut MigrationPlan) {
     configure_delivery_with_previous(plan, None, None);
@@ -366,6 +520,111 @@ pub(super) fn verify_canonical_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn relocation_context(root: &Path) -> UpdateContext {
+        let physical_root = fs::canonicalize(root).unwrap();
+        let root = physical_root.as_path();
+        let executable = root.join("H/Contents/MacOS/desktop-pet");
+        UpdateContext {
+            executable: executable.clone(),
+            version: crate::identity::neutral::VERSION.into(),
+            instance_id: "original-instance".into(),
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+            running: ExecutableIdentity {
+                path: executable,
+                sha256: "a".repeat(64),
+            },
+            running_origin: None,
+            assets_override: None,
+            environment: BTreeMap::from([(
+                "TERN_CONFIG_DIR".into(),
+                root.join("tern").display().to_string(),
+            )]),
+            locale: "en".into(),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: root.join("state/control.sock"),
+        }
+    }
+    fn saved_fixture(context: &UpdateContext, value: &serde_json::Value) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = PathBuf::from(context.environment.get("TERN_CONFIG_DIR").unwrap())
+            .join("plugin-data/tern-desktop-pet/kv.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let root = PathBuf::from(context.environment.get("TERN_CONFIG_DIR").unwrap());
+        for directory in [&root, &root.join("plugin-data"), path.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+    #[test]
+    fn relocation_captures_disconnected_saved_route_without_cli_or_consumer() {
+        let root = tempfile::tempdir().unwrap();
+        let context = relocation_context(root.path());
+        let original = TernConnection {
+            version: 1,
+            executable: context.running.path.clone(),
+            config_dir: context.config_dir.clone(),
+            state_dir: context.state_dir.clone(),
+        };
+        let path = saved_fixture(&context, &serde_json::json!({"connection": original}));
+        let before = fs::read(&path).unwrap();
+        let captured = capture_relocation_configuration(&context).unwrap().unwrap();
+        assert_eq!(captured.connection, original);
+        assert_eq!(captured.bound_source, context.running);
+        assert!(captured.source_binding_sha256.is_none());
+        assert!(!root.path().join("tern/plugins").exists());
+        assert!(!context.state_dir.join("control.sock").exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn relocation_absence_is_not_malformed_conflicting_unreadable_or_symlinked_kv() {
+        let root = tempfile::tempdir().unwrap();
+        let context = relocation_context(root.path());
+        assert!(capture_relocation_configuration(&context)
+            .unwrap()
+            .is_none());
+        let path = saved_fixture(&context, &serde_json::json!({}));
+        assert!(capture_relocation_configuration(&context)
+            .unwrap()
+            .is_none());
+        for value in [
+            serde_json::json!({"connection":null}),
+            serde_json::json!({"connection":{"version":1,"executable":context.running.path,"config_dir":"/other/config","state_dir":context.state_dir}}),
+            serde_json::json!({"executable":context.running.path,"config_dir":context.config_dir}),
+            serde_json::json!({"connection":{"version":1,"executable":"/foreign/pet","config_dir":context.config_dir,"state_dir":context.state_dir}}),
+        ] {
+            saved_fixture(&context, &value);
+            assert!(capture_relocation_configuration(&context).is_err());
+        }
+        fs::write(&path, b"not json").unwrap();
+        assert!(capture_relocation_configuration(&context).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(capture_relocation_configuration(&context).is_err());
+        fs::remove_dir(&path).unwrap();
+        let foreign = root.path().join("foreign-kv");
+        fs::write(&foreign, b"{}").unwrap();
+        std::os::unix::fs::symlink(&foreign, &path).unwrap();
+        assert!(capture_relocation_configuration(&context).is_err());
+    }
+    #[test]
+    fn relocation_saved_configuration_rejects_same_bytes_replaced_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let context = relocation_context(root.path());
+        let path = saved_fixture(
+            &context,
+            &serde_json::json!({"connection":{"version":1,"executable":context.running.path,"config_dir":context.config_dir,"state_dir":context.state_dir}}),
+        );
+        let captured = capture_relocation_configuration(&context).unwrap().unwrap();
+        let replacement = path.with_extension("replacement");
+        fs::copy(&path, &replacement).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(verify_configuration(&captured).is_err());
+    }
     #[test]
     fn short_command_capture_surfaces_backend_error_and_requires_binding_evidence() {
         use std::os::unix::fs::PermissionsExt;
@@ -612,17 +871,7 @@ pub(super) fn validate_configuration(
     plan: &MigrationPlan,
     configuration: &TernConfiguration,
 ) -> Result<(), String> {
-    image_valid(&configuration.bound_source)?;
-    if !hex(&configuration.sha256, 64)
-        || configuration.length > MAX_PLAN
-        || configuration
-            .source_binding_sha256
-            .as_ref()
-            .is_some_and(|hash| !hex(hash, 64))
-        || configuration.connection.version != 1
-    {
-        return Err("saved Tern configuration proof is structurally invalid".into());
-    }
+    validate_configuration_shape(configuration)?;
     let profile = plan
         .profiles
         .iter()
@@ -635,6 +884,20 @@ pub(super) fn validate_configuration(
     let (_, state) = roots(profile)?;
     if configuration.path != state.join("plugin-data/tern-desktop-pet/kv.json") {
         return Err("saved Tern proof escaped the documented captured state routing".into());
+    }
+    Ok(())
+}
+fn validate_configuration_shape(configuration: &TernConfiguration) -> Result<(), String> {
+    image_valid(&configuration.bound_source)?;
+    if !hex(&configuration.sha256, 64)
+        || configuration.length > MAX_PLAN
+        || configuration
+            .source_binding_sha256
+            .as_ref()
+            .is_some_and(|hash| !hex(hash, 64))
+        || configuration.connection.version != 1
+    {
+        return Err("saved Tern configuration proof is structurally invalid".into());
     }
     Ok(())
 }

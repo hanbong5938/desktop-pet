@@ -55,6 +55,7 @@ impl CardView {
 pub(crate) enum UpdateCardPrimaryAction {
     Update,
     Migrate,
+    Relocate,
 }
 
 #[derive(Clone)]
@@ -79,6 +80,9 @@ pub(crate) struct UpdateCardModel {
     pub(crate) migration_available: bool,
     pub(crate) migration_visible: bool,
     pub(crate) migration_title: String,
+    pub(crate) relocation_available: bool,
+    pub(crate) relocation_title: String,
+    pub(crate) relocation_detail: String,
 }
 
 impl UpdateCardModel {
@@ -357,7 +361,11 @@ impl AppUpdateCard {
             &model.status_text,
             &model.running_version,
             &model.source,
-            &model.detail,
+            if model.relocation_detail.is_empty() {
+                &model.detail
+            } else {
+                &model.relocation_detail
+            },
             model.last_checked,
             model.action.as_ref(),
             model.release.as_ref(),
@@ -366,6 +374,7 @@ impl AppUpdateCard {
         unsafe {
             self.apply.setAction(Some(match model.primary_action {
                 Some(UpdateCardPrimaryAction::Migrate) => sel!(migrateLegacyInstallation:),
+                Some(UpdateCardPrimaryAction::Relocate) => sel!(relocateStandaloneInstallation:),
                 Some(UpdateCardPrimaryAction::Update) | None => sel!(applyAppUpdate:),
             }));
         }
@@ -374,6 +383,10 @@ impl AppUpdateCard {
             self.apply
                 .setTitle(&NSString::from_str(&model.migration_title));
             accessibility(&self.apply, &model.migration_title);
+        } else if model.primary_action == Some(UpdateCardPrimaryAction::Relocate) {
+            self.apply
+                .setTitle(&NSString::from_str(&model.relocation_title));
+            accessibility(&self.apply, &model.relocation_title);
         }
         set_text(&self.history, &model.history);
         self.history.setHidden(model.history.is_empty());
@@ -397,6 +410,7 @@ impl AppUpdateCard {
                 && match model.primary_action {
                     Some(UpdateCardPrimaryAction::Update) => model.action.is_some(),
                     Some(UpdateCardPrimaryAction::Migrate) => model.migration_available,
+                    Some(UpdateCardPrimaryAction::Relocate) => model.relocation_available,
                     None => false,
                 },
         );

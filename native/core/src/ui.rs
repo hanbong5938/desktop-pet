@@ -2384,6 +2384,14 @@ define_class!(
         fn migrate_legacy_installation(&self, _sender: Option<&AnyObject>) {
             with_ui_update_action(|ui| ui.begin_legacy_migration());
         }
+        #[unsafe(method(relocateStandaloneInstallation:))]
+        fn relocate_standalone_installation(&self, _sender: Option<&AnyObject>) {
+            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+            let block = RcBlock::new(|| {
+                with_ui_update_action(|ui| ui.begin_standalone_relocation());
+            });
+            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+        }
         #[unsafe(method(downloadAppUpdate:))]
         fn download_app_update(&self, _sender: Option<&AnyObject>) {
             with_ui_update_action(|ui| ui.download_app_update());
@@ -8534,6 +8542,27 @@ impl Ui {
         self.update_pointer_policy(scene);
     }
 
+    fn begin_standalone_relocation(&mut self) {
+        if self.update_frozen.is_some()
+            || self.migration.busy
+            || !self.app_update.model(self.locale).relocation_available
+            || !self
+                .shared
+                .lock()
+                .is_ok_and(|state| state.is_ui_ready() && state.update_mutation_allowed().is_ok())
+        {
+            return;
+        }
+        let blockers = self.restart_blockers_snapshot();
+        if !blockers.is_empty() {
+            self.app_update.set_problem(blockers.join("; "));
+        } else {
+            self.app_update.begin_standalone_relocation();
+        }
+        self.painted_app_update = None;
+        self.refresh_app_update();
+    }
+
     fn begin_legacy_migration(&mut self) {
         if !self.migration.review_allowed() || self.update_frozen.is_some() {
             return;
@@ -9007,6 +9036,19 @@ impl Ui {
             self.app_update.check_due();
         }
         self.app_update.poll_operation();
+        // This timer also runs during tracking/modal loops. A second native
+        // consent may only be admitted once the real UI is ready in default mode.
+        if capture_dispatch_safe()
+            && self.update_frozen.is_none()
+            && !self.migration.busy
+            && self.restart_blockers_snapshot().is_empty()
+            && self
+                .shared
+                .lock()
+                .is_ok_and(|state| state.is_ui_ready() && state.update_mutation_allowed().is_ok())
+        {
+            self.app_update.poll_relocation();
+        }
         while let Some(event) = self.app_update.next_event() {
             match event {
                 app_update::Event::Checked {
@@ -9096,6 +9138,43 @@ impl Ui {
                     }
                 }
                 app_update::Event::LatestJournal(result) => self.app_update.latest_journal(result),
+                app_update::Event::RelocationAdmission { context, result } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update.relocation_admission(context, result);
+                    }
+                }
+                app_update::Event::RelocationFinished {
+                    context,
+                    operation_id,
+                    result,
+                } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update
+                            .relocation_finished(context, operation_id, result);
+                    }
+                }
+                app_update::Event::RelocationTernObserved {
+                    context,
+                    operation_id,
+                    result,
+                } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update
+                            .relocation_tern_observed(context, operation_id, result);
+                    }
+                }
                 app_update::Event::MigrationEligibility { context, result } => {
                     self.app_update.migration_eligibility(context, result)
                 }

@@ -2934,7 +2934,7 @@ mod tests {
             fs::create_dir(path).unwrap();
             fs::set_permissions(path, Permissions::from_mode(0o700)).unwrap();
         }
-        let bundle = temp.path().join("DesktopPet.app");
+        let bundle = desktop_pet_update_coordinator::installation::standalone_bundle().unwrap();
         let executable = bundle.join("Contents/MacOS/desktop-pet");
         let candidate = temp.path().join("candidate/DesktopPet.app");
         let helper = temp.path().join("helper");
@@ -2945,7 +2945,8 @@ mod tests {
             state_dir: state.clone(),
         };
         let plan = StandaloneInstallPlan {
-            version: 1,
+            version: 2,
+            purpose: standalone_install::StandaloneInstallPurpose::Upgrade,
             operation_id: "a".repeat(32),
             original: InstallationRecord {
                 version: 1,
