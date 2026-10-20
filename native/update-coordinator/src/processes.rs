@@ -228,7 +228,20 @@ pub(crate) struct ProcessEvidence {
     pub incarnation: ProcessIncarnation,
     pub mapped_file: MappedFileIdentity,
     pub path: PathBuf,
+    pub parent_pid: u32,
     pub uid: u32,
+}
+
+impl ProcessEvidence {
+    /// Ordinary peers/clients are authenticated by their image and incarnation,
+    /// not by their launcher's continued lifetime. Validation-child proofs use
+    /// full evidence equality separately to bind the kernel parent relationship.
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.incarnation == other.incarnation
+            && self.mapped_file == other.mapped_file
+            && self.path == other.path
+            && self.uid == other.uid
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -266,8 +279,77 @@ struct PinnedClientImage {
     mapped_file: MappedFileIdentity,
     bundle: PathBuf,
     compatible: bool,
+    validation_helper: Option<PinnedValidationHelper>,
+    // Only immutable replacement evidence can add the pre-move launch namespace.
+    validation_launch_bundle: Option<PathBuf>,
 }
 
+struct PinnedValidationHelper {
+    file: std::fs::File,
+    metadata: std::fs::Metadata,
+    mapped_file: MappedFileIdentity,
+    path: PathBuf,
+}
+
+fn pin_executable(
+    image: &ExecutableIdentity,
+) -> Result<(std::fs::File, std::fs::Metadata, MappedFileIdentity), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&image.path)
+        .map_err(|e| e.to_string())?;
+    let before = file.metadata().map_err(|e| e.to_string())?;
+    if !before.is_file() || before.nlink() == 0 {
+        return Err("scoped executable is not a linked regular file".into());
+    }
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    pinned_file_unchanged(&file, &before)?;
+    let after = file.metadata().map_err(|e| e.to_string())?;
+    if format!("{:x}", hash.finalize()) != image.sha256
+        || crate::executable_identity(&image.path)? != *image
+    {
+        return Err("scoped executable changed while pinning".into());
+    }
+    let path_metadata = std::fs::symlink_metadata(&image.path).map_err(|e| e.to_string())?;
+    if path_metadata.dev() != after.dev() || path_metadata.ino() != after.ino() {
+        return Err("scoped executable path no longer names pinned file".into());
+    }
+    let mapped_file = MappedFileIdentity {
+        device: after.dev() as u32,
+        inode: after.ino(),
+    };
+    Ok((file, after, mapped_file))
+}
+
+fn pinned_file_unchanged(file: &std::fs::File, old: &std::fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let now = file.metadata().map_err(|e| e.to_string())?;
+    if !now.is_file()
+        || now.nlink() == 0
+        || now.dev() != old.dev()
+        || now.ino() != old.ino()
+        || now.len() != old.len()
+        || now.mtime() != old.mtime()
+        || now.mtime_nsec() != old.mtime_nsec()
+        || now.ctime() != old.ctime()
+        || now.ctime_nsec() != old.ctime_nsec()
+    {
+        return Err("pinned installation image changed or was unlinked".into());
+    }
+    Ok(())
+}
 /// Opt-in admission for pinned images, explicitly approved physical roots, and one exact profile.
 /// Recovery retains root scope independently of the relocated/retained pinned inode paths.
 pub(crate) struct CompatibleClientScope {
@@ -296,72 +378,49 @@ impl PinnedClientImage {
         use sha2::{Digest, Sha256};
         // Do not trust a caller-constructed ValidatedApp or a version string.
         // This includes the external sidecar, signature and full deployed closure.
+        let sidecar = crate::owned_file(
+            &crate::installation::sidecar_path(&app.bundle),
+            2 * 1024 * 1024,
+        )?;
         let validated = crate::installation::validate_staged_app(&app.bundle)?;
         if validated.image != app.image || validated.version != app.version {
             return Err("scoped application differs from validated bundle".into());
         }
-        let sidecar_hash = format!(
-            "{:x}",
-            Sha256::digest(crate::owned_file(
-                &crate::installation::sidecar_path(&validated.bundle),
-                2 * 1024 * 1024,
-            )?)
-        );
-        Self::pin_validated(&validated, &sidecar_hash)
+        if crate::owned_file(
+            &crate::installation::sidecar_path(&app.bundle),
+            2 * 1024 * 1024,
+        )? != sidecar
+        {
+            return Err("scoped deployment closure changed during validation".into());
+        }
+        let sidecar_hash = format!("{:x}", Sha256::digest(&sidecar));
+        let helper_image = validation_helper_image(&validated, &sidecar)?;
+        Self::pin_validated(&validated, &sidecar_hash, helper_image.as_ref())
     }
 
     fn capture_recovered(proof: &crate::installation::RecoveredScopeImage) -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt;
-        let pinned = Self::pin_validated(proof.app(), proof.sidecar_sha256())?;
+        let mut pinned = Self::pin_validated(
+            proof.app(),
+            proof.sidecar_sha256(),
+            proof.validation_helper_image(),
+        )?;
         if (pinned.metadata.dev(), pinned.metadata.ino()) != proof.file_identity() {
             return Err("recovered executable differs from immutable replacement inode".into());
         }
+        pinned.set_namespace(&proof.app().bundle, proof.validation_launch_bundle());
         Ok(pinned)
     }
 
     fn pin_validated(
         validated: &crate::installation::ValidatedApp,
         sidecar_hash: &str,
+        helper_image: Option<&ExecutableIdentity>,
     ) -> Result<Self, String> {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&validated.image.path)
-            .map_err(|e| e.to_string())?;
-        let before = file.metadata().map_err(|e| e.to_string())?;
-        if !before.is_file() || before.nlink() == 0 {
-            return Err("scoped executable is not a linked regular file".into());
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = [0u8; 65536];
-        loop {
-            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buffer[..n]);
-        }
-        let after = file.metadata().map_err(|e| e.to_string())?;
-        if before.dev() != after.dev()
-            || before.ino() != after.ino()
-            || before.len() != after.len()
-            || before.mtime() != after.mtime()
-            || before.mtime_nsec() != after.mtime_nsec()
-            || before.ctime() != after.ctime()
-            || before.ctime_nsec() != after.ctime_nsec()
-            || format!("{:x}", hash.finalize()) != validated.image.sha256
-            || crate::executable_identity(&validated.image.path)? != validated.image
-        {
-            return Err("scoped executable changed while pinning".into());
-        }
-        let path_metadata =
-            std::fs::symlink_metadata(&validated.image.path).map_err(|e| e.to_string())?;
-        if path_metadata.dev() != after.dev() || path_metadata.ino() != after.ino() {
-            return Err("scoped executable path no longer names pinned file".into());
-        }
+        let (file, metadata, mapped_file) = pin_executable(&validated.image)?;
+        let validation_helper = helper_image
+            .map(PinnedValidationHelper::capture)
+            .transpose()?;
         let compatible = release_allows_clients(
             validated.installation_client_contract,
             &validated.image.sha256,
@@ -369,33 +428,282 @@ impl PinnedClientImage {
         );
         Ok(Self {
             _file: file,
-            metadata: after,
-            mapped_file: MappedFileIdentity {
-                device: before.dev() as u32,
-                inode: before.ino(),
-            },
+            metadata,
+            mapped_file,
             bundle: validated.bundle.clone(),
             compatible,
+            validation_helper,
+            validation_launch_bundle: None,
         })
     }
 
     fn unchanged(&self) -> Result<(), String> {
-        use std::os::unix::fs::MetadataExt;
-        let now = self._file.metadata().map_err(|e| e.to_string())?;
-        let old = &self.metadata;
-        if !now.is_file()
-            || now.nlink() == 0
-            || now.dev() != old.dev()
-            || now.ino() != old.ino()
-            || now.len() != old.len()
-            || now.mtime() != old.mtime()
-            || now.mtime_nsec() != old.mtime_nsec()
-            || now.ctime() != old.ctime()
-            || now.ctime_nsec() != old.ctime_nsec()
-        {
-            return Err("pinned installation image changed or was unlinked".into());
+        pinned_file_unchanged(&self._file, &self.metadata)?;
+        if let Some(helper) = &self.validation_helper {
+            pinned_file_unchanged(&helper.file, &helper.metadata)?;
         }
         Ok(())
+    }
+
+    fn namespace_has_image(&self, path: &std::path::Path, name: &str) -> bool {
+        std::iter::once(&self.bundle)
+            .chain(self.validation_launch_bundle.iter())
+            .any(|bundle| path.as_os_str() == bundle.join("Contents/MacOS").join(name).as_os_str())
+    }
+
+    fn verify_rebased_image(
+        &self,
+        app: &crate::installation::ValidatedApp,
+        file_identity: (u64, u64),
+        helper_image: Option<&ExecutableIdentity>,
+    ) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        self.unchanged()?;
+        let metadata = std::fs::symlink_metadata(&app.image.path).map_err(|e| e.to_string())?;
+        if (self.metadata.dev(), self.metadata.ino()) != file_identity
+            || !metadata.is_file()
+            || (metadata.dev(), metadata.ino()) != file_identity
+        {
+            return Err("replacement namespace does not name the pinned application inode".into());
+        }
+        match (&self.validation_helper, helper_image) {
+            (Some(helper), Some(image)) => {
+                let metadata = std::fs::symlink_metadata(&image.path).map_err(|e| e.to_string())?;
+                if !metadata.is_file()
+                    || metadata.dev() != helper.metadata.dev()
+                    || metadata.ino() != helper.metadata.ino()
+                {
+                    return Err(
+                        "replacement namespace does not name the pinned helper inode".into(),
+                    );
+                }
+            }
+            (None, None) => {}
+            _ => return Err("replacement helper authority differs from the pinned scope".into()),
+        }
+        Ok(())
+    }
+
+    fn set_namespace(&mut self, bundle: &std::path::Path, launch_bundle: &std::path::Path) {
+        self.bundle = bundle.to_owned();
+        self.validation_launch_bundle = (launch_bundle != bundle).then(|| launch_bundle.to_owned());
+        if let Some(helper) = &mut self.validation_helper {
+            helper.path = bundle.join("Contents/MacOS/desktop-pet-update-coordinator");
+        }
+    }
+}
+
+/// The caller has validated these exact sidecar bytes as the signed deployment
+/// closure (or as an immutable recovery snapshot of that closure).
+pub(crate) fn validation_helper_image(
+    app: &crate::installation::ValidatedApp,
+    sidecar: &[u8],
+) -> Result<Option<ExecutableIdentity>, String> {
+    if app.installation_client_contract != Some(1) {
+        return Ok(None);
+    }
+    let record: serde_json::Value = serde_json::from_slice(sidecar).map_err(|e| e.to_string())?;
+    let sha256 = record
+        .get("deployed_sha256")
+        .and_then(|hashes| hashes.get("MacOS/desktop-pet-update-coordinator"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or("validated deployment closure lacks coordinator digest")?;
+    Ok(Some(ExecutableIdentity {
+        path: app
+            .bundle
+            .join("Contents/MacOS/desktop-pet-update-coordinator"),
+        sha256: sha256.to_owned(),
+    }))
+}
+
+impl PinnedValidationHelper {
+    fn capture(image: &ExecutableIdentity) -> Result<Self, String> {
+        let (file, metadata, mapped_file) = pin_executable(image)?;
+        Ok(Self {
+            file,
+            metadata,
+            mapped_file,
+            path: image.path.clone(),
+        })
+    }
+}
+
+/// This is not a generally compatible CLI. It is the exact child invocation of
+/// validate_bundle_snapshot, including the published beta7 implementation.
+fn validation_scratch(
+    image: &PinnedClientImage,
+    evidence: &ProcessEvidence,
+    arguments: &ProcessArguments,
+) -> Option<PathBuf> {
+    let args = &arguments.argv;
+    if args.len() != 9
+        || !image.namespace_has_image(&evidence.path, "desktop-pet")
+        || args[1] != "pack"
+        || args[2] != "validate"
+        || args[3] != "--path"
+        || args[5] != "--config-dir"
+        || args[7] != "--state-dir"
+    {
+        return None;
+    }
+    // argv retains its launch paths across an authenticated bundle move, while
+    // kernel paths may already name retained storage. Both remain bound to this
+    // exact pinned app/helper pair, never to arbitrary approved-root aliases.
+    if !std::iter::once(&image.bundle)
+        .chain(image.validation_launch_bundle.iter())
+        .any(|bundle| {
+            args[0].as_os_str() == bundle.join("Contents/MacOS/desktop-pet").as_os_str()
+                && args[4].as_os_str() == bundle.join("Contents/Resources/default").as_os_str()
+        })
+    {
+        return None;
+    }
+    let config = PathBuf::from(&args[6]);
+    let scratch = config.parent()?;
+    if !normalized_explicit_path(&config)
+        || config.file_name()? != "config"
+        || args[8].as_os_str() != scratch.join("state").as_os_str()
+        || scratch.parent()? != std::path::Path::new("/private/tmp")
+    {
+        return None;
+    }
+    let name = scratch.file_name()?.to_str()?;
+    let suffix = name
+        .strip_prefix(crate::installation::VALIDATION_DIRECTORY_PREFIX)?
+        .strip_prefix('-')?;
+    if suffix.len() != 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some(scratch.to_owned())
+}
+
+fn process_started(incarnation: ProcessIncarnation) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH
+        + std::time::Duration::new(incarnation.start_sec, incarnation.start_usec as u32 * 1000)
+}
+
+fn validation_directory_isolated(
+    scratch: &std::path::Path,
+    parent: ProcessIncarnation,
+    child: ProcessIncarnation,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let open_directory = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|e| {
+                format!(
+                    "cannot authenticate validation directory {}: {e}",
+                    path.display()
+                )
+            })
+    };
+    let private_directory = |metadata: &std::fs::Metadata| {
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700
+    };
+    let directory = open_directory(scratch)?;
+    let metadata = directory.metadata().map_err(|e| e.to_string())?;
+    let created = metadata.created().map_err(|e| e.to_string())?;
+    if !private_directory(&metadata)
+        || std::fs::canonicalize(scratch).map_err(|e| e.to_string())? != scratch
+        || created < process_started(parent)
+        || created > process_started(child)
+    {
+        return Err("validation scratch is not a fresh private physical directory".into());
+    }
+    // The existing factory leaves only a bounded entitlement plist and the two
+    // empty profile directories created by Paths::resolve. No socket, journal,
+    // user config, nested directory, hard link or symlink can be admitted.
+    for (index, entry) in std::fs::read_dir(scratch)
+        .map_err(|e| e.to_string())?
+        .enumerate()
+    {
+        if index >= 3 {
+            return Err("validation scratch contains unexpected entries".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let path = entry.path();
+        let item = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if name == "config" || name == "state" {
+            let child_directory = open_directory(&path)?;
+            let pinned = child_directory.metadata().map_err(|e| e.to_string())?;
+            if !private_directory(&item)
+                || pinned.dev() != item.dev()
+                || pinned.ino() != item.ino()
+                || std::fs::read_dir(&path)
+                    .map_err(|e| e.to_string())?
+                    .next()
+                    .is_some()
+            {
+                return Err("validation profile is not an empty private directory".into());
+            }
+        } else if name != "entitlements.plist"
+            || !item.is_file()
+            || item.uid() != unsafe { libc::geteuid() }
+            || item.mode() & 0o7777 != 0o600
+            || item.nlink() != 1
+            || item.len() > 16384
+        {
+            return Err("validation scratch contains a foreign or unsafe entry".into());
+        }
+    }
+    let after = std::fs::symlink_metadata(scratch).map_err(|e| e.to_string())?;
+    if after.dev() != metadata.dev() || after.ino() != metadata.ino() || !private_directory(&after)
+    {
+        return Err("validation scratch changed while authenticating".into());
+    }
+    Ok(())
+}
+
+impl PinnedClientImage {
+    fn validation_child(
+        &self,
+        evidence: &ProcessEvidence,
+        arguments: &ProcessArguments,
+        mut capture: impl FnMut(u32) -> Result<ProcessEvidence, String>,
+    ) -> Result<bool, String> {
+        let Some(helper) = &self.validation_helper else {
+            return Ok(false);
+        };
+        if !self.compatible
+            || evidence.mapped_file != self.mapped_file
+            || evidence.uid != unsafe { libc::geteuid() }
+        {
+            return Ok(false);
+        }
+        let Some(scratch) = validation_scratch(self, evidence, arguments) else {
+            return Ok(false);
+        };
+        self.unchanged()?;
+        let parent = capture(evidence.parent_pid)?;
+        if parent.incarnation.pid != evidence.parent_pid
+            || parent.uid != evidence.uid
+            || !(parent.path == helper.path
+                || self.namespace_has_image(&parent.path, "desktop-pet-update-coordinator"))
+            || parent.mapped_file != helper.mapped_file
+            || process_started(parent.incarnation) > process_started(evidence.incarnation)
+        {
+            return Err("validation child's parent is not the pinned paired helper".into());
+        }
+        validation_directory_isolated(&scratch, parent.incarnation, evidence.incarnation)?;
+        // Both processes must still have the same incarnation, credentials,
+        // executable mapping and kernel parent relationship after the proof.
+        if capture(parent.incarnation.pid)? != parent
+            || capture(evidence.incarnation.pid)? != *evidence
+        {
+            return Err("validation parent or child changed while authenticating".into());
+        }
+        self.unchanged()?;
+        Ok(true)
     }
 }
 
@@ -436,6 +744,44 @@ impl CompatibleClientScope {
             state: state.to_path_buf(),
             approved_roots: recovered.approved_roots.clone(),
         })
+    }
+
+    pub(crate) fn rebase_replacement(
+        &mut self,
+        recovered: &crate::installation::RecoveredReplacement,
+    ) -> Result<(), String> {
+        let (original, candidate) = recovered.scope_images();
+        let pinned_candidate = self
+            .candidate
+            .as_ref()
+            .ok_or("replacement candidate was not pinned")?;
+        self.original.verify_rebased_image(
+            original.app(),
+            original.file_identity(),
+            original.validation_helper_image(),
+        )?;
+        pinned_candidate.verify_rebased_image(
+            candidate.app(),
+            candidate.file_identity(),
+            candidate.validation_helper_image(),
+        )?;
+        // Validate both namespaces before changing either. Existing FDs and
+        // vnode identities survive the cutover; no same-hash copy is repinned.
+        self.original
+            .set_namespace(&original.app().bundle, original.validation_launch_bundle());
+        self.candidate
+            .as_mut()
+            .ok_or("replacement candidate was not pinned")?
+            .set_namespace(
+                &candidate.app().bundle,
+                candidate.validation_launch_bundle(),
+            );
+        for root in &recovered.approved_roots {
+            if !self.approved_roots.contains(root) {
+                self.approved_roots.push(root.clone());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn reserve_target_scope(
@@ -789,6 +1135,7 @@ pub(crate) fn capture_process(pid: u32) -> Result<ProcessEvidence, String> {
         incarnation: incarnation(&after),
         mapped_file,
         path,
+        parent_pid: after.pbi_ppid,
         uid: after.pbi_uid,
     })
 }
@@ -869,7 +1216,7 @@ pub(crate) fn capture_process_arguments(
     evidence: &ProcessEvidence,
 ) -> Result<ProcessArguments, String> {
     let before = capture_process(evidence.incarnation.pid)?;
-    if before != *evidence {
+    if !before.same_identity(evidence) {
         return Err("process changed before argument capture".into());
     }
     let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
@@ -910,7 +1257,7 @@ pub(crate) fn capture_process_arguments(
         return Err("cannot capture complete bounded process argv/environment".into());
     }
     let arguments = parse_procargs(&bytes[..length])?;
-    if capture_process(evidence.incarnation.pid)? != before {
+    if !capture_process(evidence.incarnation.pid)?.same_identity(&before) {
         return Err("process changed while capturing argv/environment".into());
     }
     Ok(arguments)
@@ -1033,11 +1380,27 @@ pub(crate) fn admit_coordinated_processes(
         if scope.classify(&evidence, Some(&arguments), authorized)
             == InstallationProcessRole::BlockingUser
         {
+            if let Some(image) = scope.image_for(evidence.mapped_file) {
+                match image.validation_child(&evidence, &arguments, capture_process) {
+                    Ok(true) => continue,
+                    Err(_) if provably_gone(pid) => continue,
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot authenticate internal validation child {pid}: {error}"
+                        ));
+                    }
+                    Ok(false) => {}
+                }
+            }
             return Err(format!(
                 "blocking installation process {pid} uses {}",
                 evidence.path.display()
             ));
         }
+    }
+    scope.original.unchanged()?;
+    if let Some(candidate) = &scope.candidate {
+        candidate.unchanged()?;
     }
     Ok(())
 }
@@ -1085,8 +1448,21 @@ pub(crate) fn compatible_client_profiles(
             Err(_) if provably_gone(pid) => continue,
             Err(error) => return Err(format!("cannot authenticate client profile {pid}: {error}")),
         };
-        let profile = compatible_cli(&arguments.argv)
-            .ok_or_else(|| format!("blocking installation process {pid}"))?;
+        let profile = match compatible_cli(&arguments.argv) {
+            Some(profile) => profile,
+            None => match image.validation_child(&evidence, &arguments, capture_process) {
+                // Internal validation is not a user client and contributes no
+                // profile/count from its isolated temporary directory.
+                Ok(true) => continue,
+                Err(_) if provably_gone(pid) => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "cannot authenticate internal validation child {pid}: {error}"
+                    ));
+                }
+                Ok(false) => return Err(format!("blocking installation process {pid}")),
+            },
+        };
         result.client_count += 1;
         if let Some(profile) = profile {
             if !result.profiles.contains(&profile) {
@@ -1161,6 +1537,7 @@ mod process_admission_tests {
         let file = fs::File::open(&first.executable).unwrap();
         let metadata = file.metadata().unwrap();
         let captured = capture_process(first.child.id()).unwrap();
+        assert_eq!(captured.parent_pid, std::process::id());
         assert_eq!(
             captured.mapped_file,
             MappedFileIdentity {
@@ -1188,6 +1565,10 @@ mod process_admission_tests {
         let mut exec_changed = captured.clone();
         exec_changed.mapped_file = capture_process(second.child.id()).unwrap().mapped_file;
         assert!(capture_process_arguments(&exec_changed).is_err());
+        let mut reparented = captured.clone();
+        reparented.parent_pid = reparented.parent_pid.wrapping_add(1);
+        assert!(captured.same_identity(&reparented));
+        assert!(capture_process_arguments(&reparented).is_ok());
         let retained = first.executable.with_file_name("retained-original");
         fs::rename(&first.executable, &retained).unwrap();
         let renamed = capture_process(first.child.id()).unwrap();
@@ -1638,6 +2019,8 @@ mod coordinated_process_tests {
             mapped_file: MappedFileIdentity { device: 1, inode },
             bundle: "/Applications/DesktopPet.app".into(),
             compatible,
+            validation_helper: None,
+            validation_launch_bundle: None,
         }
     }
 
@@ -1663,6 +2046,7 @@ mod coordinated_process_tests {
                 inode: 10,
             },
             path: "/private/retained-old/DesktopPet.app/Contents/MacOS/desktop-pet".into(),
+            parent_pid: 1,
             uid: unsafe { libc::geteuid() },
         }
     }
@@ -2019,5 +2403,414 @@ mod coordinated_process_tests {
             parse_procargs(&apple_vector).unwrap().environment,
             vec![OsString::from("HOME=/private/home"), "KEY=a=b".into()]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod validation_child_tests {
+    use super::*;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    struct ValidationChild {
+        _directory: tempfile::TempDir,
+        scratch: PathBuf,
+        image: PinnedClientImage,
+        child: ProcessEvidence,
+        parent: ProcessEvidence,
+        arguments: ProcessArguments,
+    }
+
+    impl ValidationChild {
+        fn new() -> Self {
+            let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+            let bundle = directory.path().join("DesktopPet.app");
+            let macos = bundle.join("Contents/MacOS");
+            std::fs::create_dir_all(&macos).unwrap();
+            let app_path = macos.join("desktop-pet");
+            let helper_path = macos.join("desktop-pet-update-coordinator");
+            for path in [&app_path, &helper_path] {
+                std::fs::write(path, path.as_os_str().as_encoded_bytes()).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let app_identity = crate::executable_identity(&app_path).unwrap();
+            let (file, metadata, mapped_file) = pin_executable(&app_identity).unwrap();
+            let helper_identity = crate::executable_identity(&helper_path).unwrap();
+            let (helper_file, helper_metadata, helper_mapped) =
+                pin_executable(&helper_identity).unwrap();
+            let image = PinnedClientImage {
+                _file: file,
+                metadata,
+                mapped_file,
+                bundle,
+                compatible: true,
+                validation_helper: Some(PinnedValidationHelper {
+                    file: helper_file,
+                    metadata: helper_metadata,
+                    mapped_file: helper_mapped,
+                    path: helper_identity.path.clone(),
+                }),
+                validation_launch_bundle: None,
+            };
+            let scratch = crate::installation::validation_directory().unwrap();
+            for name in ["config", "state"] {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(scratch.join(name))
+                    .unwrap();
+            }
+            let entitlements = scratch.join("entitlements.plist");
+            std::fs::write(&entitlements, b"<plist/>").unwrap();
+            std::fs::set_permissions(&entitlements, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let parent = ProcessEvidence {
+                incarnation: ProcessIncarnation {
+                    pid: 41,
+                    start_sec: now - 1,
+                    start_usec: 0,
+                },
+                mapped_file: helper_mapped,
+                path: helper_identity.path,
+                parent_pid: 1,
+                uid: unsafe { libc::geteuid() },
+            };
+            let child = ProcessEvidence {
+                incarnation: ProcessIncarnation {
+                    pid: 42,
+                    start_sec: now + 1,
+                    start_usec: 0,
+                },
+                mapped_file,
+                path: app_identity.path,
+                parent_pid: parent.incarnation.pid,
+                uid: parent.uid,
+            };
+            let arguments = ProcessArguments {
+                argv: vec![
+                    child.path.clone().into_os_string(),
+                    "pack".into(),
+                    "validate".into(),
+                    "--path".into(),
+                    image
+                        .bundle
+                        .join("Contents/Resources/default")
+                        .into_os_string(),
+                    "--config-dir".into(),
+                    scratch.join("config").into_os_string(),
+                    "--state-dir".into(),
+                    scratch.join("state").into_os_string(),
+                ],
+                environment: vec![],
+            };
+            Self {
+                _directory: directory,
+                scratch,
+                image,
+                child,
+                parent,
+                arguments,
+            }
+        }
+
+        fn capture(&self, pid: u32) -> Result<ProcessEvidence, String> {
+            if pid == self.parent.incarnation.pid {
+                Ok(self.parent.clone())
+            } else if pid == self.child.incarnation.pid {
+                Ok(self.child.clone())
+            } else {
+                Err("unknown kernel PID".into())
+            }
+        }
+
+        fn admitted(&self) -> Result<bool, String> {
+            self.image
+                .validation_child(&self.child, &self.arguments, |pid| self.capture(pid))
+        }
+    }
+
+    impl Drop for ValidationChild {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.scratch).unwrap();
+        }
+    }
+
+    #[test]
+    fn factory_child_is_admitted_without_granting_general_pack_or_profile_authority() {
+        let fixture = ValidationChild::new();
+        assert_eq!(compatible_cli(&fixture.arguments.argv), None);
+        assert_eq!(fixture.admitted(), Ok(true));
+        // The child may be observed before Paths::resolve creates its empty
+        // directories; these are not required user-profile evidence.
+        std::fs::remove_dir(fixture.scratch.join("config")).unwrap();
+        std::fs::remove_dir(fixture.scratch.join("state")).unwrap();
+        assert_eq!(fixture.admitted(), Ok(true));
+    }
+
+    #[test]
+    fn direct_foreign_profile_and_modified_pack_invocations_are_never_internal() {
+        let mut fixture = ValidationChild::new();
+        let original = fixture.arguments.clone();
+        for (index, replacement) in [
+            (0, "desktop-pet"),
+            (1, "run"),
+            (2, "import"),
+            (4, "/private/user-pack"),
+            (6, "/private/foreign-profile/config"),
+            (8, "/private/foreign-profile/state"),
+            (
+                6,
+                "/tmp/desktop-pet-validation-00000000000000000000000000000000/config",
+            ),
+        ] {
+            fixture.arguments = original.clone();
+            fixture.arguments.argv[index] = replacement.into();
+            assert_eq!(fixture.admitted(), Ok(false), "{index}: {replacement}");
+        }
+        for (index, alias) in [
+            (
+                4,
+                format!(
+                    "{}/Contents/Resources/./default",
+                    fixture.image.bundle.display()
+                ),
+            ),
+            (6, format!("{}/./config", fixture.scratch.display())),
+            (8, format!("{}//state", fixture.scratch.display())),
+        ] {
+            fixture.arguments = original.clone();
+            fixture.arguments.argv[index] = alias.into();
+            assert_eq!(fixture.admitted(), Ok(false));
+        }
+        fixture.arguments = original.clone();
+        fixture.arguments.argv.push("--force".into());
+        assert_eq!(fixture.admitted(), Ok(false));
+        fixture.arguments = original;
+        fixture.child.parent_pid = 999;
+        assert!(fixture.admitted().is_err());
+    }
+
+    #[test]
+    fn helper_parent_uid_path_vnode_and_lifetime_are_required() {
+        let mut fixture = ValidationChild::new();
+        let original = fixture.parent.clone();
+        fixture.parent.uid = fixture.parent.uid.wrapping_add(1);
+        assert!(fixture.admitted().is_err());
+        fixture.parent = original.clone();
+        fixture.parent.path = "/private/forged/desktop-pet-update-coordinator".into();
+        assert!(fixture.admitted().is_err());
+        fixture.parent = original.clone();
+        fixture.parent.mapped_file.inode += 1;
+        assert!(fixture.admitted().is_err());
+        fixture.parent = original.clone();
+        fixture.parent.incarnation.start_sec = fixture.child.incarnation.start_sec + 1;
+        assert!(fixture.admitted().is_err());
+        fixture.parent = original;
+        fixture.child.uid = fixture.child.uid.wrapping_add(1);
+        assert_eq!(fixture.admitted(), Ok(false));
+        fixture.child.uid = unsafe { libc::geteuid() };
+        fixture.child.mapped_file.inode += 1;
+        assert_eq!(fixture.admitted(), Ok(false));
+        fixture.child.mapped_file = fixture.image.mapped_file;
+        fixture.image.compatible = false;
+        assert_eq!(fixture.admitted(), Ok(false));
+        fixture.image.compatible = true;
+        fixture.image.validation_helper = None;
+        assert_eq!(fixture.admitted(), Ok(false));
+    }
+
+    #[test]
+    fn parent_or_child_pid_reuse_exec_and_reparenting_during_proof_fail_closed() {
+        let fixture = ValidationChild::new();
+        for change in 0..6 {
+            let mut captures = 0;
+            let result =
+                fixture
+                    .image
+                    .validation_child(&fixture.child, &fixture.arguments, |pid| {
+                        captures += 1;
+                        let mut actual = fixture.capture(pid)?;
+                        match (change, captures) {
+                            (0, 2) | (1, 3) => actual.incarnation.start_usec += 1,
+                            (2, 2) | (3, 3) => actual.mapped_file.inode += 1,
+                            (4, 3) => actual.parent_pid += 1,
+                            (5, 2) => return Err("kernel evidence unreadable".into()),
+                            _ => {}
+                        }
+                        Ok(actual)
+                    });
+            assert!(result.is_err(), "change {change}");
+        }
+    }
+
+    #[test]
+    fn validation_profile_must_remain_empty_private_physical_and_bounded() {
+        let fixture = ValidationChild::new();
+        let foreign = fixture.scratch.join("config/settings.json");
+        std::fs::write(&foreign, b"user configuration").unwrap();
+        assert!(fixture.admitted().is_err());
+        std::fs::remove_file(foreign).unwrap();
+        let socket_path = fixture.scratch.join("state/control.sock");
+        let socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        assert!(fixture.admitted().is_err());
+        drop(socket);
+        std::fs::remove_file(socket_path).unwrap();
+        std::fs::set_permissions(&fixture.scratch, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(fixture.admitted().is_err());
+        std::fs::set_permissions(&fixture.scratch, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            fixture.scratch.join("state"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(fixture.admitted().is_err());
+        std::fs::set_permissions(
+            fixture.scratch.join("state"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::remove_dir(fixture.scratch.join("state")).unwrap();
+        std::os::unix::fs::symlink(
+            fixture.scratch.join("config"),
+            fixture.scratch.join("state"),
+        )
+        .unwrap();
+        assert!(fixture.admitted().is_err());
+        std::fs::remove_file(fixture.scratch.join("state")).unwrap();
+        std::fs::write(fixture.scratch.join("entitlements.plist"), vec![0; 16385]).unwrap();
+        assert!(fixture.admitted().is_err());
+        std::fs::write(fixture.scratch.join("entitlements.plist"), b"<plist/>").unwrap();
+        std::fs::write(fixture.scratch.join("foreign"), b"").unwrap();
+        assert!(fixture.admitted().is_err());
+    }
+
+    #[test]
+    fn preexisting_scratch_and_replaced_helper_image_do_not_borrow_authority() {
+        let mut fixture = ValidationChild::new();
+        fixture.parent.incarnation.start_sec = fixture.child.incarnation.start_sec;
+        assert!(fixture.admitted().is_err());
+        fixture.parent.incarnation.start_sec -= 2;
+        assert_eq!(fixture.admitted(), Ok(true));
+        let helper_path = fixture.parent.path.clone();
+        std::fs::remove_file(&helper_path).unwrap();
+        std::fs::write(&helper_path, b"replacement helper").unwrap();
+        assert!(fixture.admitted().is_err());
+    }
+
+    #[test]
+    fn helper_pin_uses_the_validated_closure_digest_not_replacement_path_bytes() {
+        let fixture = ValidationChild::new();
+        let mut app = crate::installation::ValidatedApp {
+            bundle: fixture.image.bundle.clone(),
+            image: crate::executable_identity(&fixture.child.path).unwrap(),
+            version: "0.4.13-beta.7".into(),
+            installation_client_contract: Some(1),
+        };
+        let helper = crate::executable_identity(&fixture.parent.path).unwrap();
+        let sidecar = serde_json::to_vec(&serde_json::json!({
+            "deployed_sha256": { "MacOS/desktop-pet-update-coordinator": helper.sha256 }
+        }))
+        .unwrap();
+        let expected = validation_helper_image(&app, &sidecar).unwrap().unwrap();
+        assert!(PinnedValidationHelper::capture(&expected).is_ok());
+        // Keeping the same app, filename, contract and version cannot bless a
+        // replacement helper that differs from the authenticated closure.
+        std::fs::write(&fixture.parent.path, b"substituted helper").unwrap();
+        assert!(PinnedValidationHelper::capture(&expected).is_err());
+        assert!(validation_helper_image(&app, b"{}").is_err());
+        app.installation_client_contract = Some(2);
+        assert!(validation_helper_image(&app, &sidecar).unwrap().is_none());
+    }
+
+    #[test]
+    fn exchanged_namespaces_preserve_inflight_and_fresh_validation_without_repinning() {
+        use std::os::unix::fs::MetadataExt;
+        unsafe extern "C" {
+            fn renamex_np(
+                from: *const libc::c_char,
+                to: *const libc::c_char,
+                flags: libc::c_uint,
+            ) -> libc::c_int;
+        }
+        let mut original = ValidationChild::new();
+        let mut candidate = ValidationChild::new();
+        let canonical = original.image.bundle.clone();
+        let prepared = candidate.image.bundle.clone();
+        let left = std::ffi::CString::new(canonical.as_os_str().as_encoded_bytes()).unwrap();
+        let right = std::ffi::CString::new(prepared.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { renamex_np(left.as_ptr(), right.as_ptr(), 2) }, 0);
+
+        for (fixture, physical, launch) in [
+            (&mut original, &prepared, &canonical),
+            (&mut candidate, &canonical, &prepared),
+        ] {
+            fixture.child.path = physical.join("Contents/MacOS/desktop-pet");
+            fixture.parent.path = physical.join("Contents/MacOS/desktop-pet-update-coordinator");
+            // Exact pinned vnodes are insufficient with stale pre-exchange
+            // names; reproduce the admission failure before applying the proof.
+            assert_eq!(fixture.admitted(), Ok(false));
+            let app = crate::installation::ValidatedApp {
+                bundle: physical.clone(),
+                image: crate::executable_identity(&fixture.child.path).unwrap(),
+                version: "0.4.15".into(),
+                installation_client_contract: Some(1),
+            };
+            let helper = crate::executable_identity(&fixture.parent.path).unwrap();
+            let file_identity = (fixture.image.metadata.dev(), fixture.image.metadata.ino());
+            fixture
+                .image
+                .verify_rebased_image(&app, file_identity, Some(&helper))
+                .unwrap();
+            fixture.image.set_namespace(physical, launch);
+            // In-flight argv still uses the authenticated launch namespace.
+            assert_eq!(fixture.admitted(), Ok(true));
+            // A fresh validator uses the actual retained/canonical namespace.
+            fixture.arguments.argv[0] = fixture.child.path.clone().into_os_string();
+            fixture.arguments.argv[4] =
+                physical.join("Contents/Resources/default").into_os_string();
+            assert_eq!(fixture.admitted(), Ok(true));
+            // Mixing two otherwise authenticated namespace halves is not an
+            // invocation ever produced by the validation factory.
+            fixture.arguments.argv[0] = launch.join("Contents/MacOS/desktop-pet").into_os_string();
+            assert_eq!(fixture.admitted(), Ok(false));
+            fixture.arguments.argv[0] = fixture.child.path.clone().into_os_string();
+            fixture.arguments.argv[6] = "/private/foreign-profile/config".into();
+            assert_eq!(fixture.admitted(), Ok(false));
+        }
+
+        let app = crate::installation::ValidatedApp {
+            bundle: canonical.clone(),
+            image: crate::executable_identity(&candidate.child.path).unwrap(),
+            version: "0.4.15".into(),
+            installation_client_contract: Some(1),
+        };
+        let helper = crate::executable_identity(&candidate.parent.path).unwrap();
+        let wrong_identity = (original.image.metadata.dev(), original.image.metadata.ino());
+        assert!(candidate
+            .image
+            .verify_rebased_image(&app, wrong_identity, Some(&helper))
+            .is_err());
+        let bytes = std::fs::read(&candidate.parent.path).unwrap();
+        std::fs::remove_file(&candidate.parent.path).unwrap();
+        std::fs::write(&candidate.parent.path, bytes).unwrap();
+        std::fs::set_permissions(
+            &candidate.parent.path,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::executable_identity(&candidate.parent.path).unwrap(),
+            helper
+        );
+        let identity = (
+            candidate.image.metadata.dev(),
+            candidate.image.metadata.ino(),
+        );
+        assert!(candidate
+            .image
+            .verify_rebased_image(&app, identity, Some(&helper))
+            .is_err());
     }
 }

@@ -682,6 +682,12 @@ fn validate_signing_derivation(bundle: &Path, record: &Value) -> Result<(), Stri
     }
 }
 
+pub(crate) const VALIDATION_DIRECTORY_PREFIX: &str = "desktop-pet-validation";
+
+pub(crate) fn validation_directory() -> Result<PathBuf, String> {
+    temporary_directory(Path::new("/private/tmp"), VALIDATION_DIRECTORY_PREFIX)
+}
+
 fn temporary_directory(parent: &Path, prefix: &str) -> Result<PathBuf, String> {
     let mut random = [0u8; 16];
     File::open("/dev/urandom")
@@ -919,7 +925,7 @@ pub(crate) fn validate_bundle_snapshot(
             return Err(format!("missing required rig resource: {name}"));
         }
     }
-    let scratch = temporary_directory(Path::new("/private/tmp"), "desktop-pet-validation")?;
+    let scratch = validation_directory()?;
     let result = (|| {
         for path in [&image.path, &helper, &library, bundle] {
             if !entitlement_set(path, &scratch)?
@@ -1609,6 +1615,8 @@ pub(crate) struct RecoveredScopeImage {
     app: ValidatedApp,
     file: FileSnapshot,
     sidecar_sha256: String,
+    validation_helper_image: Option<ExecutableIdentity>,
+    validation_launch_bundle: PathBuf,
 }
 
 impl RecoveredScopeImage {
@@ -1617,6 +1625,12 @@ impl RecoveredScopeImage {
     }
     pub(crate) fn sidecar_sha256(&self) -> &str {
         &self.sidecar_sha256
+    }
+    pub(crate) fn validation_helper_image(&self) -> Option<&ExecutableIdentity> {
+        self.validation_helper_image.as_ref()
+    }
+    pub(crate) fn validation_launch_bundle(&self) -> &Path {
+        &self.validation_launch_bundle
     }
     pub(crate) fn file_identity(&self) -> (u64, u64) {
         (self.file.device, self.file.inode)
@@ -1816,6 +1830,14 @@ pub fn recover_replacement(
         installation,
         retained_bundle: swapped.then(|| intent.prepared.clone()),
         original_scope: RecoveredScopeImage {
+            validation_launch_bundle: intent.target.clone(),
+            validation_helper_image: crate::processes::validation_helper_image(
+                &old,
+                intent
+                    .original_sidecar
+                    .as_deref()
+                    .ok_or("missing original sidecar snapshot")?,
+            )?,
             app: old,
             file: intent
                 .original_file
@@ -1827,6 +1849,11 @@ pub fn recover_replacement(
                 .ok_or("missing original sidecar hash")?,
         },
         candidate_scope: RecoveredScopeImage {
+            validation_launch_bundle: intent.prepared.clone(),
+            validation_helper_image: crate::processes::validation_helper_image(
+                &candidate,
+                &intent.candidate_sidecar,
+            )?,
             app: candidate,
             file: intent.candidate_file.clone(),
             sidecar_sha256: intent.candidate_sidecar_sha256.clone(),
@@ -2398,6 +2425,11 @@ fn recover_relocation(
         installation,
         retained_bundle: snapshot.retired.then(|| retained.clone()),
         original_scope: RecoveredScopeImage {
+            validation_launch_bundle: source.clone(),
+            validation_helper_image: crate::processes::validation_helper_image(
+                &old,
+                source_sidecar,
+            )?,
             app: old,
             file: intent
                 .original_file
@@ -2406,6 +2438,11 @@ fn recover_relocation(
             sidecar_sha256: source_sidecar_sha256.clone(),
         },
         candidate_scope: RecoveredScopeImage {
+            validation_launch_bundle: intent.prepared.clone(),
+            validation_helper_image: crate::processes::validation_helper_image(
+                &candidate,
+                &intent.candidate_sidecar,
+            )?,
             app: candidate,
             file: intent.candidate_file.clone(),
             sidecar_sha256: intent.candidate_sidecar_sha256.clone(),
@@ -2900,6 +2937,18 @@ fn replace_bundle_inner(
                 sync_directory(parent)?;
                 Ok((record, None))
             } else {
+                let recovered = recover_replacement(
+                    intent_path,
+                    id,
+                    actual
+                        .as_ref()
+                        .ok_or("retained replacement lost original approval")?,
+                    desired,
+                )?;
+                scope
+                    .as_deref_mut()
+                    .ok_or("retained replacement lost pinned scope")?
+                    .rebase_replacement(&recovered)?;
                 Ok((record, Some(prepared)))
             }
         }

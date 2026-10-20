@@ -76,6 +76,8 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 진짜 beta.7 helper는 새 정식판을 선택할 수 있지만, 실제 Mac에서 별도 버그가 확인됐습니다. 응답을 마친 소켓이 닫힌 뒤 Darwin peer PID를 다시 조회하여 설치 전에 `cannot authenticate control peer PID`로 실패합니다. 앱의 업데이트 확인만으로 이미 배포된 helper를 고칠 수 없습니다. [0.4.14 수정](releases/v0.4.14.md)은 인증 문제와 명시적으로 승인한 운영자 복구 경로를 제공합니다. 옛 업데이트를 반복하거나 이전 앱 전용 경로가 성공했다고 주장하지 마세요.
 
+승인한 운영자 복구에는 [v0.4.15 이상](releases/v0.4.15.md)을 사용하세요. 기존 SDK의 내부 기본 팩 검증 프로세스를 별도로 인증하며, 임의의 pack 명령이나 다른 프로필을 허용하지 않습니다. 차단을 없애려고 Tern을 종료하거나 설치 보호장치를 우회하지 마세요.
+
 인증된 원래 config/state·캐릭터·설정·사용자 자료를 유지합니다. 기존 Tern SDK가 native 작업 정산 후 저장된 executable만 바꾸며 native는 KV를 덮어쓰지 않습니다. 기본값 추측·프로필 adopt/병합·Configure/Connect·Tern 재시작·plugin reload로 실패를 숨기지 마세요. 서명된 원본과 트랜잭션 근거는 private retention에 보존합니다.
 
 **Pet의 미저장 편집을 먼저 저장하세요.** 운영자 복구는 원본 앱·프로필 백업과 Pet만 정상 종료한 뒤 별도로 시작하는 작업에 대한 명시적 승인이 필요합니다. 이미 종료된 소스의 설치 작업은 Stop ACK·업데이트 parent·재시작 token을 만들어내지 않습니다. 이후 사용자 Stop·scope 변경은 자동 재시작을 금지합니다. 실제 정산된 정식판의 같은 버전 native 이관은 별개 경로이며 그 동의가 수동 복구 동의는 아닙니다.

@@ -1,5 +1,9 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Stable 0.4.15 correction: SDK validation-child preflight
+
+The [0.4.15 correction](v0.4.15.md) addresses recovery preflight encountering genuine SDK-generated read-only default-pack validation children while the original Pet was already stopped. Unknown/foreign-profile clients remain blocked; original data, unchanged Tern processes and published tags/assets remain protected. No affected-machine recovery success is claimed, and packages remain ad-hoc signed, not notarized.
+
 ## Stable 0.4.14 correction: one-shot peer authentication and approved recovery
 
 Actual read-only diagnosis on the affected Mac reproduced beta.7's helper failure: the server closes a completed control reply, then Darwin `LOCAL_PEERPID` returns `ENOTCONN` on the helper's second query. The previous in-app-only bootstrap assumption was therefore insufficient. The [0.4.14 correction](v0.4.14.md) retains pre-send kernel authentication and revalidates the same process evidence after replies. Original source/profile backup has been verified; the owner explicitly approved SSH recovery with Pet-only normal Stop and later separate Start.

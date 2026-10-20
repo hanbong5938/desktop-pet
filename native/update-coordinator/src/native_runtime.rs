@@ -123,6 +123,12 @@ impl NativeInstallScope {
     ) -> Result<(), String> {
         self.scope.pin_prepared_candidate(candidate)
     }
+    pub(crate) fn rebase_replacement(
+        &mut self,
+        recovered: &installation::RecoveredReplacement,
+    ) -> Result<(), String> {
+        self.scope.rebase_replacement(recovered)
+    }
     pub fn admit(&self, daemon: Option<&NativeInstance>) -> Result<(), String> {
         let authorized = daemon
             .map(|daemon| -> Result<processes::AuthorizedDaemon, String> {
@@ -478,7 +484,7 @@ fn exchange_with_peer<T: Serialize, R: for<'de> Deserialize<'de>>(
     bytes.push(b'\n');
     let mut stream = connect(path, deadline)?;
     let before = peer(&stream)?;
-    if expected.is_some_and(|e| e != &before) {
+    if expected.is_some_and(|e| !e.same_identity(&before)) {
         return Err("control peer incarnation/main image differs".into());
     }
     let mut sent = 0;
@@ -528,7 +534,7 @@ fn exchange_with_peer<T: Serialize, R: for<'de> Deserialize<'de>>(
     // alive. Recheck the process authenticated on this socket before sending,
     // never a PID supplied by the reply or discovered from the socket path.
     let after = processes::capture_process(before.incarnation.pid)?;
-    if before != after {
+    if !before.same_identity(&after) {
         return Err("control peer changed during exchange".into());
     }
     remaining(deadline)?;
@@ -1171,5 +1177,42 @@ mod tests {
         );
         assert!(matches!(&result, Err(error) if error.contains("peer incarnation")));
         assert_eq!(server.join().unwrap(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn control_peer_identity_does_not_depend_on_its_launcher_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut expected = processes::capture_process(std::process::id()).unwrap();
+        expected.parent_pid = expected.parent_pid.wrapping_add(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            std::io::BufRead::read_until(
+                &mut std::io::BufReader::new(&mut stream),
+                b'\n',
+                &mut request,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request).unwrap(),
+                serde_json::json!({"version":1,"command":"status"}),
+            );
+            stream.write_all(b"{\"ok\":true}\n").unwrap();
+        });
+        let (reply, observed): (serde_json::Value, _) = exchange_with_peer(
+            &path,
+            &serde_json::json!({"version":1,"command":"status"}),
+            Duration::from_secs(3),
+            Some(&expected),
+        )
+        .unwrap();
+        assert_eq!(reply, serde_json::json!({"ok":true}));
+        assert!(observed.same_identity(&expected));
+        assert_ne!(observed.parent_pid, expected.parent_pid);
+        server.join().unwrap();
     }
 }

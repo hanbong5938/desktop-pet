@@ -76,6 +76,8 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 本物の beta.7 helper は新しい安定版を選べますが、実機で別の不変 helper の不具合が確認されました。応答後に閉じたソケットの Darwin peer PID を再取得し、導入前に `cannot authenticate control peer PID` で失敗します。アプリ内確認だけでは配布済み helper を修正できません。[0.4.14 修正](releases/v0.4.14.md)は認証を直し、明示承認した運用者復旧を提供します。旧 updater の反復や以前のアプリ内経路の成功を前提にしないでください。
 
+承認済みの運用者復旧には [v0.4.15 以降](releases/v0.4.15.md)を使用してください。既存 SDK の内部デフォルト pack 検証プロセスを個別に認証し、任意の pack コマンドや別 profile は許可しません。遮断を解消するために Tern を終了したり、導入の保護機構を迂回したりしないでください。
+
 認証した元の config/state、キャラクター、設定、ユーザーデータを保持します。既存 Tern SDK が native 処理の確定後に保存済み executable だけを変更し、native は KV を上書きしません。既定値の推測、profile 結合、Configure/Connect、Tern 再起動、plugin reload で失敗を隠さないでください。署名済み原本と証拠は private retention に保持します。
 
 **Pet の未保存編集を先に保存してください。** 運用者復旧は原本・profile の backup と、Pet だけの正常停止、その後の別途 Start への明示承認が必要です。停止済みソースの導入は Stop ACK、updater parent、再起動 token を捏造しません。後のユーザー Stop や scope 変更は自動再起動を禁止します。確定済み Stable parent の同一バージョン native 移動とは別の承認です。
