@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.13";
+    pub const VERSION: &str = "0.4.14";
     /// One-time legacy migration is authorized only for this stable release.
     /// A product version bump must never grant a new migration authority.
     pub const MIGRATION_TARGET_VERSION: &str = "0.4.12";

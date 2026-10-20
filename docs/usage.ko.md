@@ -72,15 +72,15 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 **현재 정식판 후보 소유자 정책:** 새 Standalone 설치와 일반 업데이트는 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG와 무관합니다. 원래 `Applications/DesktopPet.app`은 구 helper의 완료 확인·별도 승인 이관·복구에만 인식하며 영구적인 제자리 업데이트 위치가 아닙니다. 임의 home/custom/system 경로·symlink 인수는 금지합니다. Brew/source 소유자와 과거 동결 릴리스 노트는 유지합니다.
 
-### 기존 Applications 소유자: beta.7 앱 업데이트 후 별도 이관
+### 기존 Applications 소유자: 명시적으로 승인한 일회성 복구
 
-후보 경로는 설치기나 터미널이 아닌 진짜 beta.7 앱의 **업데이트 버튼**에서 시작합니다. 변경하지 않은 구 helper가 진짜 정식 `0.4.13`을 선택하고 원래 Applications에서 readiness·Completed·helper 종료·예약 해제까지 마친 뒤에만 **같은 서명 버전**의 전용 위치 이관을 별도 native 승인창으로 제안합니다. [릴리스 검증 범위와 제한](releases/v0.4.13.md)을 확인하세요.
+진짜 beta.7 helper는 새 정식판을 선택할 수 있지만, 실제 Mac에서 별도 버그가 확인됐습니다. 응답을 마친 소켓이 닫힌 뒤 Darwin peer PID를 다시 조회하여 설치 전에 `cannot authenticate control peer PID`로 실패합니다. 앱의 업데이트 확인만으로 이미 배포된 helper를 고칠 수 없습니다. [0.4.14 수정](releases/v0.4.14.md)은 인증 문제와 명시적으로 승인한 운영자 복구 경로를 제공합니다. 옛 업데이트를 반복하거나 이전 앱 전용 경로가 성공했다고 주장하지 마세요.
 
 인증된 원래 config/state·캐릭터·설정·사용자 자료를 유지합니다. 기존 Tern SDK가 native 작업 정산 후 저장된 executable만 바꾸며 native는 KV를 덮어쓰지 않습니다. 기본값 추측·프로필 adopt/병합·Configure/Connect·Tern 재시작·plugin reload로 실패를 숨기지 마세요. 서명된 원본과 트랜잭션 근거는 private retention에 보존합니다.
 
-**Pet의 미저장 편집을 먼저 저장하세요.** 처음 업데이트 동의는 이관 동의가 아닙니다. 취소하면 정식 앱이 Applications에서 계속 실행되고 앱 재시작 후 자동 창은 반복하지 않습니다. 새 시도는 Updates의 **업데이트 위치로 이동…**을 사용합니다. 이후 사용자 **Stop**·불확실 ACK·scope 변경은 자동 재시작을 금지합니다. Pet만 재시작하며 Tern 창·터미널·작업은 유지합니다.
+**Pet의 미저장 편집을 먼저 저장하세요.** 운영자 복구는 원본 앱·프로필 백업과 Pet만 정상 종료한 뒤 별도로 시작하는 작업에 대한 명시적 승인이 필요합니다. 이미 종료된 소스의 설치 작업은 Stop ACK·업데이트 parent·재시작 token을 만들어내지 않습니다. 이후 사용자 Stop·scope 변경은 자동 재시작을 금지합니다. 실제 정산된 정식판의 같은 버전 native 이관은 별개 경로이며 그 동의가 수동 복구 동의는 아닙니다.
 
-native 설치·준비와 창별 fresh Tern 확인은 별개입니다. 미연결·비호환 consumer는 연동 대기이지 native 설치 실패가 아닙니다. disposable macOS GUI·공식 네트워크 검증은 **대기 중**이며 실제 사용자 복구나 정식판 공개 완료를 주장하지 않습니다.
+native 설치·준비와 창별 fresh Tern 확인은 별개입니다. 미연결·비호환 consumer는 연동 대기이지 native 설치 실패가 아닙니다. 공개·소스 검사만으로 실제 사용자 복구를 주장하지 않으며 Tern 초기화나 미확정 journal 삭제 없이 실제 관측 결과를 구분해 보고합니다.
 
 ### 과거 고정 설치 예시
 
@@ -280,7 +280,7 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 현재 소스에서 업데이트 옵션은 처음에 접혀 있습니다.
 
-**정식판 후보 복구:** Applications 소유자는 [위의 2단계 앱 전용 경로](#기존-applications-소유자-beta7-앱-업데이트-후-별도-이관)를 사용합니다. 이관 후 일반 업데이트는 private 소유자에 적용됩니다. 베타 opt-in·안정판 전용·Homebrew 제한은 그대로이며 소스 계약만으로 실물 복구 성공을 뜻하지 않습니다.
+**기존 소유자 복구:** [위의 명시적으로 승인한 일회성 복구](#기존-applications-소유자-명시적으로-승인한-일회성-복구)를 확인하세요. 정상 private 위치로 복구한 후 일반 업데이트는 그 소유자에 적용됩니다. 베타 opt-in·안정판 전용·Homebrew 제한은 그대로입니다.
 
 앱 내 업데이트를 사용할 수 없어도 기존 설정과 캐릭터를 삭제하지 마세요. **공식 설치 안내 열기**는 검증된 릴리스의 공식 페이지를 엽니다. 설명 없는 압축파일 다운로드나 설치기 자동 실행이 아닙니다. 실제 설치 소유자에 맞는 절차를 사용하고 프로필 삭제·옛 설치기 재실행·추측한 기본 경로로 시작하지 마세요. Tern 제어 오류는 이제 `alpha_passthrough` 스키마 오류가 아닌 실제 백엔드 원인을 보여줍니다. 일반 상태·오류 응답은 fresh binding 증명으로 인정하지 않습니다.
 

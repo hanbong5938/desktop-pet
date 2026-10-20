@@ -111,6 +111,7 @@ Legacy protocol-1/2/3 plans, journals and reservations remain blocked and preser
 desktop-pet-update-coordinator install-coordinated --request ABS
 desktop-pet-update-coordinator install-relocate --request ABS
 desktop-pet-update-coordinator install-relocate-manual --request ABS
+desktop-pet-update-coordinator install-manual-recovery --request ABS
 desktop-pet-update-coordinator install-status --state-dir ABS --operation-id ID
 desktop-pet-update-coordinator install-recover --state-dir ABS --operation-id ID
 ```
@@ -132,6 +133,10 @@ Full old bundles and their **original sidecars** remain in private retained stor
 New approvals use v2; historical v1 journal/result/ACK bytes remain readable, but only their recorded matching helper may recover them. Relocation Stop/ACK stays source-bound, while installed results/startup bind the private destination. An atomic disk commit receipt divides exact rollback-before from roll-forward-after; the source inode and sidecar remain retained. No H alias remains. Admission is Settled only after durable outcome and exact reservation absence, not merely a terminal result. Interrupted pre-Stop confirmation can release an unchanged live source without Stop/restart; post-Stop uncertainty preserves evidence.
 
 Tern handover keeps the existing SDK wire and never writes KV natively. Native success and disconnected/incompatible-consumer pending are distinct. Challenge/receipt files use the private `install-{id}.tern-relocation/` directory with complete image/instance/tuple or window digests; nesting avoids macOS's 255-byte basename limit without shortening evidence hashes.
+
+`install-manual-recovery` is a distinct explicitly approved operator path for an original OS-home Applications owner whose immutable helper cannot update itself. It accepts private bounded strict v1 `{version,context,candidate_bundle,release,confirmation}` input; `confirmation` must be `replace_original_app_preserve_profile`. The original profile must already be stopped normally, without a pending startup, active installation or unknown process. The source is fixed to H and destination to C; no arbitrary owner takeover or inferred default profile is allowed.
+
+This operation records `ManualRecovery`, an immutable `ssh_operator` consent bound to actual plan/request bytes, a two-root reservation and the existing atomic replacement/retention evidence. Its candidate must be a strictly newer genuine stable matching the compiled helper, with retained official archive/checksum/sidecar evidence. Unlike same-version relocation, source and candidate have independently verified signed closures. It never creates a settled updater parent, native-panel consent, Stop ACK or restart token. Success is `installed_stopped`, `applied:false`, `restart:"not_requested"`; a separately approved normal start uses the exact original context only after reservation release. Tern route authority then additionally requires the fresh ready canonical instance/start fence, qualified installed consumer and per-window SDK handover. Neither the operator approval nor a durable installation result alone is reconnection proof.
 
 ### Corrected successor bridge automatic update (v0.3.15 → Core v0.4.11; source contract, not deployment evidence)
 

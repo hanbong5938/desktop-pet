@@ -72,15 +72,15 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 **現行の安定版候補の所有者方針:** 新規 Standalone と通常更新は実 OS home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使い、`HOME`/XDG に依存しません。元の `Applications/DesktopPet.app` は旧 helper の完了確認、別途承認した移動、復旧のためだけに認識し、恒久的な同じ場所での更新先にはしません。任意の home/custom/system パスや symlink の引継ぎは禁止です。Brew/source 所有者と過去の凍結ノートは変更しません。
 
-### 既存 Applications 所有者: beta.7 のアプリ更新後に別途移動
+### 既存 Applications 所有者: 明示承認した一回限りの復旧
 
-候補経路は installer や terminal ではなく、本物の beta.7 アプリの**更新ボタン**から開始します。変更していない旧 helper が本物の安定版 `0.4.13` を選び、元の Applications で readiness、Completed、helper 終了、予約解放を完了してから、**同じ署名済みバージョン**を専用位置へ移す別の native 承認を提示します。[検証範囲と制限](releases/v0.4.13.md)を確認してください。
+本物の beta.7 helper は新しい安定版を選べますが、実機で別の不変 helper の不具合が確認されました。応答後に閉じたソケットの Darwin peer PID を再取得し、導入前に `cannot authenticate control peer PID` で失敗します。アプリ内確認だけでは配布済み helper を修正できません。[0.4.14 修正](releases/v0.4.14.md)は認証を直し、明示承認した運用者復旧を提供します。旧 updater の反復や以前のアプリ内経路の成功を前提にしないでください。
 
 認証した元の config/state、キャラクター、設定、ユーザーデータを保持します。既存 Tern SDK が native 処理の確定後に保存済み executable だけを変更し、native は KV を上書きしません。既定値の推測、profile 結合、Configure/Connect、Tern 再起動、plugin reload で失敗を隠さないでください。署名済み原本と証拠は private retention に保持します。
 
-**Pet の未保存編集を先に保存してください。** 最初の更新承認は移動承認ではありません。取消では安定版が Applications で動作を続け、再起動しても自動承認窓は繰り返しません。再試行は Updates の明示的な移動操作から行います。後のユーザー **Stop**、不明な ACK、scope 変更は自動再起動を禁止します。Pet だけを再起動し、Tern の窓、terminal、作業を保持します。
+**Pet の未保存編集を先に保存してください。** 運用者復旧は原本・profile の backup と、Pet だけの正常停止、その後の別途 Start への明示承認が必要です。停止済みソースの導入は Stop ACK、updater parent、再起動 token を捏造しません。後のユーザー Stop や scope 変更は自動再起動を禁止します。確定済み Stable parent の同一バージョン native 移動とは別の承認です。
 
-native 導入・準備と窓ごとの fresh Tern 確認は別です。未接続・非互換 consumer は連携待ちであり native 導入失敗ではありません。disposable macOS GUI と公式ネットワーク検証は**未完了**で、実ユーザー復旧や安定版公開の完了は主張しません。
+native 導入・準備と窓ごとの fresh Tern 確認は別です。未接続・非互換 consumer は連携待ちであり native 導入失敗ではありません。公開やソース検査だけで実ユーザー復旧を主張せず、Tern 初期化や未確定 journal 削除なしに実際の観測結果を報告します。
 
 ### 過去の固定インストール例
 
@@ -268,7 +268,7 @@ Core は共通 lifecycle 保存と `auto_start`（既定 on）を所有し、追
 
 ## アプリ内更新
 
-**安定版候補の復旧:** Applications 所有者は[上記の二段階アプリ内経路](#既存-applications-所有者-beta7-のアプリ更新後に別途移動)を使用します。移動後の通常更新は private 所有者で行います。beta opt-in、安定版限定、Homebrew 制限は不変です。ソース契約だけでは実物の復旧成功を証明しません。
+**既存所有者の復旧:** [明示承認した一回限りの復旧](#既存-applications-所有者-明示承認した一回限りの復旧)を確認してください。canonical private への復旧後はそこで通常更新します。beta opt-in、安定版限定、Homebrew 制限は不変です。
 
 アプリ内更新が利用できなくても既存の設定とキャラクターを削除しないでください。**公式のインストール手順を開く**は検証済みリリースの公式ページを開き、説明なしのアーカイブ取得やインストーラの自動実行はしません。実際の導入方式に合う手順を使い、古いインストーラや推測した既定パスを使わないでください。Tern 制御エラーは `alpha_passthrough` スキーマエラーではなく実際のバックエンド診断を表示し、通常の状態／エラー応答を fresh binding の証明には使いません。
 

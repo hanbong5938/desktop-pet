@@ -347,11 +347,8 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
             instance_id,
         };
         desktop_pet_update_coordinator::protocol::retain_runtime_start(
-            &origin,
-            &config.paths.state_dir,
+            &context,
             std::process::id(),
-            &guard.instance_id,
-            &context.running,
             runtime_start_fence,
         )?;
         Some(guard)

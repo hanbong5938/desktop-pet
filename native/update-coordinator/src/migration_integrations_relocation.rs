@@ -1,8 +1,9 @@
 //! Standalone relocation is its own authority namespace, never a legacy Commit.
 //! Historical links are proven from retained inodes/closures; only the head is live.
 //!
-//! The source approval/Stop ACK/affirmative consent and atomic relocation
-//! receipt establish only the original H-to-C cutover. Every successor is a
+//! Native relocation proves a Running source with Stop ACK/native consent;
+//! manual recovery proves a Stopped source with exact SSH operator consent.
+//! The atomic receipt establishes the H-to-C cutover. Every successor is a
 //! completed normal updater edge with its retained predecessor inode and exact
 //! external deployment sidecar. Missing derived owner records are rebuilt in
 //! order from that history, never from a latest marker or today's version.
@@ -121,6 +122,159 @@ struct Authority {
     live: crate::native_runtime::NativeInstance,
     generation: u64,
 }
+/// A normal startup is observed separately from InstalledStopped. This never
+/// rewrites applied=false or grants bootstrap startup authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManualInstalledStoppedObservation {
+    version: u32,
+    operation_id: String,
+    plan_sha256: String,
+    result_sha256: String,
+    image: ExecutableIdentity,
+    instance_id: String,
+    pid: Option<u32>,
+    stop_generation: u64,
+}
+fn manual_observation_path(base: &Base) -> Result<PathBuf, String> {
+    protocol::validate_operation_id(&base.plan.operation_id)?;
+    Ok(base.plan.profile.state_dir.join("updates-v4").join(format!(
+        "install-{}.manual-installed-stopped-observed.json",
+        base.plan.operation_id,
+    )))
+}
+fn validate_manual_observation(
+    base: &Base,
+    observed: &ManualInstalledStoppedObservation,
+) -> Result<(), String> {
+    let previous = original_context(&base.plan)?;
+    if observed.version != 1
+        || observed.operation_id != base.plan.operation_id
+        || observed.plan_sha256 != base.plan_sha256
+        || observed.result_sha256 != base.result_sha256
+        || observed.image.path != base.intent.target.join("Contents/MacOS/desktop-pet")
+        || observed.image.sha256 != base.plan.candidate_image.sha256
+        || observed.instance_id.is_empty()
+        || observed.instance_id == previous.instance_id
+        || observed.pid == Some(0)
+        || observed.stop_generation != base.plan.original_stop_generation
+        || !matches!(
+            base.plan.purpose,
+            StandaloneInstallPurpose::ManualRecovery { .. }
+        )
+    {
+        return Err("manual InstalledStopped observation does not prove a fresh unchanged-generation normal start".into());
+    }
+    Ok(())
+}
+fn validate_manual_start_receipt(
+    base: &Base,
+    observed: &ManualInstalledStoppedObservation,
+) -> Result<(), String> {
+    validate_manual_observation(base, observed)?;
+    let (generation, context) = protocol::historical_runtime_start_context(
+        base.plan.installed_origin(),
+        &base.plan.profile.state_dir,
+        observed.pid,
+        &observed.instance_id,
+        &observed.image,
+    )?;
+    let previous = original_context(&base.plan)?;
+    if generation != observed.stop_generation
+        || context.version != base.plan.candidate_version
+        || context.config_dir != base.plan.profile.config_dir
+        || context.state_dir != base.plan.profile.state_dir
+        || context.assets_override != previous.assets_override
+        || context.environment != previous.environment
+        || context.observation_mode()? != previous.observation_mode()?
+    {
+        return Err(
+            "manual initial normal startup changed the original profile or runtime context".into(),
+        );
+    }
+    Ok(())
+}
+fn reconstruct_manual_start(base: &Base) -> Result<ManualInstalledStoppedObservation, String> {
+    // These fields discover a candidate receipt, not authority. The shared
+    // strict protocol reader below authenticates its entire canonical record.
+    #[derive(Deserialize)]
+    struct StartHint {
+        pid: u32,
+        instance_id: String,
+        image: ExecutableIdentity,
+        stop_generation: u64,
+    }
+    let expected = ExecutableIdentity {
+        path: base.intent.target.join("Contents/MacOS/desktop-pet"),
+        sha256: base.plan.candidate_image.sha256.clone(),
+    };
+    let mut selected: Option<ManualInstalledStoppedObservation> = None;
+    let mut count = 0;
+    for entry in
+        fs::read_dir(base.plan.profile.state_dir.join("updates-v4")).map_err(|e| e.to_string())?
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.ends_with(".runtime-start.json") {
+            continue;
+        }
+        count += 1;
+        if count > HISTORY_BOUND {
+            return Err("manual runtime startup history exceeds bound".into());
+        }
+        let hint: StartHint = read_json(&entry.path(), MAX_PLAN)?;
+        if hint.image != expected || hint.stop_generation != base.plan.original_stop_generation {
+            continue;
+        }
+        if name != format!("{}.runtime-start.json", digest(hint.instance_id.as_bytes())) {
+            return Err(
+                "manual historical startup is not its exact canonical runtime receipt".into(),
+            );
+        }
+        let observed = ManualInstalledStoppedObservation {
+            version: 1,
+            operation_id: base.plan.operation_id.clone(),
+            plan_sha256: base.plan_sha256.clone(),
+            result_sha256: base.result_sha256.clone(),
+            image: hint.image,
+            instance_id: hint.instance_id,
+            pid: Some(hint.pid),
+            stop_generation: hint.stop_generation,
+        };
+        validate_manual_start_receipt(base, &observed)?;
+        // Multiple context-preserving real starts at the unchanged fence are
+        // equivalent proof. Later settings are never used as initial evidence.
+        if selected
+            .as_ref()
+            .is_none_or(|old| observed.instance_id < old.instance_id)
+        {
+            selected = Some(observed);
+        }
+    }
+    selected.ok_or_else(|| {
+        "manual recovery has no unchanged-generation context-bound normal startup receipt".into()
+    })
+}
+fn observe_manual_start(base: &Base) -> Result<(), String> {
+    if !matches!(
+        base.plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        return Ok(());
+    }
+    let path = manual_observation_path(base)?;
+    let observed = if exists(&path)? {
+        read_json(&path, MAX_PLAN)?
+    } else {
+        // Always reconstruct the actual initial C startup. A later legitimate
+        // restart/updater may have changed settings and is only live-head proof.
+        reconstruct_manual_start(base)?
+    };
+    validate_manual_start_receipt(base, &observed)?;
+    publish_exact(&path, &observed)?;
+    Ok(())
+}
 
 fn released(
     source: &InstallOrigin,
@@ -233,25 +387,98 @@ fn validate_closure(
     }
     Ok(app)
 }
+fn relocation_approval(plan: &StandaloneInstallPlan) -> Option<&Option<RelocationTernApproval>> {
+    match &plan.purpose {
+        StandaloneInstallPurpose::PrivateRelocation { tern, .. }
+        | StandaloneInstallPurpose::ManualRecovery { tern, .. } => Some(tern),
+        StandaloneInstallPurpose::Upgrade => None,
+    }
+}
+fn original_context(plan: &StandaloneInstallPlan) -> Result<&UpdateContext, String> {
+    match &plan.purpose {
+        StandaloneInstallPurpose::ManualRecovery {
+            previous_context, ..
+        } => Ok(previous_context),
+        _ => plan
+            .running()
+            .map(|(_, context)| context)
+            .ok_or_else(|| "relocation has no original Running context".into()),
+    }
+}
+fn validate_base_consent(plan: &StandaloneInstallPlan, plan_sha256: &str) -> Result<(), String> {
+    let state = &plan.profile.state_dir;
+    let id = &plan.operation_id;
+    match &plan.purpose {
+        StandaloneInstallPurpose::ManualRecovery { .. } => {
+            let request = standalone_install::manual_operator_request_path(state, id)?;
+            standalone_install::read_operator_consent(plan, &request)?
+                .ok_or("manual recovery has no exact SSH operator consent")?;
+            // An ACK file, including an invalid one, cannot become authority for
+            // a source which was already stopped before this operation.
+            if exists(&standalone_install::stop_ack_path(state, id)?)?
+                || exists(&standalone_install::consent_path(state, id)?)?
+            {
+                return Err(
+                    "stopped manual recovery unexpectedly claims native consent or Stop ACK".into(),
+                );
+            }
+        }
+        StandaloneInstallPurpose::PrivateRelocation { .. } => {
+            let consent: Consent =
+                read_json(&standalone_install::consent_path(state, id)?, MAX_PLAN)?;
+            if consent.version != 1
+                || consent.operation_id != *id
+                || consent.plan_sha256 != plan_sha256
+            {
+                return Err(
+                    "relocation Tern authority has no exact native affirmative consent".into(),
+                );
+            }
+            standalone_install::read_stop_ack(plan)?
+                .ok_or("relocation has no durable source Stop ACK")?
+                .validate(plan)?;
+        }
+        StandaloneInstallPurpose::Upgrade => return Err("upgrade has no relocation consent".into()),
+    }
+    Ok(())
+}
+fn validate_source_retired(plan: &StandaloneInstallPlan) -> Result<(), String> {
+    let source = crate::physical_install_root(plan.origin())?;
+    if exists(source)? || exists(&installation::sidecar_path(source))? {
+        return Err("relocation source bundle or external sidecar has not been retired".into());
+    }
+    Ok(())
+}
+fn base_result_ready(
+    plan: &StandaloneInstallPlan,
+    record: &standalone_install::StandaloneInstallRecord,
+) -> bool {
+    record.phase == standalone_install::StandaloneInstallPhase::Completed
+        && record.result.installed
+        && match &plan.purpose {
+            StandaloneInstallPurpose::ManualRecovery { .. } => {
+                !record.result.applied
+                    && record.result.status == standalone_install::InstallStatus::InstalledStopped
+                    && record.result.restart == standalone_install::InstallRestart::NotRequested
+            }
+            StandaloneInstallPurpose::PrivateRelocation { .. } => record.result.applied,
+            StandaloneInstallPurpose::Upgrade => false,
+        }
+}
 fn read_base(state: &Path, id: &str) -> Result<Option<Base>, String> {
     let plan = standalone_install::read_plan(state, id)?;
-    let StandaloneInstallPurpose::PrivateRelocation { tern, .. } = &plan.purpose else {
+    let Some(tern) = relocation_approval(&plan) else {
         return Ok(None);
     };
     let Some(approval) = tern.clone() else {
         return Ok(None);
     };
-    let (_, context) = plan
-        .running()
-        .ok_or("relocation has no original Running context")?;
+    let context = original_context(&plan)?;
     tern_config::validate_relocation_configuration(context, &approval)?;
     let Some(record) = standalone_install::read_record(state, id)? else {
         return Ok(None);
     };
-    if record.phase != standalone_install::StandaloneInstallPhase::Completed
-        || !record.result.installed
-        || !record.result.applied
-    {
+    if !base_result_ready(&plan, &record) {
         return Ok(None);
     }
     let _lease = protocol::lock_operation(state, id)?;
@@ -265,22 +492,24 @@ fn read_base(state: &Path, id: &str) -> Result<Option<Base>, String> {
         MAX_INTENT,
     )?);
     released(plan.origin(), plan.reservation_target(), state, id)?;
-    validate_parent(&plan)?;
     let plan_sha256 = digest(&owned_private_file(
         &standalone_install::plan_path(state, id)?,
         MAX_PLAN,
     )?);
-    let consent: Consent = read_json(&standalone_install::consent_path(state, id)?, MAX_PLAN)?;
-    if consent.version != 1 || consent.operation_id != id || consent.plan_sha256 != plan_sha256 {
-        return Err("relocation Tern authority has no exact native affirmative consent".into());
+    validate_base_consent(&plan, &plan_sha256)?;
+    if matches!(
+        plan.purpose,
+        StandaloneInstallPurpose::PrivateRelocation { .. }
+    ) {
+        validate_parent(&plan)?;
     }
-    standalone_install::read_stop_ack(&plan)?
-        .ok_or("relocation has no durable source Stop ACK")?
-        .validate(&plan)?;
     let path = standalone_install::replacement_path(state, id)?;
     let intent_bytes = owned_private_file(&path, installation::MAX_REPLACEMENT_INTENT)?;
     let intent = installation::load_historical_replacement_intent(&path, id)?;
     let receipt_path = standalone_install::relocation_commit_path(state, id)?;
+    if !installation::relocation_committed(&path, &intent)? {
+        return Err("relocation has no atomic disk commit receipt".into());
+    }
     let receipt_bytes = owned_private_file(&receipt_path, MAX_PLAN)?;
     let receipt: Commit = serde_json::from_slice(&receipt_bytes).map_err(|e| e.to_string())?;
     validate_relocation_disk_evidence(&plan, &record, &receipt, &intent, &digest(&intent_bytes))?;
@@ -301,6 +530,30 @@ fn read_base(state: &Path, id: &str) -> Result<Option<Base>, String> {
             .ok_or("relocation lacks source inode")?,
         &plan.original.app_version,
     )?;
+    validate_source_retired(&plan)?;
+    if let StandaloneInstallPurpose::ManualRecovery { release, .. } = &plan.purpose {
+        // The candidate is an independently signed official release, not a
+        // byte-identical copy of the stopped beta source.
+        let candidate = installation::validate_staged_app(&plan.candidate_bundle)?;
+        if candidate.image != plan.candidate_image
+            || candidate.version != plan.candidate_version
+            || crate::owned_file(
+                &installation::sidecar_path(&plan.candidate_bundle),
+                MAX_INTENT,
+            )? != intent.candidate_sidecar
+        {
+            return Err(
+                "manual recovery candidate differs from approved signed release closure".into(),
+            );
+        }
+        installation::validate_release_evidence(
+            release,
+            plan.candidate_bundle
+                .parent()
+                .ok_or("manual candidate has no resources directory")?,
+            &plan.candidate_bundle,
+        )?;
+    }
     Ok(Some(Base {
         plan,
         approval,
@@ -318,12 +571,19 @@ fn validate_relocation_disk_evidence(
     intent_sha256: &str,
 ) -> Result<(), String> {
     record.validate(plan)?;
-    let StandaloneInstallPurpose::PrivateRelocation {
-        source_closure_sha256,
-        ..
-    } = &plan.purpose
-    else {
-        return Err("upgrade has no relocation disk authority".into());
+    installation::validate_relocation_intent_for_plan(intent, plan)?;
+    let source_closure_sha256 = match &plan.purpose {
+        StandaloneInstallPurpose::PrivateRelocation {
+            source_closure_sha256,
+            ..
+        }
+        | StandaloneInstallPurpose::ManualRecovery {
+            source_closure_sha256,
+            ..
+        } => source_closure_sha256,
+        StandaloneInstallPurpose::Upgrade => {
+            return Err("upgrade has no relocation disk authority".into())
+        }
     };
     let ReplacementLayout::Relocate {
         source,
@@ -340,9 +600,7 @@ fn validate_relocation_disk_evidence(
         .as_ref()
         .ok_or("applied relocation lacks installed result")?;
     let id = &plan.operation_id;
-    if record.phase != standalone_install::StandaloneInstallPhase::Completed
-        || !record.result.installed
-        || !record.result.applied
+    if !base_result_ready(plan, record)
         || receipt.version != 1
         || receipt.operation_id != *id
         || receipt.intent_sha256 != intent_sha256
@@ -366,10 +624,17 @@ fn validate_relocation_disk_evidence(
         || installed.app_version != plan.candidate_version
         || intent.candidate_file.sha256 != plan.candidate_image.sha256
         || intent.candidate_version != plan.candidate_version
-        || source_sidecar != &intent.candidate_sidecar
+        || matches!(
+            plan.purpose,
+            StandaloneInstallPurpose::PrivateRelocation { .. }
+        ) && source_sidecar != &intent.candidate_sidecar
         || source_sidecar_sha256 != source_closure_sha256
         || digest(source_sidecar) != *source_closure_sha256
-        || intent.candidate_sidecar_sha256 != *source_closure_sha256
+        || digest(&intent.candidate_sidecar) != intent.candidate_sidecar_sha256
+        || matches!(
+            plan.purpose,
+            StandaloneInstallPurpose::PrivateRelocation { .. }
+        ) && intent.candidate_sidecar_sha256 != *source_closure_sha256
         || intent.original_sidecar.is_some()
         || !intent.update_locator
     {
@@ -823,10 +1088,10 @@ fn successor_chain_with_access<'a>(
 }
 fn reconstruct_owners(
     base: &Base,
-    current: &ExecutableIdentity,
+    live: &crate::native_runtime::NativeInstance,
 ) -> Result<(String, Vec<String>), String> {
     let (links, mut operations) = normal_links(base)?;
-    let selected = successor_chain(base, current, &links)?;
+    let selected = successor_chain(base, &live.image, &links)?;
     for link in &selected {
         link_settled(base, link)?;
     }
@@ -862,6 +1127,7 @@ fn reconstruct_owners(
         &base.plan.profile.state_dir,
         &base.plan.operation_id,
     )?;
+    observe_manual_start(base)?;
     let hash = publish_owners(base, &selected)?;
     Ok((hash, operations.into_iter().collect()))
 }
@@ -927,7 +1193,7 @@ fn authority(base: Base) -> Result<Authority, String> {
         &live.image,
     )?;
     crate::native_runtime::verify_current_ready(&live, generation)?;
-    let (owner_sha256, owner_operations) = reconstruct_owners(&base, &live.image)?;
+    let (owner_sha256, owner_operations) = reconstruct_owners(&base, &live)?;
     let result = Authority {
         base,
         owner_sha256,
@@ -963,7 +1229,6 @@ fn recheck(authority: &Authority) -> Result<Vec<protocol::OperationLease>, Strin
     let receipt: Commit = serde_json::from_slice(&receipt_bytes).map_err(|e| e.to_string())?;
     let owner_bytes = owned_private_file(&owner_path(base, &authority.live.image), MAX_PLAN)?;
     let owner: RelocationOwner = serde_json::from_slice(&owner_bytes).map_err(|e| e.to_string())?;
-    let consent: Consent = read_json(&standalone_install::consent_path(state, id)?, MAX_PLAN)?;
     if digest(&owned_private_file(
         &standalone_install::plan_path(state, id)?,
         MAX_PLAN,
@@ -986,17 +1251,21 @@ fn recheck(authority: &Authority) -> Result<Vec<protocol::OperationLease>, Strin
                 &installation::sidecar_path(&base.intent.target),
                 MAX_INTENT,
             )?)
-        || consent.version != 1
-        || consent.operation_id != *id
-        || consent.plan_sha256 != base.plan_sha256
     {
         return Err(
             "immutable relocation plan/result/consent/commit/owner evidence changed".into(),
         );
     }
-    standalone_install::read_stop_ack(&base.plan)?
-        .ok_or("relocation source Stop ACK disappeared")?
-        .validate(&base.plan)?;
+    validate_base_consent(&base.plan, &base.plan_sha256)?;
+    validate_source_retired(&base.plan)?;
+    if matches!(
+        base.plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        let observed: ManualInstalledStoppedObservation =
+            read_json(&manual_observation_path(base)?, MAX_PLAN)?;
+        validate_manual_start_receipt(base, &observed)?;
+    }
     if protocol::stop_generation(&base.plan.profile.state_dir)? != authority.generation
         || protocol::verified_runtime_start_fence(
             base.plan.installed_origin(),
@@ -1187,6 +1456,45 @@ fn publish_challenge(
         .and_then(|directory| directory.sync_all())
         .map_err(|e| e.to_string())?;
     Ok(winner.handover)
+}
+/// A separately authenticated standalone cutover supersedes only the old
+/// native owner at its exact source root/profile. Its SSH approval does not
+/// inherit the old CLI/delivery authority, and never relaxes legacy handover.
+pub(super) fn supersedes_legacy_route(
+    response: &serde_json::Value,
+    legacy: &MigrationPlan,
+    record: &MigrationRecord,
+    profile: &LegacyProfile,
+) -> Result<bool, String> {
+    let id = response
+        .get("handover")
+        .and_then(|h| h.get("operation_id"))
+        .and_then(|id| id.as_str())
+        .ok_or("standalone route has no operation identity")?;
+    let plan = standalone_install::read_plan(&profile.state_dir, id)?;
+    if response
+        .get("handover")
+        .and_then(|h| h.get("plan_sha256"))
+        .and_then(|v| v.as_str())
+        != Some(
+            digest(&owned_private_file(
+                &standalone_install::plan_path(&profile.state_dir, id)?,
+                MAX_PLAN,
+            )?)
+            .as_str(),
+        )
+    {
+        return Err("standalone route approval changed before legacy history selection".into());
+    }
+    if relocation_approval(&plan).is_none()
+        || plan.profile.config_dir != profile.config_dir
+        || plan.profile.state_dir != profile.state_dir
+        || legacy.target.origin != *plan.origin()
+    {
+        return Ok(false);
+    }
+    verify_retained_commit(legacy, record, profile)?;
+    Ok(true)
 }
 pub(super) fn committed_route(request: &RouteRequest) -> Result<Option<serde_json::Value>, String> {
     if crate::identity::LEGACY {
@@ -1433,9 +1741,8 @@ pub fn observe_relocation_tern(
     operation_id: &str,
 ) -> Result<Vec<MigrationIntegrationStatus>, String> {
     let plan = standalone_install::read_plan(&context.state_dir, operation_id)?;
-    let StandaloneInstallPurpose::PrivateRelocation { tern, .. } = &plan.purpose else {
-        return Err("upgrade is not a relocation integration observation".into());
-    };
+    let tern =
+        relocation_approval(&plan).ok_or("upgrade is not a relocation integration observation")?;
     if tern.is_none() {
         return Ok(Vec::new());
     }
@@ -1471,9 +1778,8 @@ pub fn observe_relocation_tern_windows(
     operation_id: &str,
 ) -> Result<Option<usize>, String> {
     let plan = standalone_install::read_plan(&context.state_dir, operation_id)?;
-    let StandaloneInstallPurpose::PrivateRelocation { tern, .. } = &plan.purpose else {
-        return Err("upgrade is not a relocation integration observation".into());
-    };
+    let tern =
+        relocation_approval(&plan).ok_or("upgrade is not a relocation integration observation")?;
     if plan.profile.config_dir != context.config_dir {
         return Err("relocation observation profile changed".into());
     }
@@ -1726,7 +2032,7 @@ mod tests {
             previous_version,
             previous.candidate_file.sha256.chars().next().unwrap(),
         );
-        let mut context = base.plan.running().unwrap().1.clone();
+        let mut context = original_context(&base.plan).unwrap().clone();
         context.executable = original.executable.clone();
         context.running = original.image.clone();
         context.running_origin = Some(Box::new(original.origin.clone()));
@@ -1821,7 +2127,10 @@ mod tests {
             target: base.approval.target.clone(),
             commit_receipt_sha256: base.receipt_sha256.clone(),
             owner_proof_sha256: "8".repeat(64),
-            current_image: image(&base.intent.target, 'a'),
+            current_image: ExecutableIdentity {
+                path: base.intent.target.join("Contents/MacOS/desktop-pet"),
+                sha256: base.plan.candidate_image.sha256.clone(),
+            },
             stop_generation: 8,
             installed_package: base.plan.profile.state_dir.join("consumer"),
             package_sha256: "6".repeat(64),
@@ -2403,7 +2712,10 @@ mod tests {
             operation_id: base.plan.operation_id.clone(),
             plan_sha256: base.plan_sha256.clone(),
             challenge_sha256: "c".repeat(64),
-            current_image: image(&base.intent.target, 'a'),
+            current_image: ExecutableIdentity {
+                path: base.intent.target.join("Contents/MacOS/desktop-pet"),
+                sha256: base.plan.candidate_image.sha256.clone(),
+            },
             config_dir: base.plan.profile.config_dir.clone(),
             state_dir: base.plan.profile.state_dir.clone(),
             target_instance_id: "current-instance".into(),
@@ -2492,6 +2804,10 @@ mod tests {
         );
     }
     fn installed_result(base: &Base) -> standalone_install::StandaloneInstallRecord {
+        let manual = matches!(
+            base.plan.purpose,
+            StandaloneInstallPurpose::ManualRecovery { .. }
+        );
         standalone_install::StandaloneInstallRecord {
             version: 1,
             operation_id: base.plan.operation_id.clone(),
@@ -2500,15 +2816,23 @@ mod tests {
                 version: 1,
                 operation_id: base.plan.operation_id.clone(),
                 state_dir: base.plan.profile.state_dir.clone(),
-                status: standalone_install::InstallStatus::Applied,
+                status: if manual {
+                    standalone_install::InstallStatus::InstalledStopped
+                } else {
+                    standalone_install::InstallStatus::Applied
+                },
                 installation: Some(record(
                     base.plan.installed_origin(),
                     &base.plan.candidate_version,
-                    'a',
+                    base.plan.candidate_image.sha256.chars().next().unwrap(),
                 )),
                 installed: true,
-                applied: true,
-                restart: standalone_install::InstallRestart::Ready,
+                applied: !manual,
+                restart: if manual {
+                    standalone_install::InstallRestart::NotRequested
+                } else {
+                    standalone_install::InstallRestart::Ready
+                },
                 retained_bundle: Some(base.intent.work.join("original/DesktopPet.app")),
                 error: None,
             },
@@ -2607,5 +2931,688 @@ mod tests {
                 .unwrap(),
             "actual backend error"
         );
+    }
+    fn manual_base(root: &Path) -> Base {
+        let mut base = base(root);
+        let mut previous_context = original_context(&base.plan).unwrap().clone();
+        base.plan.original.app_version = "0.4.13-beta.7".into();
+        previous_context.version = base.plan.original.app_version.clone();
+        previous_context.environment = crate::native_runtime::captured_environment(
+            previous_context.observation_mode().unwrap(),
+            |key| previous_context.environment.get(key).cloned(),
+        )
+        .unwrap();
+        previous_context.assets_override =
+            Some(base.plan.profile.config_dir.join("preserved-assets"));
+        base.plan.candidate_version = "0.4.14".into();
+        base.plan.candidate_bundle = standalone_install::manual_operator_request_path(
+            &base.plan.profile.state_dir,
+            &base.plan.operation_id,
+        )
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("DesktopPet.app");
+        base.plan.candidate_image = image(&base.plan.candidate_bundle, 'b');
+        base.plan.purpose = StandaloneInstallPurpose::ManualRecovery {
+            target: base.plan.installed_origin().clone(),
+            release: release("0.4.14"),
+            previous_context,
+            source_closure_sha256: match &base.intent.layout {
+                ReplacementLayout::Relocate {
+                    source_sidecar_sha256,
+                    ..
+                } => source_sidecar_sha256.clone(),
+                _ => unreachable!(),
+            },
+            tern: Some(base.approval.clone()),
+        };
+        base.plan.source = standalone_install::InstallSource::Stopped {
+            profile: base.plan.profile.clone(),
+        };
+        base.intent.original = Some(base.plan.original.clone());
+        base.intent.candidate_version = base.plan.candidate_version.clone();
+        base.intent.candidate_file.sha256 = base.plan.candidate_image.sha256.clone();
+        base.intent.candidate_sidecar = b"independently-signed-official-closure-b".to_vec();
+        base.intent.candidate_sidecar_sha256 = digest(&base.intent.candidate_sidecar);
+        base.plan.validate().unwrap();
+        base
+    }
+
+    fn publish_manual_request(base: &Base) -> PathBuf {
+        let plan_path =
+            standalone_install::plan_path(&base.plan.profile.state_dir, &base.plan.operation_id)
+                .unwrap();
+        protocol::write_private_atomic_new(
+            &plan_path,
+            &serde_json::to_vec_pretty(&base.plan).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let StandaloneInstallPurpose::ManualRecovery {
+            release,
+            previous_context,
+            ..
+        } = &base.plan.purpose
+        else {
+            unreachable!()
+        };
+        let request = standalone_install::StandaloneManualRecoveryRequest {
+            version: 1,
+            context: previous_context.clone(),
+            candidate_bundle: base.plan.candidate_bundle.clone(),
+            release: release.clone(),
+            confirmation: "replace_original_app_preserve_profile".into(),
+        };
+        let request_path = standalone_install::manual_operator_request_path(
+            &base.plan.profile.state_dir,
+            &base.plan.operation_id,
+        )
+        .unwrap();
+        private(request_path.parent().unwrap());
+        protocol::write_private_atomic_new(
+            &request_path,
+            &serde_json::to_vec_pretty(&request).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        request_path
+    }
+
+    #[test]
+    fn stopped_manual_cutover_binds_distinct_source_and_candidate_without_restart_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let result = installed_result(&base);
+        assert!(base.plan.running().is_none());
+        assert!(!result.result.applied);
+        let intent_sha256 = digest(&serde_json::to_vec(&base.intent).unwrap());
+        let receipt = Commit {
+            version: 1,
+            operation_id: base.plan.operation_id.clone(),
+            intent_sha256: intent_sha256.clone(),
+        };
+        validate_relocation_disk_evidence(
+            &base.plan,
+            &result,
+            &receipt,
+            &base.intent,
+            &intent_sha256,
+        )
+        .unwrap();
+        for tamper in 0..10 {
+            let mut result = result.clone();
+            let mut intent = base.intent.clone();
+            let mut receipt = Commit {
+                version: 1,
+                operation_id: base.plan.operation_id.clone(),
+                intent_sha256: intent_sha256.clone(),
+            };
+            match tamper {
+                0 => result.result.applied = true,
+                1 => result.result.restart = standalone_install::InstallRestart::Ready,
+                2 => result.result.status = standalone_install::InstallStatus::Applied,
+                3 => receipt.intent_sha256 = "0".repeat(64),
+                4 => intent.original_file.as_mut().unwrap().inode = intent.candidate_file.inode,
+                5 => intent.candidate_sidecar.push(0),
+                6 => {
+                    let ReplacementLayout::Relocate { source_sidecar, .. } = &mut intent.layout
+                    else {
+                        unreachable!()
+                    };
+                    *source_sidecar = intent.candidate_sidecar.clone();
+                }
+                7 => result.result.state_dir = root.path().join("foreign-profile"),
+                8 => intent.origin = base.plan.origin().clone(),
+                9 => intent.original.as_mut().unwrap().image.sha256 = "f".repeat(64),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_relocation_disk_evidence(
+                    &base.plan,
+                    &result,
+                    &receipt,
+                    &intent,
+                    &intent_sha256,
+                )
+                .is_err(),
+                "manual tamper {tamper}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_authority_requires_actual_operator_bytes_and_rejects_native_ack_or_consent() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let request_path = publish_manual_request(&base);
+        let plan_sha256 = digest(
+            &owned_private_file(
+                &standalone_install::plan_path(
+                    &base.plan.profile.state_dir,
+                    &base.plan.operation_id,
+                )
+                .unwrap(),
+                MAX_PLAN,
+            )
+            .unwrap(),
+        );
+        assert!(validate_base_consent(&base.plan, &plan_sha256).is_err());
+        let consent_path =
+            standalone_install::write_operator_consent(&base.plan, &request_path).unwrap();
+        let saved = owned_private_file(&consent_path, MAX_PLAN).unwrap();
+        validate_base_consent(&base.plan, &plan_sha256).unwrap();
+        for tamper in 0..4 {
+            let mut consent: standalone_install::StandaloneOperatorConsent =
+                serde_json::from_slice(&saved).unwrap();
+            match tamper {
+                0 => consent.method = "native_panel".into(),
+                1 => consent.plan_sha256 = "0".repeat(64),
+                2 => consent.request_sha256 = "0".repeat(64),
+                3 => consent.operation_id = "f".repeat(32),
+                _ => unreachable!(),
+            }
+            protocol::write_private_bytes(
+                &consent_path,
+                &serde_json::to_vec(&consent).unwrap(),
+                0o600,
+            )
+            .unwrap();
+            assert!(validate_base_consent(&base.plan, &plan_sha256).is_err());
+        }
+        protocol::write_private_bytes(&consent_path, &saved, 0o600).unwrap();
+        for path in [
+            standalone_install::stop_ack_path(
+                &base.plan.profile.state_dir,
+                &base.plan.operation_id,
+            )
+            .unwrap(),
+            standalone_install::consent_path(&base.plan.profile.state_dir, &base.plan.operation_id)
+                .unwrap(),
+        ] {
+            protocol::write_private_atomic_new(&path, b"{}", 0o600).unwrap();
+            assert!(validate_base_consent(&base.plan, &plan_sha256).is_err());
+            fs::remove_file(path).unwrap();
+        }
+        let request_bytes = owned_private_file(&request_path, MAX_PLAN).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+        protocol::write_private_bytes(&request_path, &serde_json::to_vec(&request).unwrap(), 0o600)
+            .unwrap();
+        assert!(
+            validate_base_consent(&base.plan, &plan_sha256).is_err(),
+            "semantically equal but different request bytes cannot inherit consent"
+        );
+    }
+
+    #[test]
+    fn manual_atomic_commit_is_mandatory_and_bound_to_actual_intent_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let path = standalone_install::replacement_path(
+            &base.plan.profile.state_dir,
+            &base.plan.operation_id,
+        )
+        .unwrap();
+        assert!(!installation::relocation_committed(&path, &base.intent).unwrap());
+        let bytes = serde_json::to_vec_pretty(&base.intent).unwrap();
+        protocol::write_private_atomic_new(&path, &bytes, 0o600).unwrap();
+        let receipt_path = standalone_install::relocation_commit_path(
+            &base.plan.profile.state_dir,
+            &base.plan.operation_id,
+        )
+        .unwrap();
+        let receipt = Commit {
+            version: 1,
+            operation_id: base.plan.operation_id.clone(),
+            intent_sha256: digest(&bytes),
+        };
+        protocol::write_private_atomic_new(
+            &receipt_path,
+            &serde_json::to_vec(&receipt).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        assert!(installation::relocation_committed(&path, &base.intent).unwrap());
+        protocol::write_private_bytes(&path, &serde_json::to_vec(&base.intent).unwrap(), 0o600)
+            .unwrap();
+        assert!(installation::relocation_committed(&path, &base.intent).is_err());
+    }
+
+    #[test]
+    fn manual_separate_start_observation_rejects_old_instance_generation_image_and_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let observed = ManualInstalledStoppedObservation {
+            version: 1,
+            operation_id: base.plan.operation_id.clone(),
+            plan_sha256: base.plan_sha256.clone(),
+            result_sha256: base.result_sha256.clone(),
+            image: image(&base.intent.target, 'b'),
+            instance_id: "explicit-normal-C-start".into(),
+            pid: Some(456),
+            stop_generation: base.plan.original_stop_generation,
+        };
+        validate_manual_observation(&base, &observed).unwrap();
+        for tamper in 0..7 {
+            let mut wrong = observed.clone();
+            match tamper {
+                0 => wrong.stop_generation += 1,
+                1 => wrong.instance_id = original_context(&base.plan).unwrap().instance_id.clone(),
+                2 => wrong.image = base.plan.original.image.clone(),
+                3 => wrong.pid = Some(0),
+                4 => wrong.plan_sha256 = "0".repeat(64),
+                5 => wrong.operation_id = "f".repeat(32),
+                6 => wrong.result_sha256 = "f".repeat(64),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_manual_observation(&base, &wrong).is_err(),
+                "start tamper {tamper}"
+            );
+        }
+        assert!(
+            !installed_result(&base).result.applied,
+            "observing current readiness must not rewrite old InstalledStopped"
+        );
+    }
+
+    #[test]
+    fn manual_scopes_require_exact_helper_and_both_root_profile_release() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let global = root.path().join("global");
+        private(&global);
+        let access = OwnerAccess {
+            global: Some(global),
+            ..OwnerAccess::default()
+        };
+        let state = &base.plan.profile.state_dir;
+        let id = &base.plan.operation_id;
+        let lease = access.lease(state, id).unwrap();
+        assert!(access.lease(state, id).is_err());
+        drop(lease);
+        let reservation = protocol::test_scope::reserve_install_at(
+            access.global.as_ref().unwrap(),
+            base.plan.origin(),
+            base.plan.reservation_target(),
+            state,
+            id,
+        )
+        .unwrap();
+        assert!(access
+            .released(
+                base.plan.origin(),
+                base.plan.reservation_target(),
+                state,
+                id
+            )
+            .is_err());
+        reservation.release().unwrap();
+        access
+            .released(
+                base.plan.origin(),
+                base.plan.reservation_target(),
+                state,
+                id,
+            )
+            .unwrap();
+        let other_state = root.path().join("other-profile-state");
+        private(&other_state);
+        let foreign = protocol::test_scope::reserve_install_at(
+            access.global.as_ref().unwrap(),
+            base.plan.installed_origin(),
+            None,
+            &other_state,
+            &"f".repeat(32),
+        )
+        .unwrap();
+        assert!(access
+            .released(
+                base.plan.origin(),
+                base.plan.reservation_target(),
+                state,
+                id
+            )
+            .is_err());
+        foreign.release().unwrap();
+    }
+
+    #[test]
+    fn manual_h_to_c_sdk_challenges_two_fresh_windows_and_restart_are_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        route_tuple(&base, &base.approval.original).unwrap();
+        route_tuple(&base, &base.approval.target).unwrap();
+        let mut foreign = base.approval.original.clone();
+        foreign.state_dir = root.path().join("other-state");
+        assert!(route_tuple(&base, &foreign).is_err());
+        let current = image(&base.intent.target, 'b');
+        let mut handovers = Vec::new();
+        for tuple in [&base.approval.original, &base.approval.target] {
+            let path = challenge_path(&base, &current, "manual-C-instance", tuple).unwrap();
+            handovers.push(
+                publish_challenge(&path, challenge(&base, tuple, "manual-C-instance")).unwrap(),
+            );
+            assert_ne!(
+                path,
+                challenge_path(&base, &current, "later-C-instance", tuple).unwrap()
+            );
+        }
+        assert_ne!(handovers[0].token, handovers[1].token);
+        assert_eq!(
+            serde_json::to_value(&handovers[0])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            6
+        );
+        let mut windows = BTreeSet::new();
+        for window in ["post-save-A", "post-save-B"] {
+            let receipt = window_receipt(&base, window);
+            let fresh = binding(&receipt);
+            assert!(receipt_matches_binding(&receipt, &fresh));
+            windows.insert(receipt.window_id.clone());
+            let mut stale = fresh;
+            stale.instance_id = "previous-C-instance".into();
+            assert!(!receipt_matches_binding(&receipt, &stale));
+        }
+        assert_eq!(windows.len(), 2);
+    }
+
+    #[test]
+    fn manual_owner_chain_starts_at_candidate_not_beta_source_and_accepts_next_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let first = successor(&base, &base.intent, '2', "0.4.14", "0.4.15", 'c');
+        let second = successor(&base, &first.intent, '3', "0.4.15", "0.4.16", 'd');
+        let links = [first, second];
+        let current = links[1].result.candidate.clone().unwrap();
+        let selected = successor_chain(&base, &current, &links).unwrap();
+        publish_owners(&base, &selected).unwrap();
+        let initial: RelocationOwner = read_json(
+            &owner_path(&base, &image(&base.intent.target, 'b')),
+            MAX_PLAN,
+        )
+        .unwrap();
+        assert_eq!(initial.previous_image, initial.current_image);
+        assert_eq!(
+            initial.previous_image.sha256,
+            base.plan.candidate_image.sha256
+        );
+        assert_eq!(
+            initial.previous_closure_sha256,
+            base.intent.candidate_sidecar_sha256
+        );
+        assert_eq!(
+            initial.previous_closure_sha256,
+            initial.current_closure_sha256
+        );
+        assert_ne!(
+            initial.previous_image.sha256,
+            base.plan.original.image.sha256
+        );
+        assert!(initial.update_operation_id.is_none());
+        let head: RelocationOwner = read_json(&owner_path(&base, &current), MAX_PLAN).unwrap();
+        assert_eq!(
+            head.update_operation_id.as_ref(),
+            Some(&links[1].plan.operation_id)
+        );
+    }
+    fn manual_start_context(base: &Base, instance: &str) -> UpdateContext {
+        let mut context = original_context(&base.plan).unwrap().clone();
+        context.executable = base.intent.target.join("Contents/MacOS/desktop-pet");
+        context.running = image(&base.intent.target, 'b');
+        context.running_origin = Some(Box::new(base.plan.installed_origin().clone()));
+        context.version = base.plan.candidate_version.clone();
+        context.instance_id = instance.into();
+        context
+    }
+    fn runtime_start_fixture(base: &Base, context: &UpdateContext, generation: u64) -> PathBuf {
+        let path = base.plan.profile.state_dir.join("updates-v4").join(format!(
+            "{}.runtime-start.json",
+            digest(context.instance_id.as_bytes()),
+        ));
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version":2,
+            "root_key":protocol::installation_key(base.plan.installed_origin()).unwrap(),
+            "pid":456,
+            "instance_id":context.instance_id,
+            "image":context.running,
+            "stop_generation":generation,
+            "context":context,
+        }))
+        .unwrap();
+        protocol::write_private_atomic_new(&path, &bytes, 0o600).unwrap();
+        path
+    }
+    fn historical_start_fixture(base: &Base, instance: &str, generation: u64) -> PathBuf {
+        runtime_start_fixture(base, &manual_start_context(base, instance), generation)
+    }
+
+    #[test]
+    fn missing_manual_observation_reconstructs_old_start_after_restart_not_current_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let mut later = manual_start_context(&base, "later-restart");
+        later
+            .set_observation_selection(&desktop_pet_contracts::ObservationSelection::Provider(
+                "tern".into(),
+            ))
+            .unwrap();
+        later.assets_override = Some(base.plan.profile.config_dir.join("later-assets"));
+        later
+            .environment
+            .insert("XDG_CONFIG_HOME".into(), "/later/environment".into());
+        runtime_start_fixture(&base, &later, base.plan.original_stop_generation + 1);
+        assert!(
+            reconstruct_manual_start(&base).is_err(),
+            "a later fresh runtime cannot invent the original unchanged fence"
+        );
+        historical_start_fixture(
+            &base,
+            "initial-explicit-start",
+            base.plan.original_stop_generation,
+        );
+        let observed = reconstruct_manual_start(&base).unwrap();
+        validate_manual_observation(&base, &observed).unwrap();
+        assert_eq!(observed.instance_id, "initial-explicit-start");
+        assert_eq!(observed.stop_generation, base.plan.original_stop_generation);
+        assert!(!manual_observation_path(&base).unwrap().exists());
+        observe_manual_start(&base).unwrap();
+        let persisted: ManualInstalledStoppedObservation =
+            read_json(&manual_observation_path(&base).unwrap(), MAX_PLAN).unwrap();
+        assert_eq!(persisted, observed);
+        assert!(!installed_result(&base).result.applied);
+    }
+
+    #[test]
+    fn cold_manual_reconstruction_accepts_first_normal_updater_from_changed_later_context() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        historical_start_fixture(
+            &base,
+            "initial-explicit-start",
+            base.plan.original_stop_generation,
+        );
+        let mut later = manual_start_context(&base, "later-restart-before-first-updater");
+        later
+            .set_observation_selection(&desktop_pet_contracts::ObservationSelection::Provider(
+                "tern".into(),
+            ))
+            .unwrap();
+        later
+            .environment
+            .insert("HOME".into(), "/changed/runtime/home".into());
+        later.assets_override = Some(base.plan.profile.config_dir.join("later-assets"));
+        runtime_start_fixture(&base, &later, base.plan.original_stop_generation + 1);
+        let (later_generation, retained_later) = protocol::historical_runtime_start_context(
+            base.plan.installed_origin(),
+            &base.plan.profile.state_dir,
+            Some(456),
+            &later.instance_id,
+            &later.running,
+        )
+        .unwrap();
+        assert_eq!(later_generation, base.plan.original_stop_generation + 1);
+        assert_eq!(retained_later, later);
+        let mut first = successor(&base, &base.intent, '2', "0.4.14", "0.4.15", 'c');
+        first.plan.context = retained_later;
+        first.plan_sha256 = digest(&serde_json::to_vec(&first.plan).unwrap());
+        let links = [first];
+        let selected =
+            successor_chain(&base, links[0].result.candidate.as_ref().unwrap(), &links).unwrap();
+        assert_ne!(
+            selected[0].plan.context.environment,
+            original_context(&base.plan).unwrap().environment
+        );
+        assert!(!manual_observation_path(&base).unwrap().exists());
+        observe_manual_start(&base).unwrap();
+        publish_owners(&base, &selected).unwrap();
+        let observed: ManualInstalledStoppedObservation =
+            read_json(&manual_observation_path(&base).unwrap(), MAX_PLAN).unwrap();
+        assert_eq!(observed.instance_id, "initial-explicit-start");
+        assert_eq!(observed.stop_generation, base.plan.original_stop_generation);
+        let head: RelocationOwner = read_json(
+            &owner_path(&base, links[0].result.candidate.as_ref().unwrap()),
+            MAX_PLAN,
+        )
+        .unwrap();
+        assert_eq!(
+            head.update_operation_id.as_ref(),
+            Some(&links[0].plan.operation_id)
+        );
+        assert!(!installed_result(&base).result.applied);
+    }
+
+    #[test]
+    fn manual_historical_start_rejects_foreign_scope_and_malformed_runtime_authority() {
+        for tamper in 0..20 {
+            let root = tempfile::tempdir().unwrap();
+            let base = manual_base(root.path());
+            let path = historical_start_fixture(
+                &base,
+                "initial-explicit-start",
+                base.plan.original_stop_generation,
+            );
+            let mut value: serde_json::Value = read_json(&path, MAX_PLAN).unwrap();
+            match tamper {
+                0 => value["root_key"] = serde_json::json!("foreign-root"),
+                1 => value["version"] = serde_json::json!(3),
+                2 => value["pid"] = serde_json::json!(0),
+                3 => value["unexpected"] = serde_json::json!(true),
+                4 => value["instance_id"] = serde_json::json!("substituted-instance"),
+                5 => {
+                    value.as_object_mut().unwrap().remove("context");
+                }
+                6 => {
+                    value["version"] = serde_json::json!(1);
+                    value.as_object_mut().unwrap().remove("context");
+                }
+                7 => {
+                    value["context"]["config_dir"] = serde_json::json!(base.plan.profile.state_dir)
+                }
+                8 => {
+                    value["context"]["state_dir"] = serde_json::json!(base.plan.profile.config_dir)
+                }
+                9 => value["context"]["running"]["sha256"] = serde_json::json!("f".repeat(64)),
+                10 => value["context"]["instance_id"] = serde_json::json!("foreign-instance"),
+                11 => {
+                    value["context"]["environment"]["DESKTOP_PET_UPDATER_TOKEN"] =
+                        serde_json::json!("must-not-be-stored")
+                }
+                12 => value["context"]["assets_override"] = serde_json::json!("/changed/assets"),
+                13 => {
+                    value["context"]["environment"]
+                        [desktop_pet_contracts::OBSERVATION_SELECTION_ENV] =
+                        serde_json::json!("tern")
+                }
+                14 => value["context"]["environment"]["HOME"] = serde_json::json!("/changed/home"),
+                15 => value["context"]["version"] = serde_json::json!("0.4.15"),
+                16 => {
+                    value["stop_generation"] =
+                        serde_json::json!(base.plan.original_stop_generation + 1)
+                }
+                17 => value["image"]["sha256"] = serde_json::json!("f".repeat(64)),
+                18 => {
+                    value["context"]["running_origin"] =
+                        serde_json::to_value(base.plan.origin()).unwrap()
+                }
+                19 => value["context"]["executable"] = serde_json::json!("/foreign/desktop-pet"),
+                _ => unreachable!(),
+            }
+            protocol::write_private_bytes(&path, &serde_json::to_vec(&value).unwrap(), 0o600)
+                .unwrap();
+            assert!(
+                reconstruct_manual_start(&base).is_err(),
+                "runtime tamper {tamper}"
+            );
+            assert!(observe_manual_start(&base).is_err());
+            assert!(!manual_observation_path(&base).unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn persisted_manual_observation_cannot_replace_missing_or_substituted_initial_context() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base(root.path());
+        let path = historical_start_fixture(
+            &base,
+            "initial-explicit-start",
+            base.plan.original_stop_generation,
+        );
+        observe_manual_start(&base).unwrap();
+        let observed_path = manual_observation_path(&base).unwrap();
+        let observed_bytes = owned_private_file(&observed_path, MAX_PLAN).unwrap();
+        let initial: serde_json::Value = read_json(&path, MAX_PLAN).unwrap();
+        for missing in [false, true] {
+            let mut wrong = initial.clone();
+            if missing {
+                wrong.as_object_mut().unwrap().remove("context");
+                wrong["version"] = serde_json::json!(1);
+            } else {
+                wrong["context"]["assets_override"] = serde_json::json!("/substituted/assets");
+            }
+            protocol::write_private_bytes(&path, &serde_json::to_vec(&wrong).unwrap(), 0o600)
+                .unwrap();
+            assert!(observe_manual_start(&base).is_err());
+            assert_eq!(
+                owned_private_file(&observed_path, MAX_PLAN).unwrap(),
+                observed_bytes
+            );
+        }
+        assert!(!installed_result(&base).result.applied);
+    }
+    #[test]
+    fn recognized_manual_namespace_rejects_forged_version_running_source_and_profile() {
+        for tamper in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let base = manual_base(root.path());
+            let mut plan = base.plan.clone();
+            match tamper {
+                0 => plan.version = 1,
+                1 => plan.source = self::base(root.path()).plan.source,
+                2 => plan.profile.config_dir = root.path().join("foreign-config"),
+                _ => unreachable!(),
+            }
+            protocol::write_private_atomic_new(
+                &standalone_install::plan_path(&plan.profile.state_dir, &plan.operation_id)
+                    .unwrap(),
+                &serde_json::to_vec(&plan).unwrap(),
+                0o600,
+            )
+            .unwrap();
+            let request = RouteRequest {
+                version: 1,
+                kind: "legacy-migration-route".into(),
+                executable: base.approval.original.executable.clone(),
+                config_dir: base.plan.profile.config_dir.clone(),
+                state_dir: base.plan.profile.state_dir.clone(),
+            };
+            assert!(
+                committed_route(&request).is_err(),
+                "namespace tamper {tamper}"
+            );
+        }
     }
 }

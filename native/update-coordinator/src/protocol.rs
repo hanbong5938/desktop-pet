@@ -3075,6 +3075,8 @@ struct RuntimeStart {
     instance_id: String,
     image: crate::ExecutableIdentity,
     stop_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<crate::UpdateContext>,
 }
 fn runtime_start_path(state: &Path, instance: &str) -> PathBuf {
     state.join("updates-v4").join(format!(
@@ -3088,42 +3090,174 @@ pub fn capture_runtime_start_fence(state: &Path) -> Result<u64, String> {
     let _gate = lock_gates(&global_updates()?)?;
     combined_generation(state)
 }
+/// Retain the daemon's actual startup context, never an update request context.
 pub fn retain_runtime_start(
-    origin: &InstallOrigin,
-    state: &Path,
+    context: &crate::UpdateContext,
     pid: u32,
-    instance: &str,
-    image: &crate::ExecutableIdentity,
     generation: u64,
 ) -> Result<(), String> {
-    let global = global_updates()?;
-    let _gate = lock_gates(&global)?;
+    retain_runtime_start_at(&global_updates()?, context, pid, generation)
+}
+fn retain_runtime_start_at(
+    global: &Path,
+    context: &crate::UpdateContext,
+    pid: u32,
+    generation: u64,
+) -> Result<(), String> {
+    let origin = context
+        .running_origin
+        .as_deref()
+        .ok_or("runtime startup has no owner")?;
+    let state = &context.state_dir;
+    let _gate = lock_gates(global)?;
     let key = installation_key(origin)?;
     if combined_generation(state)? != generation
-        || !active(&global, &key)?.iter().any(|entry| {
-            entry.state_dir == state && entry.pid == pid && entry.instance_id == instance
+        || !active(global, &key)?.iter().any(|entry| {
+            entry.state_dir == *state
+                && entry.pid == pid
+                && entry.instance_id == context.instance_id
         })
     {
         return Err(
             "user Stop or changed active instance cancelled runtime startup authority".into(),
         );
     }
-    historical_identity(image)?;
-    check_dir(&state.join("updates-v4"), true)?;
     let receipt = RuntimeStart {
-        version: 1,
+        version: 2,
         root_key: key,
         pid,
-        instance_id: instance.into(),
-        image: image.clone(),
+        instance_id: context.instance_id.clone(),
+        image: context.running.clone(),
         stop_generation: generation,
+        context: Some(context.clone()),
     };
+    validate_runtime_start(
+        &receipt,
+        origin,
+        state,
+        Some(pid),
+        &context.instance_id,
+        &context.running,
+    )?;
+    let bytes = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
+    if bytes.len() > 16384 {
+        return Err("runtime startup context exceeds private receipt bound".into());
+    }
+    check_dir(&state.join("updates-v4"), true)?;
     write_private_new(
-        &runtime_start_path(state, instance),
-        &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
+        &runtime_start_path(state, &context.instance_id),
+        &bytes,
         0o600,
     )
 }
+/// Read an immutable past startup fact for an already-authenticated journal
+/// link. This is not current startup/reconnection authority and never absorbs a
+/// later Stop; live heads must still use `verified_runtime_start_fence`.
+pub(crate) fn historical_runtime_start_fence(
+    origin: &InstallOrigin,
+    state: &Path,
+    pid: Option<u32>,
+    instance: &str,
+    image: &crate::ExecutableIdentity,
+) -> Result<u64, String> {
+    Ok(read_runtime_start(origin, state, pid, instance, image)?.stop_generation)
+}
+
+/// Context-bound past startup evidence is required for manual cold reconstruction.
+/// Version 1 remains readable as a fence, but cannot invent missing settings.
+pub(crate) fn historical_runtime_start_context(
+    origin: &InstallOrigin,
+    state: &Path,
+    pid: Option<u32>,
+    instance: &str,
+    image: &crate::ExecutableIdentity,
+) -> Result<(u64, crate::UpdateContext), String> {
+    let receipt = read_runtime_start(origin, state, pid, instance, image)?;
+    Ok((
+        receipt.stop_generation,
+        receipt
+            .context
+            .ok_or("historical runtime startup has no captured context")?,
+    ))
+}
+
+fn read_runtime_start(
+    origin: &InstallOrigin,
+    state: &Path,
+    pid: Option<u32>,
+    instance: &str,
+    image: &crate::ExecutableIdentity,
+) -> Result<RuntimeStart, String> {
+    ensure_absolute(state)?;
+    check_dir(state, false)?;
+    check_dir(&state.join("updates-v4"), false)?;
+    let receipt: RuntimeStart = serde_json::from_slice(&owned_private_file(
+        &runtime_start_path(state, instance),
+        16384,
+    )?)
+    .map_err(|e| e.to_string())?;
+    validate_runtime_start(&receipt, origin, state, pid, instance, image)?;
+    Ok(receipt)
+}
+
+fn validate_runtime_start(
+    receipt: &RuntimeStart,
+    origin: &InstallOrigin,
+    state: &Path,
+    pid: Option<u32>,
+    instance: &str,
+    image: &crate::ExecutableIdentity,
+) -> Result<(), String> {
+    historical_identity(image)?;
+    if instance.is_empty()
+        || instance.len() > 128
+        || receipt.root_key != installation_key(origin)?
+        || receipt.pid == 0
+        || pid.is_some_and(|expected| receipt.pid != expected)
+        || receipt.instance_id != instance
+        || &receipt.image != image
+    {
+        return Err(
+            "historical runtime startup fact differs from authenticated journal identity".into(),
+        );
+    }
+    match (receipt.version, &receipt.context) {
+        (1, None) => {}
+        (2, Some(context)) => {
+            if context.executable != image.path
+                || &context.running != image
+                || context.instance_id != instance
+                || context.state_dir != state
+                || context.running_origin.as_deref() != Some(origin)
+            {
+                return Err(
+                    "runtime startup context differs from its recorded identity/profile".into(),
+                );
+            }
+            crate::native_runtime::ProfilePaths {
+                config_dir: context.config_dir.clone(),
+                state_dir: context.state_dir.clone(),
+            }
+            .validate()?;
+            if let Some(assets) = &context.assets_override {
+                ensure_absolute(assets)?;
+            }
+            semver::Version::parse(&context.version).map_err(|e| e.to_string())?;
+            let environment =
+                crate::native_runtime::captured_environment(context.observation_mode()?, |key| {
+                    context.environment.get(key).cloned()
+                })?;
+            if environment != context.environment {
+                return Err(
+                    "runtime startup context contains uncaptured environment settings".into(),
+                );
+            }
+        }
+        _ => return Err("invalid runtime startup receipt version/context".into()),
+    }
+    Ok(())
+}
+
 pub fn verified_runtime_start_fence(
     origin: &InstallOrigin,
     state: &Path,
@@ -3142,21 +3276,11 @@ fn verified_runtime_start_fence_at(
     image: &crate::ExecutableIdentity,
 ) -> Result<u64, String> {
     let _gate = lock_gates(global)?;
-    let receipt: RuntimeStart = serde_json::from_slice(&owned_private_file(
-        &runtime_start_path(state, instance),
-        16384,
-    )?)
-    .map_err(|e| e.to_string())?;
-    if receipt.version != 1
-        || receipt.root_key != installation_key(origin)?
-        || receipt.pid != pid
-        || receipt.instance_id != instance
-        || &receipt.image != image
-        || receipt.stop_generation != combined_generation(state)?
-    {
+    let generation = historical_runtime_start_fence(origin, state, Some(pid), instance, image)?;
+    if generation != combined_generation(state)? {
         return Err("current runtime restart/reconnection authority was superseded by user Stop or changed identity".into());
     }
-    Ok(receipt.stop_generation)
+    Ok(generation)
 }
 pub fn unregister_active(
     origin: &InstallOrigin,
@@ -4897,6 +5021,7 @@ mod tests {
             instance_id: "current-instance".into(),
             image: image.clone(),
             stop_generation: 0,
+            context: None,
         };
         let path = runtime_start_path(&state, &receipt.instance_id);
         write_private_new(&path, &serde_json::to_vec(&receipt).unwrap(), 0o600).unwrap();
@@ -4923,7 +5048,165 @@ mod tests {
             &image
         )
         .is_err());
+        assert_eq!(
+            historical_runtime_start_fence(
+                &origin,
+                &state,
+                Some(receipt.pid),
+                &receipt.instance_id,
+                &image
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            historical_runtime_start_fence(&origin, &state, None, &receipt.instance_id, &image)
+                .unwrap(),
+            0
+        );
+        assert!(
+            historical_runtime_start_context(
+                &origin,
+                &state,
+                Some(receipt.pid),
+                &receipt.instance_id,
+                &image
+            )
+            .is_err(),
+            "v1 remains fence evidence, never fabricated context evidence"
+        );
+        assert!(historical_runtime_start_fence(
+            &origin,
+            &state,
+            Some(receipt.pid.saturating_add(1)),
+            &receipt.instance_id,
+            &image
+        )
+        .is_err());
+        let substituted = crate::ExecutableIdentity {
+            path: image.path.clone(),
+            sha256: "b".repeat(64),
+        };
+        assert!(historical_runtime_start_fence(
+            &origin,
+            &state,
+            None,
+            &receipt.instance_id,
+            &substituted
+        )
+        .is_err());
+        let wrong_owner = InstallOrigin::Source {
+            root: dir.path().join("different-owner"),
+        };
+        assert!(historical_runtime_start_fence(
+            &wrong_owner,
+            &state,
+            None,
+            &receipt.instance_id,
+            &image
+        )
+        .is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg(not(desktop_pet_legacy))]
+    #[test]
+    fn context_bound_runtime_start_producer_preserves_private_fact_and_current_stop_fence() {
+        let (_dir, global, state, origin) = fixture();
+        let state = fs::canonicalize(state).unwrap();
+        let global = fs::canonicalize(global).unwrap();
+        let image = crate::ExecutableIdentity {
+            path: state.join("actual-start-image"),
+            sha256: "a".repeat(64),
+        };
+        let context = crate::UpdateContext {
+            executable: image.path.clone(),
+            version: "0.4.14".into(),
+            instance_id: "actual-start-instance".into(),
+            config_dir: state.clone(),
+            state_dir: state.clone(),
+            running: image.clone(),
+            running_origin: Some(Box::new(origin.clone())),
+            assets_override: Some(state.join("actual-assets")),
+            environment: crate::native_runtime::captured_environment(
+                desktop_pet_contracts::ObservationSelection::Provider("tern".into()),
+                |key| (key == "TERN_CONFIG_DIR").then(|| state.join("tern").display().to_string()),
+            )
+            .unwrap(),
+            locale: "ko".into(),
+        };
+        let pid = std::process::id();
+        assert!(retain_runtime_start_at(&global, &context, pid, 0).is_err());
+        register_active_at(
+            &global,
+            &origin,
+            &state,
+            pid,
+            &context.instance_id,
+            None,
+            None,
+        )
+        .unwrap();
+        retain_runtime_start_at(&global, &context, pid, 0).unwrap();
+        let path = runtime_start_path(&state, &context.instance_id);
+        let bytes = owned_private_file(&path, 16384).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (generation, retained) = historical_runtime_start_context(
+            &origin,
+            &state,
+            Some(pid),
+            &context.instance_id,
+            &image,
+        )
+        .unwrap();
+        assert_eq!(generation, 0);
+        assert_eq!(retained, context);
+        assert_eq!(
+            verified_runtime_start_fence_at(
+                &global,
+                &origin,
+                &state,
+                pid,
+                &context.instance_id,
+                &image,
+            )
+            .unwrap(),
+            0
+        );
+        let mut changed = context.clone();
+        changed
+            .environment
+            .insert("DESKTOP_PET_UPDATER_TOKEN".into(), "not-captured".into());
+        assert!(retain_runtime_start_at(&global, &changed, pid, 0).is_err());
+        changed = context.clone();
+        changed.instance_id = "unregistered-instance".into();
+        assert!(retain_runtime_start_at(&global, &changed, pid, 0).is_err());
+        record_user_stop_at(&global, &state).unwrap();
+        assert!(verified_runtime_start_fence_at(
+            &global,
+            &origin,
+            &state,
+            pid,
+            &context.instance_id,
+            &image,
+        )
+        .is_err());
+        assert!(retain_runtime_start_at(&global, &context, pid, 0).is_err());
+        assert_eq!(
+            historical_runtime_start_context(
+                &origin,
+                &state,
+                Some(pid),
+                &context.instance_id,
+                &image,
+            )
+            .unwrap(),
+            (0, context)
+        );
+        assert_eq!(owned_private_file(&path, 16384).unwrap(), bytes);
     }
 
     #[cfg(not(desktop_pet_legacy))]

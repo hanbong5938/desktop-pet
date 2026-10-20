@@ -932,7 +932,12 @@ mod tests {
                 "https://example.invalid/forged.tar.gz".into();
             fixture.write_plan();
             assert!(parent_plan_with(&fixture.context, ID, &fixture.access).is_err());
-            for previous in ["0.4.13", "0.4.14", "0.4.13-rc.1", "0.4.12+local"] {
+            for previous in [
+                crate::identity::VERSION,
+                "999.0.0",
+                "0.4.13-rc.1",
+                "0.4.12+local",
+            ] {
                 fixture.plan = approved.clone();
                 fixture.plan.context.version = previous.into();
                 fixture.write_plan();

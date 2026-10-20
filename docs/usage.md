@@ -72,15 +72,15 @@ Apple Silicon Mac, macOS 13+. Source builds require Rust/Cargo, Bun, Node.js/npm
 
 **Current stable candidate owner policy:** New Standalone installs and normal updates use the actual OS account home's `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. The original `Applications/DesktopPet.app` remains recognizable only for old-helper completion, separately approved relocation and recovery—not perpetual in-place updates. No arbitrary home/custom/system/symlink takeover is allowed. Brew/source owners and frozen historical release notes are unchanged.
 
-### Existing Applications owner: beta.7 app update, then separate relocation
+### Existing Applications owner: explicitly approved one-time recovery
 
-The supported candidate route starts at the genuine beta.7 app's **Update button**, not an installer or terminal bootstrap. Its unchanged helper can select genuine Stable `0.4.13`. That update must finish at the original Applications path, including readiness, Completed, helper exit and reservation release, before the app offers a second native approval to move the **same signed version** to the private update location. [Release qualification and limits](releases/v0.4.13.md).
+The genuine beta.7 helper can select a newer Stable, but the affected Mac exposed a separate immutable-helper defect: querying Darwin's peer PID after the one-shot server closes its reply fails with `cannot authenticate control peer PID`, before installation. An in-app check alone cannot repair that bundled helper. The [0.4.14 correction](releases/v0.4.14.md) fixes transport authentication and provides an explicitly approved operator recovery to the private owner; do not repeatedly retry the old updater or claim the earlier app-only route succeeded.
 
 Keep the authenticated original config/state, characters, settings and user data. The existing Tern SDK changes only its saved executable after verified native settlement; native code does not overwrite KV. Do not guess defaults, adopt/merge profiles, use Configure/Connect, restart Tern or reload its plugin to conceal failure. Signed retained originals and transaction evidence remain private.
 
-**Save unsaved Pet edits first.** Relocation requires a new visible approval; the original update consent is insufficient. Cancel leaves the stable app running at Applications and does not repeat the automatic panel after restart; use the explicit Updates relocation action for a fresh attempt. A later user **Stop**, ambiguous ACK or changed scope forbids automatic restart. Only Pet restarts; Tern windows, terminals and work remain running.
+**Save unsaved Pet edits first.** Operator recovery requires explicit approval for normal Pet-only Stop and later separate Start, plus original app/profile backup. Its stopped-source transaction cannot manufacture a Stop ACK, updater parent or restart token. A later user Stop or changed scope forbids automatic restart. Same-version native relocation remains a separate path for a genuinely settled Stable parent; its approval does not authorize this manual recovery.
 
-Native installation/readiness and fresh per-window Tern confirmation are separate outcomes. Disconnected or incompatible consumers remain integration pending, not native failure. Disposable macOS GUI and official-network qualification are **pending**; no affected-user recovery or public stable release is claimed.
+Native installation/readiness and fresh per-window Tern confirmation are separate outcomes. Disconnected or incompatible consumers remain integration pending, not native failure. Publication and source checks are not affected-user recovery evidence; report the actual observed result without resetting Tern or deleting unresolved journals.
 
 ### Historical pinned installation examples
 
@@ -278,7 +278,7 @@ Native `settings get`, `settings set auto_start off`, and `settings set exit_wit
 
 In current source, update options start collapsed.
 
-**Stable candidate recovery:** Applications owners use the [two-stage app-only route above](#existing-applications-owner-beta7-app-update-then-separate-relocation). After relocation, normal updates remain at the private owner. Beta opt-in, stable-only policy and Homebrew restrictions are unchanged. This source contract is not live recovery evidence.
+**Existing-owner recovery:** see the [explicitly approved one-time recovery above](#existing-applications-owner-explicitly-approved-one-time-recovery). Once canonical recovery is complete, normal updates remain at the private owner. Beta opt-in, stable-only policy and Homebrew restrictions are unchanged.
 
 If in-app update is unavailable, keep existing settings and characters. **Open official install instructions** opens the validated release's official page, not an unexplained archive or an automatically executed installer. Follow the procedure for the actual installation owner; do not delete profiles, rerun an old installer or start with guessed/default paths. A Tern control error is now shown as its actual backend diagnostic rather than an `alpha_passthrough` schema error; ordinary status/error responses never count as fresh binding evidence.
 

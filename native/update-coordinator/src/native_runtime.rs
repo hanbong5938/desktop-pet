@@ -407,7 +407,8 @@ pub fn exchange<T: Serialize, R: for<'de> Deserialize<'de>>(
 }
 
 /// Kernel evidence returned with a reply; fields are observation, not startup
-/// authorization. The process is sampled before writing and after the frame.
+/// authorization. Socket identity is authenticated before writing; that exact
+/// process incarnation and mapped main image are rechecked after the frame.
 pub struct NativePeer {
     incarnation: ProcessIncarnation,
     path: PathBuf,
@@ -522,7 +523,11 @@ fn exchange_with_peer<T: Serialize, R: for<'de> Deserialize<'de>>(
         }
     }
     remaining(deadline)?;
-    let after = peer(&stream)?;
+    // The one-shot server may close immediately after its complete reply.
+    // Darwin LOCAL_PEERPID then returns ENOTCONN even while the daemon is
+    // alive. Recheck the process authenticated on this socket before sending,
+    // never a PID supplied by the reply or discovered from the socket path.
+    let after = processes::capture_process(before.incarnation.pid)?;
     if before != after {
         return Err("control peer changed during exchange".into());
     }
@@ -1095,6 +1100,53 @@ mod tests {
         );
         assert!(result.unwrap_err().contains("deadline"));
         assert!(begin.elapsed() < Duration::from_millis(500));
+        server.join().unwrap();
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn one_shot_reply_survives_peer_socket_close() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = processes::capture_process(std::process::id()).unwrap();
+        // Exercise the public observed exchange, including its pre-send
+        // authentication and post-reply incarnation/main-image verification.
+        // Each accepted socket has the same one-frame lifetime as control.rs.
+        const EXCHANGES: usize = 16;
+        let server = std::thread::spawn(move || {
+            for _ in 0..EXCHANGES {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                std::io::BufRead::read_until(
+                    &mut std::io::BufReader::new(&mut stream),
+                    b'\n',
+                    &mut request,
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&request).unwrap(),
+                    serde_json::json!({"version":1,"command":"status"}),
+                );
+                stream.write_all(b"{\"ok\":true}\n").unwrap();
+                // Do not retain the socket to accommodate the client's
+                // verifier: native control handlers close after the reply.
+            }
+        });
+        for _ in 0..EXCHANGES {
+            let (reply, observed): (serde_json::Value, _) = exchange_observed(
+                &path,
+                &serde_json::json!({"version":1,"command":"status"}),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            assert_eq!(reply, serde_json::json!({"ok":true}));
+            assert_eq!(observed.incarnation(), expected.incarnation);
+            assert_eq!(observed.path(), expected.path);
+        }
         server.join().unwrap();
     }
     #[test]

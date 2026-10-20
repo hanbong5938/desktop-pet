@@ -1,12 +1,12 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
-## Stable 0.4.13 candidate: beta.7 app update, then independently consented relocation
+## Stable 0.4.14 correction: one-shot peer authentication and approved recovery
 
-The current [0.4.13 candidate](v0.4.13.md) replaces the proposed beta.11 installer bootstrap and permanent Applications in-place policy. Genuine beta.7 starts with its app Update button and unchanged bundled helper, installing a real newer Stable at the original OS-home Applications path. Only after that operation completes and releases its lease/root/profile reservations may a new visible native approval move the exact same signed version to the private update location. Original config/state and user data remain unchanged; only Pet restarts. Tern's existing SDK repairs only the saved executable and reports fresh window-specific confirmation separately.
+Actual read-only diagnosis on the affected Mac reproduced beta.7's helper failure: the server closes a completed control reply, then Darwin `LOCAL_PEERPID` returns `ENOTCONN` on the helper's second query. The previous in-app-only bootstrap assumption was therefore insufficient. The [0.4.14 correction](v0.4.14.md) retains pre-send kernel authentication and revalidates the same process evidence after replies. Original source/profile backup has been verified; the owner explicitly approved SSH recovery with Pet-only normal Stop and later separate Start.
 
-Current source includes v2 relocation approval, two-root transaction/recovery, one-shot admission, four-language consent and unchanged-wire Tern authority. Local checks passed; the owner explicitly authorized stable publication without the unavailable disposable-GUI gate. CI and exact-asset integrity checks still precede promotion. Source tests, transport fixtures and publication do not establish actual beta.7 recovery. Historical release notes below retain their original scope and are not current bootstrap instructions.
+Manual recovery has its own stopped-source purpose and actual `ssh_operator` consent, using existing two-root reservation and atomic disk retention. It cannot fabricate a settled updater parent, native consent, Stop ACK, startup token or applied result. Tern's existing qualified consumer alone saves its route after a verified current private owner is ready. The observed Tern warning was an old approved CLI hash differing from the current executable; source/installed consumer bytes and fresh data connections matched. No Tern reinstall or KV rewrite is indicated.
 
-**한국어:** 외부 설치기가 아닌 beta.7 앱 내 업데이트 → 실제 정식판 → 별도 native 이관 동의 경로입니다. Applications를 영구 업데이트 위치로 남기지 않습니다. 원래 프로필·자료·Tern 작업을 보존하도록 구현하고 native 성공과 창별 연동 확인은 구분합니다. 소유자가 실물 GUI 검증 미완료 상태의 공개를 승인했으며 사용자 복구 완료를 주장하지 않습니다.
+**한국어:** 실제 beta.7 helper의 소켓 종료 후 PID 재조회 버그를 재현해 수정했습니다. 이전 앱 전용 진입 가정은 불충분했습니다. 원본·프로필 백업을 검증했고 소유자가 SSH 복구·Pet만 정상 종료 및 별도 재시작을 승인했습니다. 실제 설치·private 준비·창별 SDK 연결은 소스 테스트나 공개만으로 성공을 주장하지 않습니다.
 
 ## Historical beta.10 existing-user update correction / 기존 사용자 업데이트 수정 기록
 
@@ -33,7 +33,7 @@ The previously published Python recovery script and its checksum asset have been
 
 The historical private-location correction used the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. Brew retained its verified formula prefix and source its exact checkout. That proposal did not silently relocate an old Applications owner and retained stable/migration target `0.4.12`. The current stable candidate above supersedes its recovery and normal-update policy; independent legacy migration authority remains `0.4.12`.
 
-The earlier private Bash recovery proposal is historical, not the current beta.7 entry point. Use the [current two-stage app-only contract](../usage.md#existing-applications-owner-beta7-app-update-then-separate-relocation), preserving exact original config/state, original app/sidecar, user data and evidence. No earlier script, installer or manual Start substitutes for authenticated parent settlement and the new native relocation approval.
+The earlier private Bash recovery proposal is historical, not current execution guidance. Use the [explicitly approved recovery contract](../usage.md#existing-applications-owner-explicitly-approved-one-time-recovery), retaining exact original config/state, app/sidecar, user data and evidence. Earlier scripts or approvals do not authorize the new stopped-source recovery transaction.
 
 **Evidence boundary:** source availability, dry-runs and fixtures do not prove recovery on the affected Mac. No new canonical UI, original-profile restart, same-window reconnection or external-machine success is claimed here.
 

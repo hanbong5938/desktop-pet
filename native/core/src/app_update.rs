@@ -526,7 +526,7 @@ impl AppUpdateService {
             .standalone_operation
             .as_ref()
             .or(self.previous_standalone_outcome.as_ref())
-            .filter(|record| record.result.installed && record.result.applied)
+            .filter(|record| record.result.installed)
         else {
             return;
         };
@@ -534,22 +534,29 @@ impl AppUpdateService {
             return;
         };
         let operation_id = record.operation_id.clone();
+        let applied = record.result.applied;
         self.relocation_tern_in_flight = true;
         self.next_relocation_tern_poll = Instant::now() + Duration::from_secs(5);
         let sender = self.sender.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 let plan = standalone_install::read_plan(&context.state_dir, &operation_id)?;
-                let standalone_install::StandaloneInstallPurpose::PrivateRelocation {
-                    tern, ..
-                } = &plan.purpose
-                else {
-                    return Ok(RelocationTernObservation {
-                        captured: false,
-                        windows: 0,
-                        pending: false,
-                        detail: None,
-                    });
+                let tern = match &plan.purpose {
+                    standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+                        tern,
+                        ..
+                    } if applied => tern,
+                    standalone_install::StandaloneInstallPurpose::ManualRecovery {
+                        tern, ..
+                    } => tern,
+                    _ => {
+                        return Ok(RelocationTernObservation {
+                            captured: false,
+                            windows: 0,
+                            pending: false,
+                            detail: None,
+                        });
+                    }
                 };
                 if tern.is_none() {
                     return Ok(RelocationTernObservation {
@@ -615,11 +622,9 @@ impl AppUpdateService {
             .standalone_operation
             .as_ref()
             .or(self.previous_standalone_outcome.as_ref());
-        if current.is_none_or(|record| {
-            record.operation_id != operation_id
-                || !record.result.installed
-                || !record.result.applied
-        }) {
+        if current
+            .is_none_or(|record| record.operation_id != operation_id || !record.result.installed)
+        {
             return;
         }
         let observation = result.unwrap_or_else(|error| RelocationTernObservation {
@@ -1841,9 +1846,7 @@ impl AppUpdateService {
             self.standalone_operation
                 .as_ref()
                 .or(self.previous_standalone_outcome.as_ref())
-                .filter(|record| {
-                    &record.operation_id == id && record.result.installed && record.result.applied
-                })
+                .filter(|record| &record.operation_id == id && record.result.installed)
                 .and_then(|_| observation.captured.then_some(observation))
         });
         if let Some(detail) = self

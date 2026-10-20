@@ -1,7 +1,8 @@
 //! Verified public installation discovery and explicitly requested atomic installation.
 //! The locator is a preference, never authority: every use re-proves its actual image and owner.
-//! A coordinated update retains exact original inodes for compatible clients. Private relocation
-//! commits the same signed closure at the OS-account private owner before retiring Applications.
+//! A coordinated update retains exact original inodes for compatible clients. Cross-root
+//! transactions commit either a same-closure native relocation or an explicitly approved,
+//! strictly newer stopped-source recovery before retiring the OS-home Applications owner.
 use crate::{
     ensure_absolute, executable_identity, identity, origin, owned_file, owned_private_file,
     physical_install_root, protocol, ExecutableIdentity, InstallOrigin, ReleaseChannel,
@@ -1899,6 +1900,12 @@ pub fn validate_standalone_replacement(
     plan.validate()?;
     let path =
         crate::standalone_install::replacement_path(&plan.profile.state_dir, &plan.operation_id)?;
+    if plan.reservation_target().is_some() {
+        validate_relocation_intent_for_plan(
+            &load_replacement_intent(&path, &plan.operation_id)?,
+            plan,
+        )?;
+    }
     let proof = recover_replacement(
         &path,
         &plan.operation_id,
@@ -2033,14 +2040,56 @@ pub fn preflight_standalone_relocation_source(
     Ok(())
 }
 
+/// Validate fresh cross-root authority before admission. Manual recovery additionally
+/// requires the captured Stop generation, finalized source lifecycle, and compatible
+/// process admission for both roots; it grants no Stop or restart authority.
 pub fn preflight_standalone_relocation(
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+) -> Result<(), String> {
+    preflight_relocation_inputs(plan)?;
+    require_manual_source_generation(plan)?;
+    if matches!(
+        plan.purpose,
+        crate::standalone_install::StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        let original = validate_staged_app(physical_install_root(plan.origin())?)?;
+        let mut scope =
+            crate::native_runtime::NativeInstallScope::capture(&original, &plan.profile)?;
+        scope.reserve_target_scope(plan.installed_origin())?;
+        scope.admit(None)?;
+    }
+    Ok(())
+}
+
+fn require_manual_source_generation(
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+) -> Result<(), String> {
+    if matches!(
+        plan.purpose,
+        crate::standalone_install::StandaloneInstallPurpose::ManualRecovery { .. }
+    ) && protocol::stop_generation(&plan.profile.state_dir)? != plan.original_stop_generation
+    {
+        return Err("manual recovery source Stop generation changed".into());
+    }
+    Ok(())
+}
+
+// Kept separate from admission: installation metadata locks must never enclose a
+// protocol generation/root lock acquisition.
+fn preflight_relocation_inputs(
     plan: &crate::standalone_install::StandaloneInstallPlan,
 ) -> Result<(), String> {
     plan.validate_for_execution()?;
     if plan.reservation_target().is_none() {
-        return Err("relocation preflight requires private relocation purpose".into());
+        return Err("relocation preflight requires a cross-root installation purpose".into());
     }
     preflight_standalone_relocation_source(&plan.original, &plan.profile)?;
+    if matches!(
+        plan.purpose,
+        crate::standalone_install::StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        require_manual_source_quiescent(&plan.profile)?;
+    }
     if let Some(assets) = plan
         .running()
         .and_then(|(_, context)| context.assets_override.as_ref())
@@ -2055,7 +2104,18 @@ pub fn preflight_standalone_relocation(
     Ok(())
 }
 
-fn validate_replacement_layout(intent: &ReplacementIntent) -> Result<(), String> {
+fn require_manual_source_quiescent(
+    profile: &crate::native_runtime::ProfilePaths,
+) -> Result<(), String> {
+    if !crate::native_runtime::profile_quiescent(profile)? {
+        return Err(
+            "manual recovery requires a stopped source socket and finalized lifecycle".into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_replacement_layout(intent: &ReplacementIntent) -> Result<(), String> {
     let ReplacementLayout::Relocate {
         source,
         retained,
@@ -2077,19 +2137,97 @@ fn validate_replacement_layout(intent: &ReplacementIntent) -> Result<(), String>
             })
         || intent.original_sidecar.is_some()
         || intent.original_sidecar_sha256.is_some()
-        || source_sidecar != &intent.candidate_sidecar
         || digest_bytes(source_sidecar) != *source_sidecar_sha256
         || !intent.update_locator
         || intent.original_file.as_ref().is_none_or(|f| {
             f.device != intent.candidate_file.device
                 || f.inode == intent.candidate_file.inode
-                || f.sha256 != intent.candidate_file.sha256
+                || intent
+                    .original
+                    .as_ref()
+                    .is_none_or(|r| f.sha256 != r.image.sha256)
         })
     {
-        return Err("relocation layout differs from exact source/target signed closure".into());
+        return Err(
+            "relocation layout differs from its independent source/target snapshots".into(),
+        );
     }
+    validate_relocation_closure_versions(intent)?;
     physical_directory(retained.parent().ok_or("retention has no parent")?, true)?;
     Ok(())
+}
+
+/// Bind immutable historical layout evidence to its approval without reopening H
+/// or requiring the helper's current compiled version. Closure validation is separate.
+pub(crate) fn validate_relocation_intent_for_plan(
+    intent: &ReplacementIntent,
+    plan: &crate::standalone_install::StandaloneInstallPlan,
+) -> Result<(), String> {
+    plan.validate()?;
+    let (expected_source, same_closure) = match &plan.purpose {
+        crate::standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+            source_closure_sha256,
+            ..
+        } => (source_closure_sha256, true),
+        crate::standalone_install::StandaloneInstallPurpose::ManualRecovery {
+            source_closure_sha256,
+            ..
+        } => (source_closure_sha256, false),
+        _ => return Err("upgrade approval does not authorize a relocation layout".into()),
+    };
+    let ReplacementLayout::Relocate {
+        source,
+        source_sidecar,
+        source_sidecar_sha256,
+        ..
+    } = &intent.layout
+    else {
+        return Err("cross-root approval has no relocation layout".into());
+    };
+    if intent.version != 2
+        || intent.operation_id != plan.operation_id
+        || intent.original.as_ref() != Some(&plan.original)
+        || intent.origin != *plan.installed_origin()
+        || source != physical_install_root(plan.origin())?
+        || intent.candidate_file.sha256 != plan.candidate_image.sha256
+        || intent.candidate_version != plan.candidate_version
+        || source_sidecar_sha256 != expected_source
+        || digest_bytes(source_sidecar) != *expected_source
+        || (same_closure && source_sidecar != &intent.candidate_sidecar)
+        || (!same_closure && source_sidecar == &intent.candidate_sidecar)
+    {
+        return Err("relocation intent source/candidate evidence differs from its approval".into());
+    }
+    validate_relocation_closure_versions(intent)
+}
+
+// The immutable layout can describe either same-closure native relocation or a
+// strictly newer stopped-source recovery. Its caller still authenticates purpose,
+// source state, consent, and official release evidence against the immutable plan.
+fn validate_relocation_closure_versions(intent: &ReplacementIntent) -> Result<(), String> {
+    let ReplacementLayout::Relocate { source_sidecar, .. } = &intent.layout else {
+        return Err("replacement has no relocation closure snapshots".into());
+    };
+    let original = intent
+        .original
+        .as_ref()
+        .ok_or("relocation has no original owner")?;
+    let previous = installed_version(&original.app_version)?;
+    let candidate = stable_version(&intent.candidate_version)?;
+    let same_closure = source_sidecar == &intent.candidate_sidecar
+        && original.image.sha256 == intent.candidate_file.sha256;
+    if (same_closure && previous == candidate && previous.pre.is_empty())
+        || (!same_closure
+            && source_sidecar != &intent.candidate_sidecar
+            && original.image.sha256 != intent.candidate_file.sha256
+            && candidate.cmp_precedence(&previous) == std::cmp::Ordering::Greater)
+    {
+        return Ok(());
+    }
+    Err(
+        "relocation requires the same stable closure or a strictly newer distinct stable recovery"
+            .into(),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2152,7 +2290,10 @@ fn relocation_commit_path_for(
         )))
 }
 
-fn relocation_committed(intent_path: &Path, intent: &ReplacementIntent) -> Result<bool, String> {
+pub(crate) fn relocation_committed(
+    intent_path: &Path,
+    intent: &ReplacementIntent,
+) -> Result<bool, String> {
     let path = relocation_commit_path_for(intent_path, intent)?;
     let Some(bytes) = optional_bytes(&path, true)? else {
         return Ok(false);
@@ -2340,11 +2481,13 @@ fn replace_relocation(
     scope: &mut crate::native_runtime::NativeInstallScope,
     intent_path: &Path,
 ) -> Result<RetainedReplacement, String> {
-    preflight_standalone_relocation(plan)?;
+    preflight_relocation_inputs(plan)?;
+    require_manual_source_generation(plan)?;
     let target_origin = plan.installed_origin();
     scope.reserve_target_scope(target_origin)?;
+    scope.admit(None)?;
     let _lock = install_lock()?;
-    preflight_standalone_relocation(plan)?;
+    preflight_relocation_inputs(plan)?;
     let [target, source] = standalone_bundles()?;
     let parent = target.parent().ok_or("target has no parent")?;
     let work = temporary_directory(parent, ".desktop-pet-install")?;
@@ -2356,8 +2499,28 @@ fn replace_relocation(
     let copy = copy_standalone_install_stage(staged, &prepared)?;
     let source_sidecar = owned_file(&sidecar_path(&source), MAX_RECORD)?;
     let candidate_sidecar = owned_file(&sidecar_path(&prepared), MAX_RECORD)?;
-    if candidate_sidecar != source_sidecar || copy.image.sha256 != plan.original.image.sha256 {
-        return Err("relocation stage is not the exact source signed closure".into());
+    if candidate_sidecar != owned_file(&sidecar_path(&staged.bundle), MAX_RECORD)?
+        || copy.image.sha256 != plan.candidate_image.sha256
+        || copy.version != plan.candidate_version
+    {
+        return Err("relocation stage differs from the approved candidate signed closure".into());
+    }
+    match &plan.purpose {
+        crate::standalone_install::StandaloneInstallPurpose::PrivateRelocation {
+            source_closure_sha256,
+            ..
+        } if digest_bytes(&source_sidecar) == *source_closure_sha256
+            && candidate_sidecar == source_sidecar
+            && copy.image.sha256 == plan.original.image.sha256 => {}
+        crate::standalone_install::StandaloneInstallPurpose::ManualRecovery {
+            source_closure_sha256,
+            ..
+        } if digest_bytes(&source_sidecar) == *source_closure_sha256
+            && candidate_sidecar != source_sidecar
+            && copy.image.sha256 != plan.original.image.sha256 => {}
+        _ => {
+            return Err("relocation source/candidate closures differ from approved purpose".into())
+        }
     }
     scope.pin_prepared_candidate(&copy)?;
     scope.admit(None)?;
@@ -2401,6 +2564,7 @@ fn replace_relocation(
         update_locator: true,
     };
     validate_replacement_layout(&intent)?;
+    validate_relocation_intent_for_plan(&intent, plan)?;
     sync_directory(&retained_parent)?;
     sync_directory(&work)?;
     // Persist the new work entry before durable intent can depend on it.
@@ -2436,7 +2600,10 @@ fn replace_relocation(
         {
             return Err("relocation snapshots changed before commit".into());
         }
-        let source_closure = validate_bundle_snapshot(&source, Some(&intent.candidate_sidecar))?;
+        let ReplacementLayout::Relocate { source_sidecar, .. } = &intent.layout else {
+            return Err("missing relocation source closure snapshot".into());
+        };
+        let source_closure = validate_bundle_snapshot(&source, Some(source_sidecar))?;
         if source_closure.image != plan.original.image
             || FileSnapshot::capture(&source_closure.image.path)?
                 != *intent
@@ -2445,6 +2612,13 @@ fn replace_relocation(
                     .ok_or("missing original inode")?
         {
             return Err("source signed closure changed before relocation commit".into());
+        }
+        if matches!(
+            plan.purpose,
+            crate::standalone_install::StandaloneInstallPurpose::ManualRecovery { .. }
+        ) {
+            require_manual_source_quiescent(&plan.profile)?;
+            scope.admit(None)?;
         }
         let receipt = RelocationCommit {
             version: 1,
@@ -3093,7 +3267,7 @@ pub fn commit_standalone_release(
     })
 }
 
-fn validate_release_evidence(
+pub fn validate_release_evidence(
     release: &crate::ReleaseCandidate,
     directory: &Path,
     bundle: &Path,
@@ -3989,6 +4163,13 @@ mod replacement_boundary_tests {
     fn relocation_fixture_with_locator(
         with_locator: bool,
     ) -> (tempfile::TempDir, ReplacementIntent, PathBuf) {
+        relocation_fixture_with_closures(with_locator, false)
+    }
+
+    fn relocation_fixture_with_closures(
+        with_locator: bool,
+        manual_recovery: bool,
+    ) -> (tempfile::TempDir, ReplacementIntent, PathBuf) {
         let (temporary, mut intent) = fixture();
         let source = intent.target.clone();
         let target_parent = source.parent().unwrap().join("private");
@@ -3997,18 +4178,28 @@ mod replacement_boundary_tests {
         let retained_parent = intent.work.join("original");
         create_directory(&retained_parent, true).unwrap();
         let retained = retained_parent.join("DesktopPet.app");
-        fs::copy(
-            source.join("Contents/MacOS/desktop-pet"),
-            intent.prepared.join("Contents/MacOS/desktop-pet"),
-        )
-        .unwrap();
+        if !manual_recovery {
+            fs::copy(
+                source.join("Contents/MacOS/desktop-pet"),
+                intent.prepared.join("Contents/MacOS/desktop-pet"),
+            )
+            .unwrap();
+        }
         let source_sidecar = intent.original_sidecar.take().unwrap();
-        atomic_owned_file(&sidecar_path(&intent.prepared), &source_sidecar).unwrap();
+        if !manual_recovery {
+            atomic_owned_file(&sidecar_path(&intent.prepared), &source_sidecar).unwrap();
+            intent.candidate_sidecar = source_sidecar.clone();
+            intent.candidate_sidecar_sha256 = digest_bytes(&source_sidecar);
+        }
         intent.candidate_file =
             FileSnapshot::capture(&intent.prepared.join("Contents/MacOS/desktop-pet")).unwrap();
         intent.version = 2;
-        intent.candidate_sidecar = source_sidecar.clone();
-        intent.candidate_sidecar_sha256 = digest_bytes(&source_sidecar);
+        intent.original.as_mut().unwrap().app_version = if manual_recovery {
+            "0.4.13-beta.7".into()
+        } else {
+            "0.4.14".into()
+        };
+        intent.candidate_version = "0.4.14".into();
         intent.original_sidecar_sha256 = None;
         intent.layout = ReplacementLayout::Relocate {
             source,
@@ -4081,6 +4272,227 @@ mod replacement_boundary_tests {
         }
         if boundary >= 9 {
             fs::remove_file(sidecar_path(source)).unwrap();
+        }
+    }
+
+    #[test]
+    fn manual_recovery_preserves_distinct_closures_at_every_disk_failure_boundary() {
+        for with_locator in [false, true] {
+            for boundary in 0..10 {
+                let (_temporary, intent, path) =
+                    relocation_fixture_with_closures(with_locator, true);
+                validate_relocation_closure_versions(&intent).unwrap();
+                let ReplacementLayout::Relocate {
+                    source,
+                    retained,
+                    source_sidecar,
+                    source_sidecar_sha256,
+                } = &intent.layout
+                else {
+                    unreachable!();
+                };
+                assert_ne!(source_sidecar, &intent.candidate_sidecar);
+                assert_ne!(
+                    intent.original_file.as_ref().unwrap().sha256,
+                    intent.candidate_file.sha256
+                );
+                assert_eq!(*source_sidecar_sha256, digest_bytes(source_sidecar));
+                assert_eq!(
+                    intent.original.as_ref().unwrap().app_version,
+                    "0.4.13-beta.7"
+                );
+                assert_eq!(intent.candidate_version, "0.4.14");
+                advance_relocation_boundary(&intent, &path, boundary);
+                reconcile_relocation(&path, &intent).unwrap();
+                let committed = boundary >= 5;
+                let snapshot = relocation_snapshot(&intent).unwrap();
+                assert_eq!(
+                    (snapshot.published, snapshot.retired),
+                    (committed, committed),
+                    "locator={with_locator}, boundary={boundary}"
+                );
+                let original_bundle = if committed { retained } else { source };
+                let candidate_bundle = if committed {
+                    &intent.target
+                } else {
+                    &intent.prepared
+                };
+                assert_eq!(
+                    FileSnapshot::capture(&original_bundle.join("Contents/MacOS/desktop-pet"))
+                        .unwrap(),
+                    *intent.original_file.as_ref().unwrap()
+                );
+                assert_eq!(
+                    FileSnapshot::capture(&candidate_bundle.join("Contents/MacOS/desktop-pet"))
+                        .unwrap(),
+                    intent.candidate_file
+                );
+                assert_eq!(
+                    owned_file(&sidecar_path(original_bundle), MAX_RECORD).unwrap(),
+                    *source_sidecar
+                );
+                assert_eq!(
+                    owned_file(&sidecar_path(candidate_bundle), MAX_RECORD).unwrap(),
+                    intent.candidate_sidecar
+                );
+                assert_eq!(
+                    optional_bytes(&intent.locator, true).unwrap(),
+                    if committed {
+                        intent.next_locator.clone()
+                    } else {
+                        intent.original_locator.clone()
+                    }
+                );
+                assert_eq!(relocation_committed(&path, &intent).unwrap(), committed);
+                if committed {
+                    assert!(!exists(source).unwrap());
+                    assert!(!exists(&sidecar_path(source)).unwrap());
+                } else {
+                    assert!(!exists(retained).unwrap());
+                    assert!(!exists(&intent.target).unwrap());
+                    assert!(!exists(&sidecar_path(&intent.target)).unwrap());
+                }
+                // Re-entry must never exchange source/candidate metadata or restart either app.
+                reconcile_relocation(&path, &intent).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn relocation_layout_accepts_only_same_stable_or_newer_distinct_stable_closures() {
+        let (_temporary, intent, _) = relocation_fixture_with_closures(true, true);
+        for candidate in ["0.4.12", "0.4.13-beta.7", "0.4.14-beta.1", "0.4.14+build"] {
+            let mut changed = intent.clone();
+            changed.candidate_version = candidate.into();
+            assert!(
+                validate_relocation_closure_versions(&changed).is_err(),
+                "{candidate}"
+            );
+        }
+        let mut changed = intent.clone();
+        changed.original.as_mut().unwrap().app_version = "0.4.14".into();
+        assert!(validate_relocation_closure_versions(&changed).is_err());
+        let ReplacementLayout::Relocate { source_sidecar, .. } = &intent.layout else {
+            unreachable!();
+        };
+        let mut changed = intent.clone();
+        changed.candidate_sidecar = source_sidecar.clone();
+        assert!(validate_relocation_closure_versions(&changed).is_err());
+        let mut changed = intent.clone();
+        changed.candidate_file.sha256 = changed.original.as_ref().unwrap().image.sha256.clone();
+        assert!(validate_relocation_closure_versions(&changed).is_err());
+        let (_temporary, same_closure, _) = relocation_fixture();
+        validate_relocation_closure_versions(&same_closure).unwrap();
+    }
+
+    #[test]
+    fn manual_recovery_refuses_same_hash_foreign_source_and_candidate_inodes() {
+        for committed in [false, true] {
+            for replace_original in [false, true] {
+                let (_temporary, intent, path) = relocation_fixture_with_closures(true, true);
+                advance_relocation_boundary(&intent, &path, if committed { 9 } else { 3 });
+                let ReplacementLayout::Relocate {
+                    source, retained, ..
+                } = &intent.layout
+                else {
+                    unreachable!();
+                };
+                let bundle = if replace_original {
+                    if committed {
+                        retained
+                    } else {
+                        source
+                    }
+                } else {
+                    &intent.target
+                };
+                let file = bundle.join("Contents/MacOS/desktop-pet");
+                let before = FileSnapshot::capture(&file).unwrap();
+                let foreign = file.with_extension("foreign");
+                fs::copy(&file, &foreign).unwrap();
+                fs::rename(&foreign, &file).unwrap();
+                let after = FileSnapshot::capture(&file).unwrap();
+                assert_eq!(before.sha256, after.sha256);
+                assert_ne!(before.inode, after.inode);
+                let receipt = relocation_commit_path_for(&path, &intent).unwrap();
+                let receipt_before = optional_bytes(&receipt, true).unwrap();
+                assert!(reconcile_relocation(&path, &intent).is_err());
+                assert_eq!(FileSnapshot::capture(&file).unwrap(), after);
+                assert_eq!(optional_bytes(&receipt, true).unwrap(), receipt_before);
+            }
+        }
+    }
+
+    #[test]
+    fn manual_source_requires_absent_socket_unlocked_lifecycle_and_no_startup() {
+        let temporary = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let profile = crate::native_runtime::ProfilePaths {
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+        };
+        create_directory(&profile.config_dir, true).unwrap();
+        create_directory(&profile.state_dir, true).unwrap();
+        let lock_path = profile.state_dir.join("desktop-pet.lock");
+        atomic_owned_file_new(&lock_path, b"").unwrap();
+        require_manual_source_quiescent(&profile).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert!(require_manual_source_quiescent(&profile).is_err());
+        drop(lock);
+        require_manual_source_quiescent(&profile).unwrap();
+        let socket_path = profile.state_dir.join("control.sock");
+        let socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        assert!(require_manual_source_quiescent(&profile).is_err());
+        drop(socket);
+        fs::remove_file(&socket_path).unwrap();
+        require_manual_source_quiescent(&profile).unwrap();
+        let lifecycle = profile.config_dir.join("lifecycle.json");
+        atomic_owned_file_new(&lifecycle, br#"{"startup":{"instance_id":"pending"}}"#).unwrap();
+        assert!(require_manual_source_quiescent(&profile).is_err());
+        atomic_owned_file(&lifecycle, br#"{"running":null}"#).unwrap();
+        require_manual_source_quiescent(&profile).unwrap();
+        atomic_owned_file(&lifecycle, b"{incomplete").unwrap();
+        assert!(require_manual_source_quiescent(&profile).is_err());
+    }
+
+    #[test]
+    fn manual_recovery_never_accepts_candidate_sidecar_as_retained_source_evidence() {
+        for committed in [false, true] {
+            let (_temporary, intent, path) = relocation_fixture_with_closures(true, true);
+            advance_relocation_boundary(&intent, &path, if committed { 9 } else { 3 });
+            let ReplacementLayout::Relocate {
+                source, retained, ..
+            } = &intent.layout
+            else {
+                unreachable!();
+            };
+            let original_bundle = if committed { retained } else { source };
+            atomic_owned_file(&sidecar_path(original_bundle), &intent.candidate_sidecar).unwrap();
+            let original_before =
+                FileSnapshot::capture(&original_bundle.join("Contents/MacOS/desktop-pet")).unwrap();
+            let candidate_before =
+                FileSnapshot::capture(&intent.target.join("Contents/MacOS/desktop-pet")).unwrap();
+            let receipt = relocation_commit_path_for(&path, &intent).unwrap();
+            let receipt_before = optional_bytes(&receipt, true).unwrap();
+            assert!(relocation_snapshot(&intent).is_err());
+            assert!(reconcile_relocation(&path, &intent).is_err());
+            assert_eq!(
+                FileSnapshot::capture(&original_bundle.join("Contents/MacOS/desktop-pet")).unwrap(),
+                original_before
+            );
+            assert_eq!(
+                FileSnapshot::capture(&intent.target.join("Contents/MacOS/desktop-pet")).unwrap(),
+                candidate_before
+            );
+            assert_eq!(optional_bytes(&receipt, true).unwrap(), receipt_before);
         }
     }
 

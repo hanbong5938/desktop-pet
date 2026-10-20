@@ -1,4 +1,11 @@
 //! Detached Pet-only installer. Shell lifetime is never installation authority.
+//!
+//! `install-manual-recovery --request ABS` records explicit SSH operator approval
+//! for an already-stopped historical owner and preserves the original profile.
+//! Its immutable resources live at `updates-v4/install-{id}.resources`; the
+//! operator request is fixed to `operator-request.json` there. Completion means
+//! InstalledStopped/NotRequested, never an inferred restart or native consent.
+//! A separate normal start is permitted only after exact reservation release.
 use crate::helper_ui::Panel;
 use desktop_pet_update_coordinator::{
     self as coordinator,
@@ -180,6 +187,41 @@ fn read_launch(state: &Path, id: &str) -> Result<Launch, String> {
         }
         InstallSource::Stopped { .. } => {}
     }
+    if let StandaloneInstallPurpose::ManualRecovery {
+        target,
+        release,
+        previous_context,
+        source_closure_sha256,
+        ..
+    } = &launch.purpose
+    {
+        let request = journal::read_manual_recovery_request(
+            &journal::manual_operator_request_path(state, id)?,
+        )?;
+        if request.context != *previous_context
+            || request.release != *release
+            || request.candidate_bundle != launch.request.staged_app
+            || previous_context.running != launch.original.image
+            || previous_context.executable != launch.original.executable
+            || previous_context.version != launch.original.app_version
+            || previous_context.config_dir != launch.profile.config_dir
+            || previous_context.state_dir != launch.profile.state_dir
+            || previous_context.running_origin.as_deref() != Some(&launch.original.origin)
+            || !matches!(launch.source, InstallSource::Stopped { .. })
+            || *target
+                != (InstallOrigin::Standalone {
+                    bundle: installation::standalone_bundle()?,
+                })
+            || launch.original.kind != InstallationKind::Standalone
+            || launch.original.protocol != 4
+            || launch.original.observation_mode != 2
+            || launch.original.integration_api != 1
+            || digest(launch.original_evidence.sidecar.as_bytes()) != *source_closure_sha256
+        {
+            return Err("manual launch differs from immutable operator request/source".into());
+        }
+        installation::validate_release_evidence(release, &root, &request.candidate_bundle)?;
+    }
     Ok(launch)
 }
 
@@ -214,6 +256,20 @@ fn admission_for_launch(state: &Path, id: &str) -> Result<Admission, String> {
         return Err("install launch differs from durable admission".into());
     }
     Ok(admission)
+}
+fn validate_plan_launch(plan: &Plan, launch: &Launch, admission: &Admission) -> Result<(), String> {
+    if plan.operation_id != launch.operation_id
+        || plan.original != launch.original
+        || plan.profile != launch.profile
+        || plan.source != launch.source
+        || plan.purpose != launch.purpose
+        || plan.helper_image != launch.helper
+        || plan.candidate_bundle != launch.request.staged_app
+        || plan.original_stop_generation != admission.original_stop_generation
+    {
+        return Err("immutable plan differs from admitted launch/source/purpose".into());
+    }
+    Ok(())
 }
 fn settle_admission(plan: &Plan, result: &Outcome) -> Result<(), String> {
     settle_launch(
@@ -280,6 +336,12 @@ fn verify_consent(plan: &Plan) -> Result<(), String> {
     if plan.purpose.is_upgrade() {
         return Ok(());
     }
+    if matches!(
+        plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        return Err("SSH operator recovery cannot use native-panel consent".into());
+    }
     let consent: Consent = serde_json::from_slice(&coordinator::owned_private_file(
         &journal::consent_path(&plan.profile.state_dir, &plan.operation_id)?,
         16384,
@@ -296,6 +358,12 @@ fn verify_consent(plan: &Plan) -> Result<(), String> {
 fn save_consent(plan: &Plan) -> Result<(), String> {
     if plan.purpose.is_upgrade() {
         return Ok(());
+    }
+    if matches!(
+        plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        return Err("SSH operator recovery cannot create native-panel consent".into());
     }
     protocol::write_private_atomic_new(
         &journal::consent_path(&plan.profile.state_dir, &plan.operation_id)?,
@@ -518,6 +586,171 @@ pub fn coordinated(request_path: &Path) -> Result<Outcome, String> {
     detached(&profile.state_dir, &id, &helper, false)
 }
 
+/// Explicit SSH approval is separate from native-panel consent. The original
+/// profile must already be stopped; this operation never obtains restart rights.
+pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
+    let mut operator = journal::read_manual_recovery_request(request_path)?;
+    let original = installation::inspect(&operator.context.executable)?;
+    let profile = ProfilePaths {
+        config_dir: operator.context.config_dir.clone(),
+        state_dir: operator.context.state_dir.clone(),
+    };
+    profile.validate()?;
+    if original.image != operator.context.running
+        || original.app_version != operator.context.version
+        || operator.context.running_origin.as_deref() != Some(&original.origin)
+        || !native_runtime::profile_quiescent(&profile)?
+    {
+        return Err("manual recovery requires the exact original, already stopped profile".into());
+    }
+    let generation = protocol::stop_generation(&profile.state_dir)?;
+    let source =
+        installation::validate_staged_app(coordinator::physical_install_root(&original.origin)?)?;
+    let candidate = installation::validate_staged_app(&operator.candidate_bundle)?;
+    coordinator::validate_candidate_for_context(&candidate.image.path, &operator.context)?;
+    let target = InstallOrigin::Standalone {
+        bundle: installation::standalone_bundle()?,
+    };
+    let mut scope = NativeInstallScope::capture(&source, &profile)?;
+    scope.reserve_target_scope(&target)?;
+    scope.admit(None)?;
+    installation::validate_release_evidence(
+        &operator.release,
+        operator
+            .candidate_bundle
+            .parent()
+            .ok_or("candidate lacks parent")?,
+        &operator.candidate_bundle,
+    )?;
+    let evidence = original_evidence(&original)?;
+    let tern = coordinator::migration::capture_relocation_tern(&operator.context, &target)?;
+    if protocol::stop_generation(&profile.state_dir)? != generation
+        || !native_runtime::profile_quiescent(&profile)?
+    {
+        return Err("manual recovery source generation or quiescence changed".into());
+    }
+    scope.admit(None)?;
+    let id = random_id()?;
+    if protocol::reservation_snapshot(&original.origin, Some(&target), &profile.state_dir, &id)?
+        .is_some()
+    {
+        return Err("manual recovery scope is already reserved".into());
+    }
+    installation::preflight_standalone_relocation_source(&original, &profile)?;
+    let updates = protocol::private_updates(&profile.state_dir)?;
+    let root = operation_dir(&profile.state_dir, &id)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(|e| e.to_string())?;
+    let staged =
+        installation::copy_standalone_install_stage(&candidate, &root.join("DesktopPet.app"))?;
+    let previous_directory = operator
+        .candidate_bundle
+        .parent()
+        .ok_or("candidate lacks parent")?;
+    for (name, bound) in [
+        (
+            operator.release.asset_name.as_str(),
+            operator.release.archive_size,
+        ),
+        ("archive.sha256", 4096),
+        ("SHA256SUMS", 65536),
+    ] {
+        copy_release_resource(&previous_directory.join(name), &root.join(name), bound)?;
+    }
+    installation::validate_release_evidence(&operator.release, &root, &staged.bundle)?;
+    let helper = coordinator::executable_identity(
+        &staged
+            .bundle
+            .join("Contents/MacOS/desktop-pet-update-coordinator"),
+    )?;
+    coordinator::stage_verified_helper(&helper, &root.join("helper"))?;
+    let helper = coordinator::executable_identity(&root.join("helper"))?;
+    operator.candidate_bundle = staged.bundle.clone();
+    persist_new(
+        &journal::manual_operator_request_path(&profile.state_dir, &id)?,
+        &operator,
+    )?;
+    let request = InstallRequest {
+        version: 1,
+        staged_app: staged.bundle,
+        kind: InstallationKind::Standalone,
+        source_root: None,
+    };
+    persist_new(&root.join("request.json"), &request)?;
+    persist_new(
+        &root.join("launch.json"),
+        &Launch {
+            version: 1,
+            operation_id: id.clone(),
+            original,
+            profile: profile.clone(),
+            helper: helper.clone(),
+            request,
+            purpose: StandaloneInstallPurpose::ManualRecovery {
+                target,
+                release: operator.release,
+                previous_context: operator.context,
+                source_closure_sha256: digest(evidence.sidecar.as_bytes()),
+                tern,
+            },
+            original_evidence: evidence,
+            locale: String::new(),
+            source: InstallSource::Stopped {
+                profile: profile.clone(),
+            },
+        },
+    )?;
+    File::open(&root)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    File::open(&updates)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    journal::write_admission(
+        &profile.state_dir,
+        &Admission {
+            version: 1,
+            operation_id: id.clone(),
+            launch_sha256: launch_digest(&profile.state_dir, &id)?,
+            original_stop_generation: generation,
+            phase: AdmissionPhase::Prepared,
+            result: None,
+        },
+    )?;
+    detached(&profile.state_dir, &id, &helper, false)
+}
+
+fn copy_release_resource(source: &Path, target: &Path, bound: u64) -> Result<(), String> {
+    let mut input = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(source)
+        .map_err(|e| e.to_string())?;
+    let meta = input.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o022 != 0
+        || meta.len() > bound
+    {
+        return Err("unsafe or oversized official release resource".into());
+    }
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(target)
+        .map_err(|e| e.to_string())?;
+    let count = std::io::copy(&mut (&mut input).take(bound.saturating_add(1)), &mut output)
+        .map_err(|e| e.to_string())?;
+    if count != meta.len() || count > bound {
+        return Err("official release resource changed while copying".into());
+    }
+    output.sync_all().map_err(|e| e.to_string())
+}
+
 pub fn relocate(request_path: &Path) -> Result<Outcome, String> {
     relocate_request(request_path, false)
 }
@@ -737,7 +970,8 @@ impl Launch {
     fn purpose_target(&self) -> Option<&InstallOrigin> {
         match &self.purpose {
             StandaloneInstallPurpose::Upgrade => None,
-            StandaloneInstallPurpose::PrivateRelocation { target, .. } => Some(target),
+            StandaloneInstallPurpose::PrivateRelocation { target, .. }
+            | StandaloneInstallPurpose::ManualRecovery { target, .. } => Some(target),
         }
     }
 }
@@ -884,9 +1118,12 @@ fn detached(
                 Some(_lease) => {}
             }
             let launch = read_launch(state, id)?;
-            let mut result = outcome(id, state, !launch.purpose.is_upgrade());
+            let running = matches!(launch.source, InstallSource::Running { .. });
+            let mut result = outcome(id, state, running);
             result.status = InstallStatus::Unknown;
-            result.restart = InstallRestart::Unknown;
+            if running {
+                result.restart = InstallRestart::Unknown;
+            }
             result.error = Some("install helper exited without verified settlement; retain evidence and use install-recover".into());
             // This process owns neither the child lease nor its admission. It
             // may report uncertainty, but must never publish over the winner.
@@ -1165,6 +1402,7 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         }
         if has_plan {
             let plan = journal::read_plan(state, id)?;
+            validate_plan_launch(&plan, &launch, &admission)?;
             validate_released_outcome(
                 &plan,
                 admission
@@ -1181,7 +1419,23 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         if plan.version != 2 || plan.helper_image != executing {
             return Err("recovery requires the approval's matching v2 helper".into());
         }
+        validate_plan_launch(&plan, &launch, &admission)?;
         ownership_ack();
+        if matches!(
+            plan.purpose,
+            StandaloneInstallPurpose::ManualRecovery { .. }
+        ) {
+            if snapshot.is_none() {
+                let result = existing
+                    .ok_or("manual recovery lacks durable outcome")?
+                    .result;
+                validate_released_outcome(&plan, &result)?;
+                return settle_admission(&plan, &result);
+            }
+            // Same-ID reentry is headless and idempotent. It observes the
+            // original operator approval, never presents a native panel.
+            return recover_manual_owned(&plan);
+        }
         if cleanup_unstarted(&plan)? {
             return Ok(());
         }
@@ -1200,14 +1454,25 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         return cleanup_unstarted_launch(&launch, &admission);
     }
     let candidate = installation::validate_staged_app(&launch.request.staged_app)?;
-    if installation::inspect(&launch.original.executable)? != launch.original {
+    if installation::inspect(&launch.original.executable)? != launch.original
+        || original_evidence(&launch.original)? != launch.original_evidence
+    {
         return Err("installation changed before detached admission".into());
     }
     let original = installation::validate_staged_app(coordinator::physical_install_root(
         &launch.original.origin,
     )?)?;
-    let Some((profile, instance)) = select_source(&launch.original, &original)? else {
-        return Err("selected profile disappeared before detached admission".into());
+    let (profile, instance) = if matches!(
+        launch.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        if !native_runtime::profile_quiescent(&launch.profile)? {
+            return Err("manual recovery requires an already stopped profile".into());
+        }
+        (launch.profile.clone(), None)
+    } else {
+        select_source(&launch.original, &original)?
+            .ok_or("selected profile disappeared before detached admission")?
     };
     if profile != launch.profile {
         return Err("selected install profile changed".into());
@@ -1223,6 +1488,20 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
         coordinator::standalone_relocation::validate_settled_parent(&current.context, parent)?;
         installation::preflight_standalone_relocation_source(&launch.original, &profile)?;
         scope.reserve_target_scope(target)?;
+    }
+    if let StandaloneInstallPurpose::ManualRecovery {
+        target,
+        previous_context,
+        ..
+    } = &launch.purpose
+    {
+        coordinator::validate_candidate_for_context(&candidate.image.path, previous_context)?;
+        scope.reserve_target_scope(target)?;
+        scope.admit(None)?;
+        if protocol::stop_generation(state)? != admission.original_stop_generation {
+            return Err("manual recovery Stop generation changed before admission".into());
+        }
+        installation::preflight_standalone_relocation_source(&launch.original, &profile)?;
     }
     scope.admit(instance.as_ref())?;
     let mut reservation =
@@ -1260,6 +1539,13 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
     admission.phase = AdmissionPhase::Presenting;
     journal::write_admission(state, &admission)?;
     ownership_ack();
+    if matches!(
+        plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) {
+        journal::write_operator_consent(&plan, &journal::manual_operator_request_path(state, id)?)?;
+        return execute_manual_owned(&plan, &candidate, &mut scope, reservation, &mut result);
+    }
     // No mutation or Stop has occurred. Any UI/consent failure releases cleanly.
     let consent = Panel::for_install(&launch.locale, &plan).and_then(|panel| {
         let approved = panel.confirm_install(&plan, false)?;
@@ -1431,6 +1717,237 @@ fn restore_original_precommit(
         tick(panel, reservation)?;
     }
     Ok(())
+}
+
+fn manual_authority(plan: &Plan) -> Result<(), String> {
+    plan.validate()?;
+    if !matches!(
+        plan.purpose,
+        StandaloneInstallPurpose::ManualRecovery { .. }
+    ) || plan.running().is_some()
+        || protocol::stop_generation(&plan.profile.state_dir)? != plan.original_stop_generation
+        || !missing(&journal::stop_ack_path(
+            &plan.profile.state_dir,
+            &plan.operation_id,
+        )?)
+        || !missing(&journal::consent_path(
+            &plan.profile.state_dir,
+            &plan.operation_id,
+        )?)
+    {
+        return Err("manual stopped authority or original Stop generation changed".into());
+    }
+    journal::read_operator_consent(
+        plan,
+        &journal::manual_operator_request_path(&plan.profile.state_dir, &plan.operation_id)?,
+    )?
+    .ok_or("manual recovery lacks exact SSH operator consent")?;
+    let snapshot = protocol::reservation_snapshot(
+        plan.origin(),
+        plan.reservation_target(),
+        &plan.profile.state_dir,
+        &plan.operation_id,
+    )?
+    .ok_or("manual recovery reservation is absent")?;
+    if snapshot.startup_origin.is_some() || !snapshot.markers_complete {
+        return Err(
+            "manual recovery reservation contains startup authority or incomplete markers".into(),
+        );
+    }
+    if !native_runtime::profile_quiescent(&plan.profile)? {
+        return Err("manual recovery profile is no longer stopped".into());
+    }
+    Ok(())
+}
+
+fn manual_drain(plan: &Plan, scope: &NativeInstallScope) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        manual_authority(plan)?;
+        match scope.admit(None) {
+            Ok(()) => return Ok(()),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn execute_manual_owned(
+    plan: &Plan,
+    candidate: &ValidatedApp,
+    scope: &mut NativeInstallScope,
+    reservation: protocol::InstallationReservation,
+    result: &mut Outcome,
+) -> Result<(), String> {
+    let attempt = (|| {
+        manual_authority(plan)?;
+        plan.validate_for_execution()?;
+        installation::preflight_standalone_relocation(plan)?;
+        coordinator::migration::verify_relocation_tern_unchanged(plan)?;
+        unchanged_original(plan)?;
+        native_runtime::wait_install_source_stopped(plan, Duration::from_secs(45), || {
+            manual_authority(plan)
+        })?;
+        write(plan, Phase::OriginalStopped, result)?;
+        manual_drain(plan, scope)?;
+        manual_authority(plan)?;
+        write(plan, Phase::Replacing, result)?;
+        let replaced = installation::replace_standalone_coordinated(candidate, plan, scope)?;
+        result.installed = true;
+        result.installation = Some(replaced.installation);
+        result.retained_bundle = Some(replaced.retained_bundle);
+        write(plan, Phase::Installed, result)?;
+        manual_authority(plan)?;
+        scope.admit(None)?;
+        result.status = InstallStatus::InstalledStopped;
+        result.applied = false;
+        result.restart = InstallRestart::NotRequested;
+        result.error = None;
+        write(plan, Phase::Completed, result)
+    })();
+    if let Err(error) = attempt {
+        // A stopped source never has restoration/start authority. Classify the
+        // existing transaction under the same lease instead of issuing Stop.
+        if let Err(recovery_error) = reconcile_manual_disk(plan, result, Some(&error)) {
+            return publish_manual_uncertainty(plan, result, format!("{error}; {recovery_error}"));
+        }
+    }
+    manual_authority(plan)?;
+    reservation.release()?;
+    settle_admission(plan, result)
+}
+
+fn publish_manual_uncertainty(
+    plan: &Plan,
+    result: &mut Outcome,
+    error: String,
+) -> Result<(), String> {
+    // A late/error path must not replace an already durable terminal winner.
+    if journal::read_record(&plan.profile.state_dir, &plan.operation_id)?
+        .is_some_and(|record| record.result.terminal())
+    {
+        return Err(error);
+    }
+    result.status = InstallStatus::Unknown;
+    result.applied = false;
+    result.restart = InstallRestart::NotRequested;
+    result.error = Some(error);
+    write(plan, Phase::Unknown, result)
+}
+
+fn recover_manual_owned(plan: &Plan) -> Result<(), String> {
+    if cleanup_unstarted(plan)? {
+        return Ok(());
+    }
+    let mut result = inspect(&plan.profile.state_dir, &plan.operation_id)?;
+    // This opaque handle can release only; no Stop/control/start API is used.
+    let release = protocol::recover_bootstrap_release(plan)?;
+    manual_authority(plan)?;
+    let previous_error = result.error.clone();
+    if let Err(error) = reconcile_manual_disk(plan, &mut result, previous_error.as_deref()) {
+        return publish_manual_uncertainty(plan, &mut result, error);
+    }
+    manual_authority(plan)?;
+    release.release()?;
+    settle_admission(plan, &result)
+}
+
+fn reconcile_manual_disk(
+    plan: &Plan,
+    result: &mut Outcome,
+    failure: Option<&str>,
+) -> Result<(), String> {
+    manual_authority(plan)?;
+    native_runtime::wait_install_source_stopped(plan, Duration::from_secs(45), || {
+        manual_authority(plan)
+    })?;
+    let state = &plan.profile.state_dir;
+    let intent = journal::replacement_path(state, &plan.operation_id)?;
+    if missing(&intent) {
+        if !missing(&journal::relocation_commit_path(state, &plan.operation_id)?) {
+            return Err("manual recovery commit lacks replacement intent".into());
+        }
+        unchanged_original(plan)?;
+        let original =
+            installation::validate_staged_app(coordinator::physical_install_root(plan.origin())?)?;
+        let mut scope = NativeInstallScope::capture(&original, &plan.profile)?;
+        scope.reserve_target_scope(plan.installed_origin())?;
+        scope.admit(None)?;
+        result.installed = false;
+        result.installation = None;
+        result.retained_bundle = None;
+    } else {
+        let mut recovered = installation::recover_replacement(
+            &intent,
+            &plan.operation_id,
+            &plan.original,
+            plan.installed_origin(),
+        )?;
+        approved_replacement(plan, &recovered)?;
+        let mut scope = native_runtime::recover_install_scope(&recovered, &plan.profile)?;
+        manual_drain(plan, &scope)?;
+        if recovered.disk_state != installation::ReplacementDiskState::Installed {
+            manual_authority(plan)?;
+            recovered = installation::reconcile_replacement(
+                &intent,
+                &plan.operation_id,
+                &plan.original,
+                plan.installed_origin(),
+                &plan.profile,
+                &mut scope,
+            )?;
+            approved_replacement(plan, &recovered)?;
+        }
+        if recovered.disk_state == installation::ReplacementDiskState::Original {
+            unchanged_original(plan)?;
+        } else if recovered.disk_state != installation::ReplacementDiskState::Installed {
+            return Err("manual replacement remains incompletely committed".into());
+        }
+        manual_authority(plan)?;
+        scope.admit(None)?;
+        result.installed = recovered.installation.is_some();
+        result.installation = recovered.installation;
+        result.retained_bundle = recovered.retained_bundle;
+    }
+    result.applied = false;
+    result.restart = InstallRestart::NotRequested;
+    result.status = if result.installed {
+        InstallStatus::InstalledStopped
+    } else {
+        InstallStatus::Failed
+    };
+    result.error = if result.installed {
+        None
+    } else {
+        Some(
+            failure
+                .unwrap_or("manual recovery did not commit; original remains stopped")
+                .into(),
+        )
+    };
+    manual_authority(plan)?;
+    if let Some(record) = journal::read_record(state, &plan.operation_id)? {
+        if matches!(
+            record.result.status,
+            InstallStatus::InstalledStopped | InstallStatus::Failed
+        ) {
+            if record.result != *result {
+                return Err(
+                    "manual recovery classification differs from durable terminal winner".into(),
+                );
+            }
+            return Ok(());
+        }
+    }
+    write(
+        plan,
+        if result.installed {
+            Phase::Completed
+        } else {
+            Phase::Failed
+        },
+        result,
+    )
 }
 
 fn execute(
@@ -1942,7 +2459,10 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> Result<i32, String> {
     }
     if matches!(
         command,
-        "install-coordinated" | "install-relocate" | "install-relocate-manual"
+        "install-coordinated"
+            | "install-relocate"
+            | "install-relocate-manual"
+            | "install-manual-recovery"
     ) {
         if args.len() != 2 || args[0] != "--request" || !Path::new(&args[1]).is_absolute() {
             return Err(format!("{command} requires only --request ABS"));
@@ -1950,6 +2470,7 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> Result<i32, String> {
         let result = match command {
             "install-relocate" => relocate(Path::new(&args[1]))?,
             "install-relocate-manual" => relocate_manual(Path::new(&args[1]))?,
+            "install-manual-recovery" => manual_recovery(Path::new(&args[1]))?,
             _ => coordinated(Path::new(&args[1]))?,
         };
         emit(&result)?;
@@ -2008,6 +2529,293 @@ fn parse_scope(args: &[OsString]) -> Result<(PathBuf, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manual_plan_fixture(state: &Path) -> Plan {
+        let id = "9".repeat(32);
+        let historical = installation::os_home()
+            .unwrap()
+            .join("Applications/DesktopPet.app");
+        let origin = InstallOrigin::Standalone {
+            bundle: historical.clone(),
+        };
+        let image = ExecutableIdentity {
+            path: historical.join("Contents/MacOS/desktop-pet"),
+            sha256: "a".repeat(64),
+        };
+        let profile = ProfilePaths {
+            config_dir: state.into(),
+            state_dir: state.into(),
+        };
+        let context = coordinator::UpdateContext {
+            executable: image.path.clone(),
+            version: "0.4.13-beta.7".into(),
+            instance_id: "stopped-source".into(),
+            config_dir: state.into(),
+            state_dir: state.into(),
+            running: image.clone(),
+            running_origin: Some(Box::new(origin.clone())),
+            assets_override: None,
+            environment: Default::default(),
+            locale: "ko".into(),
+        };
+        let tag = "v0.4.14";
+        let asset_name = "DesktopPet-v0.4.14-macos-arm64.tar.gz";
+        let release = coordinator::ReleaseCandidate {
+            version: "0.4.14".into(),
+            channel: coordinator::ReleaseChannel::Stable,
+            tag: tag.into(),
+            release_id: 123,
+            archive_url: format!(
+                "{}{tag}/{asset_name}",
+                coordinator::identity::neutral::RELEASE_DOWNLOAD
+            ),
+            checksum_url: format!(
+                "{}{tag}/{asset_name}.sha256",
+                coordinator::identity::neutral::RELEASE_DOWNLOAD
+            ),
+            asset_name: asset_name.into(),
+            archive_size: 123,
+            sha256: "e".repeat(64),
+        };
+        let root = operation_dir(state, &id).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let plan = Plan {
+            version: 2,
+            operation_id: id,
+            original: InstallationRecord {
+                version: 1,
+                executable: image.path.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: context.version.clone(),
+                protocol: 4,
+                observation_mode: 2,
+                integration_api: 1,
+                origin,
+                image,
+            },
+            purpose: StandaloneInstallPurpose::ManualRecovery {
+                target: InstallOrigin::Standalone {
+                    bundle: installation::standalone_bundle().unwrap(),
+                },
+                release: release.clone(),
+                previous_context: context.clone(),
+                source_closure_sha256: digest(b"source signed closure"),
+                tern: None,
+            },
+            candidate_bundle: root.join("DesktopPet.app"),
+            candidate_image: ExecutableIdentity {
+                path: root.join("DesktopPet.app/Contents/MacOS/desktop-pet"),
+                sha256: "b".repeat(64),
+            },
+            candidate_version: release.version.clone(),
+            helper_image: ExecutableIdentity {
+                path: root.join("helper"),
+                sha256: "c".repeat(64),
+            },
+            profile: profile.clone(),
+            source: InstallSource::Stopped { profile },
+            original_stop_generation: 0,
+            control_token: "d".repeat(64),
+        };
+        plan.validate().unwrap();
+        persist_new(
+            &journal::plan_path(state, &plan.operation_id).unwrap(),
+            &plan,
+        )
+        .unwrap();
+        persist_new(
+            &journal::manual_operator_request_path(state, &plan.operation_id).unwrap(),
+            &journal::StandaloneManualRecoveryRequest {
+                version: 1,
+                context,
+                candidate_bundle: plan.candidate_bundle.clone(),
+                release,
+                confirmation: "replace_original_app_preserve_profile".into(),
+            },
+        )
+        .unwrap();
+        plan
+    }
+
+    #[test]
+    fn manual_dispatch_is_strict_and_never_falls_through_to_native_install() {
+        for args in [
+            vec![],
+            vec!["--request".into(), "relative.json".into()],
+            vec![
+                "--request".into(),
+                "/private/request.json".into(),
+                "--start".into(),
+            ],
+            vec!["--plan".into(), "/private/request.json".into()],
+        ] {
+            let error = dispatch("install-manual-recovery", args).unwrap_err();
+            assert!(error.contains("requires only --request ABS"));
+        }
+    }
+
+    #[test]
+    fn manual_consent_cannot_be_native_and_changed_generation_has_no_stop_or_start() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(temp.path()).unwrap();
+        let mut plan = manual_plan_fixture(temp.path());
+        assert!(save_consent(&plan).is_err());
+        assert!(verify_consent(&plan).is_err());
+        let request_path =
+            journal::manual_operator_request_path(temp.path(), &plan.operation_id).unwrap();
+        journal::write_operator_consent(&plan, &request_path).unwrap();
+        assert!(journal::read_operator_consent(&plan, &request_path)
+            .unwrap()
+            .is_some());
+        // Even authentic SSH consent cannot survive an intervening user Stop.
+        protocol::write_private_bytes(
+            &protocol::private_updates(temp.path())
+                .unwrap()
+                .join("stop-generation.json"),
+            b"1",
+            0o600,
+        )
+        .unwrap();
+        assert!(manual_authority(&plan)
+            .unwrap_err()
+            .contains("generation changed"));
+        let result = outcome(&plan.operation_id, temp.path(), false);
+        for phase in [Phase::StopIntent, Phase::StopAcknowledged, Phase::Starting] {
+            assert!(write(&plan, phase, &result).is_err());
+        }
+        assert!(!journal::stop_ack_path(temp.path(), &plan.operation_id)
+            .unwrap()
+            .exists());
+        assert!(!journal::consent_path(temp.path(), &plan.operation_id)
+            .unwrap()
+            .exists());
+        assert!(!journal::replacement_path(temp.path(), &plan.operation_id)
+            .unwrap()
+            .exists());
+        plan.original_stop_generation = 1;
+        assert!(journal::read_operator_consent(&plan, &request_path).is_err());
+    }
+
+    #[test]
+    fn manual_request_substitution_and_late_error_preserve_durable_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(temp.path()).unwrap();
+        let plan = manual_plan_fixture(temp.path());
+        let request_path =
+            journal::manual_operator_request_path(temp.path(), &plan.operation_id).unwrap();
+        journal::write_operator_consent(&plan, &request_path).unwrap();
+        let mut bytes = coordinator::owned_private_file(&request_path, 65536).unwrap();
+        bytes.push(b'\n');
+        protocol::write_private_bytes(&request_path, &bytes, 0o600).unwrap();
+        assert!(journal::read_operator_consent(&plan, &request_path).is_err());
+        let mut result = outcome(&plan.operation_id, temp.path(), false);
+        result.status = InstallStatus::Failed;
+        result.error = Some("original remains stopped".into());
+        write(&plan, Phase::Failed, &result).unwrap();
+        let path = journal::record_path(temp.path(), &plan.operation_id).unwrap();
+        let winner = coordinator::owned_private_file(&path, 32768).unwrap();
+        assert!(publish_manual_uncertainty(&plan, &mut result, "late duplicate".into()).is_err());
+        assert_eq!(
+            coordinator::owned_private_file(&path, 32768).unwrap(),
+            winner
+        );
+        assert_eq!(result.restart, InstallRestart::NotRequested);
+        assert!(!result.applied);
+    }
+
+    #[test]
+    fn manual_release_resources_are_bounded_private_and_immutable() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let source = temp.path().join("archive");
+        let target = temp.path().join("copy");
+        protocol::write_private_new(&source, b"official archive bytes", 0o600).unwrap();
+        copy_release_resource(&source, &target, 100).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"official archive bytes");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(copy_release_resource(&source, &target, 100).is_err());
+        assert!(copy_release_resource(&source, &temp.path().join("oversized"), 3).is_err());
+        let link = temp.path().join("symlink");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        assert!(copy_release_resource(&link, &temp.path().join("linked-copy"), 100).is_err());
+    }
+
+    #[test]
+    fn manual_plan_reentry_is_bound_to_launch_purpose_source_and_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        protocol::private_updates(temp.path()).unwrap();
+        let plan = manual_plan_fixture(temp.path());
+        let launch = Launch {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            original: plan.original.clone(),
+            profile: plan.profile.clone(),
+            helper: plan.helper_image.clone(),
+            request: InstallRequest {
+                version: 1,
+                staged_app: plan.candidate_bundle.clone(),
+                kind: InstallationKind::Standalone,
+                source_root: None,
+            },
+            original_evidence: OriginalEvidence {
+                sidecar: "source signed closure".into(),
+                locator: None,
+                image_device: 1,
+                image_inode: 2,
+                bundle_device: 1,
+                bundle_inode: 3,
+            },
+            purpose: plan.purpose.clone(),
+            locale: String::new(),
+            source: plan.source.clone(),
+        };
+        let admission = Admission {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            launch_sha256: "a".repeat(64),
+            original_stop_generation: 0,
+            phase: AdmissionPhase::Presenting,
+            result: None,
+        };
+        validate_plan_launch(&plan, &launch, &admission).unwrap();
+        for field in 0..5 {
+            let mut changed = plan.clone();
+            match field {
+                0 => changed.purpose = StandaloneInstallPurpose::Upgrade,
+                1 => changed.original_stop_generation += 1,
+                2 => changed.candidate_bundle = temp.path().join("substituted/DesktopPet.app"),
+                3 => {
+                    changed.source = InstallSource::Stopped {
+                        profile: ProfilePaths {
+                            config_dir: temp.path().join("other-config"),
+                            state_dir: temp.path().into(),
+                        },
+                    }
+                }
+                _ => changed.original.image.sha256 = "f".repeat(64),
+            }
+            assert!(validate_plan_launch(&changed, &launch, &admission).is_err());
+        }
+        assert_eq!(
+            admission_disposition(&admission, true, true, false),
+            AdmissionDisposition::ExistingPlan,
+        );
+        let mut settled = admission;
+        let mut result = outcome(&plan.operation_id, temp.path(), false);
+        result.status = InstallStatus::Failed;
+        settled.phase = AdmissionPhase::Settled;
+        settled.result = Some(result);
+        assert_eq!(
+            admission_disposition(&settled, true, false, false),
+            AdmissionDisposition::Settled,
+        );
+    }
 
     fn private_admission_fixture(state: &Path, id: &str) -> Admission {
         let resources = operation_dir(state, id).unwrap();

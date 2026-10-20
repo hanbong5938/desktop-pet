@@ -1923,6 +1923,7 @@ pub fn committed_route(
     owned_directory(&directory)?;
     let mut count = 0;
     let mut response = relocation::committed_route(&request)?;
+    let has_standalone_route = response.is_some();
     let mut seen = std::collections::BTreeSet::new();
     for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -1968,6 +1969,13 @@ pub fn committed_route(
         let record = read_record(&plan)?;
         if !record.native_ready || !record.target_committed {
             continue;
+        }
+        if let Some(standalone) = response.as_ref().filter(|_| has_standalone_route) {
+            if relocation::supersedes_legacy_route(standalone, &plan, &record, profile)? {
+                // Native retirement remains authenticated above; an obsolete
+                // CLI/delivery pin cannot veto a new independent H-to-C approval.
+                continue;
+            }
         }
         let live = status(profile)?;
         // An already-current canonical path is not success by itself: it still

@@ -72,15 +72,15 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 **当前稳定版候选所有者策略：**全新 Standalone 与普通更新使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 影响。原有 `Applications/DesktopPet.app` 仅用于旧 helper 完成确认、单独批准的迁移及恢复，不再永久支持原位更新。禁止接管任意 home/custom/system 路径或 symlink。Brew/source 所有者及历史冻结说明不变。
 
-### 现有 Applications 所有者：beta.7 应用内更新后单独迁移
+### 现有 Applications 所有者：明确批准的一次恢复
 
-候选路径从真正 beta.7 应用的**更新按钮**开始，不需要安装器或终端 bootstrap。未修改的旧 helper 选择真正稳定版 `0.4.13`，在原 Applications 完成 readiness、Completed、helper 退出及释放预约后，才另行显示 native 批准窗口，将**相同签名版本**移至专用位置。请查看[验证范围与限制](releases/v0.4.13.md)。
+真正 beta.7 helper 可以选择新稳定版，但实机确认了另一个已发布 helper 缺陷：响应后的套接字关闭，再查询 Darwin peer PID 会在安装前报 `cannot authenticate control peer PID`。只检查应用更新无法修复已发布 helper。[0.4.14 修正](releases/v0.4.14.md)修复认证并提供明确批准的操作员恢复。不要反复重试旧 updater，也不要假定此前应用内路径已成功。
 
 保留已认证的原 config/state、角色、设置及用户资料。既有 Tern SDK 在 native 事务结算后仅更改保存的 executable，native 不覆盖 KV。不要猜测默认值、合并 profile，或用 Configure/Connect、Tern 重启、plugin reload 隐藏失败。签名原件及事务证据保留在 private retention。
 
-**先保存 Pet 未保存编辑。** 首次更新同意不是迁移同意。取消后稳定版继续在 Applications 运行，应用重启也不重复自动窗口；新尝试应使用 Updates 的明确迁移操作。后续用户 **Stop**、不明确 ACK 或 scope 变化禁止自动重启。只重启 Pet，Tern 窗口、终端与工作保持运行。
+**先保存 Pet 未保存编辑。** 操作员恢复需要原件及 profile 备份，并明确批准只正常停止 Pet、之后另行 Start。停止源安装不伪造 Stop ACK、updater parent 或重启 token。后续用户 Stop 或 scope 变化禁止自动重启。已结算 Stable parent 的同版本 native 迁移是另一条批准路径。
 
-native 安装／就绪与逐窗口 fresh Tern 确认是不同结果。未连接或不兼容 consumer 表示集成待确认，并非 native 安装失败。disposable macOS GUI 和官方网络验证仍**待完成**，不声称真实用户已恢复或稳定版已公开。
+native 安装／就绪与逐窗口 fresh Tern 确认是不同结果。未连接或不兼容 consumer 表示集成待确认，不是 native 安装失败。公开或源码检查不代表真实用户已恢复；不初始化 Tern、不删除未结算 journal，并按实际观察报告结果。
 
 ### 历史固定安装示例
 
@@ -268,7 +268,7 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 应用内更新
 
-**稳定版候选恢复：**Applications 所有者使用[上述两阶段应用内路径](#现有-applications-所有者beta7-应用内更新后单独迁移)。迁移后普通更新仍在 private 所有者位置。beta opt-in、仅稳定版及 Homebrew 限制不变。源码契约不等于真实恢复成功。
+**现有所有者恢复：**请参阅[明确批准的一次恢复](#现有-applications-所有者明确批准的一次恢复)。恢复到 canonical private 位置后，普通更新在该处进行。beta opt-in、仅稳定版及 Homebrew 限制不变。
 
 应用内更新不可用时，请保留现有设置和角色。**打开官方安装说明**会打开已验证版本的官方页面，不会只下载没有说明的压缩包或自动执行安装器。请按实际安装方式操作，不要删除配置、重跑旧安装器或猜测默认路径。Tern 控制错误现在显示实际后端诊断，而非 `alpha_passthrough` 模式错误；普通状态／错误响应绝不作为 fresh binding 证据。
 
