@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**当前后继版本：Core v0.4.12 / genuine bridge v0.3.16——尚未完成验证或公开。** Core v0.4.11 已公开：release `414563938`，时间 `2026-10-16T05:16:03Z`，source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`；6个公开资产均已独立验证。单独 Wiki job 缺少 `WIKI_PUBLISH_TOKEN`。genuine bridge v0.3.15 CI `38855045701` 成功，但没有公开 tag/release。公开 provenance 不等于历史迁移修复验收。 See [current successor ledger](docs/releases/v0.4.12.md).
+
+**历史启动缺陷与永久修正：**自有 VM 中实际公开 v0.4.11 的历史操作运行失败，原文为 `Migration history: current native daemon does not prove the migrated image/profile readiness`。没有新 receipt 或 SDK 交付；SDK 0.1 仍报告 `/opt/homebrew/bin/herdr-desktop-pet` 不存在。UI Ready 前的 observation 错误丢失了保留 operation。v0.4.12 用只读 discovery 在 Ready 前保留 operation，再由既有经批准的 observation/poll 稍后交付；所有 current image/owner/profile、signed-stage、合法 runtime 启动、Stop、Unknown guard 均保留。不重跑旧 manager、不改写 plan/journal、不要求手动重连。针对性 source 回归通过不代表端到端成功。
+
+**验收契约：**一次原始 Update 批准覆盖静默迁移、签名 SDK 替换/加载、精确保存 route 切换、同一 Tern 窗口的真实 fresh binding、自动 native receipt，之后才 retirement 已批准旧 owner。不增加第二次同意、Configure、Connect、ACK 或 Resume。保留每个原始 config/state profile、角色、台词/历史、account/provider、无关 profile，以及 Stop、Unknown。local 7c signed-out GUI/frame-driven sequence 47 和重启 sequence 13 仅为 component 证据，不证明 quiet/authenticated 交付、完整 lifecycle 或另一台电脑恢复。
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 独立的原生 macOS 桌面伙伴。露贝莉娅回应触摸，显示 Herdr、Tern 等已注册提供商的会话，并在来源允许时发送回复。无需宿主也能运行。
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
@@ -67,6 +76,8 @@
 Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun、Node.js/npm、Xcode Command Line Tools，预构建无需这些工具。应用为 ad-hoc 签名，未经公证。Herdr 快照需兼容本地服务器（0.9.0+），回复另需 `agent.prompt`。可选 client-attach 自动启动需官方 Herdr 0.9.3 应用[集成仓库的补丁和宿主构建指引](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)，或实际支持钩子的宿主。原版 0.9.0/0.9.3 没有该钩子，插件安装不修改宿主。
 
 ## 安装与可选集成
+
+**当前源码的 private 安装路径：**Standalone 使用实际 OS 账户 home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 覆盖。Brew 保留已验证 formula prefix 的 `libexec/DesktopPet.app`，source 保留精确 checkout 的 `dist/DesktopPet.app`。普通安装不会自动移动旧 Applications owner。公开安装器与冻结发行说明保留各自版本范围；重跑旧安装器不能修复错误目标。一次性恢复以 **Bash 私下提供**，不是分发的产品功能、native 修复命令、updater 或插件功能。保留已保存 Tern KV 的原始 config/state 对、原始数据与备份，让 Tern 和工作继续运行。参见[私下恢复指引](docs/usage.zh-Hans.md#one-time-applications-recovery)。此前公开的 Python 恢复资产已撤回，历史 beta.8 说明不是当前操作指引。没有新版本发布或版本号变更。
 
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。安装命令：
 

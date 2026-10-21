@@ -45,17 +45,23 @@ mod preferences;
 mod rig_renderer;
 mod session_cards;
 mod session_view;
+mod settings_recovery;
 mod socket;
 mod sources;
 mod state;
 mod status_indicator;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 #[cfg(test)]
 mod transport_tests;
 mod ui;
 mod update_card;
 mod worktree_confirmation;
-#[cfg(feature = "test-support")]
-pub mod test_support;
+
+#[cfg(test)]
+fn main() {
+    ui::run_recovery_ui_regressions();
+}
 
 use desktop_pet_contracts::{
     Integration, IntegrationExtensions, ObservationSelection, ProfileStore,
@@ -110,6 +116,9 @@ impl Composition {
                     | "updater"
                     | "update"
                     | "legacy-migration"
+                    | "legacy-migration-context"
+                    | "legacy-migration-route"
+                    | "migration-integration-handover"
                     | "pack"
                     | "presentation"
                     | "automation"

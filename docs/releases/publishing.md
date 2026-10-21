@@ -1,5 +1,19 @@
 # Publishing release documentation and the Wiki
 
+
+**Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](v0.4.12.md).
+
+**Historical startup defect and permanent correction:** the actual public v0.4.11 historical run in the owned VM failed with `Migration history: current native daemon does not prove the migrated image/profile readiness`; no new receipt or SDK delivery occurred, and SDK 0.1 still reported missing `/opt/homebrew/bin/herdr-desktop-pet`. Startup observation ran before UI readiness and lost the retained operation. The v0.4.12 correction uses read-only historical discovery to retain that operation before Ready; the existing admitted observation/poll delivers later, retaining all current-image/owner/profile, signed-stage, legitimate-runtime-start, Stop and Unknown guards. It never replays the old manager, rewrites the old plan/journal, or requires manual reconnect. The targeted source regression passed; this is not end-to-end qualification.
+
+**Acceptance contract:** one original Update approval covers quiet migration, signed SDK replacement/load, exact saved-route switch, real fresh binding in the same Tern window, automatic native receipt, and only then approved old-owner retirement. Preserve each exact config/state profile, character, dialogue/history, account/provider data and unrelated profiles; no second consent, Configure, Connect, ACK or Resume. Stop and Unknown remain fail-closed. The signed-out, GUI/frame-driven sequence 47 then restart sequence 13 on local 7c source is component evidence only, not autonomous quiet/authenticated delivery, lifecycle or affected-machine acceptance.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
+
+## Current successor publication procedure
+
+The parent runs `bun scripts/release-docs.ts check v0.4.12 --repository hanbong5938/desktop-pet --output /ABS/PRIVATE/NEW-OUTPUT` on integrated final source. The required first heading is exactly `# Desktop Pet v0.4.12 release notes`. After full final-source/native/tooling/signed-bundle/owned-VM gates and source freeze, publish fresh Core v0.4.12, independently authenticate its actual source and six public assets, then separately authorize genuine same-Core bridge v0.3.16 and authenticate its ingress/five public assets. Only those actual public inputs may materialize consumer metadata and authorize stable-tap cutover. No successor SHA, release ID or digest is inferred. Do not overwrite v0.4.9/v0.4.10/v0.4.11 tags, assets or release bodies. Wiki recovery requires its dedicated credential, never a broad-token fallback or binary rerun.
+
 ## Current publication boundary — 2026-10-15
 
 The [Core v0.4.7 ledger](v0.4.7.md) owns current acceptance, not the historical execution records below. Immutable [Core v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7) is public: release `413584934`, published `2026-10-15T08:39:17Z`, exact tag-dereferenced source `52514da5115f09aac22de5429c08f7acdd993258`. [Release CI 38706583599](https://github.com/hanbong5938/desktop-pet/actions/runs/38706583599) / job `116327375871` passed. Six anonymous assets, strict/deep ad-hoc signatures, paired protocol 4 / observation 2 / API 1 and exact 68-file resource closure passed.

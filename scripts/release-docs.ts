@@ -10,7 +10,7 @@ export const CORE_REPOSITORY = "hanbong5938/desktop-pet";
 export const LEGACY_REPOSITORY = "hanbong5938/herdr-desktop-pet";
 
 export function releaseRepository(tag: string): string {
-  const { major, minor } = parseStableTag(tag);
+  const { major, minor } = parseReleaseTag(tag);
   return major === 0 && minor < 4 ? LEGACY_REPOSITORY : CORE_REPOSITORY;
 }
 
@@ -27,16 +27,26 @@ export type ReleaseRecord = {
   assets: { name: string; size: number; state?: string }[];
 };
 
+export function parseReleaseTag(tag: string): {
+  version: string; major: number; minor: number; patch: number; prerelease: string | null;
+} {
+  const match = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(beta\.([1-9][0-9]*)))?$/.exec(tag);
+  if (!match || match[0] !== tag) throw new Error(`Expected vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N without leading zeros: ${tag}`);
+  const [major, minor, patch] = match.slice(1, 4).map(Number);
+  if (![major, minor, patch, ...(match[5] ? [Number(match[5])] : [])].every(Number.isSafeInteger)) {
+    throw new Error(`Tag version exceeds safe integer range: ${tag}`);
+  }
+  return { version: tag.slice(1), major: major!, minor: minor!, patch: patch!, prerelease: match[4] ?? null };
+}
+
 export function parseStableTag(tag: string): { version: string; major: number; minor: number; patch: number } {
-  const match = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(tag);
-  if (!match || match[0] !== tag) throw new Error(`Expected a stable vMAJOR.MINOR.PATCH tag without leading zeros: ${tag}`);
-  const [major, minor, patch] = match.slice(1).map(Number);
-  if (![major, minor, patch].every(Number.isSafeInteger)) throw new Error(`Tag version exceeds safe integer range: ${tag}`);
-  return { version: tag.slice(1), major: major!, minor: minor!, patch: patch! };
+  const { prerelease, ...version } = parseReleaseTag(tag);
+  if (prerelease !== null) throw new Error(`Expected a stable vMAJOR.MINOR.PATCH tag without leading zeros: ${tag}`);
+  return version;
 }
 
 export function requiredAssetNames(tag: string): string[] {
-  const { version } = parseStableTag(tag);
+  const { version } = parseReleaseTag(tag);
   if (releaseRepository(tag) === LEGACY_REPOSITORY) {
     const archive = `HerdrDesktopPet-v${version}-macos-arm64.tar.gz`;
     return [archive, `${archive}.sha256`, "SHA256SUMS"];
@@ -48,7 +58,10 @@ export function requiredAssetNames(tag: string): string[] {
 
 export function isPublishedRelease(record: ReleaseRecord): boolean {
   let required: string[];
-  try { required = requiredAssetNames(record.tag_name); } catch { return false; }
+  try {
+    parseStableTag(record.tag_name);
+    required = requiredAssetNames(record.tag_name);
+  } catch { return false; }
   if (record.html_url !== `https://github.com/${releaseRepository(record.tag_name)}/releases/tag/${record.tag_name}`) return false;
   if (record.draft || record.prerelease || !record.published_at || !Number.isFinite(Date.parse(record.published_at))) return false;
   return required.every((name) => record.assets.some((asset) =>
@@ -506,7 +519,7 @@ export function rewriteRelativeLinks(
 /** Validate the neutral Cargo product version, independently of distribution identity or release notes. */
 export async function validateProductMetadata(root: string, version: string): Promise<void> {
   const tag = `v${version}`;
-  parseStableTag(tag);
+  parseReleaseTag(tag);
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
     name?: unknown; version?: unknown; dependencies?: Record<string, string>; devDependencies?: Record<string, string>;
   };
@@ -547,7 +560,7 @@ export async function validateProductMetadata(root: string, version: string): Pr
 }
 
 export async function generateReleaseBody(root: string, tag: string, repository: string): Promise<string> {
-  const { version } = parseStableTag(tag);
+  const { version } = parseReleaseTag(tag);
   requireRepository(repository);
   if (repository !== CORE_REPOSITORY || releaseRepository(tag) !== CORE_REPOSITORY) {
     throw new Error(`New product releases must use ${CORE_REPOSITORY} and a core release tag (v0.4.0 or newer)`);

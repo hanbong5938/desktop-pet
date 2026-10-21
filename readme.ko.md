@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**현재 후속판: Core v0.4.12 / genuine bridge v0.3.16 — 아직 검증·공개되지 않았습니다.** Core v0.4.11은 release `414563938`, 공개 시각 `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`으로 공개되었고 6개 공개 자산을 독립 검증했습니다. 별도 Wiki 작업은 `WIKI_PUBLISH_TOKEN`이 없었습니다. Genuine bridge v0.3.15 CI `38855045701`은 성공했지만 태그·릴리스는 공개되지 않았습니다. 공개 출처 검증은 과거 이관 복구 수락 검증이 아닙니다. See [current successor ledger](docs/releases/v0.4.12.md).
+
+**과거 시작 결함과 영구 수정:** 소유 VM의 실제 공개 v0.4.11 과거 작업 실행은 `Migration history: current native daemon does not prove the migrated image/profile readiness`로 실패했습니다. 새 receipt·SDK 전달은 없었고 SDK 0.1은 `/opt/homebrew/bin/herdr-desktop-pet` 누락 오류를 유지했습니다. UI Ready 전 관찰 오류가 보존 작업을 잃게 했습니다. v0.4.12는 읽기 전용 discovery로 Ready 전에 작업을 보존하고 기존의 승인 검증된 observation/poll이 나중에 전달합니다. 현재 image/owner/profile·signed-stage·정당한 runtime 시작·Stop·Unknown guard를 유지하며 옛 manager 재실행·plan/journal 재작성·수동 재연결은 하지 않습니다. 대상 소스 회귀 검증 통과는 end-to-end 성공이 아닙니다.
+
+**수락 계약:** 최초 Update 승인 한 번으로 조용한 이관·서명 SDK 교체/로드·정확한 저장 route 전환·같은 Tern 창의 실제 fresh binding·자동 native receipt 뒤에만 승인된 옛 소유자를 폐기합니다. 두 번째 동의·Configure·Connect·ACK·Resume은 없습니다. 각 원래 config/state profile·캐릭터·대사/이력·계정/provider·무관 profile과 Stop·Unknown을 보존합니다. 로컬 7c signed-out GUI/frame-driven sequence 47 및 재시작 sequence 13은 component 증거일 뿐 quiet/authenticated 전달·전체 lifecycle·다른 컴퓨터 복구 증거가 아닙니다.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
@@ -67,6 +76,8 @@
 Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/npm·Xcode Command Line Tools가 필요하며 사전 빌드 설치에는 필요 없습니다. 앱은 ad-hoc 서명·미공증입니다. Herdr 스냅샷에는 호환 로컬 서버(0.9.0 이상), 답장에는 별도 `agent.prompt`가 필요합니다. 선택형 client-attach 자동 시작에는 공식 Herdr 0.9.3에 [연동 저장소의 패치와 호스트 빌드 절차](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)를 적용하거나 실제 훅 지원 호스트를 사용해야 합니다. 순정 0.9.0/0.9.3에는 훅이 없고 플러그인 설치는 호스트를 패치하지 않습니다.
 
 ## 설치와 선택형 연동
+
+**현재 소스의 private 설치 경로:** Standalone은 `HOME`/XDG가 아닌 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용합니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 core checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 옛 Applications 소유자를 자동 이동하지 않습니다. 공개 설치기·동결 릴리스 노트는 각 버전의 기록이며 옛 설치기 재실행으로 잘못된 목적지가 복구되지 않습니다. 일회성 복구는 **Bash로 비공개 제공**하며 배포 제품 기능·native 복구 명령·updater·플러그인 기능이 아닙니다. 저장된 Tern KV의 원래 config/state 쌍과 원본 데이터·백업을 보존하고 Tern/작업은 계속 실행합니다. [비공개 복구 안내](docs/usage.ko.md#일회성-applications-복구)를 보세요. 이전 공개 Python 복구 자산은 철회됐으며 과거 beta.8 노트는 현재 실행 안내가 아닙니다. 새 릴리스·버전 변경은 없습니다.
 
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 

@@ -3,20 +3,32 @@
 pub mod identity;
 pub mod installation;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/codec.rs"]
+#[path = "../../../migration/legacy-0.3.16/codec.rs"]
 pub mod legacy_codec;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/entry.rs"]
+#[path = "../../../migration/legacy-0.3.16/entry.rs"]
 pub mod legacy_entry;
 pub mod migration;
+pub mod native_runtime;
 #[cfg(desktop_pet_legacy)]
-#[path = "../../../migration/legacy-0.3.12/origin.rs"]
+#[path = "../../../migration/legacy-0.3.16/origin.rs"]
 mod origin;
 #[cfg(not(desktop_pet_legacy))]
 mod origin;
 mod processes;
 pub mod protocol;
 pub mod releases;
+pub mod standalone_install;
+pub mod standalone_relocation;
+
+/// Additive release contract. Historical absence is valid, not authorization.
+pub fn installation_client_contract(value: &serde_json::Value) -> Result<Option<u32>, String> {
+    match value.get("installation_client_contract") {
+        None => Ok(None),
+        Some(value) if value.as_u64() == Some(1) && value.is_u64() => Ok(Some(1)),
+        Some(_) => Err("unsupported installation client contract".into()),
+    }
+}
 
 use desktop_pet_contracts::{ObservationSelection, OBSERVATION_SELECTION_ENV};
 use serde::{Deserialize, Serialize};
@@ -452,7 +464,20 @@ fn validate_capabilities(
     {
         return Err("candidate does not support the integration API".into());
     }
+    if migration_handover_capability(capabilities)?.is_some() && identity::LEGACY {
+        return Err("legacy candidate cannot authorize neutral migration handover".into());
+    }
     validate_observation_capability(capabilities, mode)
+}
+
+pub(crate) fn migration_handover_capability(
+    capabilities: &serde_json::Value,
+) -> Result<Option<u64>, String> {
+    match capabilities.get("migration_handover_protocol") {
+        None => Ok(None),
+        Some(value) if value.as_u64() == Some(1) => Ok(Some(1)),
+        Some(_) => Err("unsupported migration handover capability".into()),
+    }
 }
 
 fn validate_observation_capability(
@@ -515,12 +540,22 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         &plan.context,
     )?;
     let source_id = executable_identity(&source)?;
-    let bytes = owned_file(&source, 64 * 1024 * 1024)?;
     let base = protocol::private_updates(&plan.context.state_dir)?;
     let target = base.join(format!("helper-{}", plan.operation_id));
-    protocol::write_private_new(&target, &bytes, 0o700)?;
+    stage_verified_helper(&source_id, &target)?;
+    Ok(target)
+}
+
+/// Shared operation-private helper copy. The destination's private parent must
+/// already exist; no app-image parent or replacement root is created here.
+pub fn stage_verified_helper(source: &ExecutableIdentity, target: &Path) -> Result<(), String> {
+    if executable_identity(&source.path)? != *source {
+        return Err("helper source changed before durable copy".into());
+    }
+    let bytes = owned_file(&source.path, 64 * 1024 * 1024)?;
+    protocol::write_private_new(target, &bytes, 0o700)?;
     let verified: Result<(), String> = (|| {
-        if executable_identity(&target)?.sha256 != source_id.sha256 {
+        if executable_identity(target)?.sha256 != source.sha256 {
             return Err("staged helper differs from source".into());
         }
         #[cfg(target_os = "macos")]
@@ -537,10 +572,40 @@ pub fn stage_helper(plan: &UpdatePlan) -> Result<PathBuf, String> {
         Ok(())
     })();
     if verified.is_err() {
-        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(target);
     }
     verified?;
-    Ok(target)
+    Ok(())
+}
+
+pub fn verify_executing_helper(expected: &Path) -> Result<ExecutableIdentity, String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    if fs::canonicalize(&current).map_err(|e| e.to_string())?
+        != fs::canonicalize(expected).map_err(|e| e.to_string())?
+    {
+        return Err("helper must execute from its operation-private staged copy".into());
+    }
+    let metadata = fs::symlink_metadata(expected).map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > 64 * 1024 * 1024
+    {
+        return Err("staged helper is not a bounded private owned file".into());
+    }
+    #[cfg(target_os = "macos")]
+    origin::command_output(
+        Path::new("/usr/bin/codesign"),
+        &[
+            "--verify",
+            "--strict",
+            expected.to_str().ok_or("invalid helper path")?,
+        ],
+        4096,
+        10,
+    )?;
+    executable_identity(expected)
 }
 
 pub fn write_plan(plan: &UpdatePlan) -> Result<PathBuf, String> {
@@ -624,6 +689,32 @@ mod observation_capability_tests {
             changed[field] = serde_json::json!(999);
             assert!(validate_capabilities(&changed, &mode).is_err());
         }
+    }
+
+    #[test]
+    fn historical_absence_is_not_handover_support_and_malformed_support_is_rejected() {
+        let mut capabilities = identity::capabilities();
+        capabilities
+            .as_object_mut()
+            .unwrap()
+            .remove("migration_handover_protocol");
+        assert_eq!(migration_handover_capability(&capabilities).unwrap(), None);
+        assert!(validate_capabilities(&capabilities, &ObservationSelection::Auto).is_ok());
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("1"),
+            serde_json::json!(0),
+            serde_json::json!(2),
+        ] {
+            capabilities["migration_handover_protocol"] = invalid;
+            assert!(validate_capabilities(&capabilities, &ObservationSelection::Auto).is_err());
+        }
+        capabilities["migration_handover_protocol"] = serde_json::json!(1);
+        assert_eq!(
+            validate_capabilities(&capabilities, &ObservationSelection::Auto).is_ok(),
+            !identity::LEGACY
+        );
     }
 
     #[cfg(not(desktop_pet_legacy))]

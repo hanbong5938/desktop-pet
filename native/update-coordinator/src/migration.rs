@@ -18,6 +18,28 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "migration_approval.rs"]
+mod approval;
+pub use approval::{
+    approve_profile_update, authorize_update_approval, delegated_approval,
+    prepare_automatic_bridge_plan,
+};
+#[path = "migration_integrations.rs"]
+mod integrations;
+pub use integrations::{
+    committed_route, integration_handover, observe_for_context, observe_relocation_tern,
+    observe_relocation_tern_windows, refresh_committed_integrations, verify_standalone_settlement,
+    MigrationIntegrationStatus, TernDelivery,
+};
+#[path = "migration_ancestry.rs"]
+mod ancestry;
+pub use ancestry::LegacySourceAncestor;
+#[path = "migration_tern_config.rs"]
+mod tern_config;
+pub use tern_config::{
+    capture_relocation_tern, verify_relocation_tern_unchanged, TernConfiguration, TernConnection,
+};
+
 const MAX_PLAN: u64 = 256 * 1024;
 const MAX_FRAME: usize = 16 * 1024;
 pub const PLAN_ENV: &str = "DESKTOP_PET_MIGRATION_PLAN";
@@ -39,6 +61,9 @@ fn visible(
     presentation: Option<&dyn MigrationPresentation>,
     plan: &MigrationPlan,
 ) -> Result<(), String> {
+    if delegated_approval(plan)? {
+        return Ok(());
+    }
     presentation
         .ok_or("migration mutation requires independently visible native helper consent")?
         .require_visible(plan)
@@ -130,6 +155,8 @@ pub struct MigrationTarget {
     pub origin: InstallOrigin,
     /// Signed release archive stage is retained even when an existing install is reused.
     pub staged_bundle: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_installation: Option<Box<crate::installation::InstallationRecord>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +167,8 @@ pub struct MigrationPlan {
     pub token: String,
     pub source_image: ExecutableIdentity,
     pub source_origin: LegacyOrigin,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_ancestry: Vec<LegacySourceAncestor>,
     /// Every live profile on the source root, including the selected first profile.
     pub profiles: Vec<LegacyProfile>,
     pub readonly_target_profiles: Vec<protocol::MigrationProfile>,
@@ -151,6 +180,12 @@ pub struct MigrationPlan {
     pub adopt_as_default: bool,
     pub retirement_consent: bool,
     pub tern_reconnect_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tern_delivery: Option<TernDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tern_deliveries: Vec<TernDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tern_delivery_problem: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -162,6 +197,7 @@ pub enum MigrationPhase {
     Adopting,
     Starting,
     NativeReady,
+    Integrating,
     Retiring,
     RetirementFailed,
     ManagerUnknown,
@@ -185,6 +221,20 @@ pub struct ManagerEvidence {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct MigrationTargetProfile {
+    pub config_dir: PathBuf,
+    pub state_dir: PathBuf,
+    pub pid: Option<u32>,
+    pub instance_id: Option<String>,
+    pub image: ExecutableIdentity,
+    pub native_ready: bool,
+    pub committed: bool,
+    /// Durable intent fences rollback when a Commit reply is lost.
+    #[serde(default)]
+    pub commit_requested: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MigrationRecord {
     pub version: u32,
     pub operation_id: String,
@@ -200,9 +250,23 @@ pub struct MigrationRecord {
     pub default_adopted: bool,
     pub native_ready: bool,
     pub target_committed: bool,
+    /// Empty only for historical journals; primary fields never prove secondary targets.
+    #[serde(default)]
+    pub target_profiles: Vec<MigrationTargetProfile>,
+    #[serde(default)]
+    pub stopped_target_profiles: Vec<MigrationProfilePaths>,
+    #[serde(default)]
+    pub restored_profiles: Vec<protocol::MigrationProfile>,
     pub manager: Option<ManagerEvidence>,
     pub target_manager: Option<ManagerEvidence>,
+    /// Actual manager-derived image; the approved public release remains immutable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_image: Option<ExecutableIdentity>,
     pub reconnected_profiles: Vec<MigrationProfilePaths>,
+    #[serde(default)]
+    pub integration_status: Vec<MigrationIntegrationStatus>,
+    #[serde(default)]
+    pub integration_delivery_error: Option<String>,
     pub retirement_attempt: u32,
     pub error: Option<String>,
 }
@@ -211,6 +275,7 @@ pub struct MigrationRecord {
 pub enum MigrationCommand {
     Prepare,
     ConsentAck,
+    DelegationAck,
     Stop,
     Abort,
     Commit,
@@ -367,7 +432,47 @@ pub fn read_record(plan: &MigrationPlan) -> Result<MigrationRecord, String> {
     {
         return Err("migration journal does not match immutable evidence".into());
     }
+    target_image(plan, &record)?;
     Ok(record)
+}
+
+/// A different installed SHA is allowed only for the certain, successful Brew
+/// transaction whose original-release/signing derivation was verified on disk.
+pub fn target_image<'a>(
+    plan: &'a MigrationPlan,
+    record: &'a MigrationRecord,
+) -> Result<&'a ExecutableIdentity, String> {
+    let Some(image) = &record.target_image else {
+        return Ok(&plan.target.image);
+    };
+    image_valid(image)?;
+    if image.path != plan.target.image.path {
+        return Err("actual migration candidate changed its approved executable path".into());
+    }
+    if image != &plan.target.image {
+        let InstallOrigin::Homebrew { formula, .. } = &plan.target.origin else {
+            return Err("only the approved Brew owner may derive the migration image".into());
+        };
+        let manager = record
+            .target_manager
+            .as_ref()
+            .ok_or("derived migration candidate has no actual manager result")?;
+        let action = if plan.target.previous_installation.is_some() {
+            "upgrade"
+        } else {
+            "install"
+        };
+        if !manager_can_resume(manager)
+            || manager.exit_code != Some(0)
+            || Some(&manager.program) != plan.target_manager_program.as_ref()
+            || manager.args.len() != 2
+            || manager.args[0] != action
+            || manager.args[1] != formula.as_str()
+        {
+            return Err("derived migration candidate lacks its certain successful approved manager transaction".into());
+        }
+    }
+    Ok(image)
 }
 pub fn read_plan(path: &Path) -> Result<MigrationPlan, String> {
     let plan: MigrationPlan =
@@ -376,12 +481,12 @@ pub fn read_plan(path: &Path) -> Result<MigrationPlan, String> {
     Ok(plan)
 }
 pub fn validate_plan(plan: &MigrationPlan) -> Result<(), String> {
-    if plan.target.release.version != crate::identity::neutral::VERSION
+    if plan.target.release.version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         || plan.target.release.channel != crate::ReleaseChannel::Stable
     {
         return Err(format!(
             "migration requires approved neutral stable {} release",
-            crate::identity::neutral::VERSION
+            crate::identity::neutral::MIGRATION_TARGET_VERSION
         ));
     }
     validate_plan_structure(plan)
@@ -402,7 +507,28 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
             && !profile.tern_reconnect_required) {
         return Err("known Tern profile reconnect requirements cannot be dropped from migration consent".into());
     }
+    for delivery in plan.tern_delivery.iter().chain(&plan.tern_deliveries) {
+        image_valid(&delivery.program)?;
+        tern_config::validate_delivery(plan, delivery)?;
+        if !plan.tern_reconnect_required
+            || delivery.package
+                != plan
+                    .target
+                    .staged_bundle
+                    .join("Contents/Resources/integrations/tern-desktop-pet")
+            || !plan.profiles.iter().any(|profile| {
+                profile.tern_reconnect_required
+                    && profile.config_dir == delivery.configuration.connection.config_dir
+                    && profile.state_dir == delivery.configuration.connection.state_dir
+            })
+            || !hex(&delivery.package_sha256, 64)
+            || !hex(&delivery.revision, 40)
+        {
+            return Err("Tern consumer delivery does not match this bounded signed target".into());
+        }
+    }
     image_valid(&plan.source_image)?;
+    ancestry::validate_source_ancestry(plan)?;
     image_valid(&plan.target.image)?;
     crate::ensure_absolute(plan.source_origin.root())?;
     if !plan
@@ -418,6 +544,22 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
     {
         return Err("source and neutral installation roots must be disjoint".into());
     }
+    if let Some(previous) = &plan.target.previous_installation {
+        image_valid(&previous.image)?;
+        if previous.version != 1
+            || previous.protocol != 4
+            || previous.observation_mode != 2
+            || previous.integration_api != 1
+            || previous.executable != previous.image.path
+            || previous.origin != plan.target.origin
+            || !matches!(previous.app_version.as_str(), "0.4.7" | "0.4.8")
+        {
+            return Err(
+                "previous neutral owner upgrade proof is incompatible with this approved target"
+                    .into(),
+            );
+        }
+    }
     if plan.readonly_target_profiles.len() > 64 {
         return Err("read-only target census exceeds bound".into());
     }
@@ -425,17 +567,21 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
         image_valid(&profile.image)?;
         crate::ensure_absolute(&profile.config_dir)?;
         crate::ensure_absolute(&profile.state_dir)?;
-        if profile.image != plan.target.image
+        if (profile.image != plan.target.image
+            && !matches!(&plan.target.origin, InstallOrigin::Homebrew { cellar_formula_root, .. } if profile.image.path.starts_with(cellar_formula_root)))
             || !instance_valid(&profile.instance_id)
             || profile.pid == 0
             || profile.image.path.starts_with(plan.source_origin.root())
-            || plan
-                .profiles
-                .iter()
-                .any(|source| source.state_dir == profile.state_dir || source.pid == profile.pid)
-            || plan.readonly_target_profiles[..index]
-                .iter()
-                .any(|other| other.state_dir == profile.state_dir || other.pid == profile.pid)
+            || plan.profiles.iter().any(|source| {
+                source.state_dir == profile.state_dir
+                    || source.config_dir == profile.config_dir
+                    || source.pid == profile.pid
+            })
+            || plan.readonly_target_profiles[..index].iter().any(|other| {
+                other.state_dir == profile.state_dir
+                    || other.config_dir == profile.config_dir
+                    || other.pid == profile.pid
+            })
         {
             return Err(
                 "read-only target profile is not an independent pinned neutral instance".into(),
@@ -485,9 +631,11 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
         if profile.pid == 0
             || profile.pid > i32::MAX as u32
             || !instance_valid(&profile.instance_id)
-            || plan.profiles[..index]
-                .iter()
-                .any(|other| other.state_dir == profile.state_dir || other.pid == profile.pid)
+            || plan.profiles[..index].iter().any(|other| {
+                other.state_dir == profile.state_dir
+                    || other.config_dir == profile.config_dir
+                    || other.pid == profile.pid
+            })
             || profile.environment.len() > 16
         {
             return Err("invalid or duplicate source profile".into());
@@ -523,10 +671,15 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
                     | "XDG_STATE_HOME"
                     | "HOME"
                     | "HERDR_PET_OBSERVATION_MODE"
+                    | "TERN_CONFIG_DIR"
+                    | "TERN_DAEMON_SOCKET"
             ) || value.len() > 4096
                 || value.contains('\0')
             {
                 return Err("unapproved bridge routing environment".into());
+            }
+            if matches!(key.as_str(), "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET") {
+                crate::ensure_absolute(Path::new(value))?;
             }
         }
         if let Some(mode) = profile.environment.get("HERDR_PET_OBSERVATION_MODE") {
@@ -559,8 +712,11 @@ fn validate_plan_structure(plan: &MigrationPlan) -> Result<(), String> {
     {
         return Err("migration locator/profile pointer is not a canonical product record".into());
     }
-    if plan.adopt_as_default && !is_legacy_base_profile(&plan.profiles[0], &plan.source_origin)? {
-        return Err("migration cannot make a beta/Tern/custom profile the default; use explicit profile adopt separately".into());
+    if plan.adopt_as_default
+        && plan.target.release.version == crate::identity::neutral::MIGRATION_TARGET_VERSION
+        && !default_profile_matches(&plan.previous_default_profile, &plan.profiles[0])?
+    {
+        return Err("migration cannot replace an unrelated existing default profile".into());
     }
     match &plan.source_origin {
         LegacyOrigin::Homebrew {
@@ -724,7 +880,8 @@ fn exchange_bounded(
         return Err("control socket is not private and owned".into());
     }
     let deadline = Instant::now() + timeout;
-    let mut stream = connect_bounded(path, deadline)?;
+    let mut stream = connect_bounded(path, deadline)
+        .map_err(|error| format!("migration control connect {}: {error}", path.display()))?;
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
@@ -738,16 +895,18 @@ fn exchange_bounded(
     }
     stream
         .set_read_timeout(Some(timeout))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("migration control initial read timeout: {error}"))?;
     stream
         .set_write_timeout(Some(timeout))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("migration control write timeout: {error}"))?;
     let mut bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;
     if bytes.len() >= MAX_FRAME {
         return Err("migration control request exceeds bound".into());
     }
     bytes.push(b'\n');
-    stream.write_all(&bytes).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&bytes)
+        .map_err(|error| format!("migration control request write: {error}"))?;
     let mut reply = Vec::with_capacity(2048);
     let mut buffer = [0u8; 4096];
     while reply.len() < response_limit {
@@ -756,11 +915,11 @@ fn exchange_bounded(
             .ok_or("migration control deadline expired")?;
         stream
             .set_read_timeout(Some(remaining))
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| format!("migration control remaining read timeout: {error}"))?;
         let available = (response_limit - reply.len()).min(buffer.len());
         let count = stream
             .read(&mut buffer[..available])
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| format!("migration control reply read: {error}"))?;
         if count == 0 {
             return Err("control reply truncated".into());
         }
@@ -788,7 +947,10 @@ fn status_at(socket: &Path) -> Result<LiveStatus, String> {
     .map_err(|e| e.to_string())
 }
 fn live_observation(live: &LiveStatus) -> Result<ObservationSelection, String> {
-    if live.app_version == "0.3.12" {
+    if matches!(
+        live.app_version.as_str(),
+        "0.3.12" | "0.3.13" | "0.3.14" | "0.3.15" | "0.3.16"
+    ) {
         ObservationSelection::migrate_legacy_input(Some(&live.observation_mode))
     } else {
         live.observation_mode.parse()
@@ -823,8 +985,9 @@ fn verify_status(
     live: &LiveStatus,
     target: bool,
 ) -> Result<(), String> {
-    let image = if target {
-        &plan.target.image
+    let target_record = target.then(|| read_record(plan)).transpose()?;
+    let image = if let Some(record) = &target_record {
+        target_image(plan, record)?
     } else {
         &plan.source_image
     };
@@ -836,9 +999,9 @@ fn verify_status(
         || !live.control_ready
         || live.app_version
             != if target {
-                crate::identity::neutral::VERSION
+                crate::identity::neutral::MIGRATION_TARGET_VERSION
             } else {
-                "0.3.12"
+                "0.3.16"
             }
         || live.updater_protocol != if target { 4 } else { 3 }
         || live.observation_capability != if target { 2 } else { 1 }
@@ -883,7 +1046,7 @@ fn control(
         token: plan.token.clone(),
         plan_path: evidence_path(plan),
         source_image: if target {
-            plan.target.image.clone()
+            target_image(plan, &read_record(plan)?)?.clone()
         } else {
             plan.source_image.clone()
         },
@@ -944,7 +1107,7 @@ fn verify_source(plan: &MigrationPlan) -> Result<(), String> {
         return Err("bridge image changed".into());
     }
     let version = command_output(&plan.source_image.path, &["--version".into()])?;
-    if version.trim() != "herdr-desktop-pet 0.3.12" {
+    if version.trim() != "herdr-desktop-pet 0.3.16" {
         return Err("Operation A must finish with the genuine bridge image".into());
     }
     let caps: serde_json::Value = serde_json::from_str(&command_output(
@@ -1156,12 +1319,12 @@ pub fn startup_authorization(
         }
         if record.phase != MigrationPhase::RollingBack
             || record.manager.is_some()
-            || context.version != "0.3.12"
+            || context.version != "0.3.16"
         {
             return Err("bridge restart lacks valid rollback authorization".into());
         }
-    } else if context.running != plan.target.image
-        || context.version != crate::identity::neutral::VERSION
+    } else if &context.running != target_image(&plan, &record)?
+        || context.version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         || record.phase != MigrationPhase::Starting
     {
         return Err("target startup lacks held migration authorization".into());
@@ -1215,10 +1378,12 @@ pub fn verify_live_control(
                 && profile.instance_id == context.instance_id
                 && context.running == plan.source_image
         }
-        (true, MigrationCommand::ConsentAck) => {
+        (true, MigrationCommand::ConsentAck | MigrationCommand::DelegationAck) => {
             record.phase == MigrationPhase::Preparing
                 && record.prepared_profiles.contains(&profile.instance_id)
                 && context.running == plan.source_image
+                && (request.command != MigrationCommand::DelegationAck
+                    || delegated_approval(&plan)?)
         }
         (true, MigrationCommand::Stop) => {
             record.phase == MigrationPhase::Stopping
@@ -1239,24 +1404,34 @@ pub fn verify_live_control(
         }
         (false, MigrationCommand::Commit) => {
             record.native_ready
-                && record.target_pid == Some(std::process::id())
-                && record.target_instance.as_deref() == Some(&context.instance_id)
+                && record.target_profiles.iter().any(|target| {
+                    target.config_dir == context.config_dir
+                        && target.state_dir == context.state_dir
+                        && target.pid == Some(std::process::id())
+                        && target.instance_id.as_deref() == Some(context.instance_id.as_str())
+                        && target.native_ready
+                        && target.commit_requested
+                        && target.image == context.running
+                })
                 && matches!(
                     record.phase,
                     MigrationPhase::NativeReady
+                        | MigrationPhase::Integrating
                         | MigrationPhase::Retiring
                         | MigrationPhase::RetirementFailed
                         | MigrationPhase::ManagerUnknown
                         | MigrationPhase::AwaitingReconnect
                         | MigrationPhase::Complete
                 )
-                && context.running == plan.target.image
+                && &context.running == target_image(&plan, &record)?
         }
         (false, MigrationCommand::Stop) => {
             matches!(
                 record.phase,
-                MigrationPhase::RollingBack | MigrationPhase::UserStopped
-            ) && context.running == plan.target.image
+                MigrationPhase::RollingBack
+                    | MigrationPhase::UserStopped
+                    | MigrationPhase::RetirementFailed
+            ) && &context.running == target_image(&plan, &record)?
         }
         _ => false,
     };
@@ -1282,9 +1457,15 @@ fn make_record(plan: &MigrationPlan, bytes: &[u8]) -> MigrationRecord {
         default_adopted: false,
         native_ready: false,
         target_committed: false,
+        target_profiles: Vec::new(),
+        stopped_target_profiles: Vec::new(),
+        restored_profiles: Vec::new(),
         manager: None,
         target_manager: None,
+        target_image: None,
         reconnected_profiles: Vec::new(),
+        integration_status: Vec::new(),
+        integration_delivery_error: None,
         retirement_attempt: 0,
         error: None,
     }
@@ -1389,21 +1570,24 @@ fn restore_pointers(plan: &MigrationPlan, record: &MigrationRecord) -> Result<()
     }
     Ok(())
 }
+fn neutral_environment_key(key: &str) -> bool {
+    matches!(
+        key,
+        "HERDR_BIN_PATH"
+            | "HERDR_SOCKET_PATH"
+            | "HERDR_ENV"
+            | "HOME"
+            | "XDG_CONFIG_HOME"
+            | "XDG_STATE_HOME"
+            | "TERN_CONFIG_DIR"
+            | "TERN_DAEMON_SOCKET"
+    )
+}
 fn neutral_environment(profile: &LegacyProfile) -> BTreeMap<String, String> {
     profile
         .environment
         .iter()
-        .filter(|(key, _)| {
-            matches!(
-                key.as_str(),
-                "HERDR_BIN_PATH"
-                    | "HERDR_SOCKET_PATH"
-                    | "HERDR_ENV"
-                    | "HOME"
-                    | "XDG_CONFIG_HOME"
-                    | "XDG_STATE_HOME"
-            )
-        })
+        .filter(|(key, _)| neutral_environment_key(key))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -1416,8 +1600,9 @@ fn launch(
     if stop_requested(plan)? {
         return Err("user Stop prevents migration launch".into());
     }
-    let image = if target {
-        &plan.target.image
+    let target_record = target.then(|| read_record(plan)).transpose()?;
+    let image = if let Some(record) = &target_record {
+        target_image(plan, record)?
     } else {
         &plan.source_image
     };
@@ -1596,6 +1781,18 @@ pub fn run_with_presentation(
     run_impl(path, Some(presentation))
 }
 #[cfg(not(desktop_pet_legacy))]
+pub fn run_delegated(path: &Path, retirement_only: bool) -> Result<MigrationRecord, String> {
+    let plan = read_plan(path)?;
+    if !delegated_approval(&plan)? {
+        return Err("automatic migration requires exact delegated update approval".into());
+    }
+    if retirement_only {
+        resume_retirement_impl(path, None)
+    } else {
+        run_impl(path, None)
+    }
+}
+#[cfg(not(desktop_pet_legacy))]
 fn run_impl(
     path: &Path,
     presentation: Option<&dyn MigrationPresentation>,
@@ -1626,6 +1823,7 @@ fn run_impl(
     unchanged(&plan.previous_locator)?;
     unchanged(&plan.previous_default_profile)?;
     verify_source(&plan)?;
+    ancestry::verify_source_ancestry(&plan)?;
     for profile in &plan.profiles {
         verify_status(&plan, profile, &status(profile)?, false)?;
     }
@@ -1643,8 +1841,26 @@ fn run_impl(
         Ok(()) => Ok(record),
         Err(error) => {
             record.error = Some(error);
-            if record.target_committed || record.phase == MigrationPhase::ManagerUnknown {
-                if record.phase != MigrationPhase::ManagerUnknown {
+            if commit_may_have_applied(&record) || record.phase == MigrationPhase::ManagerUnknown {
+                if !record.target_committed
+                    && record
+                        .target_profiles
+                        .iter()
+                        .any(|target| target.commit_requested || target.committed)
+                {
+                    record.error = record.error.take().map(|error| format!(
+                        "Partial or uncertain per-profile Commit; committed targets retained, remaining profiles not confirmed; legacy retirement pending. {error}"
+                    ));
+                }
+                if stop_requested(&plan)? {
+                    transition(
+                        &plan,
+                        &mut record,
+                        MigrationPhase::UserStopped,
+                        presentation,
+                    )?;
+                    stop_launched_targets(&plan, &mut record, true, presentation)?;
+                } else if record.phase != MigrationPhase::ManagerUnknown {
                     transition(
                         &plan,
                         &mut record,
@@ -1654,7 +1870,8 @@ fn run_impl(
                 } else {
                     save(&plan, &record)?;
                 }
-                // Native readiness and retirement completion remain separate.
+                // A partial/uncertain Commit never rolls back an already committed target.
+                // Keep ownership and the old installation until integration/retirement resolves.
                 Ok(record)
             } else {
                 rollback(&plan, &reservation, &mut record, presentation)?;
@@ -1689,6 +1906,15 @@ fn execute(
     }
     transition(plan, record, MigrationPhase::Staged, presentation)?;
     install_target_manager(plan, record, presentation)?;
+    if record.target_manager.is_some() {
+        let installed_stage = crate::installation::stage_migration_target_with_image(
+            plan,
+            target_image(plan, record)?,
+        )?;
+        if installed_stage != staged {
+            return Err("target owner upgrade changed the approved signed stage".into());
+        }
+    }
     if presentation.is_some() {
         let ref_plan = plan.clone();
         off_ui(presentation, move || verify_integration_ref(&ref_plan))?;
@@ -1722,13 +1948,20 @@ fn execute(
     // mutations or host work can now race the source shutdown.
     verify_source(plan)?;
     visible(presentation, plan)?;
+    let delegated = delegated_approval(plan)?;
     for profile in &plan.profiles {
-        assert_final_source_visibility(plan, profile)?;
+        if !delegated {
+            assert_final_source_visibility(plan, profile)?;
+        }
         presented_control(
             plan,
             profile,
             &profile.instance_id,
-            MigrationCommand::ConsentAck,
+            if delegated {
+                MigrationCommand::DelegationAck
+            } else {
+                MigrationCommand::ConsentAck
+            },
             false,
             presentation,
         )?;
@@ -1738,7 +1971,7 @@ fn execute(
         save(plan, record)?;
     }
     visible(presentation, plan)?;
-    write_final_visible_ack(plan, record, false)?;
+    write_authorization_ack(plan, record, false)?;
     transition(plan, record, MigrationPhase::Stopping, presentation)?;
     for profile in &plan.profiles {
         if stop_requested(plan)? {
@@ -1760,21 +1993,24 @@ fn execute(
     if stop_requested(plan)? {
         return Err("user Stop before adoption".into());
     }
+    let installed_image = target_image(plan, record)?.clone();
     if reservation.target_reuse_present()? {
-        let existing = crate::installation::inspect(&plan.target.image.path)?;
-        if existing.image != plan.target.image
+        let existing = crate::installation::inspect(&installed_image.path)?;
+        if existing.image != installed_image
             || existing.origin != plan.target.origin
-            || existing.app_version != crate::identity::neutral::VERSION
+            || existing.app_version != crate::identity::neutral::MIGRATION_TARGET_VERSION
         {
             return Err(
                 "live read-only target installation changed; migration may not replace it".into(),
             );
         }
     } else {
-        crate::installation::commit_migration_target(plan, &staged)?;
+        crate::installation::commit_migration_target(plan, &staged, &installed_image)?;
     }
-    if executable_identity(&plan.target.image.path)? != plan.target.image {
-        return Err("installed target differs from staged consent".into());
+    if executable_identity(&installed_image.path)? != installed_image {
+        return Err(
+            "installed target differs from its verified approved release derivation".into(),
+        );
     }
     transition(plan, record, MigrationPhase::Adopting, presentation)?;
     reservation.with_pointer_mutation(|| adopt_pointers(plan, record))?;
@@ -1782,34 +2018,189 @@ fn execute(
         return Err("user Stop before target launch".into());
     }
     transition(plan, record, MigrationPhase::Starting, presentation)?;
-    let selected = &plan.profiles[0];
-    let authorization = reservation.authorize_start(
-        &plan.target.origin,
-        &plan.target.image,
-        &selected.state_dir,
-    )?;
-    let pid = launch(plan, selected, true, authorization)?;
-    record.target_pid = Some(pid);
+    record.target_profiles = plan
+        .profiles
+        .iter()
+        .map(|profile| MigrationTargetProfile {
+            config_dir: profile.config_dir.clone(),
+            state_dir: profile.state_dir.clone(),
+            pid: None,
+            instance_id: None,
+            image: installed_image.clone(),
+            native_ready: false,
+            committed: false,
+            commit_requested: false,
+        })
+        .collect();
     save(plan, record)?;
-    let live = wait_ready(plan, selected, pid, true, presentation)?;
-    record.target_instance = Some(live.instance_id.clone());
-    record.native_ready = true;
-    transition(plan, record, MigrationPhase::NativeReady, presentation)?;
-    if stop_requested(plan)? {
-        return Err("user Stop before migration commit".into());
+    integrations::retain_profile_plans(plan, record)?;
+    for (index, profile) in plan.profiles.iter().enumerate() {
+        let authorization = reservation.authorize_start(
+            &plan.target.origin,
+            &installed_image,
+            &profile.state_dir,
+        )?;
+        let pid = launch(plan, profile, true, authorization)?;
+        record.target_profiles[index].pid = Some(pid);
+        if index == 0 {
+            record.target_pid = Some(pid);
+        }
+        save(plan, record)?;
+        let live = wait_ready(plan, profile, pid, true, presentation)?;
+        record.target_profiles[index].instance_id = Some(live.instance_id.clone());
+        record.target_profiles[index].native_ready = true;
+        if index == 0 {
+            record.target_instance = Some(live.instance_id);
+        }
+        save(plan, record)?;
     }
-    presented_control(
-        plan,
-        selected,
-        &live.instance_id,
-        MigrationCommand::Commit,
-        true,
-        presentation,
-    )?;
-    record.target_committed = true;
-    save(plan, record)?;
+    sync_target_aggregates(plan, record);
+    transition(plan, record, MigrationPhase::NativeReady, presentation)?;
+    for (index, profile) in plan.profiles.iter().enumerate() {
+        if stop_requested(plan)? {
+            return Err("user Stop before per-profile migration commit".into());
+        }
+        let instance = record.target_profiles[index]
+            .instance_id
+            .clone()
+            .ok_or("native-ready target instance missing")?;
+        record.target_profiles[index].commit_requested = true;
+        save(plan, record)?;
+        presented_control(
+            plan,
+            profile,
+            &instance,
+            MigrationCommand::Commit,
+            true,
+            presentation,
+        )?;
+        record.target_profiles[index].committed = true;
+        sync_target_aggregates(plan, record);
+        save(plan, record)?;
+    }
+    integrate_before_retirement(plan, record, presentation)?;
     retire(plan, reservation, record, presentation)?;
     Ok(())
+}
+
+fn target_profiles_complete(plan: &MigrationPlan, record: &MigrationRecord) -> bool {
+    let image = record.target_image.as_ref().unwrap_or(&plan.target.image);
+    record.target_profiles.len() == plan.profiles.len()
+        && !plan.profiles.is_empty()
+        && plan.profiles.iter().all(|profile| {
+            record
+                .target_profiles
+                .iter()
+                .filter(|target| {
+                    target.config_dir == profile.config_dir
+                        && target.state_dir == profile.state_dir
+                        && target
+                            .pid
+                            .is_some_and(|pid| pid != 0 && pid <= i32::MAX as u32)
+                        && target.instance_id.as_deref().is_some_and(instance_valid)
+                        && &target.image == image
+                })
+                .count()
+                == 1
+        })
+}
+
+fn sync_target_aggregates(plan: &MigrationPlan, record: &mut MigrationRecord) {
+    let complete_set = target_profiles_complete(plan, record);
+    record.native_ready = complete_set
+        && record
+            .target_profiles
+            .iter()
+            .all(|target| target.native_ready);
+    record.target_committed =
+        complete_set && record.target_profiles.iter().all(|target| target.committed);
+}
+
+fn retirement_gate(
+    plan: &MigrationPlan,
+    record: &MigrationRecord,
+    integrations_confirmed: bool,
+) -> Result<(), String> {
+    if !target_profiles_complete(plan, record)
+        || !record.native_ready
+        || !record.target_committed
+        || record
+            .target_profiles
+            .iter()
+            .any(|target| !target.native_ready || !target.committed)
+    {
+        return Err(
+            "legacy retirement requires every approved profile's own native-ready durable Commit"
+                .into(),
+        );
+    }
+    if !integrations_confirmed {
+        return Err(
+            "app committed; actual SDK handover/binding missing; legacy retirement pending".into(),
+        );
+    }
+    Ok(())
+}
+
+fn commit_may_have_applied(record: &MigrationRecord) -> bool {
+    record.target_committed
+        || record
+            .target_profiles
+            .iter()
+            .any(|target| target.committed || target.commit_requested)
+}
+
+#[cfg(not(desktop_pet_legacy))]
+fn integrate_before_retirement(
+    plan: &MigrationPlan,
+    record: &mut MigrationRecord,
+    presentation: Option<&dyn MigrationPresentation>,
+) -> Result<(), String> {
+    verify_all_committed_targets(plan, record)?;
+    transition(plan, record, MigrationPhase::Integrating, presentation)?;
+    if stop_requested(plan)? {
+        return Err("user Stop before integration delivery".into());
+    }
+    let delivery = if presentation.is_some() {
+        thread::scope(|scope| {
+            let task = scope.spawn(|| integrations::begin_fresh_integrations(plan, record));
+            while !task.is_finished() {
+                pump(presentation);
+                thread::sleep(Duration::from_millis(25));
+            }
+            task.join()
+                .map_err(|_| "migration consumer delivery worker panicked".to_string())?
+        })
+    } else {
+        integrations::begin_fresh_integrations(plan, record)
+    };
+    if let Err(error) = delivery {
+        record.integration_delivery_error = Some(error.clone());
+        save(plan, record)?;
+        return Err(format!(
+            "app committed; integration unavailable; legacy retirement pending: {error}"
+        ));
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        pump(presentation);
+        if stop_requested(plan)? {
+            return Err("user Stop while awaiting actual integration binding".into());
+        }
+        verify_all_committed_targets(plan, record)?;
+        if integrations::refresh_fresh_integrations(plan, record)? {
+            save(plan, record)?;
+            return Ok(());
+        }
+        save(plan, record)?;
+        if Instant::now() >= until {
+            let error = "app committed; actual SDK load/binding was not confirmed for every required profile; legacy installation retained and retirement pending".to_string();
+            record.integration_delivery_error = Some(error.clone());
+            save(plan, record)?;
+            return Err(error);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 #[cfg(not(desktop_pet_legacy))]
 fn rollback(
@@ -1818,11 +2209,17 @@ fn rollback(
     record: &mut MigrationRecord,
     presentation: Option<&dyn MigrationPresentation>,
 ) -> Result<(), String> {
-    rollback_precommit(plan, reservation, record, presentation, verify_source,
+    rollback_precommit(
+        plan,
+        reservation,
+        record,
+        presentation,
+        verify_source,
         |plan, profile, authorization| {
             let pid = launch(plan, profile, false, authorization)?;
             wait_ready(plan, profile, pid, false, presentation).map(|_| ())
-        })
+        },
+    )
 }
 // Keep rollback ordering independent of process launch so private-namespace
 // state-machine fixtures can exercise the same durable cleanup transaction.
@@ -1835,7 +2232,8 @@ fn rollback_precommit(
     verify_source: impl FnOnce(&MigrationPlan) -> Result<(), String>,
     mut restore_source: impl FnMut(&MigrationPlan, &LegacyProfile, (u64, String)) -> Result<(), String>,
 ) -> Result<(), String> {
-    let stopped_by_user = stop_requested(plan)?;
+    let stopped_by_user = stop_requested(plan)
+        .map_err(|error| format!("rollback initial Stop observation: {error}"))?;
     record.native_ready = false;
     transition(
         plan,
@@ -1846,41 +2244,13 @@ fn rollback_precommit(
             MigrationPhase::RollingBack
         },
         presentation,
-    )?;
-    if let Some(pid) = record.target_pid {
-        if process_live(pid) {
-            protocol::verify_migration_target_stop(
-                &plan.profiles[0].state_dir, pid,
-                record.target_instance.as_deref().ok_or("rollback target instance missing")?,
-                &plan.operation_id, &plan.token,
-            )?;
-            // Only the attested migration child may be stopped. No unrelated
-            // process or same-path replacement is signaled.
-            if actual_process_image(pid)? != plan.target.image.path {
-                return Err("rollback target PID no longer names authorized image".into());
-            }
-            if let Ok(live) = status(&plan.profiles[0]) {
-                if live.pid == pid {
-                    control(
-                        plan,
-                        &plan.profiles[0],
-                        &live.instance_id,
-                        MigrationCommand::Stop,
-                        true,
-                    )?;
-                    wait_stopped(pid, presentation)?;
-                } else {
-                    return Err("rollback control socket belongs to another process".into());
-                }
-            } else {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
-                wait_stopped(pid, presentation)?;
-            }
-        }
-    }
-    reservation.with_pointer_mutation(|| restore_pointers(plan, record))?;
+    )
+    .map_err(|error| format!("rollback initial journal: {error}"))?;
+    stop_launched_targets(plan, record, stopped_by_user, presentation)
+        .map_err(|error| format!("rollback target shutdown: {error}"))?;
+    reservation
+        .with_pointer_mutation(|| restore_pointers(plan, record))
+        .map_err(|error| format!("rollback pointer restoration: {error}"))?;
     // Abort every preparation-attempted survivor before any original restarts,
     // including when Stop has revoked all new launch authority.
     for profile in &plan.profiles {
@@ -1888,28 +2258,51 @@ fn rollback_precommit(
             || record.prepared_profiles.contains(&profile.instance_id))
             && process_live(profile.pid)
         {
-            reservation.verify_source_abort(&profile.state_dir, profile.pid, &profile.instance_id)?;
-            abort_live_preparation(plan, profile, presentation)?;
+            reservation
+                .verify_source_abort(&profile.state_dir, profile.pid, &profile.instance_id)
+                .map_err(|error| {
+                    format!(
+                        "rollback source abort authority {}: {error}",
+                        profile.state_dir.display()
+                    )
+                })?;
+            abort_live_preparation(plan, profile, presentation).map_err(|error| {
+                format!(
+                    "rollback source abort exchange {}: {error}",
+                    profile.state_dir.display()
+                )
+            })?;
         }
     }
-    let mut user_stopped = stopped_by_user || stop_requested(plan)?;
+    let mut user_stopped = stopped_by_user
+        || stop_requested(plan)
+            .map_err(|error| format!("rollback post-abort Stop observation: {error}"))?;
     if !user_stopped {
-        verify_source(plan)?;
+        verify_source(plan).map_err(|error| format!("rollback source verification: {error}"))?;
         for profile in &plan.profiles {
-            if stop_requested(plan)? {
+            if stop_requested(plan)
+                .map_err(|error| format!("rollback pre-restore Stop observation: {error}"))?
+            {
                 user_stopped = true;
                 break;
             }
-            if record.prepared_profiles.contains(&profile.instance_id) && !process_live(profile.pid) {
+            if record.prepared_profiles.contains(&profile.instance_id) && !process_live(profile.pid)
+            {
                 let origin = rollback_origin(plan)?;
-                let authorization = match reservation.authorize_source_restore(&origin, &profile.state_dir) {
-                    Ok(authorization) => authorization,
-                    Err(_) if stop_requested(plan)? => {
-                        user_stopped = true;
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                };
+                let authorization =
+                    match reservation.authorize_source_restore(&origin, &profile.state_dir) {
+                        Ok(authorization) => authorization,
+                        Err(_) if stop_requested(plan)? => {
+                            user_stopped = true;
+                            break;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "rollback source restore authority {}: {error}",
+                                profile.state_dir.display()
+                            ))
+                        }
+                    };
                 let restored = restore_source(plan, profile, authorization);
                 match restored {
                     Ok(_) => {}
@@ -1917,15 +2310,104 @@ fn rollback_precommit(
                         user_stopped = true;
                         break;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        return Err(format!(
+                            "rollback source restoration {}: {error}",
+                            profile.state_dir.display()
+                        ))
+                    }
                 }
             }
         }
     }
-    user_stopped |= stop_requested(plan)?;
-    transition(plan, record, if user_stopped { MigrationPhase::UserStopped }
-        else { MigrationPhase::RolledBack }, presentation)?;
-    reservation.release()
+    user_stopped |= stop_requested(plan)
+        .map_err(|error| format!("rollback final Stop observation: {error}"))?;
+    transition(
+        plan,
+        record,
+        if user_stopped {
+            MigrationPhase::UserStopped
+        } else {
+            MigrationPhase::RolledBack
+        },
+        presentation,
+    )
+    .map_err(|error| format!("rollback terminal journal: {error}"))?;
+    reservation
+        .release()
+        .map_err(|error| format!("rollback reservation release: {error}"))
+}
+
+#[cfg(not(desktop_pet_legacy))]
+fn stop_launched_targets(
+    plan: &MigrationPlan,
+    record: &mut MigrationRecord,
+    include_committed: bool,
+    presentation: Option<&dyn MigrationPresentation>,
+) -> Result<(), String> {
+    for index in 0..record.target_profiles.len() {
+        let target = &record.target_profiles[index];
+        if !include_committed && (target.committed || target.commit_requested) {
+            continue;
+        }
+        let Some(pid) = target.pid else {
+            continue;
+        };
+        if !process_live(pid) {
+            continue;
+        }
+        let profile = plan
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.config_dir == target.config_dir && profile.state_dir == target.state_dir
+            })
+            .ok_or("rollback target profile was not approved")?;
+        let instance = target
+            .instance_id
+            .as_deref()
+            .ok_or("rollback target instance missing; shutdown authority is unproven")?;
+        protocol::verify_migration_target_stop(
+            &profile.state_dir,
+            pid,
+            instance,
+            &plan.operation_id,
+            &plan.token,
+        )?;
+        if actual_process_image(pid)? != target.image.path
+            || executable_identity(&target.image.path)? != target.image
+        {
+            return Err("rollback target PID/image no longer matches the authorized child".into());
+        }
+        match status(profile) {
+            Ok(live) => {
+                if live.pid != pid || live.instance_id != instance {
+                    return Err("rollback target control socket/instance changed".into());
+                }
+                control(
+                    plan,
+                    profile,
+                    &live.instance_id,
+                    MigrationCommand::Stop,
+                    true,
+                )?;
+            }
+            Err(_) => {
+                // Scope, exact registered instance and current process image
+                // were authenticated above; no unrelated child is signaled.
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
+        }
+        wait_stopped(pid, presentation)?;
+        record.stopped_target_profiles.push(MigrationProfilePaths {
+            config_dir: profile.config_dir.clone(),
+            state_dir: profile.state_dir.clone(),
+        });
+        save(plan, record)?;
+    }
+    Ok(())
 }
 fn rollback_origin(plan: &MigrationPlan) -> Result<InstallOrigin, String> {
     Ok(match &plan.source_origin {
@@ -2013,6 +2495,7 @@ fn manager_environment(plan: &MigrationPlan) -> Result<BTreeMap<String, String>,
     );
     environment.insert("HOMEBREW_NO_AUTO_UPDATE".into(), "1".into());
     environment.insert("HOMEBREW_NO_ANALYTICS".into(), "1".into());
+    environment.insert("HOMEBREW_NO_INSTALL_CLEANUP".into(), "1".into());
     environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     environment.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
     environment.insert("GIT_CONFIG_GLOBAL".into(), "/dev/null".into());
@@ -2114,6 +2597,9 @@ fn execute_manager(
     }
     let stdout_file = output("stdout")?;
     let stderr_file = output("stderr")?;
+    if stop_requested(plan)? {
+        return Err("user Stop immediately before manager spawn; durable intent retained".into());
+    }
     let mut child = Command::new(&program.path)
         .args(args)
         .env_clear()
@@ -2213,24 +2699,56 @@ fn install_target_manager(
             plan,
             record,
             manager,
-            vec!["install".into(), formula.clone()],
+            vec![
+                if plan.target.previous_installation.is_some() {
+                    "upgrade".into()
+                } else {
+                    "install".into()
+                },
+                formula.clone(),
+            ],
             true,
             presentation,
         )?;
-        if executable_identity(&plan.target.image.path)? != plan.target.image {
-            return Err("Brew did not install the staged approved neutral image".into());
-        }
+        record.target_image = Some(crate::installation::installed_migration_candidate(plan)?);
+        target_image(plan, record)?;
+        save(plan, record)?;
     }
     Ok(())
+}
+/// The approved old stable Brew owner publishes exactly these native/helper
+/// commands. Retirement and historical native-route authorization share this
+/// contract; a missing arbitrary path under the prefix is not owner evidence.
+fn legacy_brew_cli_publications(origin: &LegacyOrigin) -> Result<Option<[PathBuf; 2]>, String> {
+    let LegacyOrigin::Homebrew {
+        prefix,
+        cellar_formula_root,
+        formula,
+        ..
+    } = origin
+    else {
+        return Ok(None);
+    };
+    if formula != "hanbong5938/tap/herdr-desktop-pet"
+        || cellar_formula_root != &prefix.join("Cellar/herdr-desktop-pet")
+    {
+        return Err("legacy CLI publications lack the approved stable Brew owner".into());
+    }
+    Ok(Some([
+        prefix.join("bin/herdr-desktop-pet"),
+        prefix.join("bin/herdr-update-coordinator"),
+    ]))
 }
 fn retired(plan: &MigrationPlan) -> Result<(), String> {
     if plan.source_image.path.exists() || source_bundle(plan)?.exists() {
         return Err("legacy image/bundle remains installed".into());
     }
-    if let LegacyOrigin::Homebrew { prefix, .. } = &plan.source_origin {
-        for name in ["herdr-desktop-pet", "herdr-update-coordinator"] {
-            if fs::symlink_metadata(prefix.join("bin").join(name)).is_ok() {
-                return Err("legacy CLI alias remains published".into());
+    if let Some(publications) = legacy_brew_cli_publications(&plan.source_origin)? {
+        for alias in publications {
+            match fs::symlink_metadata(&alias) {
+                Ok(_) => return Err("legacy CLI alias remains published".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
             }
         }
     }
@@ -2255,7 +2773,12 @@ fn retire(
         return Err("user Stop prevents retirement".into());
     }
     reservation.recheck_inactive_source()?;
-    verify_committed_target(plan, record, &status(&plan.profiles[0])?)?;
+    verify_all_committed_targets(plan, record)?;
+    let integrations_confirmed = integrations::refresh_fresh_integrations(plan, record)?;
+    retirement_gate(plan, record, integrations_confirmed)?;
+    if stop_requested(plan)? {
+        return Err("user Stop before approved owner retirement".into());
+    }
     if let Some(item) = &record.manager {
         if !manager_can_resume(item) {
             transition(plan, record, MigrationPhase::ManagerUnknown, presentation)?;
@@ -2326,17 +2849,8 @@ fn retire(
         transition(plan, record, MigrationPhase::UserStopped, presentation)?;
         return reservation.release();
     }
-    verify_committed_target(plan, record, &status(&plan.profiles[0])?)?;
-    transition(
-        plan,
-        record,
-        if plan.tern_reconnect_required {
-            MigrationPhase::AwaitingReconnect
-        } else {
-            MigrationPhase::Complete
-        },
-        presentation,
-    )?;
+    verify_all_committed_targets(plan, record)?;
+    transition(plan, record, MigrationPhase::Complete, presentation)?;
     reservation.release()
 }
 /// Sole manager retry entry point: unknown intent/running state never qualifies.
@@ -2384,10 +2898,15 @@ fn resume_retirement_impl(
     if stop_requested(&plan)? {
         return Err("user Stop prevents retirement resume".into());
     }
-    let live = status(&plan.profiles[0])?;
-    verify_committed_target(&plan, &record, &live)?;
+    verify_all_committed_targets(&plan, &record)?;
     visible(presentation, &plan)?;
-    write_final_visible_ack(&plan, &record, true)?;
+    write_authorization_ack(&plan, &record, true)?;
+    transition(
+        &plan,
+        &mut record,
+        MigrationPhase::Integrating,
+        presentation,
+    )?;
     match retire(&plan, &reservation, &mut record, presentation) {
         Ok(()) => Ok(record),
         Err(error) => {
@@ -2507,10 +3026,14 @@ pub fn source_origin_from_context(
 /// Availability never stages, writes a plan, acquires reservations or starts a
 /// manager. The worker repeats durable admission before a consent can execute.
 pub fn readonly_eligibility(context: &UpdateContext) -> Result<(), String> {
-    if context.version != "0.3.12" || executable_identity(&context.running.path)? != context.running
+    if context.version != "0.3.16" || executable_identity(&context.running.path)? != context.running
     {
-        return Err("finish Operation A with genuine bridge0.3.12 before migrating".into());
+        return Err(
+            "finish the approved update with genuine bridge 0.3.16 before automatic migration"
+                .into(),
+        );
     }
+    source_origin_from_context(context, None)?;
     let updates = context.state_dir.join("updates");
     if fs::symlink_metadata(updates.join("profile.reservation.json")).is_ok() {
         return Err("Operation A still owns the profile; use its matching helper".into());
@@ -2605,7 +3128,8 @@ fn build_plan_with_id(
     profiles.swap(0, selected);
     let home = crate::origin::os_home()?;
     let config_root = neutral_config_root(&profiles[0].environment, &home)?;
-    let adopt_as_default = is_legacy_base_profile(&profiles[0], &source_origin)?;
+    let previous_default_profile = capture_record(config_root.join("default-profile.json"))?;
+    let adopt_as_default = default_profile_matches(&previous_default_profile, &profiles[0])?;
     let target_manager_program = match &target.origin {
         InstallOrigin::Homebrew { brew, .. } => Some(executable_identity(brew)?),
         _ => None,
@@ -2615,24 +3139,30 @@ fn build_plan_with_id(
     let tern_reconnect_required = profiles
         .iter()
         .any(|profile| profile.tern_reconnect_required);
-    let plan = MigrationPlan {
+    let source_ancestry = ancestry::capture_source_ancestry(&source_origin, &context.running)?;
+    let mut plan = MigrationPlan {
         version: 1,
         kind: "legacy_to_desktop_pet".into(),
         operation_id,
         token: random_hex(32)?,
         source_image: context.running.clone(),
         source_origin,
+        source_ancestry,
         profiles,
         target,
         target_manager_program,
         legacy_aliases,
         readonly_target_profiles,
         previous_locator: capture_record(home.join(".local/share/desktop-pet/installation.json"))?,
-        previous_default_profile: capture_record(config_root.join("default-profile.json"))?,
+        previous_default_profile,
         adopt_as_default,
         retirement_consent: true,
         tern_reconnect_required,
+        tern_delivery: None,
+        tern_deliveries: Vec::new(),
+        tern_delivery_problem: None,
     };
+    tern_config::configure_delivery(&mut plan);
     validate_plan(&plan)?;
     verify_source(&plan)?;
     for profile in &plan.profiles {
@@ -3277,6 +3807,9 @@ fn retire_aliases(plan: &MigrationPlan) -> Result<(), String> {
         if normalized != plan.source_image.path {
             return Err("legacy alias changed after consent".into());
         }
+        if stop_requested(plan)? {
+            return Err("user Stop prevents legacy alias retirement".into());
+        }
         fs::remove_file(alias).map_err(|e| e.to_string())?;
         File::open(alias.parent().ok_or("alias parent missing")?)
             .and_then(|f| f.sync_all())
@@ -3316,22 +3849,39 @@ struct TernBindingEvidence {
     fresh: bool,
 }
 fn reconnect_receipt_path(plan: &MigrationPlan, profile: &LegacyProfile) -> PathBuf {
-    let key = format!("{:x}", Sha256::digest(
-        format!("{}\0{}", profile.config_dir.display(), profile.state_dir.display()).as_bytes()));
-    plan.profiles[0].state_dir.join("updates-v4")
+    let key = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "{}\0{}",
+                profile.config_dir.display(),
+                profile.state_dir.display()
+            )
+            .as_bytes()
+        )
+    );
+    plan.profiles[0]
+        .state_dir
+        .join("updates-v4")
         .join(format!("{}.tern-reconnect-{key}.json", plan.operation_id))
 }
 fn validate_reconnect_evidence(
-    plan: &MigrationPlan, profile: &LegacyProfile, evidence: &TernReconnectEvidence,
+    plan: &MigrationPlan,
+    profile: &LegacyProfile,
+    evidence: &TernReconnectEvidence,
 ) -> Result<(), String> {
     if !profile.tern_reconnect_required
-        || evidence.version != 1 || evidence.operation_id != plan.operation_id
+        || evidence.version != 1
+        || evidence.operation_id != plan.operation_id
         || evidence.executable != plan.target.image.path
-        || evidence.config_dir != profile.config_dir || evidence.state_dir != profile.state_dir
+        || evidence.config_dir != profile.config_dir
+        || evidence.state_dir != profile.state_dir
         || !instance_valid(&evidence.instance_id)
-        || evidence.window_id.is_empty() || evidence.window_id.len() > 4096
+        || evidence.window_id.is_empty()
+        || evidence.window_id.len() > 4096
         || evidence.window_id.contains('\0')
-        || evidence.local_host.is_empty() || evidence.local_host.len() > 4096
+        || evidence.local_host.is_empty()
+        || evidence.local_host.len() > 4096
         || evidence.local_host.contains('\0')
     {
         return Err("retained reconnect receipt has foreign or invalid evidence".into());
@@ -3339,7 +3889,8 @@ fn validate_reconnect_evidence(
     Ok(())
 }
 fn read_reconnect_receipt(
-    plan: &MigrationPlan, profile: &LegacyProfile,
+    plan: &MigrationPlan,
+    profile: &LegacyProfile,
 ) -> Result<Option<TernReconnectEvidence>, String> {
     let path = reconnect_receipt_path(plan, profile);
     match fs::symlink_metadata(&path) {
@@ -3352,17 +3903,32 @@ fn read_reconnect_receipt(
     validate_reconnect_evidence(plan, profile, &evidence)?;
     Ok(Some(evidence))
 }
-fn validate_reconnect_receipts(plan: &MigrationPlan, record: &MigrationRecord) -> Result<bool, String> {
+fn validate_reconnect_receipts(
+    plan: &MigrationPlan,
+    record: &MigrationRecord,
+) -> Result<bool, String> {
     for done in &record.reconnected_profiles {
-        let profile = plan.profiles.iter().find(|profile|
-            profile.tern_reconnect_required && profile.config_dir == done.config_dir
-                && profile.state_dir == done.state_dir)
+        let profile = plan
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.tern_reconnect_required
+                    && profile.config_dir == done.config_dir
+                    && profile.state_dir == done.state_dir
+            })
             .ok_or("journal contains an unknown reconnect profile")?;
-        read_reconnect_receipt(plan, profile)?.ok_or("acknowledged reconnect receipt is missing")?;
+        read_reconnect_receipt(plan, profile)?
+            .ok_or("acknowledged reconnect receipt is missing")?;
     }
-    let complete = plan.profiles.iter().filter(|profile| profile.tern_reconnect_required)
-        .all(|profile| record.reconnected_profiles.iter().any(|done|
-            done.config_dir == profile.config_dir && done.state_dir == profile.state_dir));
+    let complete = plan
+        .profiles
+        .iter()
+        .filter(|profile| profile.tern_reconnect_required)
+        .all(|profile| {
+            record.reconnected_profiles.iter().any(|done| {
+                done.config_dir == profile.config_dir && done.state_dir == profile.state_dir
+            })
+        });
     if record.phase == MigrationPhase::Complete && !complete {
         return Err("complete migration has incomplete reconnect receipts".into());
     }
@@ -3381,7 +3947,8 @@ pub fn confirm_tern_reconnect(
 }
 #[cfg(not(desktop_pet_legacy))]
 fn confirm_tern_reconnect_leased(
-    plan: &MigrationPlan, evidence_file: &Path,
+    plan: &MigrationPlan,
+    evidence_file: &Path,
     lease: &protocol::MigrationReconnectLease<'_>,
 ) -> Result<MigrationRecord, String> {
     let record = read_record(&plan)?;
@@ -3404,7 +3971,10 @@ fn confirm_tern_reconnect_leased(
     };
     let retained = reconnect_receipt_path(&plan, selected);
     let previous = read_reconnect_receipt(&plan, selected)?;
-    if previous.as_ref().is_some_and(|previous| previous != &evidence) {
+    if previous
+        .as_ref()
+        .is_some_and(|previous| previous != &evidence)
+    {
         return Err("retained Tern reconnect evidence conflicts with this request".into());
     }
     if record.reconnected_profiles.contains(&paths) {
@@ -3421,12 +3991,19 @@ fn confirm_tern_reconnect_leased(
         return Err("complete migration cannot accept a new reconnect acknowledgement".into());
     }
     let live = status(selected)?;
-    verify_neutral_profile(&plan.target.image, selected, &live)?;
+    verify_neutral_profile(
+        &plan.target.image,
+        &plan.target.release.version,
+        selected,
+        &live,
+    )?;
     if live.instance_id != evidence.instance_id {
         return Err("external reconnect instance is not the current verified native daemon".into());
     }
-    let binding:TernBindingEvidence=serde_json::from_slice(&exchange(&selected.control_socket,
-        &serde_json::json!({"version":1,"kind":"tern-migration-evidence","window_id":evidence.window_id}))?).map_err(|e|e.to_string())?;
+    let binding = decode_tern_binding_evidence(&exchange(
+        &selected.control_socket,
+        &serde_json::json!({"version":1,"kind":"tern-migration-evidence","window_id":evidence.window_id}),
+    )?)?;
     if binding.version != 1
         || binding.kind != "tern-migration-evidence"
         || !binding.fresh
@@ -3448,8 +4025,9 @@ fn confirm_tern_reconnect_leased(
             return Err("migration no longer accepts reconnect acknowledgements".into());
         }
         match read_reconnect_receipt(&plan, selected)? {
-            Some(previous) if previous != evidence =>
-                return Err("retained Tern reconnect evidence conflicts with live binding".into()),
+            Some(previous) if previous != evidence => {
+                return Err("retained Tern reconnect evidence conflicts with live binding".into())
+            }
             Some(_) => {}
             None => protocol::write_private_bytes(&retained, &bytes, 0o600)?,
         }
@@ -3464,12 +4042,64 @@ fn confirm_tern_reconnect_leased(
         Ok(fresh.clone())
     })
 }
-fn verify_committed_target(
+fn decode_tern_binding_evidence(bytes: &[u8]) -> Result<TernBindingEvidence, String> {
+    let response: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if let Some(error) = response.get("error").and_then(|value| value.as_str()) {
+        if !error.trim().is_empty() {
+            return Err(error.into());
+        }
+    }
+    if response.get("ok").and_then(|value| value.as_bool()) == Some(false)
+        || response.get("type").and_then(|value| value.as_str()) == Some("error")
+        || response.get("error").is_some_and(|value| !value.is_null())
+    {
+        return Err(
+            "Tern migration binding evidence is unsupported or the backend returned an error envelope without a diagnostic".into(),
+        );
+    }
+    serde_json::from_value(response).map_err(|e| e.to_string())
+}
+fn verify_all_committed_targets(
     plan: &MigrationPlan,
     record: &MigrationRecord,
+) -> Result<(), String> {
+    if record.target_profiles.len() != plan.profiles.len()
+        || !record.target_committed
+        || !record.native_ready
+    {
+        return Err("every approved profile requires its own durable ready/Commit evidence".into());
+    }
+    for profile in &plan.profiles {
+        verify_committed_profile(plan, record, profile, &status(profile)?)?;
+    }
+    Ok(())
+}
+
+fn verify_committed_profile(
+    plan: &MigrationPlan,
+    record: &MigrationRecord,
+    selected: &LegacyProfile,
     live: &LiveStatus,
 ) -> Result<(), String> {
-    let selected = &plan.profiles[0];
+    let target = record.target_profiles.iter().find(|target| {
+        target.config_dir == selected.config_dir && target.state_dir == selected.state_dir
+    });
+    let (pid, instance) = if let Some(target) = target {
+        if !target.native_ready || !target.committed || &target.image != target_image(plan, record)?
+        {
+            return Err("target profile lacks its own native-ready Commit evidence".into());
+        }
+        (target.pid, target.instance_id.as_deref())
+    } else if record.target_profiles.is_empty()
+        && selected.config_dir == plan.profiles[0].config_dir
+        && selected.state_dir == plan.profiles[0].state_dir
+    {
+        // Historical primary codec is admitted only for its original selected profile.
+        (record.target_pid, record.target_instance.as_deref())
+    } else {
+        return Err("target profile has no recorded Commit identity".into());
+    };
+    let image = target_image(plan, record)?;
     if !live.ok
         || !live.running
         || live.shutdown
@@ -3477,16 +4107,16 @@ fn verify_committed_target(
         || !live.ui_ready
         || !live.control_ready
         || live.migration_gated
-        || live.app_version != crate::identity::neutral::VERSION
+        || live.app_version != plan.target.release.version
         || live.updater_protocol != 4
         || live.observation_capability != 2
         || live.integration_api != 1
-        || live.pid != record.target_pid.ok_or("native-ready PID missing")?
-        || Some(live.instance_id.as_str()) != record.target_instance.as_deref()
-        || actual_process_image(live.pid)? != plan.target.image.path
-        || executable_identity(&plan.target.image.path)? != plan.target.image
-        || live.executable_path != plan.target.image.path
-        || live.running_sha256 != plan.target.image.sha256
+        || live.pid != pid.ok_or("native-ready profile PID missing")?
+        || Some(live.instance_id.as_str()) != instance
+        || actual_process_image(live.pid)? != image.path
+        || executable_identity(&image.path)? != *image
+        || live.executable_path != image.path
+        || live.running_sha256 != image.sha256
         || live.assets_override != selected.assets_override
         || live.config_dir != selected.config_dir
         || live.state_dir != selected.state_dir
@@ -3502,7 +4132,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::os::unix::net::UnixListener;
 
-    fn fixture() -> (tempfile::TempDir, MigrationPlan) {
+    pub(super) fn fixture() -> (tempfile::TempDir, MigrationPlan) {
         let temp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(temp.path()).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -3527,18 +4157,20 @@ mod tests {
                 pid:1000,instance_id:"source-instance".into(),stop_generation:0,observation:ObservationSelection::Auto,environment:BTreeMap::new(),
                 herdr_socket:None,assets_override:None,host_plugin_config_dir:None,tern_reconnect_required:false}],
             target:MigrationTarget {release:ReleaseCandidate {
-                version:crate::identity::neutral::VERSION.into(),channel:crate::ReleaseChannel::Stable,
-                tag:format!("v{}", crate::identity::neutral::VERSION),release_id:1,
-                asset_name:format!("DesktopPet-v{}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
-                archive_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz", crate::identity::neutral::VERSION),
+                version:crate::identity::neutral::MIGRATION_TARGET_VERSION.into(),channel:crate::ReleaseChannel::Stable,
+                tag:format!("v{}", crate::identity::neutral::MIGRATION_TARGET_VERSION),release_id:1,
+                asset_name:format!("DesktopPet-v{}-macos-arm64.tar.gz", crate::identity::neutral::MIGRATION_TARGET_VERSION),
+                archive_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz", crate::identity::neutral::MIGRATION_TARGET_VERSION),
                 archive_size:10,sha256:"a".repeat(64),
-                checksum_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz.sha256", crate::identity::neutral::VERSION)
+                checksum_url:format!("https://github.com/hanbong5938/desktop-pet/releases/download/v{0}/DesktopPet-v{0}-macos-arm64.tar.gz.sha256", crate::identity::neutral::MIGRATION_TARGET_VERSION)
             },image:ExecutableIdentity {path:target.join("Contents/MacOS/desktop-pet"),sha256:"c".repeat(64)},
-                origin:InstallOrigin::Standalone{bundle:target},staged_bundle:root.join("stage/DesktopPet.app")},
+                origin:InstallOrigin::Standalone{bundle:target},staged_bundle:root.join("stage/DesktopPet.app"),previous_installation:None},
             target_manager_program:None,legacy_aliases:Vec::new(),
             previous_locator:PreviousRecord {path:home.join(".local/share/desktop-pet/installation.json"),bytes:None},
             previous_default_profile:PreviousRecord {path:home.join(".config/desktop-pet/default-profile.json"),bytes:None},
             adopt_as_default:false,retirement_consent:true,tern_reconnect_required:false,
+            tern_delivery:None,tern_deliveries:Vec::new(),tern_delivery_problem:None,
+            source_ancestry:Vec::new(),
         };
         (temp, plan)
     }
@@ -3551,7 +4183,7 @@ mod tests {
         plan.target.release.checksum_url = format!("{}.sha256", plan.target.release.archive_url);
         (temp, plan)
     }
-    fn persist_fixture(plan: &MigrationPlan) -> MigrationRecord {
+    pub(super) fn persist_fixture(plan: &MigrationPlan) -> MigrationRecord {
         let bytes = serde_json::to_vec(plan).unwrap();
         protocol::write_private_new(&evidence_path(plan), &bytes, 0o600).unwrap();
         let record = make_record(plan, &bytes);
@@ -3562,10 +4194,15 @@ mod tests {
     #[test]
     fn retired_reconnect_uses_current_binding_and_all_retained_receipts() {
         let (_temp, mut plan) = fixture();
-        let sockets = tempfile::Builder::new().prefix("pet-rc-").tempdir_in("/tmp").unwrap();
+        let sockets = tempfile::Builder::new()
+            .prefix("pet-rc-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let image = executable_identity(&std::env::current_exe().unwrap()).unwrap();
         plan.target.image = image.clone();
-        plan.target.origin = InstallOrigin::Source { root: image.path.parent().unwrap().into() };
+        plan.target.origin = InstallOrigin::Source {
+            root: image.path.parent().unwrap().into(),
+        };
         plan.tern_reconnect_required = true;
         plan.profiles[0].tern_reconnect_required = true;
         plan.profiles[0].control_socket = sockets.path().join("first.sock");
@@ -3587,25 +4224,37 @@ mod tests {
         record.target_instance = Some("old-target".into());
         record.phase = MigrationPhase::AwaitingReconnect;
         save(&plan, &record).unwrap();
-        let global = fs::canonicalize(sockets.path()).unwrap().join(".desktop-pet-updates");
+        let global = fs::canonicalize(sockets.path())
+            .unwrap()
+            .join(".desktop-pet-updates");
         ensure_private_directory(&global).unwrap();
         let lease = protocol::lock_migration_reconnect_at(global.clone(), &plan).unwrap();
         assert!(protocol::lock_migration_reconnect_at(global.clone(), &plan).is_err());
 
         let evidence_for = |index: usize| TernReconnectEvidence {
-            version: 1, operation_id: plan.operation_id.clone(), executable: image.path.clone(),
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            executable: image.path.clone(),
             config_dir: plan.profiles[index].config_dir.clone(),
             state_dir: plan.profiles[index].state_dir.clone(),
-            instance_id: format!("current-target-{index}"), window_id: format!("window-{index}"),
-            binding_epoch: 8, sequence: 12, local_host: "local".into(),
-            observation_generation: 4, native_generation: 5,
+            instance_id: format!("current-target-{index}"),
+            window_id: format!("window-{index}"),
+            binding_epoch: 8,
+            sequence: 12,
+            local_host: "local".into(),
+            observation_generation: 4,
+            native_generation: 5,
         };
         let serve = |index: usize, evidence: &TernReconnectEvidence| {
             let listener = UnixListener::bind(&plan.profiles[index].control_socket).unwrap();
-            fs::set_permissions(&plan.profiles[index].control_socket, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(
+                &plan.profiles[index].control_socket,
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
             let status = serde_json::json!({
                 "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
-                "app_version":crate::identity::neutral::VERSION,"updater_protocol":4,"observation_capability":2,
+                "app_version":plan.target.release.version,"updater_protocol":4,"observation_capability":2,
                 "integration_api":1,"instance_id":evidence.instance_id,"pid":std::process::id(),
                 "running_sha256":image.sha256,"executable_path":image.path,
                 "config_dir":evidence.config_dir,"state_dir":evidence.state_dir,"observation_mode":"tern"
@@ -3622,7 +4271,9 @@ mod tests {
                     let (mut stream, _) = listener.accept().unwrap();
                     let mut byte = [0u8; 1];
                     while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
-                    stream.write_all(&serde_json::to_vec(&reply).unwrap()).unwrap();
+                    stream
+                        .write_all(&serde_json::to_vec(&reply).unwrap())
+                        .unwrap();
                     stream.write_all(b"\n").unwrap();
                 }
             })
@@ -3631,24 +4282,35 @@ mod tests {
         let input = plan.profiles[0].state_dir.join("reconnect-input.json");
         protocol::write_private_new(&input, &serde_json::to_vec(&first).unwrap(), 0o600).unwrap();
         // Receipt-only crash is not an acknowledgement; a live binding is still required.
-        protocol::write_private_bytes(&reconnect_receipt_path(&plan, &plan.profiles[0]),
-            &serde_json::to_vec(&first).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(
+            &reconnect_receipt_path(&plan, &plan.profiles[0]),
+            &serde_json::to_vec(&first).unwrap(),
+            0o600,
+        )
+        .unwrap();
         let server = serve(0, &first);
         let first_done = confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap();
         server.join().unwrap();
         assert_eq!(first_done.phase, MigrationPhase::AwaitingReconnect);
         assert_eq!(first_done.reconnected_profiles.len(), 1);
         // Acknowledged retry succeeds without opening the now-unserved socket.
-        assert_eq!(confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap(), first_done);
+        assert_eq!(
+            confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap(),
+            first_done
+        );
 
         let second = evidence_for(1);
-        protocol::write_private_bytes(&input, &serde_json::to_vec(&second).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(&input, &serde_json::to_vec(&second).unwrap(), 0o600)
+            .unwrap();
         let server = serve(1, &second);
         let complete = confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap();
         server.join().unwrap();
         assert_eq!(complete.phase, MigrationPhase::Complete);
         assert_eq!(complete.reconnected_profiles.len(), 2);
-        assert_eq!(confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap(), complete);
+        assert_eq!(
+            confirm_tern_reconnect_leased(&plan, &input, &lease).unwrap(),
+            complete
+        );
         let first_path = reconnect_receipt_path(&plan, &plan.profiles[0]);
         let receipt_bytes = fs::read(&first_path).unwrap();
         protocol::write_private_bytes(&first_path, b"{", 0o600).unwrap();
@@ -3664,10 +4326,12 @@ mod tests {
         protocol::write_private_bytes(&first_path, &receipt_bytes, 0o600).unwrap();
         let mut conflicting = second.clone();
         conflicting.binding_epoch += 1;
-        protocol::write_private_bytes(&input, &serde_json::to_vec(&conflicting).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(&input, &serde_json::to_vec(&conflicting).unwrap(), 0o600)
+            .unwrap();
         assert!(confirm_tern_reconnect_leased(&plan, &input, &lease).is_err());
         assert_eq!(fs::read(&first_path).unwrap(), receipt_bytes);
-        protocol::write_private_bytes(&input, &serde_json::to_vec(&second).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(&input, &serde_json::to_vec(&second).unwrap(), 0o600)
+            .unwrap();
 
         // Completion reads fresh durable state, not the record from acquisition.
         let marker = plan.profiles[1].state_dir.join("updates-v4");
@@ -3675,10 +4339,20 @@ mod tests {
         let marker = marker.join("profile.reservation.json");
         protocol::write_private_bytes(&marker, b"{}", 0o600).unwrap();
         let mut called = false;
-        assert!(lease.with_completion(|_| { called = true; Ok(()) }).is_err());
+        assert!(lease
+            .with_completion(|_| {
+                called = true;
+                Ok(())
+            })
+            .is_err());
         assert!(!called);
         fs::remove_file(marker).unwrap();
-        lease.with_completion(|fresh| { assert_eq!(fresh.phase, MigrationPhase::Complete); Ok(()) }).unwrap();
+        lease
+            .with_completion(|fresh| {
+                assert_eq!(fresh.phase, MigrationPhase::Complete);
+                Ok(())
+            })
+            .unwrap();
         let unrelated = global.join("unrelated.reservation.json");
         protocol::write_private_bytes(&unrelated, &serde_json::to_vec(&serde_json::json!({
             "version":4,"source":{"kind":"source","root":"/unrelated-root"},"state_dir":"/unrelated-state"
@@ -3687,17 +4361,27 @@ mod tests {
         fs::remove_file(unrelated).unwrap();
         // Retirement's save-before-scope-release crash cut remains fail-closed.
         let scope_path = global.join(format!("{}.migration.json", plan.operation_id));
-        let mut roots = vec![plan.source_origin.root().to_path_buf(),
-            crate::physical_install_root(&plan.target.origin).unwrap().to_path_buf()];
+        let mut roots = vec![
+            plan.source_origin.root().to_path_buf(),
+            crate::physical_install_root(&plan.target.origin)
+                .unwrap()
+                .to_path_buf(),
+        ];
         roots.sort_unstable();
         let profiles = plan.profiles.iter().map(|profile| serde_json::json!({
             "pid":profile.pid,"instance_id":profile.instance_id,"state_dir":profile.state_dir,
             "config_dir":profile.config_dir,"image":plan.source_image,"stop_generation":profile.stop_generation
         })).collect::<Vec<_>>();
-        protocol::write_private_bytes(&scope_path, &serde_json::to_vec(&serde_json::json!({
-            "version":4,"operation_id":plan.operation_id,"owner_token":plan.token,
-            "roots":roots,"profiles":profiles,"readonly_target_profiles":[],"startups":[]
-        })).unwrap(), 0o600).unwrap();
+        protocol::write_private_bytes(
+            &scope_path,
+            &serde_json::to_vec(&serde_json::json!({
+                "version":4,"operation_id":plan.operation_id,"owner_token":plan.token,
+                "roots":roots,"profiles":profiles,"readonly_target_profiles":[],"startups":[]
+            }))
+            .unwrap(),
+            0o600,
+        )
+        .unwrap();
         assert!(lease.with_completion(|_| Ok(())).is_err());
         fs::remove_file(scope_path).unwrap();
         drop(lease);
@@ -3710,7 +4394,10 @@ mod tests {
     #[cfg(all(not(desktop_pet_legacy), target_os = "macos"))]
     #[test]
     fn partial_stop_rollback_aborts_survivors_before_source_grants_and_releases_on_stop() {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
         struct OwnedChildren(Vec<std::process::Child>);
         impl OwnedChildren {
             fn spawn_ready_source(&mut self, executable: &Path) -> u32 {
@@ -3729,11 +4416,27 @@ mod tests {
                 let marker = format!("DESKTOP_PET_UNLINKED_CHILD_READY:{pid}\n");
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let mut bytes = Vec::new();
-                while !bytes.windows(marker.len()).any(|window| window == marker.as_bytes()) {
-                    let remaining = deadline.checked_duration_since(Instant::now())
+                while !bytes
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+                {
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
                         .expect("source fixture did not acknowledge userspace startup");
-                    let mut poll = libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-                    assert!(unsafe { libc::poll(&mut poll, 1, remaining.as_millis().min(i32::MAX as u128) as i32) } > 0);
+                    let mut poll = libc::pollfd {
+                        fd: output.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    assert!(
+                        unsafe {
+                            libc::poll(
+                                &mut poll,
+                                1,
+                                remaining.as_millis().min(i32::MAX as u128) as i32,
+                            )
+                        } > 0
+                    );
                     let mut buffer = [0u8; 1024];
                     let count = output.read(&mut buffer).unwrap();
                     assert!(count > 0, "source fixture exited before userspace startup");
@@ -3747,12 +4450,18 @@ mod tests {
         }
         impl Drop for OwnedChildren {
             fn drop(&mut self) {
-                for child in &mut self.0 { let _ = child.kill(); let _ = child.wait(); }
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
             }
         }
         for interrupt in [false, true] {
             let (_temp, mut plan) = fixture();
-            let namespace = tempfile::Builder::new().prefix("pet-rb-").tempdir_in("/tmp").unwrap();
+            let namespace = tempfile::Builder::new()
+                .prefix("pet-rb-")
+                .tempdir_in("/tmp")
+                .unwrap();
             let root = fs::canonicalize(namespace.path()).unwrap().join("source");
             ensure_private_directory(&root).unwrap();
             let executable = root.join("herdr-desktop-pet");
@@ -3760,7 +4469,8 @@ mod tests {
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
             plan.source_image = executable_identity(&executable).unwrap();
             plan.source_origin = LegacyOrigin::Generated {
-                source_root: root.clone(), bundle: root.join("dist/HerdrDesktopPet.app"),
+                source_root: root.clone(),
+                bundle: root.join("dist/HerdrDesktopPet.app"),
             };
             let mut children = OwnedChildren(Vec::new());
             for index in 0..3 {
@@ -3778,39 +4488,69 @@ mod tests {
                     child.kill().unwrap();
                     child.wait().unwrap();
                 }
-                if index == 0 { plan.profiles[0] = profile; } else { plan.profiles.push(profile); }
+                if index == 0 {
+                    plan.profiles[0] = profile;
+                } else {
+                    plan.profiles.push(profile);
+                }
             }
             ensure_private_directory(&plan.profiles[0].state_dir.join("updates-v4")).unwrap();
             let mut record = persist_fixture(&plan);
-            record.preparing_profiles = plan.profiles.iter().map(|profile| profile.instance_id.clone()).collect();
-            record.prepared_profiles = vec![plan.profiles[0].instance_id.clone(), plan.profiles[2].instance_id.clone()];
+            record.preparing_profiles = plan
+                .profiles
+                .iter()
+                .map(|profile| profile.instance_id.clone())
+                .collect();
+            record.prepared_profiles = vec![
+                plan.profiles[0].instance_id.clone(),
+                plan.profiles[2].instance_id.clone(),
+            ];
             record.stopped_profiles = record.prepared_profiles.clone();
             record.phase = MigrationPhase::Stopping;
             save(&plan, &record).unwrap();
-            let global = fs::canonicalize(namespace.path()).unwrap().join(".desktop-pet-updates");
+            let global = fs::canonicalize(namespace.path())
+                .unwrap()
+                .join(".desktop-pet-updates");
             ensure_private_directory(&global).unwrap();
             let operation_path = global.join(format!("{}.migration.json", plan.operation_id));
             let profiles = plan.profiles.iter().map(|profile| serde_json::json!({
                 "pid":profile.pid,"instance_id":profile.instance_id,"state_dir":profile.state_dir,
                 "config_dir":profile.config_dir,"image":plan.source_image,"stop_generation":0
             })).collect::<Vec<_>>();
-            protocol::write_private_new(&operation_path, &serde_json::to_vec(&serde_json::json!({
-                "version":4,"operation_id":plan.operation_id,"owner_token":plan.token,
-                "roots":[root,crate::physical_install_root(&plan.target.origin).unwrap()],
-                "profiles":profiles,"readonly_target_profiles":[],"startups":[]
-            })).unwrap(), 0o600).unwrap();
+            protocol::write_private_new(
+                &operation_path,
+                &serde_json::to_vec(&serde_json::json!({
+                    "version":4,"operation_id":plan.operation_id,"owner_token":plan.token,
+                    "roots":[root,crate::physical_install_root(&plan.target.origin).unwrap()],
+                    "profiles":profiles,"readonly_target_profiles":[],"startups":[]
+                }))
+                .unwrap(),
+                0o600,
+            )
+            .unwrap();
             let origin = rollback_origin(&plan).unwrap();
-            let registry = global.join(format!("{}.active.json", protocol::installation_key(&origin).unwrap()));
+            let registry = global.join(format!(
+                "{}.active.json",
+                protocol::installation_key(&origin).unwrap()
+            ));
             let survivor = &plan.profiles[1];
             let mut active = vec![protocol::ActiveProfile {
-                pid:survivor.pid, instance_id:survivor.instance_id.clone(), state_dir:survivor.state_dir.clone()
+                pid: survivor.pid,
+                instance_id: survivor.instance_id.clone(),
+                state_dir: survivor.state_dir.clone(),
             }];
-            protocol::write_private_bytes(&registry, &serde_json::to_vec(&active).unwrap(), 0o600).unwrap();
+            protocol::write_private_bytes(&registry, &serde_json::to_vec(&active).unwrap(), 0o600)
+                .unwrap();
             let reservation = protocol::load_migration_reservation_at(
-                global.clone(), &plan.operation_id, &plan.token).unwrap();
+                global.clone(),
+                &plan.operation_id,
+                &plan.token,
+            )
+            .unwrap();
             let gated = Arc::new(AtomicBool::new(true));
             let listener = UnixListener::bind(&survivor.control_socket).unwrap();
-            fs::set_permissions(&survivor.control_socket, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&survivor.control_socket, fs::Permissions::from_mode(0o600))
+                .unwrap();
             let live = serde_json::json!({
                 "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
                 "app_version":"0.3.12","updater_protocol":3,"observation_capability":1,"integration_api":1,
@@ -3828,59 +4568,177 @@ mod tests {
                     let (mut stream, _) = listener.accept().unwrap();
                     let mut bytes = Vec::new();
                     let mut byte = [0u8; 1];
-                    while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' { bytes.push(byte[0]); }
+                    while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {
+                        bytes.push(byte[0]);
+                    }
                     let reply = if is_abort {
-                        let request: MigrationControlRequest = serde_json::from_slice(&bytes).unwrap();
+                        let request: MigrationControlRequest =
+                            serde_json::from_slice(&bytes).unwrap();
                         validate_control_request(&request, &expected, 0, true).unwrap();
                         assert_eq!(request.command, MigrationCommand::Abort);
                         server_gate.store(false, Ordering::Release);
                         serde_json::to_value(MigrationControlReply {
-                            version:request.version,kind:request.kind,command:request.command,
-                            operation_id:request.operation_id,instance_id:request.instance_id,token:request.token,
-                            plan_path:request.plan_path,source_image:request.source_image,config_dir:request.config_dir,
-                            state_dir:request.state_dir,stop_generation:request.stop_generation,accepted:true,error:None
-                        }).unwrap()
-                    } else { live.clone() };
-                    stream.write_all(&serde_json::to_vec(&reply).unwrap()).unwrap();
+                            version: request.version,
+                            kind: request.kind,
+                            command: request.command,
+                            operation_id: request.operation_id,
+                            instance_id: request.instance_id,
+                            token: request.token,
+                            plan_path: request.plan_path,
+                            source_image: request.source_image,
+                            config_dir: request.config_dir,
+                            state_dir: request.state_dir,
+                            stop_generation: request.stop_generation,
+                            accepted: true,
+                            error: None,
+                        })
+                        .unwrap()
+                    } else {
+                        live.clone()
+                    };
+                    stream
+                        .write_all(&serde_json::to_vec(&reply).unwrap())
+                        .unwrap();
                     stream.write_all(b"\n").unwrap();
                 }
             });
             let mut restored = 0;
-            rollback_precommit(&plan, &reservation, &mut record, None,
+            rollback_precommit(
+                &plan,
+                &reservation,
+                &mut record,
+                None,
                 |plan| {
                     assert!(!gated.load(Ordering::Acquire));
-                    assert_eq!(executable_identity(&plan.source_image.path)?, plan.source_image);
+                    assert_eq!(
+                        executable_identity(&plan.source_image.path)?,
+                        plan.source_image
+                    );
                     Ok(())
                 },
                 |plan, profile, authorization| {
                     assert!(!gated.load(Ordering::Acquire));
-                    protocol::start_allowed_at(&global, &origin, &profile.state_dir,
-                        Some(authorization.0), Some(&authorization.1))?;
+                    protocol::start_allowed_at(
+                        &global,
+                        &origin,
+                        &profile.state_dir,
+                        Some(authorization.0),
+                        Some(&authorization.1),
+                    )
+                    .map_err(|error| format!("fixture pre-launch startup admission: {error}"))?;
                     let pid = children.spawn_ready_source(&executable);
-                    active.push(protocol::ActiveProfile { pid, instance_id:format!("restored-{restored}"), state_dir:profile.state_dir.clone() });
-                    protocol::write_private_bytes(&registry, &serde_json::to_vec(&active).unwrap(), 0o600)?;
-                    protocol::start_allowed_at(&global, &origin, &profile.state_dir,
-                        Some(authorization.0), Some(&authorization.1))?;
+                    active.push(protocol::ActiveProfile {
+                        pid,
+                        instance_id: format!("restored-{restored}"),
+                        state_dir: profile.state_dir.clone(),
+                    });
+                    protocol::write_private_bytes(
+                        &registry,
+                        &serde_json::to_vec(&active).unwrap(),
+                        0o600,
+                    )
+                    .map_err(|error| format!("fixture restored active registry write: {error}"))?;
+                    protocol::start_allowed_at(
+                        &global,
+                        &origin,
+                        &profile.state_dir,
+                        Some(authorization.0),
+                        Some(&authorization.1),
+                    )
+                    .map_err(|error| format!("fixture post-launch startup admission: {error}"))?;
                     restored += 1;
                     if interrupt {
                         let updates = plan.profiles[2].state_dir.join("updates-v4");
                         ensure_private_directory(&updates)?;
-                        protocol::write_private_bytes(&updates.join("stop-generation.json"), b"1", 0o600)?;
+                        protocol::write_private_bytes(
+                            &updates.join("stop-generation.json"),
+                            b"1",
+                            0o600,
+                        )
+                        .map_err(|error| format!("fixture late Stop write: {error}"))?;
                     }
                     Ok(())
-                }).unwrap();
+                },
+            )
+            .unwrap();
             server.join().unwrap();
             assert!(!operation_path.exists());
-            assert_eq!(record.phase, if interrupt { MigrationPhase::UserStopped } else { MigrationPhase::RolledBack });
+            assert_eq!(
+                record.phase,
+                if interrupt {
+                    MigrationPhase::UserStopped
+                } else {
+                    MigrationPhase::RolledBack
+                }
+            );
             assert_eq!(restored, if interrupt { 1 } else { 2 });
             assert_eq!(read_record(&plan).unwrap(), record);
         }
     }
-    fn context(plan: &MigrationPlan) -> UpdateContext {
+    /// Old-schema immutable owner approval and its actual-shaped retained
+    /// Commit/retirement journal; this does not supply signing or SDK evidence.
+    pub(super) fn retained_brew_fixture() -> (tempfile::TempDir, MigrationPlan, MigrationRecord) {
+        let (temp, mut plan) = retained_fixture("0.4.8");
+        let prefix = fs::canonicalize(temp.path()).unwrap().join("brew");
+        let brew = ExecutableIdentity {
+            path: prefix.join("bin/brew"),
+            sha256: "d".repeat(64),
+        };
+        let cellar_formula_root = prefix.join("Cellar/herdr-desktop-pet");
+        plan.source_image.path = cellar_formula_root
+            .join("0.3.12/libexec/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet");
+        plan.source_origin = LegacyOrigin::Homebrew {
+            brew: brew.clone(),
+            prefix,
+            cellar_formula_root,
+            formula: "hanbong5938/tap/herdr-desktop-pet".into(),
+        };
+        plan.profiles[0].observation = ObservationSelection::Provider("tern".into());
+        plan.profiles[0].tern_reconnect_required = true;
+        plan.tern_reconnect_required = true;
+        let tern_root = plan.profiles[0].state_dir.join("tern");
+        plan.profiles[0].environment.insert(
+            "TERN_CONFIG_DIR".into(),
+            tern_root.to_string_lossy().into_owned(),
+        );
+        let mut value = serde_json::to_value(&plan).unwrap();
+        for field in [
+            "source_ancestry",
+            "tern_delivery",
+            "tern_deliveries",
+            "tern_delivery_problem",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        protocol::write_private_new(&evidence_path(&plan), &bytes, 0o600).unwrap();
+        let mut record = make_record(&plan, &bytes);
+        record.phase = MigrationPhase::AwaitingReconnect;
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_pid = Some(2000);
+        record.target_instance = Some("original-committed".into());
+        record.retirement_attempt = 1;
+        record.manager = Some(ManagerEvidence {
+            program: brew,
+            args: vec![
+                "uninstall".into(),
+                "hanbong5938/tap/herdr-desktop-pet".into(),
+            ],
+            intent_at: 1,
+            pid: Some(2001),
+            pgid: Some(2001),
+            exit_code: Some(0),
+            quiescent: true,
+        });
+        save(&plan, &record).unwrap();
+        (temp, plan, record)
+    }
+    pub(super) fn context(plan: &MigrationPlan) -> UpdateContext {
         let profile = &plan.profiles[0];
         UpdateContext {
             executable: plan.source_image.path.clone(),
-            version: "0.3.12".into(),
+            version: "0.3.16".into(),
             instance_id: profile.instance_id.clone(),
             config_dir: profile.config_dir.clone(),
             state_dir: profile.state_dir.clone(),
@@ -3910,6 +4768,191 @@ mod tests {
             stop_generation: 0,
         }
     }
+    #[test]
+    fn two_affected_profiles_require_distinct_ready_and_commit_evidence() {
+        let (_temp, mut plan) = fixture();
+        let original = plan.profiles[0].state_dir.join("original-history");
+        fs::write(&original, b"preserved original history").unwrap();
+        let mut secondary = plan.profiles[0].clone();
+        secondary.state_dir = secondary.state_dir.join("secondary");
+        secondary.config_dir = secondary.config_dir.join("secondary");
+        secondary.control_socket = secondary.state_dir.join("control.sock");
+        secondary.pid += 1;
+        secondary.instance_id = "secondary-instance".into();
+        plan.profiles.push(secondary);
+        validate_plan(&plan).unwrap();
+        let mut record = make_record(&plan, &serde_json::to_vec(&plan).unwrap());
+        record.target_profiles.push(ready_target(&plan, 0));
+        sync_target_aggregates(&plan, &mut record);
+        assert!(!record.native_ready && !record.target_committed);
+        assert!(retirement_gate(&plan, &record, true).is_err());
+        record.target_profiles.push(ready_target(&plan, 1));
+        sync_target_aggregates(&plan, &mut record);
+        assert!(record.native_ready && record.target_committed);
+        assert!(retirement_gate(&plan, &record, false).is_err());
+        retirement_gate(&plan, &record, true).unwrap();
+        record.target_profiles[1].state_dir = plan.profiles[0].state_dir.clone();
+        sync_target_aggregates(&plan, &mut record);
+        assert!(!record.native_ready && !record.target_committed);
+        assert_eq!(fs::read(original).unwrap(), b"preserved original history");
+        assert!(!journal_path(&plan).exists());
+    }
+
+    fn ready_target(plan: &MigrationPlan, index: usize) -> MigrationTargetProfile {
+        let profile = &plan.profiles[index];
+        MigrationTargetProfile {
+            config_dir: profile.config_dir.clone(),
+            state_dir: profile.state_dir.clone(),
+            pid: Some(2000 + index as u32),
+            instance_id: Some(format!("target-{index}")),
+            image: plan.target.image.clone(),
+            native_ready: true,
+            committed: true,
+            commit_requested: true,
+        }
+    }
+
+    #[test]
+    fn committed_primary_or_historical_flags_cannot_authorize_retirement_without_profile_binding() {
+        let (_temp, plan) = fixture();
+        let mut record = make_record(&plan, &serde_json::to_vec(&plan).unwrap());
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_pid = Some(2000);
+        record.target_instance = Some("target-0".into());
+        assert!(retirement_gate(&plan, &record, true).is_err());
+        record.target_profiles.push(ready_target(&plan, 0));
+        assert!(retirement_gate(&plan, &record, false).is_err());
+        assert_eq!(record.retirement_attempt, 0);
+        assert!(record.manager.is_none());
+        retirement_gate(&plan, &record, true).unwrap();
+    }
+
+    #[test]
+    fn captured_tern_endpoints_must_remain_absolute_before_any_mutation() {
+        let (temp, mut plan) = fixture();
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            plan.profiles[0]
+                .environment
+                .insert(key.into(), "relative-route".into());
+            assert!(validate_plan(&plan).is_err());
+            plan.profiles[0].environment.insert(
+                key.into(),
+                temp.path().join(key).to_string_lossy().into_owned(),
+            );
+            validate_plan(&plan).unwrap();
+        }
+        assert!(!journal_path(&plan).exists());
+    }
+
+    #[test]
+    fn partial_or_uncertain_commit_is_never_eligible_for_whole_operation_rollback() {
+        let (_temp, mut plan) = fixture();
+        let mut second = plan.profiles[0].clone();
+        second.config_dir = second.config_dir.join("second");
+        second.state_dir = second.state_dir.join("second");
+        plan.profiles.push(second);
+        let mut record = make_record(&plan, &serde_json::to_vec(&plan).unwrap());
+        record.target_profiles = vec![ready_target(&plan, 0), ready_target(&plan, 1)];
+        record.target_profiles[1].committed = false;
+        sync_target_aggregates(&plan, &mut record);
+        assert!(record.native_ready && !record.target_committed);
+        assert!(commit_may_have_applied(&record));
+        assert!(record.target_profiles[0].committed);
+        assert!(retirement_gate(&plan, &record, true).is_err());
+        record.target_profiles[0].committed = false;
+        assert!(commit_may_have_applied(&record)); // Lost Commit reply is Unknown, not rollback permission.
+        for target in &mut record.target_profiles {
+            target.commit_requested = false;
+        }
+        assert!(!commit_may_have_applied(&record));
+    }
+
+    #[test]
+    fn secondary_stop_after_partial_commit_prevents_every_target_and_rollback_launch() {
+        let (_temp, mut plan) = fixture();
+        let mut second = plan.profiles[0].clone();
+        second.config_dir = second.config_dir.join("second");
+        second.state_dir = second.state_dir.join("second");
+        second.control_socket = second.state_dir.join("control.sock");
+        second.pid += 1;
+        second.instance_id = "second-source".into();
+        fs::create_dir_all(second.state_dir.join("updates-v4")).unwrap();
+        fs::set_permissions(
+            second.state_dir.join("updates-v4"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        plan.profiles.push(second);
+        let mut record = make_record(&plan, &serde_json::to_vec(&plan).unwrap());
+        record.target_profiles = vec![ready_target(&plan, 0), ready_target(&plan, 1)];
+        record.target_profiles[1].committed = false;
+        sync_target_aggregates(&plan, &mut record);
+        let evidence = serde_json::to_vec(&record).unwrap();
+        assert!(!stop_requested(&plan).unwrap());
+        protocol::write_private_bytes(
+            &plan.profiles[1]
+                .state_dir
+                .join("updates-v4/stop-generation.json"),
+            b"1",
+            0o600,
+        )
+        .unwrap();
+        assert!(stop_requested(&plan).unwrap());
+        for profile in &plan.profiles {
+            for target in [false, true] {
+                let error = launch(&plan, profile, target, (0, "c".repeat(64))).unwrap_err();
+                assert!(error.contains("user Stop"));
+            }
+        }
+        assert_eq!(serde_json::to_vec(&record).unwrap(), evidence);
+        assert!(record.target_profiles[0].committed);
+        assert!(!journal_path(&plan).exists());
+    }
+
+    #[test]
+    fn derived_brew_candidate_requires_exact_certain_successful_manager() {
+        let (temp, mut plan) = fixture();
+        let formula = "hanbong5938/tap/desktop-pet".to_owned();
+        let brew = ExecutableIdentity {
+            path: temp.path().join("bin/brew"),
+            sha256: "e".repeat(64),
+        };
+        let cellar = temp.path().join("Cellar/desktop-pet");
+        plan.target.image.path =
+            cellar.join("0.4.12/libexec/DesktopPet.app/Contents/MacOS/desktop-pet");
+        plan.target.origin = InstallOrigin::Homebrew {
+            brew: brew.path.clone(),
+            prefix: temp.path().into(),
+            cellar_formula_root: cellar,
+            formula: formula.clone(),
+            locator: plan.target.image.path.clone(),
+        };
+        plan.target_manager_program = Some(brew.clone());
+        let mut record = make_record(&plan, &serde_json::to_vec(&plan).unwrap());
+        let mut derived = plan.target.image.clone();
+        derived.sha256 = "f".repeat(64);
+        record.target_image = Some(derived.clone());
+        assert!(target_image(&plan, &record).is_err());
+        record.target_manager = Some(ManagerEvidence {
+            program: brew,
+            args: vec!["install".into(), formula],
+            intent_at: 1,
+            pid: Some(1000),
+            pgid: Some(1000),
+            exit_code: Some(0),
+            quiescent: false,
+        });
+        assert!(target_image(&plan, &record).is_err());
+        record.target_manager.as_mut().unwrap().quiescent = true;
+        assert_eq!(target_image(&plan, &record).unwrap(), &derived);
+        record.target_manager.as_mut().unwrap().exit_code = None;
+        assert!(target_image(&plan, &record).is_err());
+        record.target_manager.as_mut().unwrap().exit_code = Some(0);
+        record.target_manager.as_mut().unwrap().args[0] = "reinstall".into();
+        assert!(target_image(&plan, &record).is_err());
+    }
+
     #[test]
     fn integration_closure_rejects_product_roots_bundles_and_archives() {
         for path in [
@@ -4078,8 +5121,10 @@ mod tests {
     fn migration_plan_uses_fixed_neutral_authority_even_in_bridge_build() {
         let (_temp, mut plan) = fixture();
         validate_plan(&plan).unwrap();
+        assert_eq!(plan.target.release.version, "0.4.12");
         for version in [
-            "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7",
+            "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9",
+            "0.4.10", "0.4.11",
         ] {
             let mut obsolete = plan.clone();
             obsolete.target.release.version = version.into();
@@ -4091,6 +5136,24 @@ mod tests {
             .archive_url
             .replace("desktop-pet/releases", "herdr-desktop-pet/releases");
         assert!(validate_plan(&plan).is_err());
+    }
+    #[test]
+    fn valid_beta_release_never_gains_stable_migration_authority() {
+        let (_temp, mut plan) = retained_fixture("0.4.13-beta.1");
+        plan.target.release.channel = crate::ReleaseChannel::Beta;
+        plan.target.release.tag = "v0.4.13-beta.1".into();
+        plan.target.release.archive_url = format!(
+            "https://github.com/hanbong5938/desktop-pet/releases/download/{}/{}",
+            plan.target.release.tag, plan.target.release.asset_name
+        );
+        plan.target.release.checksum_url = format!("{}.sha256", plan.target.release.archive_url);
+        plan.target.release.validate_neutral().unwrap();
+        assert!(validate_plan(&plan)
+            .unwrap_err()
+            .contains("approved neutral stable 0.4.12"));
+        assert!(validate_plan_structure(&plan).is_err());
+        assert!(approval::authorize_update_approval(&plan).is_err());
+        assert!(!journal_path(&plan).exists());
     }
     #[test]
     fn migration_eligibility_accepts_only_the_current_bridge_image() {
@@ -4107,12 +5170,17 @@ mod tests {
             "0.3.8",
             "0.3.9",
             "0.3.10",
+            "0.3.11",
+            "0.3.12",
+            "0.3.13",
+            "0.3.14",
+            "0.3.15",
             crate::identity::neutral::VERSION,
         ] {
             ctx.version = version.into();
             assert!(readonly_eligibility(&ctx).is_err());
         }
-        ctx.version = "0.3.12".into();
+        ctx.version = "0.3.16".into();
         ctx.running.sha256 = "f".repeat(64);
         assert!(readonly_eligibility(&ctx).is_err());
     }
@@ -4205,14 +5273,30 @@ mod tests {
     #[test]
     fn durable_plan_substitution_and_journal_digest_change_are_rejected() {
         let (_temp, plan) = fixture();
-        let mut record = persist_fixture(&plan);
+        let record = persist_fixture(&plan);
         read_record(&plan).unwrap();
         let mut altered = plan.clone();
         altered.source_image.sha256 = "d".repeat(64);
         assert!(read_record(&altered).is_err());
-        record.plan_sha256 = "0".repeat(64);
+        let bytes = fs::read(evidence_path(&plan)).unwrap();
+        let mut changed_bytes = bytes.clone();
+        changed_bytes.push(b'\n');
+        fs::write(evidence_path(&plan), changed_bytes).unwrap();
+        assert!(read_record(&plan).is_err(), "raw bytes remain digest-bound");
+        fs::write(evidence_path(&plan), &bytes).unwrap();
+        for field in ["version", "operation_id", "plan_sha256"] {
+            let mut changed = record.clone();
+            match field {
+                "version" => changed.version += 1,
+                "operation_id" => changed.operation_id = "0".repeat(32),
+                "plan_sha256" => changed.plan_sha256 = "0".repeat(64),
+                _ => unreachable!(),
+            }
+            save(&plan, &changed).unwrap();
+            assert!(read_record(&plan).is_err(), "{field} must remain bound");
+        }
         save(&plan, &record).unwrap();
-        assert!(read_record(&plan).is_err());
+        read_record(&plan).unwrap();
     }
     #[test]
     fn legacy_and_neutral_stop_evidence_is_combined_without_rewriting() {
@@ -4230,6 +5314,29 @@ mod tests {
         protocol::write_private_bytes(&new, u64::MAX.to_string().as_bytes(), 0o600).unwrap();
         assert!(stop_requested(&plan).is_err());
     }
+    #[test]
+    fn selected_original_custom_pair_becomes_default_only_when_absent_or_identical() {
+        let (_temp, mut plan) = fixture();
+        plan.profiles[0].config_dir = plan.profiles[0].config_dir.join("custom-original");
+        plan.profiles[0].state_dir = plan.profiles[0].state_dir.join("custom-original");
+        assert!(
+            default_profile_matches(&plan.previous_default_profile, &plan.profiles[0]).unwrap()
+        );
+        plan.previous_default_profile.bytes = Some(serde_json::to_vec(&serde_json::json!({
+            "version":1,"config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir,
+        })).unwrap());
+        assert!(
+            default_profile_matches(&plan.previous_default_profile, &plan.profiles[0]).unwrap()
+        );
+        plan.previous_default_profile.bytes = Some(
+            br#"{"version":1,"config_dir":"/unrelated/config","state_dir":"/unrelated/state"}"#
+                .to_vec(),
+        );
+        assert!(
+            !default_profile_matches(&plan.previous_default_profile, &plan.profiles[0]).unwrap()
+        );
+    }
+
     #[test]
     fn previous_other_default_is_preserved_byte_for_byte() {
         let (_temp, mut plan) = fixture();
@@ -4345,7 +5452,7 @@ mod tests {
         let (_temp, plan) = fixture();
         let mut value = serde_json::json!({
             "ok":true,"running":true,"shutdown":false,"ready":true,"ui_ready":true,"control_ready":true,
-            "app_version":"0.3.12","updater_protocol":3,"observation_capability":1,"integration_api":1,
+            "app_version":"0.3.16","updater_protocol":3,"observation_capability":1,"integration_api":1,
             "instance_id":"source-instance","running_sha256":plan.source_image.sha256,"pid":1000,
             "executable_path":plan.source_image.path,"config_dir":plan.profiles[0].config_dir,"state_dir":plan.profiles[0].state_dir,
             "observation_mode":"both","host_connections":{"herdr":1,"tern":0}
@@ -4353,6 +5460,13 @@ mod tests {
         let live: LiveStatus = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(live_observation(&live).unwrap(), ObservationSelection::Auto);
         assert!(!source_requires_tern(&live).unwrap());
+        value["migration_source_environment"] =
+            serde_json::json!({"TERN_WINDOW_KEY":"ambient-window","TERM_PROGRAM":"Tern"});
+        let ambient: LiveStatus = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            !source_requires_tern(&ambient).unwrap(),
+            "ambient Tern routing is not a configured integration"
+        );
         value["host_connections"]["tern"] = serde_json::json!(1);
         let live: LiveStatus = serde_json::from_value(value.clone()).unwrap();
         assert!(source_requires_tern(&live).unwrap());
@@ -4393,7 +5507,114 @@ mod tests {
         assert!(latest_for_context(&wrong).unwrap().is_none());
     }
     #[test]
-    fn retained_older_completed_migration_does_not_block_a_newer_native_image() {
+    fn startup_discovery_retains_old_operation_before_current_runtime_readiness() {
+        let (_temp, plan) = retained_fixture("0.4.8");
+        let mut record = persist_fixture(&plan);
+        record.phase = MigrationPhase::AwaitingReconnect;
+        record.native_ready = true;
+        record.target_committed = true;
+        record.target_pid = Some(2000);
+        record.target_instance = Some("original-committed".into());
+        record.retirement_attempt = 1;
+        save(&plan, &record).unwrap();
+        let old_plan = fs::read(evidence_path(&plan)).unwrap();
+        let old_journal = fs::read(journal_path(&plan)).unwrap();
+        let mut ctx = context(&plan);
+        ctx.running =
+            executable_identity(&actual_process_image(std::process::id()).unwrap()).unwrap();
+        ctx.executable = ctx.running.path.clone();
+        ctx.version = crate::identity::neutral::VERSION.into();
+        ctx.running_origin = Some(Box::new(plan.target.origin.clone()));
+        ctx.instance_id = "current-runtime".into();
+        let listener = UnixListener::bind(&plan.profiles[0].control_socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(
+            &plan.profiles[0].control_socket,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let profile = plan.profiles[0].clone();
+        let image = ctx.running.clone();
+        let server = thread::spawn(move || {
+            let ready = false;
+            for _ in 0..2 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "retained readiness request did not arrive"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("retained readiness accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut byte = [0u8; 1];
+                while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {}
+                let mut reply = serde_json::to_vec(&serde_json::json!({
+                    "ok":true,"running":true,"shutdown":false,"ready":ready,
+                    "ui_ready":ready,"control_ready":true,"observation_mode":"auto",
+                    "app_version":crate::identity::neutral::VERSION,
+                    "updater_protocol":4,"observation_capability":2,"integration_api":1,
+                    "instance_id":"current-runtime","pid":std::process::id(),
+                    "executable_path":image.path,"running_sha256":image.sha256,
+                    "config_dir":profile.config_dir,"state_dir":profile.state_dir
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                stream.write_all(&reply).unwrap();
+                // Keep the authenticated peer alive until the client has finished
+                // reading and closed its socket; a close race is not readiness.
+                let mut remaining = [0u8; 1];
+                assert_eq!(stream.read(&mut remaining).unwrap(), 0);
+            }
+        });
+        let discovered = discover_for_context(&ctx).unwrap().unwrap();
+        assert_eq!(discovered, (plan.clone(), record.clone()));
+        let live = status(&plan.profiles[0]).unwrap();
+        assert_eq!(live.pid, std::process::id());
+        assert_eq!(live.instance_id, ctx.instance_id);
+        assert_eq!(live.executable_path, ctx.running.path);
+        assert_eq!(live.running_sha256, ctx.running.sha256);
+        assert_eq!(live.config_dir, ctx.config_dir);
+        assert_eq!(live.state_dir, ctx.state_dir);
+        assert!(live.ok && live.running && live.control_ready);
+        assert!(!live.ready && !live.ui_ready && !live.shutdown);
+        assert_eq!(actual_process_image(live.pid).unwrap(), ctx.running.path);
+        // The old startup lookup consumed readiness before it returned the
+        // plan, leaving the UI with no operation to observe on later ticks.
+        assert!(latest_for_context(&ctx).is_err());
+        assert_eq!(
+            discover_for_context(&ctx).unwrap(),
+            Some(discovered.clone())
+        );
+        server.join().unwrap();
+        let mut unrelated = ctx.clone();
+        unrelated.config_dir = unrelated.config_dir.join("other");
+        assert!(discover_for_context(&unrelated).unwrap().is_none());
+        let mut old_source_version = ctx;
+        old_source_version.version = "0.3.10".into();
+        assert!(discover_for_context(&old_source_version).unwrap().is_none());
+        assert_eq!(fs::read(evidence_path(&plan)).unwrap(), old_plan);
+        assert_eq!(fs::read(journal_path(&plan)).unwrap(), old_journal);
+        for suffix in ["migration-settlement.json", "tern-delivery.json"] {
+            assert!(!plan.profiles[0]
+                .state_dir
+                .join("updates-v4")
+                .join(format!("{}.{suffix}", plan.operation_id))
+                .exists());
+        }
+    }
+
+    #[test]
+    fn unverified_newer_native_image_cannot_settle_old_completed_history() {
         let (_temp, plan) = retained_fixture("0.4.2");
         let mut record = persist_fixture(&plan);
         record.phase = MigrationPhase::Complete;
@@ -4406,7 +5627,7 @@ mod tests {
         ctx.running = plan.target.image.clone();
         ctx.running.sha256 = "f".repeat(64);
         ctx.running_origin = Some(Box::new(plan.target.origin.clone()));
-        assert!(latest_for_context(&ctx).unwrap().is_none());
+        assert!(latest_for_context(&ctx).is_err());
         assert_eq!(fs::read(evidence_path(&plan)).unwrap(), evidence_before);
         assert_eq!(fs::read(journal_path(&plan)).unwrap(), journal_before);
     }
@@ -4746,6 +5967,7 @@ pub struct MigrationProfilePaths {
 #[serde(rename_all = "snake_case")]
 pub enum MigrationFinalConsentOutcome {
     VisibleApproved,
+    DelegatedApproved,
     Cancelled,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -4822,7 +6044,7 @@ pub fn write_final_consent_cancelled(
         MigrationFinalConsentOutcome::Cancelled,
     ))
 }
-fn write_final_visible_ack(
+fn write_authorization_ack(
     plan: &MigrationPlan,
     record: &MigrationRecord,
     retirement_only: bool,
@@ -4838,7 +6060,11 @@ fn write_final_visible_ack(
         plan,
         record.plan_sha256.clone(),
         retirement_only,
-        MigrationFinalConsentOutcome::VisibleApproved,
+        if delegated_approval(plan)? {
+            MigrationFinalConsentOutcome::DelegatedApproved
+        } else {
+            MigrationFinalConsentOutcome::VisibleApproved
+        },
     ))
 }
 fn read_final_consent_frame<R: Read>(
@@ -4866,6 +6092,11 @@ fn read_final_consent_frame<R: Read>(
     let evidence = owned_private_file(plan_path, MAX_PLAN)?;
     let stored: MigrationPlan = serde_json::from_slice(&evidence).map_err(|e| e.to_string())?;
     let approved = frame.outcome == MigrationFinalConsentOutcome::VisibleApproved;
+    if frame.outcome == MigrationFinalConsentOutcome::DelegatedApproved
+        && !delegated_approval(plan)?
+    {
+        return Err("helper delegation has no matching original update authority".into());
+    }
     if stored != *plan
         || frame.version != 4
         || frame.kind != "legacy_migration_final_consent"
@@ -4957,45 +6188,17 @@ fn neutral_config_root(
     crate::ensure_absolute(&root)?;
     Ok(root.join("desktop-pet"))
 }
-fn is_legacy_base_profile(profile: &LegacyProfile, origin: &LegacyOrigin) -> Result<bool, String> {
-    let home = profile_home(&profile.environment, &crate::origin::os_home()?)?;
-    let config_base = profile
-        .environment
-        .get("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let state_base = profile
-        .environment
-        .get("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"));
-    let host_name = match origin {
-        LegacyOrigin::HerdrManaged {
-            host_config_dir, ..
-        } => host_config_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or("managed host root has no name")?,
-        _ => profile
-            .host_plugin_config_dir
-            .as_ref()
-            .and_then(|path| path.ancestors().nth(3))
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or("herdr"),
+fn default_profile_matches(
+    previous: &PreviousRecord,
+    profile: &LegacyProfile,
+) -> Result<bool, String> {
+    let Some(bytes) = &previous.bytes else {
+        return Ok(true);
     };
-    if !matches!(host_name, "herdr" | "herdr-dev") {
-        return Ok(false);
-    }
-    let config = profile.host_plugin_config_dir.clone().unwrap_or_else(|| {
-        config_base
-            .join(host_name)
-            .join("plugins/config/desktop-pet")
-    });
-    Ok(profile.config_dir == config
-        && profile.state_dir == state_base.join(host_name).join("plugins/desktop-pet"))
+    let old: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    Ok(
+        old == serde_json::json!({"version":1,"config_dir":profile.config_dir,"state_dir":profile.state_dir})
+    )
 }
 
 fn capture_target_profiles(
@@ -5008,28 +6211,52 @@ fn capture_target_profiles(
     let mut profiles = Vec::with_capacity(active.len());
     for registered in active {
         let live = status_at(&registered.state_dir.join("control.sock"))?;
+        let image = ExecutableIdentity {
+            path: live.executable_path.clone(),
+            sha256: live.running_sha256.clone(),
+        };
+        let current = image == target.image
+            && live.app_version == crate::identity::neutral::MIGRATION_TARGET_VERSION;
+        let retained_brew = matches!(&target.origin, InstallOrigin::Homebrew { cellar_formula_root, .. }
+            if image.path.starts_with(cellar_formula_root) && image.path != target.image.path)
+            && matches!(live.app_version.as_str(), "0.4.7" | "0.4.8");
         if !live.ok
             || !live.running
             || live.shutdown
             || !live.ready
             || !live.ui_ready
             || !live.control_ready
-            || live.app_version != crate::identity::neutral::VERSION
+            || !(current || retained_brew)
             || live.updater_protocol != 4
             || live.observation_capability != 2
             || live.integration_api != 1
             || live.pid != registered.pid
             || live.instance_id != registered.instance_id
             || live.state_dir != registered.state_dir
-            || live.executable_path != target.image.path
-            || live.running_sha256 != target.image.sha256
             || live.migration_gated
-            || actual_process_image(live.pid)? != target.image.path
-            || executable_identity(&target.image.path)? != target.image
+            || actual_process_image(live.pid)? != image.path
+            || executable_identity(&image.path)? != image
         {
             return Err(
                 "existing target profile does not prove immutable compatible neutral reuse".into(),
             );
+        }
+        if retained_brew {
+            let bundle = image
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .ok_or("retained Brew target image has no bundle")?;
+            command_output(
+                Path::new("/usr/bin/codesign"),
+                &[
+                    "--verify".into(),
+                    "--deep".into(),
+                    "--strict".into(),
+                    bundle.to_string_lossy().into_owned(),
+                ],
+            )?;
         }
         owned_directory(&live.config_dir)?;
         owned_directory(&live.state_dir)?;
@@ -5038,16 +6265,31 @@ fn capture_target_profiles(
             instance_id: live.instance_id,
             config_dir: live.config_dir,
             state_dir: live.state_dir.clone(),
-            image: target.image.clone(),
+            image,
             stop_generation: migration_stop_generation(&live.state_dir)?,
         });
     }
     Ok(profiles)
 }
-/// Bounded, read-only history lookup. A terminal native journal is not converted
-/// into new authority; explicit resume still verifies its owned scope and Stop.
+/// Bounded discovery retains the validated historical operation even before the
+/// current UI is ready. Discovery never delivers integrations or settles it;
+/// the caller must observe the retained plan once runtime witnesses are ready.
+pub fn discover_for_context(
+    context: &UpdateContext,
+) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
+    history_for_context(context, false)
+}
+
+/// Lookup with current-owner observation, preserving control-route semantics.
 pub fn latest_for_context(
     context: &UpdateContext,
+) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
+    history_for_context(context, true)
+}
+
+fn history_for_context(
+    context: &UpdateContext,
+    observe: bool,
 ) -> Result<Option<(MigrationPlan, MigrationRecord)>, String> {
     crate::ensure_absolute(&context.state_dir)?;
     image_valid(&context.running)?;
@@ -5062,28 +6304,28 @@ pub fn latest_for_context(
     let mut count = 0;
     for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".migration-plan.json")
-        {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".migration-plan.json") && !name.ends_with(".migration-profile.json") {
             continue;
         }
         count += 1;
         if count > 1024 {
             return Err("migration history exceeds bound".into());
         }
+        let plan_path = if name.ends_with(".migration-profile.json") {
+            integrations::profile_plan_path(&entry.path(), &context.config_dir, &context.state_dir)?
+        } else {
+            entry.path()
+        };
         // History keeps its originally approved release; current-version binding
         // still applies to every new plan, execution, startup and resume.
         let plan: MigrationPlan =
-            serde_json::from_slice(&owned_private_file(&entry.path(), MAX_PLAN)?)
+            serde_json::from_slice(&owned_private_file(&plan_path, MAX_PLAN)?)
                 .map_err(|e| e.to_string())?;
         validate_plan_structure(&plan)?;
-        if entry.path() != evidence_path(&plan) {
+        if plan_path != evidence_path(&plan) {
             return Err("migration evidence name does not match operation/profile".into());
-        }
-        if context.running != plan.target.image && context.running != plan.source_image {
-            continue;
         }
         if !plan
             .profiles
@@ -5092,7 +6334,21 @@ pub fn latest_for_context(
         {
             continue;
         }
-        let record = read_record(&plan)?;
+        let retained = read_record(&plan)?;
+        let actual_target = target_image(&plan, &retained)?;
+        if &context.running != actual_target
+            && context.running != plan.source_image
+            && !integrations::retained_owner_matches(&plan, context)?
+        {
+            continue;
+        }
+        let record =
+            if observe && &context.running != actual_target && context.running != plan.source_image
+            {
+                integrations::observe_for_context(&plan, context)?
+            } else {
+                retained
+            };
         let modified = fs::symlink_metadata(journal_path(&plan))
             .map_err(|e| e.to_string())?
             .modified()
@@ -5107,6 +6363,7 @@ pub fn latest_for_context(
 
 fn verify_neutral_profile(
     image: &ExecutableIdentity,
+    version: &str,
     profile: &LegacyProfile,
     live: &LiveStatus,
 ) -> Result<(), String> {
@@ -5117,7 +6374,7 @@ fn verify_neutral_profile(
         || !live.ui_ready
         || !live.control_ready
         || live.migration_gated
-        || live.app_version != crate::identity::neutral::VERSION
+        || live.app_version != version
         || live.updater_protocol != 4
         || live.observation_capability != 2
         || live.integration_api != 1
@@ -5304,6 +6561,9 @@ fn retire_exact_bundle(plan: &MigrationPlan, bundle: &Path, label: &str) -> Resu
     if retained.exists() {
         return Err("retired bundle evidence already exists; preserve both copies".into());
     }
+    if stop_requested(plan)? {
+        return Err("user Stop prevents approved bundle retirement".into());
+    }
     match fs::rename(bundle, &retained) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
@@ -5330,6 +6590,9 @@ fn retire_exact_bundle(plan: &MigrationPlan, bundle: &Path, label: &str) -> Resu
                     backup.to_string_lossy().into_owned(),
                 ],
             )?;
+            if stop_requested(plan)? {
+                return Err("user Stop prevents cross-volume legacy retirement".into());
+            }
             fs::remove_dir_all(bundle).map_err(|e| e.to_string())?;
         }
         Err(error) => return Err(error.to_string()),

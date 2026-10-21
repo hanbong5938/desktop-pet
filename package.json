@@ -1,12 +1,12 @@
 {
   "name": "desktop-pet",
-  "version": "0.4.8",
+  "version": "0.4.17-beta.6",
   "private": true,
   "type": "module",
   "description": "Native desktop character companion",
   "scripts": {
     "check": "tsc --noEmit",
-    "build:native": "distribution=\"${DESKTOP_PET_DISTRIBUTION:-neutral}\"; case \"$distribution\" in neutral|legacy-0.3.12) ;; *) echo 'invalid DESKTOP_PET_DISTRIBUTION' >&2; exit 1 ;; esac; export DESKTOP_PET_DISTRIBUTION=\"$distribution\"; set --; if [ -n \"${DESKTOP_PET_CARGO_TARGET:-}\" ]; then set -- --target \"$DESKTOP_PET_CARGO_TARGET\"; fi; cargo build --release --locked --workspace --target-dir \"native/target/$distribution\" \"$@\" --manifest-path native/Cargo.toml",
+    "build:native": "distribution=\"${DESKTOP_PET_DISTRIBUTION:-neutral}\"; case \"$distribution\" in neutral|legacy-0.3.16) ;; *) echo 'invalid DESKTOP_PET_DISTRIBUTION' >&2; exit 1 ;; esac; export DESKTOP_PET_DISTRIBUTION=\"$distribution\"; set --; if [ -n \"${DESKTOP_PET_CARGO_TARGET:-}\" ]; then set -- --target \"$DESKTOP_PET_CARGO_TARGET\"; fi; cargo build --release --locked --workspace --target-dir \"native/target/$distribution\" \"$@\" --manifest-path native/Cargo.toml",
     "test:native": "cargo test --locked --workspace --manifest-path native/Cargo.toml",
     "package:native": "bun scripts/package-native.ts",
     "install:local": "bash scripts/install.sh --source"

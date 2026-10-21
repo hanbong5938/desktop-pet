@@ -159,8 +159,8 @@ discover_native() {
     accept_discovery "$record"
     return
   done
-  candidate="$home/Applications/DesktopPet.app/Contents/MacOS/desktop-pet"
-  if [[ -e "$home/Applications/DesktopPet.app" || -L "$home/Applications/DesktopPet.app" ]]; then
+  candidate="$home/.local/share/desktop-pet/libexec/DesktopPet.app/Contents/MacOS/desktop-pet"
+  if [[ -e "$home/.local/share/desktop-pet/libexec/DesktopPet.app" || -L "$home/.local/share/desktop-pet/libexec/DesktopPet.app" ]]; then
     candidate="$(physical_file "$candidate")"
     preflight_pair "$candidate"
     record="$("$SELECTED_HELPER" discover --json)" || fail 'standalone installation requires explicit native repair'

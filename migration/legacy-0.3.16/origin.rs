@@ -111,6 +111,8 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
                 | "HERDR_SOCKET_PATH"
                 | "XDG_CONFIG_HOME"
                 | "XDG_STATE_HOME"
+                | "TERN_CONFIG_DIR"
+                | "TERN_DAEMON_SOCKET"
                 | "HOME"
                 | OBSERVATION_MODE_ENV
         ) || value.len() > 4096
@@ -119,6 +121,9 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
             return Err(format!(
                 "unapproved host routing environment variable {key}"
             ));
+        }
+        if matches!(key.as_str(), "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET") {
+            ensure_absolute(Path::new(value))?;
         }
     }
     if c.running_origin.is_none() && executable_identity(&c.executable)? != c.running {
@@ -2227,6 +2232,25 @@ mod tests {
             locale: "en".into(),
         };
         assert!(context_valid(&context).is_ok());
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            context
+                .environment
+                .insert(key.into(), "/isolated/tern/endpoint".into());
+            assert!(context_valid(&context).is_ok());
+            let bytes = serde_json::to_vec(&context).unwrap();
+            let retained: UpdateContext = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(retained, context);
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                context.environment.insert(key.into(), invalid);
+                assert!(context_valid(&context).is_err());
+            }
+            context.environment.remove(key);
+        }
         let default_context = context.clone();
         for mode in ["herdr", "tern", "auto"] {
             context
@@ -2311,10 +2335,14 @@ mod tests {
             candidate: None,
         };
         let original = serde_json::to_vec(&plan).unwrap();
-        assert_eq!(recheck_plan(&plan).unwrap_err(),
-            "legacy bridge ingress does not support source rebuilding");
-        assert_eq!(manager_command(&plan).unwrap_err(),
-            "legacy bridge ingress does not support source rebuilding");
+        assert_eq!(
+            recheck_plan(&plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding"
+        );
+        assert_eq!(
+            manager_command(&plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding"
+        );
         assert_eq!(serde_json::to_vec(&plan).unwrap(), original);
         assert!(!base.join("missing").exists());
 
@@ -2335,8 +2363,10 @@ mod tests {
         std::os::unix::fs::symlink(&base, &external_alias).unwrap();
         let mut aliased_plan = plan.clone();
         aliased_plan.context.herdr_socket = external_alias.join("missing/parent/herdr.sock");
-        assert_eq!(recheck_plan(&aliased_plan).unwrap_err(),
-            "legacy bridge ingress does not support source rebuilding");
+        assert_eq!(
+            recheck_plan(&aliased_plan).unwrap_err(),
+            "legacy bridge ingress does not support source rebuilding"
+        );
 
         // Files and dangling aliases cannot be treated as absent directories.
         let blocked = base.join("not-a-directory");
@@ -2834,7 +2864,11 @@ mod tests {
             assert_eq!(snapshot.status, CheckStatus::Current);
             assert!(snapshot.plan.is_none());
             assert_eq!(snapshot.detail, "Verified local legacy bridge ingress; installation is prebuilt-only. Source rebuilding is unsupported; use the separately approved Desktop Pet migration when eligible.");
-            fs::write(local.join("native/Cargo.toml"), b"[package]\nname='looks-buildable'\n").unwrap();
+            fs::write(
+                local.join("native/Cargo.toml"),
+                b"[package]\nname='looks-buildable'\n",
+            )
+            .unwrap();
             let still_prebuilt = check(&context, UpdatePolicy::StableOnly).unwrap();
             assert_eq!(still_prebuilt.status, CheckStatus::Current);
             assert!(still_prebuilt.plan.is_none());
@@ -2843,30 +2877,45 @@ mod tests {
             let bytes = serde_json::to_vec(&stale).unwrap();
             let retained: UpdatePlan = serde_json::from_slice(&bytes).unwrap();
             assert!(matches!(retained.action, UpdateAction::SourceRebuild));
-            assert_eq!(recheck_plan(&retained).unwrap_err(),
-                "legacy bridge ingress does not support source rebuilding");
-            assert_eq!(manager_command(&retained).unwrap_err(),
-                "legacy bridge ingress does not support source rebuilding");
+            assert_eq!(
+                recheck_plan(&retained).unwrap_err(),
+                "legacy bridge ingress does not support source rebuilding"
+            );
+            assert_eq!(
+                manager_command(&retained).unwrap_err(),
+                "legacy bridge ingress does not support source rebuilding"
+            );
         }
 
         // A real, independently verified different installed image remains applicable.
         let mut captured = context.clone();
-        captured.running_origin = Some(Box::new(InstallOrigin::Source { root: local.clone() }));
+        captured.running_origin = Some(Box::new(InstallOrigin::Source {
+            root: local.clone(),
+        }));
         let capabilities = serde_json::to_string(&crate::identity::capabilities()).unwrap();
         let literal = serde_json::to_string(&capabilities).unwrap();
         let program = local.join("candidate.c");
         fs::write(&program, format!(
             "#include <stdio.h>\n#include <string.h>\nint main(int n,char**v){{if(n==2&&!strcmp(v[1],\"update-capabilities\")){{puts({literal});return 0;}}if(n==2&&!strcmp(v[1],\"--version\")){{puts(\"Herdr Desktop Pet 0.3.12\");return 0;}}return 99;}}\n"
         )).unwrap();
-        assert!(Command::new("/usr/bin/clang").arg(&program).arg("-o").arg(&binary)
-            .status().unwrap().success());
+        assert!(Command::new("/usr/bin/clang")
+            .arg(&program)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success());
         let contents = binary.parent().unwrap().parent().unwrap();
         fs::write(contents.join("Info.plist"),
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>herdr-desktop-pet</string><key>CFBundleIdentifier</key><string>test.desktop-pet.legacy-candidate</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string></dict></plist>"
         ).unwrap();
         #[cfg(target_os = "macos")]
-        assert!(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"])
-            .arg(contents.parent().unwrap()).status().unwrap().success());
+        assert!(Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(contents.parent().unwrap())
+            .status()
+            .unwrap()
+            .success());
         let installed = executable_identity(&binary).unwrap();
         assert_ne!(installed.sha256, captured.running.sha256);
         let applicable = check(&captured, UpdatePolicy::StableOnly).unwrap();

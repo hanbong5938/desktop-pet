@@ -4,7 +4,7 @@ umask 077
 
 # This file is also the self-contained, checksum-pinned release installer asset.
 # Prebuilt mode does not read a checkout, host manifest, HOME, or host environment.
-RELEASE_VERSION="0.4.8"
+RELEASE_VERSION="0.4.17-beta.6"
 REPOSITORY="hanbong5938/desktop-pet"
 APP_NAME="DesktopPet.app"
 BUNDLE_ID="io.github.hanbong5938.desktop-pet"
@@ -18,7 +18,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: bash scripts/install.sh [--prebuilt | --source [--stage-only ABS]]
 
-  (default), --prebuilt  Install the pinned Desktop Pet 0.4.8 release only.
+  (default), --prebuilt  Install the pinned Desktop Pet 0.4.17-beta.6 prerelease only.
                          A failed download never falls back to source.
   --source               Build this verified core checkout, then admit the
                          staged app at this checkout's dist/DesktopPet.app.
@@ -27,10 +27,10 @@ Usage: bash scripts/install.sh [--prebuilt | --source [--stage-only ABS]]
                          in an existing private empty directory. The updater's
                          reserved transaction owns commit and stage cleanup.
 
-The native coordinator serializes installation with the private OS-home install
-lock, both updater namespaces, installation roots, and live-profile admission.
-Compatible same/higher stable installations are reused. Beta/incompatible/live
-or reserved installations require an explicit native update/migration instead.
+The native coordinator serializes installation and preserves existing owners.
+Prebuilt upgrades of the same standalone owner ask native consent to restart
+only Desktop Pet; Tern and work stay running. Save unsaved Pet edits first.
+Other active profiles are rejected before any app is stopped.
 
 DESKTOP_PET_INSTALL_MODE accepts prebuilt (default) or source.
 DESKTOP_PET_SHA256 may pin the archive digest in addition to the fixed authority.
@@ -258,9 +258,26 @@ printf '{"version":1}\n' > "$request"
 /usr/bin/plutil -insert kind -string "$([[ "$mode" == source ]] && printf source || printf standalone)" "$request"
 if [[ "$mode" == source ]]; then /usr/bin/plutil -insert source_root -string "$ROOT_DIR" "$request"; fi
 chmod 600 "$request"
-# The native transaction owns OS-account-home destination/locator validation,
-# rechecking after lock, no-live/no-reservation admission and atomic replacement.
-# A failed stage never removes the previous app or locator.
-result="$("$STAGED_APP/Contents/MacOS/desktop-pet-update-coordinator" install --request "$request")" || fail 'native installation admission failed; existing installation was preserved'
-executable="$(json_string "$result" executable)" || fail 'coordinator returned an invalid installation record'
+# Prebuilt admission owns a detached durable native transaction. Its separate
+# ownership ACK is not installation success; this call waits for a final result.
+command=install
+[[ "$mode" != prebuilt ]] || command=install-coordinated
+status=0
+result="$("$STAGED_APP/Contents/MacOS/desktop-pet-update-coordinator" "$command" --request "$request")" || status=$?
+if [[ "$mode" == prebuilt ]]; then
+  if (( status != 0 )); then
+    printf '%s\n' "$result" >&2
+    operation_id="$(json_string "$result" operation_id 2>/dev/null)" || operation_id=""
+    state_dir="$(json_string "$result" state_dir 2>/dev/null)" || state_dir=""
+    if [[ -n "$operation_id" && -n "$state_dir" ]]; then
+      printf 'Installation is not confirmed applied. Operation: %s\nState: %s\nRecover: %q install-recover --state-dir %q --operation-id %q\n' \
+        "$operation_id" "$state_dir" "$state_dir/updates-v4/install-$operation_id.resources/helper" "$state_dir" "$operation_id" >&2
+    fi
+    exit "$status"
+  fi
+  executable="$(json_string "$result" installation.executable)" || fail 'coordinator returned an invalid nested installation record'
+else
+  (( status == 0 )) || fail 'native source installation failed; inspect its reported disk outcome'
+  executable="$(json_string "$result" executable)" || fail 'coordinator returned an invalid installation record'
+fi
 printf 'Desktop Pet installation: %s\n' "$executable"
