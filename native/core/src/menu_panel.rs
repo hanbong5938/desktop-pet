@@ -20,15 +20,15 @@ use objc2_app_kit::{
     NSBoxType, NSButton, NSButtonType, NSCellImagePosition, NSColor, NSControl, NSControlSize,
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
     NSFloatingWindowLevel, NSFont, NSImage, NSImageScaling, NSImageView, NSPanel, NSPopUpButton,
-    NSScreen, NSScrollElasticity, NSScrollView, NSScroller, NSScrollerStyle, NSSwitch,
+    NSScreen, NSScrollElasticity, NSScrollView, NSScroller, NSScrollerStyle, NSSwitch, NSText,
     NSTextAlignment, NSTextField, NSTextView, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
 
 use objc2_foundation::{
-    NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager,
+    NSArray, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager, NSValue,
 };
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::fmt::Write as _;
 const PANEL_WIDTH: f64 = 352.0;
 const PANEL_HEIGHT: f64 = 540.0;
@@ -40,6 +40,11 @@ const FOOTER_HEIGHT: f64 = 50.0;
 const INITIAL_CHARACTER_HEIGHT: f64 = 72.0;
 const MIN_SCALE: f64 = 0.35;
 const MAX_SCALE: f64 = 1.25;
+const DETAIL_PAGE_COUNT: usize = 7;
+const DETAIL_MIN_WIDTH: f64 = 360.0;
+const DETAIL_MIN_HEIGHT: f64 = 96.0;
+const DETAIL_DEFAULT_WIDTH: f64 = 600.0;
+const DETAIL_DEFAULT_MAX_HEIGHT: f64 = 560.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -72,6 +77,7 @@ pub(crate) enum SettingsDetailPage {
     UpdateSettings = 3,
     ConnectionDiagnostics = 4,
     UpdateDetails = 5,
+    AppRecovery = 6,
 }
 
 impl SettingsDetailPage {
@@ -83,6 +89,7 @@ impl SettingsDetailPage {
             3 => Some(Self::UpdateSettings),
             4 => Some(Self::ConnectionDiagnostics),
             5 => Some(Self::UpdateDetails),
+            6 => Some(Self::AppRecovery),
             _ => None,
         }
     }
@@ -97,6 +104,7 @@ impl SettingsDetailPage {
             Self::UpdateSettings => Message::UpdateSettings,
             Self::ConnectionDiagnostics => Message::ConnectionDiagnostics,
             Self::UpdateDetails => Message::UpdateDetails,
+            Self::AppRecovery => Message::AppRecovery,
         }
     }
 }
@@ -105,6 +113,7 @@ impl SettingsDetailPage {
 struct SettingsDetailWindowIvars {
     composition_escape: Cell<Option<u64>>,
     update_frozen: Cell<bool>,
+    field_editor: OnceCell<Retained<SettingsFieldEditor>>,
 }
 
 define_class!(
@@ -115,6 +124,17 @@ define_class!(
     struct SettingsDetailNativeWindow;
     unsafe impl NSObjectProtocol for SettingsDetailNativeWindow {}
     impl SettingsDetailNativeWindow {
+        #[unsafe(method_id(fieldEditor:forObject:))]
+        fn field_editor(&self, create: bool, _object: Option<&AnyObject>) -> Option<Retained<NSText>> {
+            if create {
+                self.ivars().field_editor.get_or_init(|| {
+                    let editor = SettingsFieldEditor::new(self.mtm());
+                    editor.ivars().set(self.ivars().update_frozen.get());
+                    editor
+                });
+            }
+            self.ivars().field_editor.get().map(|editor| editor.retain().into_super().into_super())
+        }
         #[unsafe(method(sendEvent:))]
         fn send_event(&self, event: &NSEvent) {
             let composing_escape = event.r#type() == objc2_app_kit::NSEventType::KeyDown && event.keyCode() == 53 && self.firstResponder()
@@ -189,6 +209,89 @@ define_class!(
         #[unsafe(method(isEnabled))]
         fn is_enabled(&self) -> bool {
             !self.ivars().get() && unsafe { msg_send![super(self), isEnabled] }
+        }
+    }
+);
+
+// Changing NSTextView's editable state discards active marked text. A native
+// field editor keeps that session intact and rejects mutations at their source.
+define_class!(
+    #[unsafe(super = NSTextView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OMPetSettingsFieldEditor"]
+    #[ivars = Cell<bool>]
+    struct SettingsFieldEditor;
+    unsafe impl NSObjectProtocol for SettingsFieldEditor {}
+    impl SettingsFieldEditor {
+        #[unsafe(method(isEditable))]
+        fn is_editable(&self) -> bool {
+            !self.ivars().get() && unsafe { msg_send![super(self), isEditable] }
+        }
+        #[unsafe(method(shouldChangeTextInRange:replacementString:))]
+        fn should_change_text(&self, range: NSRange, replacement: Option<&NSString>) -> bool {
+            !self.ivars().get() && unsafe {
+                msg_send![super(self), shouldChangeTextInRange: range, replacementString: replacement]
+            }
+        }
+        #[unsafe(method(shouldChangeTextInRanges:replacementStrings:))]
+        fn should_change_ranges(&self, ranges: &NSArray<NSValue>, replacements: Option<&NSArray<NSString>>) -> bool {
+            !self.ivars().get() && unsafe {
+                msg_send![super(self), shouldChangeTextInRanges: ranges, replacementStrings: replacements]
+            }
+        }
+        #[unsafe(method(insertText:))]
+        fn insert_text(&self, text: &AnyObject) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), insertText: text] };
+            }
+        }
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text_replacement(&self, text: &AnyObject, range: NSRange) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), insertText: text, replacementRange: range] };
+            }
+        }
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, text: &AnyObject, selected: NSRange, replacement: NSRange) {
+            if !self.ivars().get() {
+                let _: () = unsafe {
+                    msg_send![super(self), setMarkedText: text, selectedRange: selected, replacementRange: replacement]
+                };
+            }
+        }
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), unmarkText] };
+            }
+        }
+        #[unsafe(method(cut:))]
+        fn cut(&self, sender: Option<&AnyObject>) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), cut: sender] };
+            }
+        }
+        #[unsafe(method(paste:))]
+        fn paste(&self, sender: Option<&AnyObject>) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), paste: sender] };
+            }
+        }
+        #[unsafe(method(undo:))]
+        fn undo(&self, _sender: Option<&AnyObject>) {
+            if !self.ivars().get() {
+                if let Some(manager) = self.undoManager() {
+                    if manager.canUndo() { manager.undo(); }
+                }
+            }
+        }
+        #[unsafe(method(redo:))]
+        fn redo(&self, _sender: Option<&AnyObject>) {
+            if !self.ivars().get() {
+                if let Some(manager) = self.undoManager() {
+                    if manager.canRedo() { manager.redo(); }
+                }
+            }
         }
     }
 );
@@ -548,6 +651,18 @@ impl MenuTabTrack {
     }
 }
 
+impl SettingsFieldEditor {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(false));
+        let this: Retained<Self> =
+            unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        this.setFieldEditor(true);
+        this.setRichText(false);
+        this.setAllowsUndo(true);
+        this
+    }
+}
+
 impl SettingsDetailNativeWindow {
     fn handle_edit_shortcut(&self, event: &NSEvent) -> bool {
         let modifiers = event.modifierFlags()
@@ -665,10 +780,12 @@ pub(crate) struct MenuPanel {
     detail_root: Retained<SettingsDetailRoot>,
     detail_scroll: Retained<NSScrollView>,
     detail_document: Retained<MenuPanelDocument>,
-    detail_documents: [Retained<MenuPanelDocument>; 6],
+    detail_documents: [Retained<MenuPanelDocument>; DETAIL_PAGE_COUNT],
     selected_detail: Option<SettingsDetailPage>,
-    detail_offsets: Cell<[f64; 6]>,
-    detail_openers: [Retained<NSButton>; 6],
+    detail_offsets: Cell<[f64; DETAIL_PAGE_COUNT]>,
+    detail_user_sizes: Cell<[Option<NSSize>; DETAIL_PAGE_COUNT]>,
+    detail_layout_size: Cell<Option<NSSize>>,
+    detail_openers: [Retained<NSButton>; DETAIL_PAGE_COUNT],
     detail_opener: Option<Retained<NSButton>>,
     saved_color_selection: Option<(usize, NSRange)>,
     character_card: Retained<MenuPanelCard>,
@@ -689,6 +806,11 @@ pub(crate) struct MenuPanel {
     observation_locale: Option<UiLocale>,
     footer_details: Retained<NSButton>,
     update_frozen: bool,
+    reset_settings_busy: bool,
+    reset_settings: Retained<NSButton>,
+    recovery_reset_help: Retained<NSTextField>,
+    recovery_preserved_help: Retained<NSTextField>,
+    settings_recovery_status: Retained<NSTextField>,
     update_details_problem: bool,
     control_refresh_depth: usize,
     tabs: [Retained<NSButton>; 3],
@@ -877,15 +999,15 @@ impl MenuPanel {
             .map(|screen| screen.visibleFrame().size)
             .unwrap_or(NSSize::new(800.0, 700.0));
         let detail_size = NSSize::new(
-            600.0_f64.min((available.width - 32.0).max(1.0)),
-            560.0_f64.min((available.height - 64.0).max(1.0)),
+            DETAIL_DEFAULT_WIDTH.min((available.width - 32.0).max(1.0)),
+            DETAIL_DEFAULT_MAX_HEIGHT.min((available.height - 64.0).max(1.0)),
         );
         let detail_frame = NSRect::new(NSPoint::new(0.0, 0.0), detail_size);
         let detail_window = SettingsDetailNativeWindow::new(detail_frame, mtm);
         unsafe { detail_window.setReleasedWhenClosed(false) };
         detail_window.setContentMinSize(NSSize::new(
-            480.0_f64.min(detail_size.width),
-            420.0_f64.min(detail_size.height),
+            DETAIL_MIN_WIDTH.min(detail_size.width),
+            DETAIL_MIN_HEIGHT.min(detail_size.height),
         ));
         detail_window.center();
         if let Some(appearance) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
@@ -1558,7 +1680,7 @@ impl MenuPanel {
         for index in [1, 4] {
             bubble_tab.addSubview(&detail_openers[index]);
         }
-        for index in [2, 3, 5] {
+        for index in [2, 3, 5, 6] {
             settings_tab.addSubview(&detail_openers[index]);
         }
         let mut lifecycle_card = LifecycleSettingsCard::new(locale, target, mtm);
@@ -1568,6 +1690,30 @@ impl MenuPanel {
         settings_tab.addSubview(update_card.view());
         detail_documents[3].addSubview(update_card.settings_view());
         detail_documents[5].addSubview(update_card.details_view());
+        let recovery_reset_help = diagnostic_label(mtm);
+        let recovery_preserved_help = diagnostic_label(mtm);
+        let reset_settings = make_action_button(
+            text(locale, Message::ResetAppSettings),
+            target,
+            sel!(resetAppSettings:),
+            mtm,
+        );
+        reset_settings.setKeyEquivalent(&NSString::from_str(""));
+        set_accessibility_label(&reset_settings, text(locale, Message::ResetAppSettings));
+        for (field, message) in [
+            (&recovery_reset_help, Message::AppRecoveryResetHelp),
+            (&recovery_preserved_help, Message::AppRecoveryPreservedHelp),
+        ] {
+            set_readonly_value(field, text(locale, message));
+            set_accessibility_label(field, text(locale, message));
+            detail_documents[SettingsDetailPage::AppRecovery.index()].addSubview(field);
+        }
+        detail_documents[SettingsDetailPage::AppRecovery.index()].addSubview(&reset_settings);
+        let settings_recovery_status = diagnostic_label(mtm);
+        settings_recovery_status.setMaximumNumberOfLines(8);
+        settings_recovery_status.setHidden(true);
+        detail_documents[SettingsDetailPage::AppRecovery.index()]
+            .addSubview(&settings_recovery_status);
 
         let status = label("", 10.5, false, secondary(), mtm);
         status.setMaximumNumberOfLines(2);
@@ -1612,7 +1758,9 @@ impl MenuPanel {
             detail_document,
             detail_documents,
             selected_detail: None,
-            detail_offsets: Cell::new([0.0; 6]),
+            detail_offsets: Cell::new([0.0; DETAIL_PAGE_COUNT]),
+            detail_user_sizes: Cell::new([None; DETAIL_PAGE_COUNT]),
+            detail_layout_size: Cell::new(None),
             detail_openers,
             saved_color_selection: None,
             character_card,
@@ -1634,6 +1782,11 @@ impl MenuPanel {
             connection_snapshot_unavailable: false,
             footer_details,
             update_frozen: false,
+            reset_settings_busy: false,
+            reset_settings,
+            recovery_reset_help,
+            recovery_preserved_help,
+            settings_recovery_status,
             control_refresh_depth: 0,
             update_details_problem: false,
             tabs,
@@ -1797,16 +1950,19 @@ impl MenuPanel {
         }
         let changed = self.selected_detail != Some(page);
         let reopening = !self.detail_window.isVisible();
+        self.remember_detail_size();
         if changed {
             self.remember_color_selection();
             if !self.detail_window.makeFirstResponder(None) {
                 return None;
             }
         }
-        if let Some(old) = self.selected_detail {
-            let mut offsets = self.detail_offsets.get();
-            offsets[old.index()] = self.detail_scroll.contentView().bounds().origin.y;
-            self.detail_offsets.set(offsets);
+        if !reopening {
+            if let Some(old) = self.selected_detail {
+                let mut offsets = self.detail_offsets.get();
+                offsets[old.index()] = self.detail_scroll.contentView().bounds().origin.y;
+                self.detail_offsets.set(offsets);
+            }
         }
         self.selected_detail = Some(page);
         for (index, document) in self.detail_documents.iter().enumerate() {
@@ -1850,7 +2006,7 @@ impl MenuPanel {
             )
     }
     pub(crate) fn refresh_detail_layout(&mut self) {
-        if self.detail_root.ivars().layout_dirty.replace(false) {
+        if self.detail_root.ivars().layout_dirty.get() && !self.bubble_colors_marked() {
             self.layout_detail();
         }
     }
@@ -1886,6 +2042,12 @@ impl MenuPanel {
         self.remember_color_selection();
         if !self.detail_window.makeFirstResponder(None) {
             return false;
+        }
+        self.remember_detail_size();
+        if let Some(page) = self.selected_detail {
+            let mut offsets = self.detail_offsets.get();
+            offsets[page.index()] = self.detail_scroll.contentView().bounds().origin.y;
+            self.detail_offsets.set(offsets);
         }
         let focus_opener = self.detail_window.isKeyWindow()
             && self.panel.isVisible()
@@ -2265,6 +2427,28 @@ impl MenuPanel {
         self.menu_bar_restore
             .setEnabled(self.menu_bar_icon_custom && !busy);
         self.end_control_refresh();
+    }
+
+    pub(crate) fn set_reset_settings_busy(&mut self, busy: bool) {
+        self.begin_control_refresh();
+        self.reset_settings_busy = busy;
+        self.reset_settings.setEnabled(!busy);
+        self.end_control_refresh();
+    }
+
+    pub(crate) fn set_settings_recovery_status(&self, status: &str) {
+        set_readonly_value(&self.settings_recovery_status, status);
+        set_tooltip(&self.settings_recovery_status, status);
+        set_accessibility_label(&self.settings_recovery_status, status);
+        self.settings_recovery_status.setHidden(status.is_empty());
+        self.layout_detail();
+    }
+
+    pub(crate) fn reset_settings_enabled(&self) -> bool {
+        !self.update_frozen
+            && !self.reset_settings_busy
+            && !self.menu_bar_icon_busy.get()
+            && !self.bubble_colors_marked()
     }
 
     fn update_menu_bar_icon_labels(&self) {
@@ -2864,6 +3048,22 @@ impl MenuPanel {
             .setTitle(&NSString::from_str(text(locale, Message::MenuRestartApp)));
         self.quit
             .setTitle(&NSString::from_str(text(locale, Message::MenuQuit)));
+        self.reset_settings
+            .setTitle(&NSString::from_str(text(locale, Message::ResetAppSettings)));
+        set_accessibility_label(
+            &self.reset_settings,
+            text(locale, Message::ResetAppSettings),
+        );
+        for (field, message) in [
+            (&self.recovery_reset_help, Message::AppRecoveryResetHelp),
+            (
+                &self.recovery_preserved_help,
+                Message::AppRecoveryPreservedHelp,
+            ),
+        ] {
+            set_readonly_value(field, text(locale, message));
+            set_accessibility_label(field, text(locale, message));
+        }
         set_accessibility_label(&*self.scale_down, text(locale, Message::ScaleDown));
         set_accessibility_label(&*self.scale_up, text(locale, Message::ScaleUp));
         set_accessibility_label(
@@ -2950,8 +3150,16 @@ impl MenuPanel {
     pub(crate) fn refresh_app_update(&mut self, model: &UpdateCardModel) {
         self.begin_control_refresh();
         self.update_card.refresh(model);
-        self.update_details_problem =
-            model.status == desktop_pet_update_coordinator::CheckStatus::Failed;
+        self.update_details_problem = model.status
+            == desktop_pet_update_coordinator::CheckStatus::Failed
+            || matches!(
+                model.primary_action,
+                Some(
+                    crate::update_card::UpdateCardPrimaryAction::Recover
+                        | crate::update_card::UpdateCardPrimaryAction::RecoverStart
+                        | crate::update_card::UpdateCardPrimaryAction::RecoverStoppedOriginal
+                )
+            );
         self.localize_detail_openers();
         self.layout_root();
         self.layout_detail();
@@ -2988,12 +3196,18 @@ impl MenuPanel {
                     let opener = child
                         .downcast_ref::<NSButton>()
                         .is_some_and(|button| button.action() == Some(sel!(openSettingsDetail:)));
+                    let recovery = child.downcast_ref::<NSButton>().is_some_and(|button| {
+                        matches!(button.action(), Some(action) if
+                            action == sel!(recoverAppUpdate:)
+                                || action == sel!(showAppUpdateRecoveryProgress:))
+                    });
                     let scroller = child.downcast_ref::<NSScroller>().is_some();
                     let editing = child
                         .downcast_ref::<SettingsColorNativeField>()
                         .is_some_and(|field| field.ivars().get());
                     if !readonly
                         && !opener
+                        && !recovery
                         && !scroller
                         && !editing
                         && !exempt.iter().any(|view| std::ptr::eq(*view, &*child))
@@ -3005,16 +3219,18 @@ impl MenuPanel {
                 visit(&child, exempt, controls);
             }
         }
-        // setEnabled(false) ends an active field editor session and clears Undo.
-        // Report its host as disabled without that setter, keeping the native
-        // editor read-only. Preserve this flag through refresh and focus changes.
+        // Neither setEnabled(false) on the host nor setEditable(false) on
+        // its field editor may run here: both can end an IME session.
+        // The owned editor rejects mutations without changing that session.
         for index in 0..self.bubble_color_fields.len() {
             if let Some(editor) = self
                 .bubble_field_editor(index)
                 .and_then(|editor| editor.downcast_ref::<NSTextView>())
             {
                 self.bubble_color_fields[index].ivars().set(true);
-                editor.setEditable(false);
+                if let Some(editor) = editor.downcast_ref::<SettingsFieldEditor>() {
+                    editor.ivars().set(true);
+                }
             }
         }
         let exempt: [&NSView; 4] = [&self.quit, &self.tabs[0], &self.tabs[1], &self.tabs[2]];
@@ -3027,6 +3243,9 @@ impl MenuPanel {
         }
         self.update_frozen = frozen;
         self.detail_window.ivars().update_frozen.set(frozen);
+        if let Some(editor) = self.detail_window.ivars().field_editor.get() {
+            editor.ivars().set(frozen);
+        }
         if frozen {
             self.freeze_controls();
         } else {
@@ -3034,14 +3253,6 @@ impl MenuPanel {
                 field.ivars().set(false);
             }
             self.restore_frozen_controls();
-        }
-        for index in 0..self.bubble_color_fields.len() {
-            if let Some(editor) = self
-                .bubble_field_editor(index)
-                .and_then(|editor| editor.downcast_ref::<NSTextView>())
-            {
-                editor.setEditable(!frozen);
-            }
         }
     }
 
@@ -3390,6 +3601,9 @@ impl MenuPanel {
             ));
         }
         y += 36.0;
+        self.detail_openers[SettingsDetailPage::AppRecovery.index()]
+            .setFrame(rect(8.0, y, width, 28.0));
+        y += 36.0;
         y + 8.0
     }
 
@@ -3405,14 +3619,130 @@ impl MenuPanel {
             .reflectScrolledClipView(&self.detail_scroll.contentView());
     }
 
+    fn remember_detail_size(&self) {
+        let size = self.detail_root.bounds().size;
+        if let (Some(page), Some(last)) = (self.selected_detail, self.detail_layout_size.get()) {
+            if self.detail_window.isVisible()
+                && ((size.width - last.width).abs() > 0.5
+                    || (size.height - last.height).abs() > 0.5)
+            {
+                let mut sizes = self.detail_user_sizes.get();
+                sizes[page.index()] = Some(size);
+                self.detail_user_sizes.set(sizes);
+            }
+        }
+        self.detail_layout_size.set(Some(size));
+    }
+
     fn layout_detail(&self) {
         let Some(page) = self.selected_detail else {
             return;
         };
+        // Native marked text owns its geometry until composition ends. Keep the
+        // dirty bit so the normal refresh applies the deferred fit afterward.
+        if self.bubble_colors_marked() {
+            self.detail_root.ivars().layout_dirty.set(true);
+            return;
+        }
+        self.remember_detail_size();
         let old_offset = self.detail_scroll.contentView().bounds().origin.y;
+        let anchor =
+            scroll_reading_anchor(&self.detail_document, &self.detail_document, old_offset);
+        let frame = self.detail_window.frame();
+        let visible = self
+            .detail_window
+            .screen()
+            .or_else(|| NSScreen::mainScreen(self.detail_window.mtm()))
+            .map(|screen| screen.visibleFrame())
+            .unwrap_or(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(800.0, 700.0),
+            ));
+        let decoration = (frame.size.height - self.detail_root.bounds().size.height).max(0.0);
+        let maximum = NSSize::new(
+            (visible.size.width - 32.0).max(1.0),
+            (visible.size.height - decoration - 32.0).max(1.0),
+        );
+        let minimum = NSSize::new(
+            DETAIL_MIN_WIDTH.min(maximum.width),
+            DETAIL_MIN_HEIGHT.min(maximum.height),
+        );
+        let preferred = self.detail_user_sizes.get()[page.index()];
+        let width = preferred
+            .map_or(DETAIL_DEFAULT_WIDTH, |size| size.width)
+            .clamp(minimum.width, maximum.width);
+        let content_width = (width - 30.0).max(1.0);
+        let measured_height = self.layout_detail_content(page, content_width);
+        let height = preferred
+            .map_or(measured_height.min(DETAIL_DEFAULT_MAX_HEIGHT), |size| {
+                size.height
+            })
+            .clamp(minimum.height, maximum.height);
+        self.detail_window.setContentMinSize(minimum);
+        self.detail_window.setContentMaxSize(maximum);
+        let size = NSSize::new(width, height);
+        let current = self.detail_root.bounds().size;
+        if (current.width - width).abs() > 0.5 || (current.height - height).abs() > 0.5 {
+            self.detail_window.setContentSize(size);
+            // AppKit's content-size adjustment must not move the reading edge.
+            // Clamp only when the retained top edge would leave this display.
+            let resized = self.detail_window.frame().size;
+            self.detail_window.setFrameOrigin(NSPoint::new(
+                frame.origin.x.clamp(
+                    visible.origin.x,
+                    (visible.origin.x + visible.size.width - resized.width).max(visible.origin.x),
+                ),
+                (frame.origin.y + frame.size.height - resized.height).clamp(
+                    visible.origin.y,
+                    (visible.origin.y + visible.size.height - resized.height).max(visible.origin.y),
+                ),
+            ));
+        }
+        self.detail_root.setFrame(rect(0.0, 0.0, width, height));
         self.detail_scroll.setFrame(self.detail_root.bounds());
-        let width = (self.detail_scroll.contentView().bounds().size.width - 30.0).max(1.0);
-        let height = match page {
+        let document_width = self
+            .detail_scroll
+            .contentView()
+            .bounds()
+            .size
+            .width
+            .max(1.0);
+        let document_height = measured_height.max(height);
+        self.detail_documents[page.index()].setFrame(rect(
+            0.0,
+            0.0,
+            document_width,
+            document_height,
+        ));
+        self.detail_document
+            .setFrame(rect(0.0, 0.0, document_width, document_height));
+        let maximum_offset = (document_height - height).max(0.0);
+        let offset = anchor
+            .filter(|(view, _)| {
+                let hidden: bool = unsafe { msg_send![&**view, isHiddenOrHasHiddenAncestor] };
+                view.window().is_some() && !hidden
+            })
+            .map_or(old_offset, |(view, old_y)| {
+                old_offset
+                    + view
+                        .convertRect_toView(view.bounds(), Some(&self.detail_document))
+                        .origin
+                        .y
+                    - old_y
+            })
+            .clamp(0.0, maximum_offset);
+        self.detail_scroll
+            .contentView()
+            .scrollToPoint(NSPoint::new(0.0, offset));
+        self.detail_scroll
+            .reflectScrolledClipView(&self.detail_scroll.contentView());
+        self.detail_window.recalculateKeyViewLoop();
+        self.detail_layout_size.set(Some(size));
+        self.detail_root.ivars().layout_dirty.set(false);
+    }
+
+    fn layout_detail_content(&self, page: SettingsDetailPage, width: f64) -> f64 {
+        match page {
             SettingsDetailPage::Appearance => self.layout_appearance_detail(width),
             SettingsDetailPage::Connections => self.layout_connections_detail(width),
             SettingsDetailPage::MenuBar => self.layout_menu_bar_detail(width),
@@ -3429,26 +3759,26 @@ impl MenuPanel {
                     .layout_details(rect(8.0, 8.0, width, height));
                 height + 16.0
             }
+            SettingsDetailPage::AppRecovery => self.layout_recovery_detail(width),
         }
-        .max(self.detail_scroll.contentView().bounds().size.height);
-        let document_width = self
-            .detail_scroll
-            .contentView()
-            .bounds()
-            .size
-            .width
-            .max(1.0);
-        self.detail_documents[page.index()].setFrame(rect(0.0, 0.0, document_width, height));
-        self.detail_document
-            .setFrame(rect(0.0, 0.0, document_width, height));
-        let maximum = (height - self.detail_scroll.contentView().bounds().size.height).max(0.0);
-        self.detail_scroll
-            .contentView()
-            .scrollToPoint(NSPoint::new(0.0, old_offset.clamp(0.0, maximum)));
-        self.detail_scroll
-            .reflectScrolledClipView(&self.detail_scroll.contentView());
-        self.detail_window.recalculateKeyViewLoop();
-        self.detail_root.ivars().layout_dirty.set(false);
+    }
+
+    fn layout_recovery_detail(&self, width: f64) -> f64 {
+        let content = (width - 28.0).max(1.0);
+        let mut y = 16.0;
+        for field in [&self.recovery_reset_help, &self.recovery_preserved_help] {
+            place_observation_label(field, 22.0, content, 18.0, &mut y, true);
+            y += 12.0;
+        }
+        if !self.settings_recovery_status.isHidden() {
+            let height =
+                measured_label_height(&self.settings_recovery_status, content).clamp(18.0, 144.0);
+            self.settings_recovery_status
+                .setFrame(rect(22.0, y, content, height));
+            y += height + 12.0;
+        }
+        self.reset_settings.setFrame(rect(22.0, y, content, 30.0));
+        y + 46.0
     }
 
     fn layout_appearance_detail(&self, width: f64) -> f64 {

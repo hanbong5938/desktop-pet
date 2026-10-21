@@ -320,6 +320,21 @@ fn initialize_owner_settings(
     Ok(())
 }
 
+/// Reset only registered user defaults, retaining runtime provenance,
+/// routing, and all unknown owner fields from the current lifecycle object.
+pub(crate) fn settings_reset_object(
+    config: &Path,
+    mut object: Map<String, Value>,
+    extensions: &[Arc<dyn LifecycleExtension>],
+) -> Result<Map<String, Value>, String> {
+    let mut defaults = Map::new();
+    initialize_owner_settings(&mut defaults, false, extensions)?;
+    let settings = settings_from_object(config, &Map::new(), false)?;
+    object.extend(defaults);
+    put_settings(&mut object, settings);
+    Ok(object)
+}
+
 pub(crate) fn write_settings(
     profile: &ProfileStore,
     extensions: &[Arc<dyn LifecycleExtension>],
@@ -675,6 +690,40 @@ mod tests {
             initializations: AtomicU64::new(0),
             reject_initialization,
         })
+    }
+
+    #[test]
+    fn reset_uses_registered_defaults_and_preserves_runtime_and_routing() {
+        let fixture = Fixture::new();
+        let extension = owner(false);
+        let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![extension.clone()];
+        let original = serde_json::json!({
+            "auto_start":false, "owner_setting":false,
+            "startup":{"token":"live"}, "endpoints":["opaque"],
+            "future_registration":{"installed":true},
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let reset = settings_reset_object(fixture.path(), original.clone(), &extensions).unwrap();
+        assert_eq!(reset["auto_start"], true);
+        assert_eq!(reset["owner_setting"], true);
+        assert_eq!(reset["startup"], original["startup"]);
+        assert_eq!(reset["endpoints"], original["endpoints"]);
+        assert_eq!(
+            reset["future_registration"],
+            original["future_registration"]
+        );
+        assert_eq!(extension.initializations.load(Ordering::SeqCst), 1);
+        assert!(!fixture.state().exists());
+    }
+
+    #[test]
+    fn rejected_reset_defaults_do_not_publish_a_partial_lifecycle() {
+        let fixture = Fixture::new();
+        let extensions: Vec<Arc<dyn LifecycleExtension>> = vec![owner(true)];
+        assert!(settings_reset_object(fixture.path(), Map::new(), &extensions).is_err());
+        assert!(!fixture.state().exists());
     }
 
     fn first_common_write(

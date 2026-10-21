@@ -263,6 +263,42 @@ impl PackStore {
         Ok(listing_from_loaded(loaded))
     }
 
+    /// A settings reset changes selection only. Hold the existing registry
+    /// writer throughout the caller's backup/CAS/commit; do not run orphan
+    /// recovery, garbage collection, or import bookkeeping.
+    pub(crate) fn with_settings_reset_selection<T>(
+        &self,
+        operation: impl FnOnce(&Path, Option<&[u8]>, Option<&[u8]>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let (layout, _lock) = self.open_locked()?;
+        let current = read_registry_slot(&layout.root_file, REGISTRY_FILE)?;
+        let previous = read_registry_slot(&layout.root_file, PREVIOUS_REGISTRY_FILE)?;
+        let path = self.root.join(REGISTRY_FILE);
+        let Some((mut index, bytes)) = current else {
+            if previous.is_some() {
+                return Err("character registry needs recovery before settings reset".into());
+            }
+            return operation(&path, None, None);
+        };
+        if previous
+            .as_ref()
+            .is_some_and(|(previous, _)| previous.generation > index.generation)
+        {
+            return Err("character registry needs recovery before settings reset".into());
+        }
+        if index.selected == CharacterRef::builtin() {
+            return operation(&path, Some(&bytes), Some(&bytes));
+        }
+        index.selected = CharacterRef::builtin();
+        index.generation = index
+            .generation
+            .checked_add(1)
+            .ok_or("character registry generation overflow")?;
+        validate_registry(&index)?;
+        let candidate = serde_json::to_vec(&index).map_err(|error| error.to_string())?;
+        operation(&path, Some(&bytes), Some(&candidate))
+    }
+
     /// Read an operation and its registry listing under a single flock and load.
     pub(crate) fn listing_and_status(
         &self,

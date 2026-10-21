@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install/install-coordinated/install-relocate/install-relocate-manual/install-manual-recovery --request ABS | install-status/install-recover --state-dir ABS --operation-id ID | migrate-legacy --plan ABS [--resume-retirement] | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
+    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install/install-coordinated/install-relocate/install-relocate-manual/install-manual-recovery --request ABS | install-status/install-recover --state-dir ABS --operation-id ID | migrate-legacy --plan ABS [--resume-retirement] | run/status/recover/recover-ui/recover-legacy-ui --state-dir ABS --operation-id ID [--start (recover/recover-ui only)]")?;
     if command == "update-capabilities" || command == "distribution-identity" {
         if args.next().is_some() {
             return Err("identity commands accept no arguments".into());
@@ -215,9 +215,12 @@ fn run() -> Result<(), String> {
     }
     let state_dir = state_dir.ok_or("missing --state-dir")?;
     let operation_id = operation_id.ok_or("missing --operation-id")?;
+    if !state_dir.is_absolute() {
+        return Err("--state-dir requires an absolute path".into());
+    }
     protocol::validate_operation_id(&operation_id)?;
-    if start && command != "recover" {
-        return Err("--start is only valid with recover".into());
+    if start && command != "recover" && command != "recover-ui" {
+        return Err("--start is only valid with recover or recover-ui".into());
     }
     let plan = read_plan(&state_dir, &operation_id)?;
     match command.to_str().ok_or("invalid updater command encoding")? {
@@ -241,6 +244,30 @@ fn run() -> Result<(), String> {
             } else {
                 Err(format!("update was not applied: {}", result.detail))
             }
+        }
+        "recover-legacy-ui" => {
+            let result = runner::recover_legacy_ui(plan)?;
+            // The source UI may have exited after the separately approved Stop.
+            // A closed observer pipe must not dismiss the independent result UI.
+            use std::io::Write;
+            let mut bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
+            bytes.push(b'\n');
+            if let Err(error) = std::io::stdout().lock().write_all(&bytes) {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(error.to_string());
+                }
+            }
+            Ok(())
+        }
+        "recover-ui" => {
+            let result = runner::recover_ui(plan, start)?;
+            println!(
+                "{}",
+                serde_json::to_string(&result).map_err(|e| e.to_string())?
+            );
+            // Successful observation/reconciliation is not a claim of upgrade.
+            // Failed/Unknown/UserStopped are durable outcomes, not CLI errors.
+            Ok(())
         }
         _ => Err("unknown updater command".into()),
     }

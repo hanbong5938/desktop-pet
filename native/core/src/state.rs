@@ -191,6 +191,7 @@ pub struct AppState {
     migration_gate: Option<(String, String)>,
     pending_migration_plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
     pending_update: Option<PendingUpdate>,
+    local_recovery_prepare: Option<(String, UpdateContext)>,
     update_ui_operation_id: Option<String>,
     update_ui_visible: bool,
     cancelled_updates: VecDeque<String>,
@@ -236,6 +237,7 @@ impl AppState {
             updater_stopping: false,
             update_context: None,
             pending_update: None,
+            local_recovery_prepare: None,
             cancelled_updates: VecDeque::new(),
             update_ui_operation_id: None,
             update_ui_visible: false,
@@ -312,7 +314,7 @@ impl AppState {
             Err("application is shutting down".to_owned())
         } else if self.migration_gate.is_some() {
             Err("profile migration is awaiting commit authorization".to_owned())
-        } else if self.pending_update.is_some() {
+        } else if self.pending_update.is_some() || self.local_recovery_prepare.is_some() {
             Err("application update is preparing or in progress; retry later".to_owned())
         } else {
             Ok(())
@@ -444,7 +446,7 @@ impl AppState {
         if self.migration_gate.is_some() {
             return Err("profile migration is awaiting commit authorization".into());
         }
-        if self.pending_update.is_some() {
+        if self.pending_update.is_some() || self.local_recovery_prepare.is_some() {
             return Err("another application update is preparing".into());
         }
         if self
@@ -507,6 +509,45 @@ impl AppState {
             self.pending_migration_plan = None;
         }
         success && delivered
+    }
+
+    /// Only the locally authenticated recovery frontend may hold this gate.
+    /// It has no remote control token and grants no updater Stop authority.
+    pub(crate) fn hold_recovery_prepare(
+        &mut self,
+        operation_id: &str,
+        context: &UpdateContext,
+    ) -> Result<(), String> {
+        self.update_mutation_allowed()?;
+        if !self.ui_ready
+            || self.update_context.as_ref() != Some(context)
+            || self.pending_migration_plan.is_some()
+        {
+            return Err("recovery source is no longer ready for local admission".into());
+        }
+        self.local_recovery_prepare = Some((operation_id.to_owned(), context.clone()));
+        self.retire_integrations();
+        Ok(())
+    }
+
+    pub(crate) fn release_recovery_prepare(
+        &mut self,
+        operation_id: &str,
+        context: &UpdateContext,
+    ) -> bool {
+        if self.shutdown
+            || !self.ui_ready
+            || self.updater_stopping
+            || self.update_context.as_ref() != Some(context)
+            || !self
+                .local_recovery_prepare
+                .as_ref()
+                .is_some_and(|(id, original)| id == operation_id && original == context)
+        {
+            return false;
+        }
+        self.local_recovery_prepare = None;
+        true
     }
 
     /// Accept only a background-proven recovery for this exact prepared
@@ -1908,6 +1949,60 @@ pub(crate) mod tests {
         );
         assert!(state.claim_update_stop("operation-a", "secret-a").is_err());
         assert!(state.update_mutation_allowed().is_ok());
+    }
+
+    #[test]
+    fn held_recovery_prepare_survives_consent_and_releases_only_its_original() {
+        let mut state = observed_test_state(ObservationSelection::Auto);
+        state.set_ui_ready();
+        let context = state.update_context().unwrap().clone();
+        let mut foreign = context.clone();
+        foreign.instance_id.push_str("-foreign");
+        assert!(state.hold_recovery_prepare("recovery", &foreign).is_err());
+        state.hold_recovery_prepare("recovery", &context).unwrap();
+        assert!(state.hold_recovery_prepare("other", &context).is_err());
+        // There is deliberately no TTL on this local gate: running the ordinary
+        // expiration path during an arbitrarily long consent cannot release it.
+        state.expire_update_prepare();
+        assert!(!state.update_prepared());
+        assert!(state.claim_update_stop("recovery", "any-token").is_err());
+        assert!(state.take_cancelled_update_prepare().is_none());
+        assert!(state.update_mutation_allowed().is_err());
+        let (remote, _remote_reply) = mpsc::channel();
+        assert!(state
+            .queue_update_prepare("remote".into(), "token".into(), remote)
+            .is_err());
+        assert!(state.set_update_context(foreign.clone()).is_err());
+        state.cancel_update_prepare("recovery", "secret");
+        assert!(state.update_mutation_allowed().is_err());
+        assert!(!state.reconcile_update_prepare("recovery", &context));
+        assert!(!state.release_recovery_prepare("other", &context));
+        assert!(!state.release_recovery_prepare("recovery", &foreign));
+        assert!(state.update_mutation_allowed().is_err());
+        assert!(state.release_recovery_prepare("recovery", &context));
+        assert!(state.update_mutation_allowed().is_ok());
+        assert!(!state.release_recovery_prepare("recovery", &context));
+
+        let (sender, receiver) = mpsc::channel();
+        state
+            .queue_update_prepare("ordinary".into(), "secret".into(), sender)
+            .unwrap();
+        state.take_update_prepare().unwrap();
+        assert!(state.finish_update_prepare("ordinary", "secret", Ok(())));
+        receiver.recv().unwrap().unwrap();
+        state.pending_update.as_mut().unwrap().expires = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            state.take_cancelled_update_prepare().as_deref(),
+            Some("ordinary")
+        );
+        assert!(state.update_mutation_allowed().is_ok());
+
+        state.hold_recovery_prepare("recovery", &context).unwrap();
+        state.request_shutdown();
+        assert!(state.scene().shutdown);
+        assert!(!state.updater_stopping());
+        assert!(!state.release_recovery_prepare("recovery", &context));
+        assert!(state.update_mutation_allowed().is_err());
     }
 
     #[test]

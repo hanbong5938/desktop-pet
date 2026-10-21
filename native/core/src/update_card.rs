@@ -64,6 +64,10 @@ pub(crate) enum UpdateCardPrimaryAction {
     Update,
     Migrate,
     Relocate,
+    Recover,
+    RecoverStart,
+    RecoverStoppedOriginal,
+    ShowProgress,
 }
 
 #[derive(Clone)]
@@ -124,6 +128,7 @@ pub(crate) struct AppUpdateCard {
     source: Retained<NSTextField>,
     release: Retained<NSTextField>,
     detail: Retained<NSTextField>,
+    compact_detail: Retained<NSTextField>,
     relocation_detail: Retained<NSTextField>,
     history: Retained<NSTextField>,
     diagnostics: Retained<NSTextField>,
@@ -184,6 +189,10 @@ impl AppUpdateCard {
         let source = diagnostic_label(10.5, mtm);
         let release = diagnostic_label(10.5, mtm);
         let detail = diagnostic_label(10.5, mtm);
+        let compact_detail = diagnostic_label(10.5, mtm);
+        compact_detail.setMaximumNumberOfLines(5);
+        compact_detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        compact_detail.setHidden(true);
         let relocation_detail = diagnostic_label(10.5, mtm);
         let history = diagnostic_label(10.0, mtm);
         let diagnostics = diagnostic_label(10.0, mtm);
@@ -208,6 +217,7 @@ impl AppUpdateCard {
             &*running,
             &*status_icon,
             &*status,
+            &*compact_detail,
             &*beta_summary,
             &*check,
             &*apply,
@@ -255,6 +265,7 @@ impl AppUpdateCard {
             source,
             release,
             detail,
+            compact_detail,
             relocation_detail,
             history,
             diagnostics,
@@ -386,6 +397,19 @@ impl AppUpdateCard {
         accessibility(&self.running, &running);
         self.running.setHidden(running.is_empty());
         self.beta_summary.setHidden(!model.receive_beta_updates);
+        set_text(&self.compact_detail, &model.detail);
+        accessibility(&self.compact_detail, &model.detail);
+        accessibility_help(
+            &self.compact_detail,
+            &format!(
+                "{}: {}",
+                text(self.locale, Message::UpdateDetails),
+                model.detail
+            ),
+        );
+        self.compact_detail
+            .setToolTip(Some(&NSString::from_str(&model.detail)));
+        self.compact_detail.setHidden(model.detail.is_empty());
 
         let source = format!(
             "{}: {}",
@@ -445,17 +469,36 @@ impl AppUpdateCard {
             muted()
         };
         self.detail.setTextColor(Some(&detail_color));
+        self.compact_detail.setTextColor(Some(&detail_color));
 
         unsafe {
             self.apply.setAction(Some(match model.primary_action {
                 Some(UpdateCardPrimaryAction::Migrate) => sel!(migrateLegacyInstallation:),
                 Some(UpdateCardPrimaryAction::Relocate) => sel!(relocateStandaloneInstallation:),
+                Some(UpdateCardPrimaryAction::Recover) => sel!(recoverAppUpdate:),
+                Some(UpdateCardPrimaryAction::RecoverStart) => sel!(startAppUpdateRecovery:),
+                Some(UpdateCardPrimaryAction::RecoverStoppedOriginal) => {
+                    sel!(recoverStoppedOriginalAppUpdate:)
+                }
+                Some(UpdateCardPrimaryAction::ShowProgress) => sel!(showAppUpdateRecoveryProgress:),
                 Some(UpdateCardPrimaryAction::Update) | None => sel!(applyAppUpdate:),
             }));
         }
         let action_title = match model.primary_action {
             Some(UpdateCardPrimaryAction::Migrate) => Some(model.migration_title.as_str()),
             Some(UpdateCardPrimaryAction::Relocate) => Some(model.relocation_title.as_str()),
+            Some(UpdateCardPrimaryAction::Recover) => {
+                Some(text(self.locale, Message::AppUpdateRecover))
+            }
+            Some(UpdateCardPrimaryAction::RecoverStart) => {
+                Some(text(self.locale, Message::AppUpdateRecoveryStart))
+            }
+            Some(UpdateCardPrimaryAction::RecoverStoppedOriginal) => {
+                Some(text(self.locale, Message::AppUpdateRecoveryStop))
+            }
+            Some(UpdateCardPrimaryAction::ShowProgress) => {
+                Some(text(self.locale, Message::AppUpdateRecoveryProgress))
+            }
             Some(UpdateCardPrimaryAction::Update) => model.action.as_ref().map(|action| {
                 text(
                     self.locale,
@@ -477,17 +520,48 @@ impl AppUpdateCard {
             self.apply.setTitle(&NSString::from_str(title));
             accessibility(&self.apply, title);
         }
-        self.apply.setEnabled(
-            !model.busy
-                && !model.settings_locked
-                && match model.primary_action {
-                    Some(UpdateCardPrimaryAction::Update) => model.action.is_some(),
-                    Some(UpdateCardPrimaryAction::Migrate) => model.migration_available,
-                    Some(UpdateCardPrimaryAction::Relocate) => model.relocation_available,
-                    None => false,
-                },
+        let action_help =
+            if model.primary_action == Some(UpdateCardPrimaryAction::RecoverStoppedOriginal) {
+                text(self.locale, Message::AppUpdateRecoveryStopHelp)
+            } else {
+                ""
+            };
+        let action_help = (!action_help.is_empty()).then(|| NSString::from_str(action_help));
+        self.apply.setToolTip(action_help.as_deref());
+        unsafe {
+            let _: () = msg_send![&*self.apply, setAccessibilityHelp: action_help.as_deref()];
+        }
+        let recovery = matches!(
+            model.primary_action,
+            Some(
+                UpdateCardPrimaryAction::Recover
+                    | UpdateCardPrimaryAction::RecoverStart
+                    | UpdateCardPrimaryAction::RecoverStoppedOriginal
+                    | UpdateCardPrimaryAction::ShowProgress
+            )
         );
-        self.download.setHidden(model.download_url.is_none());
+        self.apply.setEnabled(match model.primary_action {
+            Some(UpdateCardPrimaryAction::ShowProgress) => true,
+            Some(
+                UpdateCardPrimaryAction::Recover
+                | UpdateCardPrimaryAction::RecoverStart
+                | UpdateCardPrimaryAction::RecoverStoppedOriginal,
+            ) => !model.busy,
+            Some(UpdateCardPrimaryAction::Update) => {
+                !model.busy && !model.settings_locked && model.action.is_some()
+            }
+            Some(UpdateCardPrimaryAction::Migrate) => {
+                !model.busy && !model.settings_locked && model.migration_available
+            }
+            Some(UpdateCardPrimaryAction::Relocate) => {
+                !model.busy && !model.settings_locked && model.relocation_available
+            }
+            None => false,
+        });
+        self.check
+            .setEnabled(!model.busy && !model.settings_locked && !recovery);
+        self.download
+            .setHidden(model.download_url.is_none() || recovery);
         self.download
             .setEnabled(!model.busy && !model.settings_locked && model.download_url.is_some());
         self.migration
@@ -495,6 +569,8 @@ impl AppUpdateCard {
         accessibility(&self.migration, &model.migration_title);
         self.migration.setHidden(
             !model.migration_visible
+                || recovery
+                || model.settings_locked
                 || model.primary_action == Some(UpdateCardPrimaryAction::Migrate),
         );
         self.migration
@@ -536,7 +612,20 @@ impl AppUpdateCard {
             place(&self.running, 14.0, full, 14.0, &mut y, apply);
             y += 2.0;
         }
-        place(&self.status, 14.0, full, 18.0, &mut y, apply);
+        let status_height = measured(&self.status, full).clamp(18.0, 54.0);
+        if apply {
+            self.status.setFrame(rect(14.0, y, full, status_height));
+        }
+        y += status_height;
+        if !self.compact_detail.isHidden() {
+            y += 3.0;
+            let detail_height = measured(&self.compact_detail, full).clamp(14.0, 76.0);
+            if apply {
+                self.compact_detail
+                    .setFrame(rect(14.0, y, full, detail_height));
+            }
+            y += detail_height;
+        }
         if !self.beta_summary.isHidden() {
             y += 2.0;
             place(&self.beta_summary, 14.0, full, 14.0, &mut y, apply);

@@ -417,6 +417,7 @@ pub fn exchange<T: Serialize, R: for<'de> Deserialize<'de>>(
 /// process incarnation and mapped main image are rechecked after the frame.
 pub struct NativePeer {
     incarnation: ProcessIncarnation,
+    mapped_file: MappedFileIdentity,
     path: PathBuf,
 }
 impl NativePeer {
@@ -437,11 +438,30 @@ pub fn exchange_observed<T: Serialize, R: for<'de> Deserialize<'de>>(
             reply,
             NativePeer {
                 incarnation: peer.incarnation,
+                mapped_file: peer.mapped_file,
                 path: peer.path,
             },
         )
     })
 }
+/// Send a command only to the exact incarnation and mapped image observed
+/// earlier. Unlike an unbound exchange, replacement peers receive no bytes.
+pub fn exchange_observed_peer<T: Serialize, R: for<'de> Deserialize<'de>>(
+    path: &Path,
+    observed: &NativePeer,
+    request: &T,
+    timeout: Duration,
+) -> Result<R, String> {
+    let expected = processes::capture_process(observed.incarnation.pid)?;
+    if expected.incarnation != observed.incarnation
+        || expected.mapped_file != observed.mapped_file
+        || expected.path != observed.path
+    {
+        return Err("observed control source incarnation/main image changed".into());
+    }
+    exchange_with_peer(path, request, timeout, Some(&expected)).map(|(reply, _)| reply)
+}
+
 pub fn exchange_instance<T: Serialize, R: for<'de> Deserialize<'de>>(
     instance: &NativeInstance,
     request: &T,
@@ -582,6 +602,22 @@ fn verify_reply(
     Ok(())
 }
 
+// Read-only observation must not require authority to spawn a new process.
+// The fallback consumes only exact existing-runtime evidence, never a token.
+fn observed_reserved_start(
+    generation: u64,
+    admission: Result<(), String>,
+    existing_fence: impl FnOnce() -> Result<u64, String>,
+) -> Result<Option<u64>, String> {
+    if admission.is_ok() {
+        return Ok(Some(generation));
+    }
+    if existing_fence()? != generation {
+        return Err("released runtime startup fence changed".into());
+    }
+    Ok(None)
+}
+
 pub fn capture_instance(
     origin: &InstallOrigin,
     profile: &ProfilePaths,
@@ -665,27 +701,19 @@ pub fn capture_instance(
             let generation = generation
                 .parse()
                 .map_err(|_| "invalid reserved-start generation")?;
-            if protocol::start_allowed(origin, &profile.state_dir, Some(generation), Some(token))
-                .is_ok()
-            {
-                Some(generation)
-            } else {
-                // A released operation no longer grants reserved execution.
-                // Its existing runtime can still be observed using its exact
-                // retained startup receipt and the unchanged Stop fence.
-                protocol::start_allowed(origin, &profile.state_dir, None, None)?;
-                if protocol::verified_runtime_start_fence(
-                    origin,
-                    &profile.state_dir,
-                    live.pid,
-                    &live.instance_id,
-                    &image,
-                )? != generation
-                {
-                    return Err("released runtime startup fence changed".into());
-                }
-                None
-            }
+            observed_reserved_start(
+                generation,
+                protocol::start_allowed(origin, &profile.state_dir, Some(generation), Some(token)),
+                || {
+                    protocol::verified_runtime_start_fence(
+                        origin,
+                        &profile.state_dir,
+                        live.pid,
+                        &live.instance_id,
+                        &image,
+                    )
+                },
+            )?
         }
         (None, None) => None,
         _ => return Err("incomplete reserved-start environment".into()),
@@ -1071,6 +1099,150 @@ pub fn stop_for_install(
 mod tests {
     use super::*;
     #[test]
+    #[cfg(target_os = "macos")]
+    fn token_original_observation_survives_new_reservation_without_start_authority() {
+        use crate::protocol::test_scope as isolated;
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let global = root.join("global");
+        let state = root.join("state");
+        let config = root.join("config");
+        for path in [&global, &state, &config] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let process = processes::capture_process(std::process::id()).unwrap();
+        let image = crate::executable_identity(&process.path).unwrap();
+        let origin = InstallOrigin::Source { root: root.clone() };
+        let context = UpdateContext {
+            executable: image.path.clone(),
+            version: identity::VERSION.into(),
+            instance_id: "token-original".into(),
+            config_dir: config,
+            state_dir: state.clone(),
+            running: image.clone(),
+            running_origin: Some(Box::new(origin.clone())),
+            assets_override: None,
+            environment: captured_environment(ObservationSelection::Auto, |_| None).unwrap(),
+            locale: "en".into(),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: state.join("control.sock"),
+        };
+        let previous =
+            isolated::reserve_install_at(&global, &origin, None, &state, &"1".repeat(32)).unwrap();
+        let generation = previous.stop_generation;
+        let token = previous.authorize_start_for(&origin).unwrap();
+        isolated::register_active_at(
+            &global,
+            &origin,
+            &state,
+            process.incarnation.pid,
+            &context.instance_id,
+            Some(generation),
+            Some(&token),
+        )
+        .unwrap();
+        isolated::retain_runtime_start_at(&global, &context, process.incarnation.pid, generation)
+            .unwrap();
+        previous.release().unwrap();
+        let current =
+            isolated::reserve_install_at(&global, &origin, None, &state, &"2".repeat(32)).unwrap();
+        let observe = |pid, instance: &str, image: &ExecutableIdentity, generation| {
+            observed_reserved_start(
+                generation,
+                isolated::start_allowed_at(
+                    &global,
+                    &origin,
+                    &state,
+                    Some(generation),
+                    Some(&token),
+                ),
+                || {
+                    isolated::verified_runtime_start_fence_at(
+                        &global, &origin, &state, pid, instance, image,
+                    )
+                },
+            )
+        };
+        assert!(isolated::start_allowed_at(&global, &origin, &state, None, None).is_err());
+        assert!(isolated::start_allowed_at(
+            &global,
+            &origin,
+            &state,
+            Some(generation),
+            Some(&token),
+        )
+        .is_err());
+        assert_eq!(
+            observe(
+                process.incarnation.pid,
+                &context.instance_id,
+                &image,
+                generation
+            )
+            .unwrap(),
+            None
+        );
+        assert!(observe(
+            process.incarnation.pid + 1,
+            &context.instance_id,
+            &image,
+            generation
+        )
+        .is_err());
+        assert!(observe(
+            process.incarnation.pid,
+            "different-instance",
+            &image,
+            generation
+        )
+        .is_err());
+        let mut drift = image.clone();
+        drift.sha256 = "f".repeat(64);
+        assert!(observe(
+            process.incarnation.pid,
+            &context.instance_id,
+            &drift,
+            generation
+        )
+        .is_err());
+        assert!(observe(
+            process.incarnation.pid,
+            &context.instance_id,
+            &image,
+            generation + 1
+        )
+        .is_err());
+        let other = root.join("other-state");
+        fs::create_dir(&other).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(isolated::verified_runtime_start_fence_at(
+            &global,
+            &origin,
+            &other,
+            process.incarnation.pid,
+            &context.instance_id,
+            &image,
+        )
+        .is_err());
+        isolated::record_user_stop_at(&global, &state).unwrap();
+        assert!(current.user_stop_requested().unwrap());
+        assert!(current.authorize_start_for(&origin).is_err());
+        assert!(observe(
+            process.incarnation.pid,
+            &context.instance_id,
+            &image,
+            generation
+        )
+        .is_err());
+        assert!(isolated::start_allowed_at(&global, &origin, &state, None, None).is_err());
+        let after = processes::capture_process(process.incarnation.pid).unwrap();
+        assert_eq!(after.incarnation, process.incarnation);
+        assert_eq!(after.mapped_file, process.mapped_file);
+    }
+    #[test]
     fn duplicate_authority_and_nested_keys_are_rejected() {
         for bytes in [
             br#"{"ok":true,"ok":false}"#.as_slice(),
@@ -1155,6 +1327,33 @@ mod tests {
         }
         server.join().unwrap();
     }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn changed_observed_main_image_receives_no_stop_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = processes::capture_process(std::process::id()).unwrap();
+        let mut observed = NativePeer {
+            incarnation: expected.incarnation,
+            mapped_file: expected.mapped_file,
+            path: expected.path,
+        };
+        observed.mapped_file.inode = observed.mapped_file.inode.wrapping_add(1);
+        let result: Result<serde_json::Value, String> = exchange_observed_peer(
+            &path,
+            &observed,
+            &serde_json::json!({"version":1,"command":"stop"}),
+            Duration::from_secs(1),
+        );
+        assert!(result.is_err());
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn mismatched_incarnation_receives_no_stop_frame() {

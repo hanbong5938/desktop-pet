@@ -202,18 +202,7 @@ pub fn run(config: DaemonConfig) -> Result<(), String> {
     let profile = ProfileStore::with_lock(&config.paths.config_dir, lock.clone())?
         .with_preferences_validator(Preferences::validate_committed_object);
     let settings = lifecycle::read_settings(&config.paths.config_dir)?;
-    let updater_generation = env::var("DESKTOP_PET_UPDATER_GENERATION")
-        .ok()
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map_err(|_| "invalid updater generation".to_owned())
-        })
-        .transpose()?;
-    let updater_token = env::var("DESKTOP_PET_UPDATER_TOKEN").ok();
-    if updater_token.is_some() != updater_generation.is_some() {
-        return Err("updater startup requires both token and generation".into());
-    }
+    let (updater_generation, updater_token) = crate::cli::startup_authorization()?;
     if config.automatic_start && !settings.auto_start {
         if let Some(token) = config.startup_token.as_deref() {
             let _ = profile

@@ -70,12 +70,13 @@ use crate::state::{AppState, Phase, Scene, MAX_SCALE, MIN_SCALE};
 use crate::status_indicator::{
     semantic_color, StatusIcon, STATUS_ICON_GAP, STATUS_ICON_SIZE, STATUS_ROW_HEIGHT,
 };
+use crate::update_card::UpdateCardPrimaryAction;
 use block2::RcBlock;
 use desktop_pet_contracts::{
     PromptError, PromptReceipt, PromptResult, RequestOrigin, SessionKey, WorktreeRemoveError,
     WorktreeRemoveTarget,
 };
-use desktop_pet_update_coordinator::UpdatePolicy;
+use desktop_pet_update_coordinator::{UpdateContext, UpdatePolicy};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -1546,6 +1547,8 @@ struct Ui {
     app_update: AppUpdateService,
     painted_app_update: Option<(u64, UiLocale, bool)>,
     update_frozen: Option<String>,
+    legacy_recovery_handoff: Option<(UpdateContext, String, u64)>,
+    settings_reset_handoff: Option<(UpdateContext, String, mpsc::Receiver<Result<(), String>>)>,
     update_consent: Option<(String, Retained<NSAlert>)>,
     migration: MigrationUiState,
     migration_plan_receiver: Option<
@@ -2414,6 +2417,29 @@ define_class!(
             schedule_app_update_confirmation();
         }
 
+        #[unsafe(method(recoverAppUpdate:))]
+        fn recover_app_update(&self, _sender: Option<&AnyObject>) {
+            with_ui_recovery_action(|ui| ui.recover_app_update(false));
+        }
+
+        #[unsafe(method(startAppUpdateRecovery:))]
+        fn start_app_update_recovery(&self, _sender: Option<&AnyObject>) {
+            schedule_app_update_recovery_start();
+        }
+
+        #[unsafe(method(recoverStoppedOriginalAppUpdate:))]
+        fn recover_stopped_original_app_update(&self, _sender: Option<&AnyObject>) {
+            schedule_stopped_original_recovery();
+        }
+
+        #[unsafe(method(showAppUpdateRecoveryProgress:))]
+        fn show_app_update_recovery_progress(&self, _sender: Option<&AnyObject>) {
+            with_ui_recovery_action(|ui| {
+                ui.app_update.show_recovery_progress();
+                ui.refresh_app_update();
+            });
+        }
+
         #[unsafe(method(migrateLegacyInstallation:))]
         fn migrate_legacy_installation(&self, _sender: Option<&AnyObject>) {
             with_ui_update_action(|ui| ui.begin_legacy_migration());
@@ -2828,6 +2854,13 @@ define_class!(
         #[unsafe(method(packDiagnose:))]
         fn pack_diagnose(&self, _sender: Option<&AnyObject>) {
             show_character_diagnostics();
+        }
+
+        #[unsafe(method(resetAppSettings:))]
+        fn reset_app_settings(&self, _sender: Option<&AnyObject>) {
+            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+            let block = RcBlock::new(|| with_ui_update_action(|ui| ui.reset_app_settings()));
+            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
         }
 
         #[unsafe(method(restartApp:))]
@@ -4185,11 +4218,25 @@ fn with_ui_update_action<F>(f: F)
 where
     F: FnOnce(&mut Ui) + Send + 'static,
 {
+    with_ui_retained_action(f, false);
+}
+
+fn with_ui_recovery_action<F>(f: F)
+where
+    F: FnOnce(&mut Ui) + Send + 'static,
+{
+    with_ui_retained_action(f, true);
+}
+
+fn with_ui_retained_action<F>(f: F, allow_frozen: bool)
+where
+    F: FnOnce(&mut Ui) + Send + 'static,
+{
     let mut f = Some(f);
     let deferred = UI.with(|cell| match cell.try_borrow_mut() {
         Ok(mut slot) => {
             if let Some(ui) = slot.as_mut() {
-                if ui.update_frozen.is_none() {
+                if allow_frozen || ui.update_frozen.is_none() {
                     f.take().expect("update action once")(ui);
                 }
             }
@@ -4200,7 +4247,7 @@ where
     drain_deferred_pointers();
     if deferred {
         let f = f.expect("deferred update action");
-        DispatchQueue::main().exec_async(move || with_ui_update_action(f));
+        DispatchQueue::main().exec_async(move || with_ui_retained_action(f, allow_frozen));
     }
 }
 
@@ -4345,6 +4392,15 @@ fn present_requested_settings_detail() {
             SettingsDetailIntent::Open(page) => {
                 ui.sync_menu_panel_state();
                 ui.refresh_app_update();
+                if page == SettingsDetailPage::AppRecovery && ui.settings_reset_handoff.is_none() {
+                    let detail =
+                        match crate::settings_recovery::load_last_result(&ui.lifecycle_paths) {
+                            Ok(Some(detail)) => detail,
+                            Ok(None) => String::new(),
+                            Err(error) => error,
+                        };
+                    ui.menu_panel.set_settings_recovery_status(&detail);
+                }
                 window = ui.menu_panel.prepare_detail(page);
                 if window.is_some() {
                     ui.menu_panel.set_detail_opener(opener.as_deref());
@@ -4413,6 +4469,93 @@ fn schedule_app_update_confirmation() {
     // before performClick returns. Confirmation belongs to the default mode.
     unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
 }
+
+fn schedule_app_update_recovery_start() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(confirm_app_update_recovery_start);
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn schedule_stopped_original_recovery() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(|| {
+        with_ui_recovery_action(|ui| ui.recover_stopped_original_app_update());
+    });
+    // Admission must see settled button/gesture tracking, and contention must
+    // retain the action rather than dropping the user's request.
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn recovery_shutdown_admission(
+    frozen: bool,
+    migration_busy: bool,
+    blockers: &[String],
+) -> Result<(), String> {
+    if frozen {
+        return Err("another update is already prepared".into());
+    }
+    if migration_busy {
+        return Err("migration is still pending".into());
+    }
+    if !blockers.is_empty() {
+        return Err(blockers.join("; "));
+    }
+    Ok(())
+}
+
+fn confirm_app_update_recovery_start() {
+    // Leave button tracking and release the UI borrow before any native modal
+    // loop. New helpers own their approval; only older helpers need this alert.
+    let preflight = with_ui_read(|ui| {
+        if ui.update_frozen.is_some() {
+            return None;
+        }
+        ui.app_update.recovery_operation_id().map(|id| {
+            (
+                ui.mtm,
+                ui.locale,
+                id.to_owned(),
+                ui.app_update.recovery_start_requires_confirmation(),
+            )
+        })
+    });
+    let Some(preflight) = preflight else {
+        schedule_app_update_recovery_start();
+        return;
+    };
+    let Some((mtm, locale, operation_id, needs_confirmation)) = preflight else {
+        return;
+    };
+    if needs_confirmation && !confirm_legacy_recovery_start(mtm, locale) {
+        return;
+    }
+    with_ui_recovery_action(move |ui| {
+        if ui.app_update.recovery_operation_id() == Some(operation_id.as_str())
+            && ui.app_update.recovery_start_requires_confirmation() == needs_confirmation
+        {
+            ui.recover_app_update(true);
+        }
+    });
+}
+
+fn confirm_legacy_recovery_start(mtm: MainThreadMarker, locale: UiLocale) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryConfirmTitle,
+    )));
+    alert.setInformativeText(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryConfirmBody,
+    )));
+    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
+    alert.addButtonWithTitle(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryStart,
+    )));
+    alert.runModal() == NSAlertSecondButtonReturn
+}
+
 pub(crate) fn confirm_migration_consent_visibility(operation_id: &str) -> Result<(), String> {
     let operation_id = operation_id.to_owned();
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -5087,6 +5230,15 @@ fn install_alert_escape_monitor(
     alert: &NSAlert,
     cancel: &NSButton,
 ) -> Option<AlertEscapeMonitor> {
+    install_alert_cancel_monitor(mtm, alert, cancel, false)
+}
+
+fn install_alert_cancel_monitor(
+    mtm: MainThreadMarker,
+    alert: &NSAlert,
+    cancel: &NSButton,
+    include_return: bool,
+) -> Option<AlertEscapeMonitor> {
     let window = alert.window();
     let cancel = objc2::Message::retain(cancel);
     let app = NSApplication::sharedApplication(mtm);
@@ -5098,12 +5250,12 @@ fn install_alert_escape_monitor(
                 | NSEventModifierFlags::Control
                 | NSEventModifierFlags::Option
                 | NSEventModifierFlags::Shift;
-            if event.keyCode() == 53
+            if (event.keyCode() == 53 || (include_return && matches!(event.keyCode(), 36 | 76)))
                 && !event.modifierFlags().intersects(modifiers)
                 && event
                     .window(mtm)
                     .is_some_and(|current| current.windowNumber() == window.windowNumber())
-                && window.isKeyWindow()
+                && (include_return || window.isKeyWindow())
                 && app
                     .modalWindow()
                     .is_some_and(|current| current.windowNumber() == window.windowNumber())
@@ -5119,6 +5271,44 @@ fn install_alert_escape_monitor(
             token,
             _main_thread: mtm,
         })
+}
+
+fn confirm_settings_reset(
+    mtm: MainThreadMarker,
+    locale: UiLocale,
+    config: &Path,
+    state: &Path,
+) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(text(
+        locale,
+        Message::ResetAppSettingsConfirmTitle,
+    )));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "{}\n\nConfig: {}\nState: {}",
+        text(locale, Message::ResetAppSettingsConfirmBody),
+        config.display(),
+        state.display()
+    )));
+    let cancel = alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
+    cancel.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    let reset =
+        alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::ResetAndRestart)));
+    reset.setKeyEquivalent(&NSString::from_str(""));
+    alert.layout();
+    let Some(cell) = cancel
+        .cell()
+        .and_then(|cell| cell.downcast::<NSButtonCell>().ok())
+    else {
+        return false;
+    };
+    alert.window().setDefaultButtonCell(Some(&cell));
+    let Some(monitor) = install_alert_cancel_monitor(mtm, &alert, &cancel, true) else {
+        return false;
+    };
+    let response = alert.runModal();
+    drop(monitor);
+    response == NSAlertSecondButtonReturn
 }
 
 fn begin_worktree_remove(target: WorktreeRemoveTarget) {
@@ -6226,6 +6416,8 @@ impl Ui {
             app_update,
             painted_app_update: None,
             update_frozen: None,
+            legacy_recovery_handoff: None,
+            settings_reset_handoff: None,
             update_consent: None,
             migration: MigrationUiState {
                 busy: migration_plan.is_some(),
@@ -9070,7 +9262,12 @@ impl Ui {
                 model.detail = model.status_text.clone();
             }
         }
-        if self.update_frozen.is_some() {
+        if self.update_frozen.is_some()
+            && !matches!(
+                model.primary_action,
+                Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress)
+            )
+        {
             model.primary_action = None;
         }
         clear_overridden_relocation_summary(
@@ -9233,10 +9430,14 @@ impl Ui {
                     operation_id,
                     result,
                     prepared_recovery,
+                    completed_history,
                 } => {
-                    let reconciled =
-                        self.app_update
-                            .journal(&operation_id, result, prepared_recovery);
+                    let reconciled = self.app_update.journal(
+                        &operation_id,
+                        result,
+                        prepared_recovery,
+                        completed_history,
+                    );
                     if let Some(context) = reconciled {
                         if self.update_frozen.as_deref() == Some(operation_id.as_str())
                             && self.shared.lock().is_ok_and(|mut state| {
@@ -9381,6 +9582,8 @@ impl Ui {
                 }
             }
         }
+        self.poll_legacy_recovery_handoff();
+        self.poll_settings_reset();
         self.refresh_app_update();
     }
 
@@ -9618,6 +9821,26 @@ impl Ui {
             }
         }
         let blockers = self.restart_blockers_snapshot();
+        self.checkpoint_update_shutdown(&blockers)?;
+        self.freeze_update_controls(operation_id);
+        Ok(())
+    }
+
+    fn freeze_update_controls(&mut self, operation_id: &str) {
+        self.update_composer_editable = Some(self.composer_view.isEditable());
+        self.update_composer_send_enabled = Some(self.composer_send.isEnabled());
+        self.composer_view.setEditable(false);
+        self.composer_send.setEnabled(false);
+        self.menu_panel.set_update_frozen(true);
+        self.dialogue_editor.set_update_frozen(true);
+        self.character_browser.set_update_frozen(true);
+        self.cards.set_update_frozen(true);
+        self.panel.setIgnoresMouseEvents(true);
+        self.bubble_panel.setIgnoresMouseEvents(true);
+        self.update_frozen = Some(operation_id.to_owned());
+    }
+
+    fn checkpoint_update_shutdown(&mut self, blockers: &[String]) -> Result<(), String> {
         if !blockers.is_empty() {
             return Err(blockers.join("; "));
         }
@@ -9639,17 +9862,6 @@ impl Ui {
             self.save_position_only(Some(Some(position)))?;
         }
         self.save_position_only(None)?;
-        self.update_composer_editable = Some(self.composer_view.isEditable());
-        self.update_composer_send_enabled = Some(self.composer_send.isEnabled());
-        self.composer_view.setEditable(false);
-        self.composer_send.setEnabled(false);
-        self.menu_panel.set_update_frozen(true);
-        self.dialogue_editor.set_update_frozen(true);
-        self.character_browser.set_update_frozen(true);
-        self.cards.set_update_frozen(true);
-        self.panel.setIgnoresMouseEvents(true);
-        self.bubble_panel.setIgnoresMouseEvents(true);
-        self.update_frozen = Some(operation_id.to_owned());
         Ok(())
     }
 
@@ -9743,6 +9955,125 @@ impl Ui {
                 .is_ok_and(|state| state.update_mutation_allowed().is_ok())
         {
             self.app_update.check_now();
+        }
+        self.refresh_app_update();
+    }
+
+    fn recover_app_update(&mut self, start: bool) {
+        if start {
+            let blockers = self.restart_blockers_snapshot();
+            if let Err(error) = recovery_shutdown_admission(
+                self.update_frozen.is_some(),
+                self.migration.busy,
+                &blockers,
+            ) {
+                self.app_update.set_problem(format!(
+                    "{}\n{}",
+                    text(self.locale, Message::AppUpdateRecoveryNotStarted),
+                    error
+                ));
+                self.refresh_app_update();
+                return;
+            }
+        }
+        // Recovery validates the retained operation, not installation admission:
+        // the very reservation being reconciled intentionally blocks installation.
+        self.app_update.recover(start);
+        self.refresh_app_update();
+    }
+
+    fn prepare_legacy_recovery_handoff(&mut self) -> Result<(UpdateContext, String), String> {
+        let blockers = self.restart_blockers_snapshot();
+        recovery_shutdown_admission(self.update_frozen.is_some(), self.migration.busy, &blockers)?;
+        let plan = self
+            .app_update
+            .recovery_stop_plan()
+            .ok_or("retained recovery operation changed; no source was stopped")?;
+        let context = plan.context;
+        let operation_id = plan.operation_id;
+        {
+            let mut state = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?;
+            if state.update_context() != Some(&context) || context.running != plan.running {
+                return Err("running executable, instance or profile changed".into());
+            }
+            state.hold_recovery_prepare(&operation_id, &context)?;
+        }
+        // The local gate covers AX, control, automation and domain writes as
+        // well as widgets, without borrowing a reservation or updater token.
+        // Hold it before checkpointing and before any external consent can open.
+        if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
+            self.release_legacy_recovery_handoff(&context, &operation_id);
+            return Err(error);
+        }
+        self.freeze_update_controls(&operation_id);
+        Ok((context, operation_id))
+    }
+
+    fn release_legacy_recovery_handoff(
+        &mut self,
+        context: &UpdateContext,
+        operation_id: &str,
+    ) -> bool {
+        let released = self
+            .shared
+            .lock()
+            .is_ok_and(|mut state| state.release_recovery_prepare(operation_id, context));
+        if released {
+            self.cancel_update_prepare(operation_id);
+        }
+        released
+    }
+
+    fn poll_legacy_recovery_handoff(&mut self) {
+        let Some((context, operation_id, request)) = self.legacy_recovery_handoff.as_ref() else {
+            return;
+        };
+        if self
+            .app_update
+            .legacy_recovery_handoff_active(context, operation_id, *request)
+            || !self
+                .app_update
+                .legacy_recovery_handoff_releasable(context, operation_id, *request)
+        {
+            return;
+        }
+        let (context, operation_id, request) = self
+            .legacy_recovery_handoff
+            .take()
+            .expect("matched recovery handoff");
+        if !self.release_legacy_recovery_handoff(&context, &operation_id) {
+            // A changed source, claimed Stop, or unknown outcome must not reopen
+            // mutation ingress. Keep the exact scope for subsequent safe proof.
+            self.legacy_recovery_handoff = Some((context, operation_id, request));
+        }
+    }
+
+    fn recover_stopped_original_app_update(&mut self) {
+        let admission = self.prepare_legacy_recovery_handoff();
+        let (context, operation_id) = match admission {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.app_update.set_problem(format!(
+                    "{}\n{}",
+                    text(self.locale, Message::AppUpdateRecoveryNotStarted),
+                    error
+                ));
+                self.refresh_app_update();
+                return;
+            }
+        };
+        // This only hands off to the authenticated bundled coordinator. That
+        // separate visible UI must obtain consent before stopping the original;
+        // this app never issues Stop or restarts either executable.
+        if let Some(scope) = self.app_update.recover_stopped_original() {
+            self.legacy_recovery_handoff = Some(scope);
+        } else {
+            // None means admission rejected before a coordinator worker was
+            // accepted. Only this exact locally held original may be released.
+            self.release_legacy_recovery_handoff(&context, &operation_id);
         }
         self.refresh_app_update();
     }
@@ -13929,6 +14260,112 @@ impl Ui {
             }
         }
         self.sync_character_menu_frame();
+    }
+
+    fn reset_app_settings(&mut self) {
+        let result = (|| -> Result<(), String> {
+            if self.settings_reset_handoff.is_some()
+                || !self.menu_panel.reset_settings_enabled()
+                || !self.update_setting_admitted()
+                || self.migration.busy
+            {
+                return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
+            }
+            let blockers = self.restart_blockers_snapshot();
+            if !blockers.is_empty() {
+                return Err(blockers.join("; "));
+            }
+            let context = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?
+                .update_context()
+                .cloned()
+                .ok_or("running profile is unavailable")?;
+            if !confirm_settings_reset(
+                self.mtm,
+                self.locale,
+                &context.config_dir,
+                &context.state_dir,
+            ) {
+                return Ok(());
+            }
+            if !self.update_setting_admitted() || self.migration.busy {
+                return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
+            }
+            let blockers = self.restart_blockers_snapshot();
+            if !blockers.is_empty() {
+                return Err(blockers.join("; "));
+            }
+            let observation = context.observation_mode()?;
+            let operation_id = format!("settings-reset-{}", context.instance_id);
+            {
+                let mut state = self
+                    .shared
+                    .lock()
+                    .map_err(|_| "native state lock is poisoned")?;
+                if state.update_context() != Some(&context) {
+                    return Err("running profile changed during confirmation".into());
+                }
+                state.hold_recovery_prepare(&operation_id, &context)?;
+            }
+            if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
+                self.release_legacy_recovery_handoff(&context, &operation_id);
+                return Err(error);
+            }
+            self.freeze_update_controls(&operation_id);
+            self.menu_panel.set_reset_settings_busy(true);
+            match crate::cli::spawn_settings_reset(
+                &self.lifecycle_paths,
+                &observation,
+                &context.instance_id,
+            ) {
+                Ok(receiver) => {
+                    self.settings_reset_handoff = Some((context, operation_id, receiver));
+                    self.menu_panel.set_settings_recovery_status(text(
+                        self.locale,
+                        Message::ResetAppSettingsStarted,
+                    ));
+                }
+                Err(error) => {
+                    self.release_legacy_recovery_handoff(&context, &operation_id);
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.menu_panel.set_reset_settings_busy(false);
+            self.menu_panel.set_settings_recovery_status(&error);
+            self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, &error);
+        }
+    }
+
+    fn poll_settings_reset(&mut self) {
+        let outcome = match self.settings_reset_handoff.as_ref() {
+            Some((_, _, receiver)) => match receiver.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "settings recovery worker disconnected before shutdown".into(),
+                )),
+            },
+            None => None,
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let Some((context, operation_id, _)) = self.settings_reset_handoff.take() else {
+            return;
+        };
+        let detail = outcome.err().unwrap_or_else(|| {
+            "settings recovery exited while the original instance is still running".into()
+        });
+        if self.release_legacy_recovery_handoff(&context, &operation_id) {
+            self.menu_panel.set_reset_settings_busy(false);
+        }
+        self.menu_panel.set_settings_recovery_status(&detail);
+        self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, &detail);
     }
 
     fn restart_app(&mut self) {

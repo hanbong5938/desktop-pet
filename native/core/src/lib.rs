@@ -45,6 +45,7 @@ mod preferences;
 mod rig_renderer;
 mod session_cards;
 mod session_view;
+mod settings_recovery;
 mod socket;
 mod sources;
 mod state;

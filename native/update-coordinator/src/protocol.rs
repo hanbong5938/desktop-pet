@@ -191,6 +191,38 @@ pub(crate) mod test_scope {
         )?
         .map(|file| OperationLease { _file: file }))
     }
+    pub(crate) fn register_active_at(
+        global: &Path,
+        origin: &InstallOrigin,
+        state: &Path,
+        pid: u32,
+        instance: &str,
+        generation: Option<u64>,
+        token: Option<&str>,
+    ) -> Result<(), String> {
+        super::register_active_at(global, origin, state, pid, instance, generation, token)
+    }
+    pub(crate) fn retain_runtime_start_at(
+        global: &Path,
+        context: &crate::UpdateContext,
+        pid: u32,
+        generation: u64,
+    ) -> Result<(), String> {
+        super::retain_runtime_start_at(global, context, pid, generation)
+    }
+    pub(crate) fn verified_runtime_start_fence_at(
+        global: &Path,
+        origin: &InstallOrigin,
+        state: &Path,
+        pid: u32,
+        instance: &str,
+        image: &crate::ExecutableIdentity,
+    ) -> Result<u64, String> {
+        super::verified_runtime_start_fence_at(global, origin, state, pid, instance, image)
+    }
+    pub(crate) fn record_user_stop_at(global: &Path, state: &Path) -> Result<u64, String> {
+        super::record_user_stop_at(global, state)
+    }
 }
 pub fn private_updates(state_dir: &Path) -> Result<PathBuf, String> {
     check_dir(state_dir, false)?;
@@ -5776,6 +5808,28 @@ mod tests {
         write_private_bytes(&legacy, b"legacy evidence", 0o600).unwrap();
         assert!(reservation_snapshot_at(&global, &brew, None, &state, op).is_err());
         assert_eq!(fs::read(legacy).unwrap(), b"legacy evidence");
+    }
+
+    #[test]
+    fn independent_manual_start_rejects_a_stop_after_approval_without_updater_authority() {
+        let (_dir, global, state, origin) = fixture();
+        let approved_generation = generation(&state).unwrap();
+        start_allowed_at(&global, &origin, &state, Some(approved_generation), None).unwrap();
+
+        let stopped_generation = record_user_stop_at(&global, &state).unwrap();
+        assert!(stopped_generation > approved_generation);
+        assert!(
+            start_allowed_at(&global, &origin, &state, Some(approved_generation), None).is_err()
+        );
+        start_allowed_at(&global, &origin, &state, Some(stopped_generation), None).unwrap();
+        assert!(start_allowed_at(
+            &global,
+            &origin,
+            &state,
+            Some(stopped_generation),
+            Some(&"a".repeat(64)),
+        )
+        .is_err());
     }
 
     #[test]

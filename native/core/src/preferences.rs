@@ -1103,6 +1103,33 @@ impl Preferences {
         }
     }
 
+    /// Prepare native defaults without changing disk or adapter live policy.
+    /// Unknown integration metadata and update-check evidence remain owned by
+    /// the current saved object. Adapter defaults use their registered projection.
+    pub(crate) fn settings_reset_object(
+        &self,
+        directory: &Path,
+        profile: &desktop_pet_contracts::ProfileStore,
+        extensions: &[std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>],
+    ) -> Result<Map<String, Value>, String> {
+        let mut defaults = Self::default();
+        defaults.last_update_check = self.last_update_check;
+        defaults.last_beta_update_check = self.last_beta_update_check;
+        let mut prepared = Vec::new();
+        for extension in extensions {
+            if !extension.preference_patch_keys().is_empty() {
+                let mut patch = extension.preference_snapshot(&Map::new())?;
+                // Installation provenance is not a user observation setting.
+                // Reset must not pretend the existing integration was removed.
+                patch.remove("plugin_manager_installed");
+                if !patch.is_empty() {
+                    prepared.push(extension.prepare_preference_patch(profile, &patch)?);
+                }
+            }
+        }
+        defaults.disk_object(directory, &prepared)
+    }
+
     fn write_atomically_locked(
         &self,
         directory: &Path,
@@ -1112,6 +1139,18 @@ impl Preferences {
         fs::create_dir_all(directory)
             .map_err(|error| format!("preferences directory cannot be created: {error}"))?;
         set_private_directory(directory)?;
+        let path = directory.join(PREFERENCES_FILE);
+        let candidate = self.disk_object(directory, prepared)?;
+        let bytes = serde_json::to_vec_pretty(&candidate)
+            .map_err(|error| format!("preferences cannot be encoded: {error}"))?;
+        self.commit_encoded_object(directory, &path, no_clobber, candidate, &bytes)
+    }
+
+    fn disk_object(
+        &self,
+        directory: &Path,
+        prepared: &[Box<dyn desktop_pet_contracts::PreparedPreferencePatch>],
+    ) -> Result<Map<String, Value>, String> {
         let path = directory.join(PREFERENCES_FILE);
         let mut latest = read_preference_object(&path)?;
         let exists = path
@@ -1187,9 +1226,17 @@ impl Preferences {
         for mutation in prepared {
             mutation.apply(&mut candidate)?;
         }
-        let bytes = serde_json::to_vec_pretty(&candidate)
-            .map_err(|error| format!("preferences cannot be encoded: {error}"))?;
+        Ok(candidate)
+    }
 
+    fn commit_encoded_object(
+        &self,
+        directory: &Path,
+        path: &Path,
+        no_clobber: bool,
+        candidate: Map<String, Value>,
+        bytes: &[u8],
+    ) -> Result<(bool, Map<String, Value>), String> {
         let temporary = temporary_path(directory);
         let mut file = OpenOptions::new()
             .write(true)
@@ -1628,6 +1675,48 @@ mod tests {
         fn should_exit(&self, _selection: &ObservationSelection, _now: std::time::Instant) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn reset_candidate_uses_registered_observation_defaults_without_live_apply() {
+        let directory = isolated_preferences_directory();
+        let store = desktop_pet_contracts::ProfileStore::acquire(
+            &directory,
+            &directory.join("runtime-state"),
+        )
+        .unwrap();
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(SelectionCommitState::default()));
+        let extension = std::sync::Arc::new(SelectionOwner {
+            store: store.clone(),
+            state: state.clone(),
+        });
+        let mut preferences = Preferences::default();
+        preferences.observation_extra.insert(
+            "remote_selection".into(),
+            serde_json::json!({"targets":["old"],"future_owner_setting":{"keep":true}}),
+        );
+        preferences
+            .extra
+            .insert("plugin_manager_installed".into(), Value::Bool(true));
+        preferences.save_in_directory(&directory).unwrap();
+        let before = fs::read(directory.join(PREFERENCES_FILE)).unwrap();
+        let extensions: Vec<std::sync::Arc<dyn desktop_pet_contracts::LifecycleExtension>> =
+            vec![extension];
+        let candidate = preferences
+            .settings_reset_object(&directory, &store, &extensions)
+            .unwrap();
+        assert!(candidate["observation"]["remote_selection"]
+            .get("targets")
+            .is_none());
+        assert_eq!(
+            candidate["observation"]["remote_selection"]["future_owner_setting"],
+            serde_json::json!({"keep":true})
+        );
+        assert_eq!(candidate["plugin_manager_installed"], true);
+        assert_eq!(state.lock().commits, 0);
+        assert_eq!(fs::read(directory.join(PREFERENCES_FILE)).unwrap(), before);
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

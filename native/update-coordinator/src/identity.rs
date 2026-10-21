@@ -10,7 +10,7 @@ pub use selected::*;
 pub mod neutral {
     pub const DISTRIBUTION: &str = "neutral";
     pub const LEGACY: bool = false;
-    pub const VERSION: &str = "0.4.17-beta.4";
+    pub const VERSION: &str = "0.4.17-beta.5";
     /// One-time legacy migration is authorized only for this stable release.
     /// A product version bump must never grant a new migration authority.
     pub const MIGRATION_TARGET_VERSION: &str = "0.4.12";
@@ -47,6 +47,7 @@ pub fn capabilities() -> serde_json::Value {
         "protocol": PROTOCOL,
         "observation_mode": OBSERVATION_CAPABILITY,
         "integration_api": INTEGRATION_API,
+        "ui_recovery_contract": 1,
     });
     #[cfg(not(desktop_pet_legacy))]
     let value = {
@@ -59,6 +60,14 @@ pub fn capabilities() -> serde_json::Value {
             .as_object_mut()
             .expect("compiled capabilities object")
             .insert("installation_client_contract".into(), 1.into());
+        value
+            .as_object_mut()
+            .expect("compiled capabilities object")
+            .insert("ui_recovery_legacy_contract".into(), 1.into());
+        value
+            .as_object_mut()
+            .expect("compiled capabilities object")
+            .insert("manual_start_fence_contract".into(), 1.into());
         value
     };
     value

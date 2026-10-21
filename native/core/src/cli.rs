@@ -7,6 +7,7 @@ use crate::control::{
 };
 use crate::daemon::DaemonConfig;
 use crate::lifecycle::Paths;
+use crate::preferences::Preferences;
 use crate::Composition;
 use crate::{
     automation_cli, bubble, bundle, character_renderer, control, daemon, lifecycle, pack_authoring,
@@ -157,6 +158,7 @@ enum CommandKind {
     Start,
     Stop,
     Restart,
+    SettingsReset,
     Status,
     UpdateCapabilities,
     UpdateStatus,
@@ -201,6 +203,7 @@ impl CommandKind {
             "start" => Self::Start,
             "stop" => Self::Stop,
             "restart" => Self::Restart,
+            "settings-reset-internal" => Self::SettingsReset,
             "status" => Self::Status,
             "update-capabilities" => Self::UpdateCapabilities,
             "profile" => Self::Profile,
@@ -256,6 +259,7 @@ impl CommandKind {
             Self::Update => "update",
             Self::Extension => "extension",
             Self::Restart => "restart",
+            Self::SettingsReset => "settings-reset-internal",
             Self::Status => "status",
             Self::Show => "show",
             Self::Settings => "settings",
@@ -540,6 +544,17 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
     } else {
         Paths::resolve(cli.config_dir.as_deref(), cli.state_dir.as_deref())?
     };
+    if command == CommandKind::SettingsReset {
+        if cli.config_dir.is_none() || cli.state_dir.is_none() {
+            return Err("settings reset requires the captured explicit profile".into());
+        }
+        return run_settings_reset(
+            &paths,
+            cli.assets.as_deref(),
+            &cli.extension_options,
+            &composition,
+        );
+    }
     if command == CommandKind::Extension {
         if cli.assets.is_some() {
             return Err("--assets is not valid with integration commands".into());
@@ -658,7 +673,7 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
         cli.assets
     };
     if command == CommandKind::Daemon {
-        let (generation, token) = updater_start_authorization()?;
+        let (generation, token) = startup_authorization()?;
         admit_startup(
             &paths,
             generation,
@@ -824,6 +839,7 @@ fn execute_command(
                 extension_options,
             )
         }
+        CommandKind::SettingsReset => unreachable!("internal reset is dispatched before startup"),
         CommandKind::Stop => stop(paths),
         CommandKind::Status => status(paths, observation_mode, &composition),
         CommandKind::SettingsGet | CommandKind::SettingsSet => {
@@ -1212,20 +1228,38 @@ fn startup_origin(
     }))
 }
 
-fn updater_start_authorization() -> Result<(Option<u64>, Option<String>), String> {
-    let generation = env::var("DESKTOP_PET_UPDATER_GENERATION")
-        .ok()
+const MANUAL_START_GENERATION_ENV: &str = "DESKTOP_PET_MANUAL_START_STOP_GENERATION";
+
+fn parse_startup_authorization(
+    updater_generation: Option<String>,
+    updater_token: Option<String>,
+    manual_generation: Option<String>,
+) -> Result<(Option<u64>, Option<String>), String> {
+    if manual_generation.is_some() && (updater_generation.is_some() || updater_token.is_some()) {
+        return Err("independent manual start cannot use updater authorization".into());
+    }
+    if updater_generation.is_some() != updater_token.is_some() {
+        return Err("updater start needs both token and generation".into());
+    }
+    let generation = updater_generation
+        .or(manual_generation)
         .map(|value| {
             value
                 .parse::<u64>()
-                .map_err(|_| "invalid updater generation".to_owned())
+                .map_err(|_| "invalid startup Stop generation".to_owned())
         })
         .transpose()?;
-    let token = env::var("DESKTOP_PET_UPDATER_TOKEN").ok();
-    if generation.is_some() != token.is_some() {
-        return Err("updater start needs both token and generation".into());
-    }
-    Ok((generation, token))
+    Ok((generation, updater_token))
+}
+
+/// An independent manual start carries a Stop fence, never updater authority.
+/// Daemon admission must consume the same fence all the way through readiness.
+pub(crate) fn startup_authorization() -> Result<(Option<u64>, Option<String>), String> {
+    parse_startup_authorization(
+        env::var("DESKTOP_PET_UPDATER_GENERATION").ok(),
+        env::var("DESKTOP_PET_UPDATER_TOKEN").ok(),
+        env::var(MANUAL_START_GENERATION_ENV).ok(),
+    )
 }
 
 fn admit_startup(
@@ -1264,7 +1298,7 @@ fn ensure(
     if settings_request && control::control_socket_is_live(&paths.control_socket, CONTROL_TIMEOUT) {
         return open_settings(&paths);
     }
-    let (generation, token) = updater_start_authorization()?;
+    let (generation, token) = startup_authorization()?;
     let verified_origin = Cell::new(None);
     let admit = || {
         admit_startup(
@@ -1779,6 +1813,30 @@ fn wait_for_ready(
     })))
 }
 
+fn configure_startup_authorization(
+    command: &mut Command,
+    (generation, token): (Option<u64>, Option<String>),
+) {
+    command
+        .env_remove("DESKTOP_PET_UPDATER_GENERATION")
+        .env_remove("DESKTOP_PET_UPDATER_TOKEN")
+        .env_remove(MANUAL_START_GENERATION_ENV);
+    match (generation, token) {
+        (Some(generation), Some(token)) => {
+            command
+                .env("DESKTOP_PET_UPDATER_GENERATION", generation.to_string())
+                .env("DESKTOP_PET_UPDATER_TOKEN", token);
+        }
+        (Some(generation), None) => {
+            command.env(MANUAL_START_GENERATION_ENV, generation.to_string());
+        }
+        (None, None) => {}
+        (None, Some(_)) => {
+            unreachable!("startup authorization parser rejects incomplete updater pair")
+        }
+    }
+}
+
 fn spawn_daemon(
     paths: &Paths,
     assets: Option<&Path>,
@@ -1832,15 +1890,7 @@ fn spawn_daemon(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_stderr));
     command.args(extension_options);
-    if let (Some(generation), Some(token)) = updater_start_authorization()? {
-        command
-            .env("DESKTOP_PET_UPDATER_GENERATION", generation.to_string())
-            .env("DESKTOP_PET_UPDATER_TOKEN", token);
-    } else {
-        command
-            .env_remove("DESKTOP_PET_UPDATER_GENERATION")
-            .env_remove("DESKTOP_PET_UPDATER_TOKEN");
-    }
+    configure_startup_authorization(&mut command, startup_authorization()?);
     if assets_override {
         command
             .arg("--assets")
@@ -1907,6 +1957,316 @@ pub(crate) fn spawn_restart(
         let _ = child.wait();
     });
     Ok(())
+}
+
+const SETTINGS_RESET_SOURCE_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_SOURCE_PID";
+const SETTINGS_RESET_GENERATION_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_STOP_GENERATION";
+const SETTINGS_RESET_INSTANCE_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_SOURCE_INSTANCE";
+
+/// Launch acceptance is not reset completion. The source UI polls this receiver
+/// only while alive and releases its exact local gate on any early worker exit.
+pub(crate) fn spawn_settings_reset(
+    paths: &Paths,
+    observation_mode: &ObservationSelection,
+    source_instance: &str,
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+    let options = DAEMON_RESTART_OPTIONS
+        .get()
+        .ok_or("running daemon restart options are unavailable")?;
+    let executable = bundle::executable().map_err(|e| e.to_string())?;
+    let generation = desktop_pet_update_coordinator::protocol::stop_generation(&paths.state_dir)?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(LOG_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&paths.log_file)
+        .map_err(|e| format!("cannot open settings reset log: {e}"))?;
+    let metadata = log.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("settings reset log must be private and owned".into());
+    }
+    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let mut command = Command::new(executable);
+    command
+        .arg("settings-reset-internal")
+        .arg("--config-dir")
+        .arg(&paths.config_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .args(options)
+        .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+        .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+        .env(OBSERVATION_SELECTION_ENV, observation_mode.as_str())
+        .env(SETTINGS_RESET_SOURCE_ENV, std::process::id().to_string())
+        .env(SETTINGS_RESET_GENERATION_ENV, generation.to_string())
+        .env(SETTINGS_RESET_INSTANCE_ENV, source_instance)
+        .env_remove("DESKTOP_PET_STARTUP_TOKEN")
+        .env_remove("DESKTOP_PET_UPDATER_GENERATION")
+        .env_remove("DESKTOP_PET_UPDATER_TOKEN")
+        .env_remove(MANUAL_START_GENERATION_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot launch settings reset worker: {e}"))?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let paths = paths.clone();
+    thread::spawn(move || {
+        let result = child.wait().map_err(|e| e.to_string()).and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(crate::settings_recovery::load_last_result(&paths)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        format!(
+                            "settings reset worker exited with {status}; inspect {}",
+                            paths.log_file.display()
+                        )
+                    }))
+            }
+        });
+        let _ = sender.send(result);
+    });
+    Ok(receiver)
+}
+
+fn run_settings_reset(
+    paths: &Paths,
+    assets: Option<&Path>,
+    extension_options: &[OsString],
+    composition: &Composition,
+) -> Result<(), String> {
+    let mut backup = None;
+    let result = (|| {
+        use desktop_pet_update_coordinator::{native_runtime, protocol};
+        let source_pid: u32 = env::var(SETTINGS_RESET_SOURCE_ENV)
+            .map_err(|_| "settings reset requires source UI admission")?
+            .parse()
+            .map_err(|_| "invalid settings reset source")?;
+        let source_instance = env::var(SETTINGS_RESET_INSTANCE_ENV)
+            .map_err(|_| "settings reset requires the admitted source instance")?;
+        let generation: u64 = env::var(SETTINGS_RESET_GENERATION_ENV)
+            .map_err(|_| "settings reset requires a captured Stop fence")?
+            .parse()
+            .map_err(|_| "invalid settings reset Stop fence")?;
+        let selection = env::var(OBSERVATION_SELECTION_ENV)
+            .map_err(|_| "settings reset requires captured observation context")?
+            .parse::<ObservationSelection>()?;
+        let origin = startup_origin(paths, selection.clone(), None)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        let (source, peer): (ControlResponse, _) = native_runtime::exchange_observed(
+            &paths.control_socket,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"status"}),
+            CONTROL_TIMEOUT,
+        )?;
+        if !source.ok || source.version != control::PROTOCOL_VERSION || source.command != "status" {
+            return Err(source.error.unwrap_or_else(|| {
+                "settings reset source status used an unsupported control response".into()
+            }));
+        }
+        require_profile_identity(&source, paths)?;
+        let image = executable_identity(&bundle::executable().map_err(|e| e.to_string())?)?;
+        if peer.incarnation().pid != source_pid
+            || source.pid != source_pid
+            || peer.path() != image.path
+            || source.running_sha256 != image.sha256
+            || source.observation_mode != selection.as_str()
+            || source.instance_id.is_empty()
+            || source.instance_id != source_instance
+            || source.shutdown
+            || !source.ready
+            || !source.running
+            || !source.ui_ready
+            || !source.control_ready
+        {
+            return Err("settings reset source instance, image or observation changed".into());
+        }
+        let assets_override =
+            settings_reset_assets_override(assets, source.assets_override.as_deref())?;
+        Preferences::load_committed(&paths.config_dir)?;
+        lifecycle::read_settings(&paths.config_dir)?;
+        let listing = PackStore::new_read_only(paths.config_dir.clone(), None).list()?;
+        if let Some(error) = listing.error {
+            return Err(format!(
+                "character registry needs recovery before settings reset: {error}"
+            ));
+        }
+        // Unlike cli::stop, this worker does not record a client-side Stop.
+        // The ordinary server handler alone records the one increment before
+        // acknowledging shutdown; never retry Stop or refresh this baseline.
+        let restart_generation = generation
+            .checked_add(1)
+            .ok_or("Stop generation overflow")?;
+        let expected = crate::settings_recovery::capture(paths)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        let reply: ControlResponse = native_runtime::exchange_observed_peer(
+            &paths.control_socket,
+            &peer,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"stop"}),
+            CONTROL_TIMEOUT,
+        )?;
+        if !reply.ok
+            || reply.version != control::PROTOCOL_VERSION
+            || reply.command != "stop"
+            || !reply.shutdown
+            || reply.instance_id != source.instance_id
+        {
+            return Err(reply.error.unwrap_or_else(|| {
+                "settings reset Stop was not acknowledged by the captured source".into()
+            }));
+        }
+        let admit =
+            || protocol::start_allowed(&origin, &paths.state_dir, Some(restart_generation), None);
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        loop {
+            admit()?;
+            let absent = unsafe { libc::kill(source_pid as i32, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            let socket_gone = fs::symlink_metadata(&paths.control_socket)
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+            if absent && socket_gone && !lifecycle::startup_pending(&paths.config_dir)? {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("settings reset source process/socket/startup exit is unproved".into());
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        admit()?;
+        let profile = ProfileStore::acquire(&paths.config_dir, &paths.state_dir)?
+            .with_preferences_validator(Preferences::validate_committed_object);
+        let retained = crate::settings_recovery::reset(
+            paths,
+            &profile,
+            &composition.extensions.lifecycle,
+            &expected,
+            &admit,
+        )?;
+        backup = Some(retained);
+        drop(profile);
+        admit()?;
+        let defaults = Preferences::load_committed(&paths.config_dir)?.observation_host();
+        let mut command = Command::new(&image.path);
+        command
+            .arg("start")
+            .arg("--config-dir")
+            .arg(&paths.config_dir)
+            .arg("--state-dir")
+            .arg(&paths.state_dir)
+            .arg("--host")
+            .arg(defaults.as_str())
+            .args(extension_options)
+            .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+            .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+            .env(OBSERVATION_SELECTION_ENV, defaults.as_str())
+            .env_remove("DESKTOP_PET_STARTUP_TOKEN")
+            .env_remove(SETTINGS_RESET_SOURCE_ENV)
+            .env_remove(SETTINGS_RESET_GENERATION_ENV)
+            .env_remove(SETTINGS_RESET_INSTANCE_ENV)
+            .stdin(Stdio::null());
+        if let Some(assets) = &assets_override {
+            command.arg("--assets").arg(assets);
+        }
+        configure_startup_authorization(&mut command, (Some(restart_generation), None));
+        let status = settings_reset_restart_if_unchanged(
+            &image,
+            &origin,
+            || startup_origin(paths, selection.clone(), None),
+            || {
+                command.status().map_err(|e| {
+                    format!("settings reset committed, but restart could not launch: {e}")
+                })
+            },
+        )?;
+        if !status.success() {
+            return Err(format!("settings reset committed, but restart failed ({status}); a later Stop or updater reservation may have superseded restart"));
+        }
+        crate::settings_recovery::record_result(paths, "Native settings reset and restart completed. Installed character packs, integration routing and updater evidence were preserved.", backup.as_deref())?;
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        let message = format!(
+            "Native settings reset did not complete: {error}. See {} for details.",
+            paths.log_file.display()
+        );
+        let _ = crate::settings_recovery::record_result(paths, &message, backup.as_deref());
+        eprintln!("{message}");
+        // A live source receives this error through the coordinator. Only a
+        // proven-absent source needs a separate native alert; its presentation
+        // must never keep the transaction worker or source admission frozen.
+        let source_absent = env::var(SETTINGS_RESET_SOURCE_ENV).ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|pid| unsafe { libc::kill(pid as i32, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
+        if source_absent {
+            let _ = Command::new("/usr/bin/osascript")
+                .arg("-e").arg("on run argv\n display alert \"Native settings reset\" message (item 1 of argv) as critical buttons {\"OK\"} default button \"OK\"\nend run")
+                .arg(&message).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        }
+    }
+    result
+}
+
+/// Renderer preflight must not promote the resolved builtin assets directory
+/// into an external override. The authenticated source owns that distinction.
+fn settings_reset_assets_override(
+    invocation: Option<&Path>,
+    source_override: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let resolved = resolve_assets(source_override.map(Path::new))?;
+    if let Some(invocation) = invocation {
+        if source_override.is_none() || resolve_assets(Some(invocation))? != resolved {
+            return Err(
+                "settings reset invocation assets differ from the authenticated source override"
+                    .into(),
+            );
+        }
+    }
+    Ok(source_override.map(|_| resolved))
+}
+
+/// Revalidate the captured installation and executable immediately before
+/// launch. Source checkouts intentionally retain their unsigned dev baseline,
+/// but not permission to execute replacement bytes at the same mutable path.
+fn settings_reset_restart_if_unchanged<T>(
+    image: &desktop_pet_update_coordinator::ExecutableIdentity,
+    origin: &InstallOrigin,
+    current_origin: impl FnOnce() -> Result<InstallOrigin, String>,
+    restart: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let blocked = |detail| {
+        format!("Settings may already be reset, but restart was blocked because the authenticated source image or installation changed: {detail}")
+    };
+    // Origin discovery may execute --version/capability probes for installed
+    // apps. Authenticate bytes before permitting even that probe boundary.
+    let current_image = executable_identity(&image.path).map_err(&blocked)?;
+    if &current_image != image {
+        return Err(blocked("executable path or SHA-256 differs".to_owned()));
+    }
+    let current_origin = current_origin().map_err(&blocked)?;
+    if &current_origin != origin {
+        return Err(blocked("installation origin differs".to_owned()));
+    }
+    let current_image = executable_identity(&image.path).map_err(&blocked)?;
+    if &current_image != image {
+        return Err(blocked("executable path or SHA-256 differs".to_owned()));
+    }
+    restart()
 }
 
 fn print_response(response: &ControlResponse) -> Result<(), String> {
@@ -2980,6 +3340,158 @@ fn validate_assets_path(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_reset_preserves_asset_override_semantics_not_resolved_default() {
+        // A real resolvable builtin directory is a prerequisite, not an
+        // invocation override. Keeping None allows normal character selection.
+        let default_assets = resolve_assets(None).unwrap();
+        assert!(default_assets.join("manifest.json").is_file());
+        assert!(settings_reset_assets_override(None, None)
+            .unwrap()
+            .is_none());
+        assert!(settings_reset_assets_override(Some(&default_assets), None).is_err());
+
+        let root = tempfile::tempdir().unwrap();
+        let external = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("external-character");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("manifest.json"), b"{}").unwrap();
+        let source_override = external.to_str().unwrap();
+        assert_eq!(
+            settings_reset_assets_override(None, Some(source_override)).unwrap(),
+            Some(external.clone()),
+        );
+        assert_eq!(
+            settings_reset_assets_override(Some(&external), Some(source_override)).unwrap(),
+            Some(external.clone()),
+        );
+        assert!(
+            settings_reset_assets_override(Some(&default_assets), Some(source_override)).is_err()
+        );
+        fs::remove_file(external.join("manifest.json")).unwrap();
+        assert!(settings_reset_assets_override(None, Some(source_override)).is_err());
+    }
+
+    #[test]
+    fn settings_reset_never_restarts_replaced_executable_or_changed_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let executable = root_path.join("captured-source");
+        let original = b"#!/bin/sh\nprintf original > \"$1\"\n";
+        let replacement = b"#!/bin/sh\nprintf replacement > \"$1\"\n";
+        fs::write(&executable, original).unwrap();
+        fs::set_permissions(&executable, Permissions::from_mode(0o700)).unwrap();
+        let image = executable_identity(&executable).unwrap();
+        let origin = InstallOrigin::Source {
+            root: root_path.clone(),
+        };
+        let launched = Cell::new(false);
+        let probe_marker = root_path.join("origin-probe-executed");
+        fs::write(&executable, replacement).unwrap();
+        let error = settings_reset_restart_if_unchanged(
+            &image,
+            &origin,
+            || {
+                // This is a real executable probe, not a substitute result: a
+                // pre-authentication invocation would run replacement bytes.
+                Command::new(&executable)
+                    .arg(&probe_marker)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                Ok(origin.clone())
+            },
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            !probe_marker.exists(),
+            "replacement ran during origin discovery"
+        );
+        assert!(!launched.get());
+        assert!(error.contains("Settings may already be reset"));
+        assert!(error.contains("SHA-256"));
+        fs::write(&executable, original).unwrap();
+        let changed_origin = InstallOrigin::Source {
+            root: root_path.join("different-owner"),
+        };
+        let error = settings_reset_restart_if_unchanged(
+            &image,
+            &origin,
+            || Ok(changed_origin),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!launched.get());
+        assert!(error.contains("installation origin differs"));
+        let error = settings_reset_restart_if_unchanged(
+            &image,
+            &origin,
+            || {
+                fs::write(&executable, replacement).unwrap();
+                Ok(origin.clone())
+            },
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!launched.get());
+        assert!(error.contains("SHA-256"));
+        fs::write(&executable, original).unwrap();
+        settings_reset_restart_if_unchanged(
+            &image,
+            &origin,
+            || Ok(origin.clone()),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(launched.get());
+    }
+    #[test]
+    fn independent_manual_start_has_generation_but_no_updater_authority() {
+        assert_eq!(
+            parse_startup_authorization(None, None, Some("7".into())).unwrap(),
+            (Some(7), None)
+        );
+        assert_eq!(
+            parse_startup_authorization(None, None, None).unwrap(),
+            (None, None)
+        );
+        assert_eq!(
+            parse_startup_authorization(Some("7".into()), Some("token".into()), None).unwrap(),
+            (Some(7), Some("token".into()))
+        );
+        for (generation, token, manual) in [
+            (Some("7"), None, None),
+            (None, Some("token"), None),
+            (Some("7"), Some("token"), Some("7")),
+            (None, Some("token"), Some("7")),
+            (Some("7"), None, Some("7")),
+            (None, None, Some("not-a-generation")),
+        ] {
+            assert!(parse_startup_authorization(
+                generation.map(str::to_owned),
+                token.map(str::to_owned),
+                manual.map(str::to_owned),
+            )
+            .is_err());
+        }
+    }
+
     #[test]
     #[cfg(not(desktop_pet_legacy))]
     fn update_status_observes_standalone_without_normal_plan_or_start_authority() {
