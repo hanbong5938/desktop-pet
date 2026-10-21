@@ -1,4 +1,5 @@
 mod helper_ui;
+mod install_runner;
 mod runner;
 
 use desktop_pet_update_coordinator::{identity, installation, protocol, read_plan, OperationPhase};
@@ -6,7 +7,7 @@ use std::path::PathBuf;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install --request ABS | migrate-legacy --plan ABS [--resume-retirement | --confirm-tern ABS] | run/status/recover --state-dir PATH --operation-id ID [--start]")?;
+    let command = args.next().ok_or("usage: desktop-pet-update-coordinator update-capabilities | distribution-identity | discover [--executable ABS] --json | install/install-coordinated/install-relocate/install-relocate-manual/install-manual-recovery --request ABS | install-status/install-recover --state-dir ABS --operation-id ID | migrate-legacy --plan ABS [--resume-retirement] | run/status/recover/recover-ui/recover-legacy-ui --state-dir ABS --operation-id ID [--start (recover/recover-ui only)]")?;
     if command == "update-capabilities" || command == "distribution-identity" {
         if args.next().is_some() {
             return Err("identity commands accept no arguments".into());
@@ -21,6 +22,24 @@ fn run() -> Result<(), String> {
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         );
         return Ok(());
+    }
+    if matches!(
+        command.to_str(),
+        Some(
+            "install-coordinated"
+                | "install-relocate"
+                | "install-relocate-manual"
+                | "install-manual-recovery"
+                | "install-status"
+                | "install-recover"
+                | "install-run"
+        )
+    ) {
+        let code = install_runner::dispatch(
+            command.to_str().ok_or("invalid install command")?,
+            args.collect(),
+        )?;
+        std::process::exit(code);
     }
     if command == "discover" {
         if identity::LEGACY {
@@ -84,18 +103,6 @@ fn run() -> Result<(), String> {
                 return Err("migration plan must be absolute".into());
             }
             let action = args.next();
-            let evidence = if action.as_deref() == Some(std::ffi::OsStr::new("--confirm-tern")) {
-                let evidence = PathBuf::from(
-                    args.next()
-                        .ok_or("--confirm-tern requires an absolute evidence path")?,
-                );
-                if !evidence.is_absolute() {
-                    return Err("Tern reconnect evidence must be absolute".into());
-                }
-                Some(evidence)
-            } else {
-                None
-            };
             if args.next().is_some() {
                 return Err(
                     "migration actions are mutually exclusive and accept no extra arguments".into(),
@@ -105,14 +112,28 @@ fn run() -> Result<(), String> {
             // The helper owns this system-library-only native window independently
             // of both replaceable applications, on the process main thread.
             let approved = migration::read_plan(&plan)?;
-            let panel = helper_ui::Panel::for_migration("en", &approved)?;
             let resume = action.as_deref() == Some(std::ffi::OsStr::new("--resume-retirement"));
-            let confirm_reconnect =
-                action.as_deref() == Some(std::ffi::OsStr::new("--confirm-tern"));
-            if action.is_some() && !resume && !confirm_reconnect {
+            if action.is_some() && !resume {
                 return Err("unexpected migration argument".into());
             }
-            if !confirm_reconnect && !panel.confirm_migration(&approved, resume)? {
+            if migration::delegated_approval(&approved)? {
+                // The original update approval owns this exact automatic cutover.
+                // No source/helper visibility or second consent is fabricated.
+                let record = migration::run_delegated(&plan, resume)?;
+                use std::io::Write;
+                let mut output = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+                output.push(b'\n');
+                let mut stdout = std::io::stdout().lock();
+                if let Err(error) = stdout.write_all(&output).and_then(|_| stdout.flush()) {
+                    if error.kind() != std::io::ErrorKind::BrokenPipe {
+                        return Err(format!("cannot write migration result: {error}"));
+                    }
+                }
+                return Ok(());
+            }
+            let panel = helper_ui::Panel::for_migration("en", &approved)?;
+            // Retained operations without delegated approval retain their original UI.
+            if !panel.confirm_migration(&approved, resume)? {
                 migration::write_final_consent_cancelled(&approved, &plan, resume)?;
                 panel.close();
                 return Ok(());
@@ -122,12 +143,6 @@ fn run() -> Result<(), String> {
                 Some(arg) if arg == "--resume-retirement" => {
                     migration::resume_retirement_with_presentation(&plan, &panel)
                 }
-                Some(arg) if arg == "--confirm-tern" => migration::confirm_tern_reconnect(
-                    &plan,
-                    evidence
-                        .as_deref()
-                        .ok_or("missing Tern reconnect evidence")?,
-                ),
                 Some(_) => unreachable!(),
             };
             match &result {
@@ -200,9 +215,12 @@ fn run() -> Result<(), String> {
     }
     let state_dir = state_dir.ok_or("missing --state-dir")?;
     let operation_id = operation_id.ok_or("missing --operation-id")?;
+    if !state_dir.is_absolute() {
+        return Err("--state-dir requires an absolute path".into());
+    }
     protocol::validate_operation_id(&operation_id)?;
-    if start && command != "recover" {
-        return Err("--start is only valid with recover".into());
+    if start && command != "recover" && command != "recover-ui" {
+        return Err("--start is only valid with recover or recover-ui".into());
     }
     let plan = read_plan(&state_dir, &operation_id)?;
     match command.to_str().ok_or("invalid updater command encoding")? {
@@ -226,6 +244,30 @@ fn run() -> Result<(), String> {
             } else {
                 Err(format!("update was not applied: {}", result.detail))
             }
+        }
+        "recover-legacy-ui" => {
+            let result = runner::recover_legacy_ui(plan)?;
+            // The source UI may have exited after the separately approved Stop.
+            // A closed observer pipe must not dismiss the independent result UI.
+            use std::io::Write;
+            let mut bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
+            bytes.push(b'\n');
+            if let Err(error) = std::io::stdout().lock().write_all(&bytes) {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(error.to_string());
+                }
+            }
+            Ok(())
+        }
+        "recover-ui" => {
+            let result = runner::recover_ui(plan, start)?;
+            println!(
+                "{}",
+                serde_json::to_string(&result).map_err(|e| e.to_string())?
+            );
+            // Successful observation/reconciliation is not a claim of upgrade.
+            // Failed/Unknown/UserStopped are durable outcomes, not CLI errors.
+            Ok(())
         }
         _ => Err("unknown updater command".into()),
     }

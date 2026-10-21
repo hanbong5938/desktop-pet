@@ -141,21 +141,26 @@ pub(crate) fn commit_owner_mutation(
         let state = shared.lock().map_err(|_| {
             PreferenceMutationError::new("state_unavailable", "native state lock is poisoned")
         })?;
-        state.update_mutation_allowed().map_err(|error| {
-            PreferenceMutationError::new("update_preparing", error)
-        })?;
+        state
+            .update_mutation_allowed()
+            .map_err(|error| PreferenceMutationError::new("update_preparing", error))?;
         if let PreferenceMutation::Patch(patch) = &mutation {
             if let Some(selection) = &patch.observation_host {
                 if let Some(mut context) = state.update_context().cloned() {
-                    context.set_observation_selection(selection).map_err(|error| {
-                        PreferenceMutationError::new("invalid_preferences", error)
-                    })?;
+                    context
+                        .set_observation_selection(selection)
+                        .map_err(|error| {
+                            PreferenceMutationError::new("invalid_preferences", error)
+                        })?;
                 }
             }
         }
     }
     if expected_revision.is_some_and(|expected| expected != *revision) {
-        return Err(PreferenceMutationError::new("revision_conflict", "preference revision changed"));
+        return Err(PreferenceMutationError::new(
+            "revision_conflict",
+            "preference revision changed",
+        ));
     }
     let previous = preferences.snapshot();
     if let PreferenceMutation::Patch(patch) = &mutation {
@@ -163,16 +168,28 @@ pub(crate) fn commit_owner_mutation(
             .map_err(|error| PreferenceMutationError::new("invalid_preferences", error))?
             && !(patch.observation_host.is_some() && observation_native_pending)
         {
-            return Ok(OwnerCommit { target: previous.clone(), previous, saved: false });
+            return Ok(OwnerCommit {
+                target: previous.clone(),
+                previous,
+                saved: false,
+            });
         }
     }
     let target = match mutation {
         PreferenceMutation::Patch(patch) => preferences.apply_patch(patch, directory),
-        PreferenceMutation::Prepared(prepared) =>
-            preferences.apply_prepared_owner_patch(prepared, directory),
-    }.map_err(|error| PreferenceMutationError::new("persist_failed", error))?;
-    *revision = revision.checked_add(1).expect("preference revision exhausted");
-    Ok(OwnerCommit { previous, target, saved: true })
+        PreferenceMutation::Prepared(prepared) => {
+            preferences.apply_prepared_owner_patch(prepared, directory)
+        }
+    }
+    .map_err(|error| PreferenceMutationError::new("persist_failed", error))?;
+    *revision = revision
+        .checked_add(1)
+        .expect("preference revision exhausted");
+    Ok(OwnerCommit {
+        previous,
+        target,
+        saved: true,
+    })
 }
 
 impl Ui {
@@ -283,7 +300,11 @@ impl Ui {
             &self.shared,
             pending,
         )?;
-        let OwnerCommit { previous, target, saved } = commit;
+        let OwnerCommit {
+            previous,
+            target,
+            saved,
+        } = commit;
         if !saved {
             return Ok(target);
         }
@@ -636,13 +657,19 @@ mod tests {
     }
     impl desktop_pet_contracts::PreparedPreferencePatch for TestPrepared {
         fn apply(&self, candidate: &mut serde_json::Map<String, Value>) -> Result<(), String> {
-            if self.fail_apply { return Err("preparation rejected candidate".into()); }
+            if self.fail_apply {
+                return Err("preparation rejected candidate".into());
+            }
             candidate.insert("owner_test".into(), json!(true));
             Ok(())
         }
         fn committed(&self, _saved: &serde_json::Map<String, Value>) -> Result<(), String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            if self.fail_committed { Err("adapter live apply failed".into()) } else { Ok(()) }
+            if self.fail_committed {
+                Err("adapter live apply failed".into())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -653,39 +680,97 @@ mod tests {
         let mut preferences = Preferences::default();
         let mut revision = 0;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let apply = |preferences: &mut Preferences, revision: &mut u64, fail_apply, fail_committed| {
-            let expected = *revision;
-            commit_owner_mutation(preferences, revision, PreferenceMutation::Prepared(Box::new(TestPrepared {
-                fail_apply, fail_committed, calls: calls.clone(),
-            })), Some(expected), root.path(), &shared, false)
-        };
+        let apply =
+            |preferences: &mut Preferences, revision: &mut u64, fail_apply, fail_committed| {
+                let expected = *revision;
+                commit_owner_mutation(
+                    preferences,
+                    revision,
+                    PreferenceMutation::Prepared(Box::new(TestPrepared {
+                        fail_apply,
+                        fail_committed,
+                        calls: calls.clone(),
+                    })),
+                    Some(expected),
+                    root.path(),
+                    &shared,
+                    false,
+                )
+            };
         assert!(apply(&mut preferences, &mut revision, true, false).is_err());
         assert_eq!(revision, 0);
         assert!(!root.path().join("preferences.json").exists());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert!(apply(&mut preferences, &mut revision, false, false).unwrap().saved);
+        assert!(
+            apply(&mut preferences, &mut revision, false, false)
+                .unwrap()
+                .saved
+        );
         assert_eq!(revision, 1);
-        assert!(apply(&mut preferences, &mut revision, false, false).unwrap().saved);
+        assert!(
+            apply(&mut preferences, &mut revision, false, false)
+                .unwrap()
+                .saved
+        );
         assert_eq!(revision, 2);
         let before = std::fs::read(root.path().join("preferences.json")).unwrap();
-        let error = commit_owner_mutation(&mut preferences, &mut revision,
-            PreferenceMutation::Patch(PreferencePatch { language: Some(LanguagePreference::Ko), ..Default::default() }),
-            Some(1), root.path(), &shared, false).err().unwrap();
+        let error = commit_owner_mutation(
+            &mut preferences,
+            &mut revision,
+            PreferenceMutation::Patch(PreferencePatch {
+                language: Some(LanguagePreference::Ko),
+                ..Default::default()
+            }),
+            Some(1),
+            root.path(),
+            &shared,
+            false,
+        )
+        .err()
+        .unwrap();
         assert_eq!(error.code, "revision_conflict");
-        assert_eq!(std::fs::read(root.path().join("preferences.json")).unwrap(), before);
-        assert!(apply(&mut preferences, &mut revision, false, true).unwrap().saved);
+        assert_eq!(
+            std::fs::read(root.path().join("preferences.json")).unwrap(),
+            before
+        );
+        assert!(
+            apply(&mut preferences, &mut revision, false, true)
+                .unwrap()
+                .saved
+        );
         assert_eq!(revision, 3);
-        assert_eq!(preferences.postcommit_error(), Some("adapter live apply failed"));
+        assert_eq!(
+            preferences.postcommit_error(),
+            Some("adapter live apply failed")
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         let blocked = root.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").unwrap();
-        let error = commit_owner_mutation(&mut preferences, &mut revision,
-            PreferenceMutation::Patch(PreferencePatch { language: Some(LanguagePreference::Ko), ..Default::default() }),
-            Some(3), &blocked, &shared, false).err().unwrap();
+        let error = commit_owner_mutation(
+            &mut preferences,
+            &mut revision,
+            PreferenceMutation::Patch(PreferencePatch {
+                language: Some(LanguagePreference::Ko),
+                ..Default::default()
+            }),
+            Some(3),
+            &blocked,
+            &shared,
+            false,
+        )
+        .err()
+        .unwrap();
         assert!(!error.committed);
         assert_eq!(revision, 3);
-        assert_eq!(std::fs::read(root.path().join("preferences.json")).unwrap(), before);
-        shared.lock().unwrap().set_migration_gate("migration".into(), "token".into()).unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("preferences.json")).unwrap(),
+            before
+        );
+        shared
+            .lock()
+            .unwrap()
+            .set_migration_gate("migration".into(), "token".into())
+            .unwrap();
         assert!(apply(&mut preferences, &mut revision, false, false).is_err());
         shared.lock().unwrap().request_shutdown();
         assert!(apply(&mut preferences, &mut revision, false, false).is_err());

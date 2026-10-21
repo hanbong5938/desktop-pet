@@ -268,6 +268,30 @@ private final class RigAnchorGeometry {
     }
 }
 
+#if RIG_HOST_VISIBILITY_CHECKS
+struct RigHostVisibilitySnapshot: Codable {
+    let drawableAttempts: UInt64
+    let drawStarts: UInt64
+    let drawCompletions: UInt64
+    let driverStarts: UInt64
+    let active: Bool
+    let visible: Bool
+    let driverRunning: Bool
+    let renderPending: Bool
+    let surfaceReady: Bool
+    let hitsDisabled: Bool
+    let intentSerial: UInt64
+    let viewportEpoch: UInt64
+    let surfaceReadySerial: UInt64
+    let surfaceReadyViewportEpoch: UInt64
+    let selectedModelIndex: Int
+    let pendingModelIndex: Int?
+    let gateFailure: String?
+}
+
+enum RigHostVisibilityGate { case beforeValidation, afterDrawable, beforePublication }
+#endif
+
 final class RigNativeHost {
     private static let surfaceFreshness: TimeInterval = 0.25
     private static let displayFrameInterval: DispatchTimeInterval = .nanoseconds(16_666_667)
@@ -341,6 +365,60 @@ final class RigNativeHost {
     private var displayTimer: DispatchSourceTimer?
     private var visible = false
     private var lastError: String?
+#if RIG_HOST_VISIBILITY_CHECKS
+    private var probeDrawableAttempts: UInt64 = 0
+    private var probeDrawStarts: UInt64 = 0
+    private var probeDrawCompletions: UInt64 = 0
+    private var probeDriverStarts: UInt64 = 0
+    private var visibilityGate: (stage: RigHostVisibilityGate, reached: () -> Void,
+                                 release: DispatchSemaphore)?
+    private var visibilityGateFailure: String?
+
+    func probeVisibilitySnapshot() -> RigHostVisibilitySnapshot {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return RigHostVisibilitySnapshot(
+            drawableAttempts: probeDrawableAttempts, drawStarts: probeDrawStarts,
+            drawCompletions: probeDrawCompletions, driverStarts: probeDriverStarts,
+            active: active, visible: visible, driverRunning: displayTimer != nil,
+            renderPending: renderPending, surfaceReady: surfaceReady, hitsDisabled: hitsDisabled,
+            intentSerial: intentSerial, viewportEpoch: viewport.epoch,
+            surfaceReadySerial: surfaceReadySerial, surfaceReadyViewportEpoch: surfaceReadyViewportEpoch,
+            selectedModelIndex: selectedModelIndex, pendingModelIndex: pendingModelIndex,
+            gateFailure: visibilityGateFailure)
+    }
+
+    func probeGateNextRender(_ stage: RigHostVisibilityGate, reached: @escaping () -> Void,
+                             release: DispatchSemaphore) {
+        stateLock.lock()
+        precondition(visibilityGate == nil, "visibility gate already armed")
+        visibilityGate = (stage, reached, release)
+        stateLock.unlock()
+    }
+
+    private func probeWaitAtGate(_ stage: RigHostVisibilityGate) {
+        stateLock.lock()
+        let gate = visibilityGate?.stage == stage ? visibilityGate : nil
+        if gate != nil { visibilityGate = nil }
+        stateLock.unlock()
+        guard let gate else { return }
+        DispatchQueue.main.async(execute: gate.reached)
+        if gate.release.wait(timeout: .now() + .seconds(10)) == .timedOut {
+            stateLock.lock()
+            visibilityGateFailure = "visibility gate timed out at \(stage)"
+            stateLock.unlock()
+        }
+    }
+
+    func probeDrainRenderQueue(_ completion: @escaping () -> Void) {
+        renderQueue.async { DispatchQueue.main.async(execute: completion) }
+    }
+
+    func probeTriggerRecovery() {
+        precondition(Thread.isMainThread)
+        markFailure("visibility-check recovery")
+    }
+#endif
 
     init(asset: HerdrRigAssetInput, token: HerdrRigTokenInput) throws {
         guard Thread.isMainThread else {
@@ -561,6 +639,11 @@ final class RigNativeHost {
                 hitsDisabled = true
                 cachedSpeechAnchor = nil
             }
+            // Inactive candidates still need a bootstrap drawable before activate().
+            if active && !visible {
+                stateLock.unlock()
+                return false
+            }
             let currentSerial = intentSerial
             let currentViewport = viewport
             let ready = isCurrentSurfaceLocked(now, serial: currentSerial, viewport: currentViewport)
@@ -642,8 +725,12 @@ final class RigNativeHost {
     func setVisible(_ visible: Bool) {
         guard Thread.isMainThread else { return }
         stateLock.lock()
-        if self.visible != visible { inputGeneration &+= 1 }
-        if self.visible != visible { cachedSpeechAnchor = nil }
+        guard self.visible != visible else {
+            stateLock.unlock()
+            return
+        }
+        inputGeneration &+= 1
+        cachedSpeechAnchor = nil
         self.visible = visible
         if visible {
             if active { startDisplayDriverLocked() }
@@ -939,6 +1026,9 @@ final class RigNativeHost {
         timer.setEventHandler { [weak self] in self?.displayTick() }
         timer.resume()
         displayTimer = timer
+#if RIG_HOST_VISIBILITY_CHECKS
+        probeDriverStarts &+= 1
+#endif
     }
 
     private func stopDisplayDriverLocked() {
@@ -981,34 +1071,61 @@ final class RigNativeHost {
     private func enqueueRender(_ request: RigSurfaceRequest, renderer: RigMetalRenderer) {
         renderQueue.async { [weak self] in
             guard let self else { return }
+#if RIG_HOST_VISIBILITY_CHECKS
+            self.probeWaitAtGate(.beforeValidation)
+#endif
             self.stateLock.lock()
             let canRender = !self.cancelled
+                && (!self.active || self.visible)
                 && self.intentSerial == request.serial
                 && self.viewport.epoch == request.viewport.epoch
             self.stateLock.unlock()
+#if RIG_HOST_VISIBILITY_CHECKS
+            if canRender {
+                self.stateLock.lock()
+                self.probeDrawableAttempts &+= 1
+                self.stateLock.unlock()
+            }
+#endif
             guard canRender, let drawable = request.layer.nextDrawable() else {
                 self.stateLock.lock()
                 self.renderPending = false
                 self.stateLock.unlock()
                 return
             }
+#if RIG_HOST_VISIBILITY_CHECKS
+            self.probeWaitAtGate(.afterDrawable)
+#endif
             self.stateLock.lock()
             let stillCurrent = !self.cancelled
+                && (!self.active || self.visible)
                 && self.intentSerial == request.serial
                 && self.viewport.epoch == request.viewport.epoch
             if !stillCurrent { self.renderPending = false }
             self.stateLock.unlock()
             guard stillCurrent else { return }
             do {
+#if RIG_HOST_VISIBILITY_CHECKS
+                self.stateLock.lock()
+                self.probeDrawStarts &+= 1
+                self.stateLock.unlock()
+#endif
                 _ = try renderer.draw(
                     to: drawable, parameters: request.evaluated.parameters,
                     time: request.evaluated.timeMS, neutral: request.intent.frozen != 0,
                     poseMix: request.evaluated.poseMix, localMotion: request.evaluated.local,
                     capture: false
                 )
+#if RIG_HOST_VISIBILITY_CHECKS
+                self.stateLock.lock()
+                self.probeDrawCompletions &+= 1
+                self.stateLock.unlock()
+                self.probeWaitAtGate(.beforePublication)
+#endif
                 self.stateLock.lock()
                 self.renderPending = false
-                if !self.cancelled && self.intentSerial == request.serial,
+                if !self.cancelled && (!self.active || self.visible)
+                    && self.intentSerial == request.serial,
                    self.viewport.epoch == request.viewport.epoch {
                     self.surfaceReady = true
                     self.surfaceReadySerial = request.serial

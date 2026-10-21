@@ -1165,7 +1165,8 @@ fn dispatch_legacy_registration(
         if frame.len() + 1 > extension.max_request_bytes() {
             return Err("legacy registration exceeds frame limit".into());
         }
-        let preferences = crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
+        let preferences =
+            crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
         let bytes = extension.handle_frame(frame, &preferences)?;
         if bytes.len() > extension.max_response_bytes() {
             return Err("legacy registration response exceeds frame limit".into());
@@ -1256,6 +1257,7 @@ fn dispatch_migration(
 ) -> Result<bool, String> {
     use desktop_pet_update_coordinator::migration::{self, MigrationCommand};
     let context = verify_migration_control(inner, request)?;
+    let delegated = migration::delegated_approval(&migration::read_plan(&request.plan_path)?)?;
     if inner.stopping.load(Ordering::Acquire) {
         return Err("daemon is stopping".into());
     }
@@ -1270,8 +1272,10 @@ fn dispatch_migration(
                     return Err("migration source UI is not ready".into());
                 }
                 if state.migration_authorized(&request.operation_id, &request.token)
-                    && state.update_ui_visible()
-                    && state.update_ui_operation_id() == Some(request.operation_id.as_str())
+                    && (delegated
+                        || (state.update_ui_visible()
+                            && state.update_ui_operation_id()
+                                == Some(request.operation_id.as_str())))
                 {
                     return Ok(false);
                 }
@@ -1312,7 +1316,12 @@ fn dispatch_migration(
                 .promote_prepared_migration(&request.operation_id, &request.token)?;
             Ok(false)
         }
-        MigrationCommand::ConsentAck => {
+        MigrationCommand::ConsentAck | MigrationCommand::DelegationAck => {
+            if (request.command == MigrationCommand::DelegationAck) != delegated {
+                return Err(
+                    "migration authorization acknowledgement kind differs from approval".into(),
+                );
+            }
             {
                 let state = lock_unpoisoned(&inner.shared);
                 if !desktop_pet_update_coordinator::identity::LEGACY
@@ -1324,13 +1333,16 @@ fn dispatch_migration(
                     );
                 }
             }
-            ui::confirm_migration_consent_visibility(&request.operation_id)?;
+            if !delegated {
+                ui::confirm_migration_consent_visibility(&request.operation_id)?;
+            }
             verify_migration_control(inner, request)?;
             let state = lock_unpoisoned(&inner.shared);
             if state.scene().shutdown
                 || !state.migration_authorized(&request.operation_id, &request.token)
-                || !state.update_ui_visible()
-                || state.update_ui_operation_id() != Some(request.operation_id.as_str())
+                || (!delegated
+                    && (!state.update_ui_visible()
+                        || state.update_ui_operation_id() != Some(request.operation_id.as_str())))
             {
                 return Err(
                     "migration final consent is not visible for this exact operation".into(),
@@ -1339,7 +1351,7 @@ fn dispatch_migration(
             Ok(false)
         }
         MigrationCommand::Stop => {
-            if desktop_pet_update_coordinator::identity::LEGACY {
+            if desktop_pet_update_coordinator::identity::LEGACY && !delegated {
                 ui::confirm_migration_consent_visibility(&request.operation_id)?;
                 verify_migration_control(inner, request)?;
             }
@@ -1347,8 +1359,10 @@ fn dispatch_migration(
             if state.scene().shutdown
                 || (desktop_pet_update_coordinator::identity::LEGACY
                     && (!state.migration_authorized(&request.operation_id, &request.token)
-                        || !state.update_ui_visible()
-                        || state.update_ui_operation_id() != Some(request.operation_id.as_str())))
+                        || (!delegated
+                            && (!state.update_ui_visible()
+                                || state.update_ui_operation_id()
+                                    != Some(request.operation_id.as_str())))))
             {
                 return Err(
                     "migration source is not visibly prepared for this authorization".into(),
@@ -1413,8 +1427,13 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
             command,
             ..
         }) => {
-            let result =
-                dispatch_legacy_registration(&inner, &frame, &command, verify_peer_uid(&stream), deadline);
+            let result = dispatch_legacy_registration(
+                &inner,
+                &frame,
+                &command,
+                verify_peer_uid(&stream),
+                deadline,
+            );
             let _ = write_response(&mut stream, &result, deadline);
             return;
         }
@@ -1438,6 +1457,69 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
     if reject_duplicate_json_keys(&frame).is_err() {
         let response = ControlResponse::error("unknown", &inner, "invalid control request");
         let _ = write_response(&mut stream, &response, deadline);
+        return;
+    }
+    if matches!(
+        frame_kind.kind.as_deref(),
+        Some("legacy-migration-route" | "migration-integration-handover")
+    ) {
+        let response = ControlResponse::error(
+            "unknown",
+            &inner,
+            "migration integration proofs require the bounded native CLI",
+        );
+        let _ = write_response(&mut stream, &response, deadline);
+        return;
+    }
+    if frame_kind.kind.as_deref() == Some("legacy-migration-context") {
+        if frame.len() + 1 > MAX_FRAME_BYTES || !verify_peer_uid(&stream) {
+            return;
+        }
+        let result = (|| -> Result<serde_json::Value, String> {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Request {
+                version: u32,
+                kind: String,
+                config_dir: PathBuf,
+                state_dir: PathBuf,
+            }
+            let request: Request = serde_json::from_slice(&frame).map_err(|e| e.to_string())?;
+            if request.version != 1 || request.kind != "legacy-migration-context" {
+                return Err("unsupported migration context request".into());
+            }
+            #[cfg(desktop_pet_legacy)]
+            {
+                let state = lock_unpoisoned(&inner.shared);
+                state.update_mutation_allowed()?;
+                let mut context = state
+                    .update_context()
+                    .cloned()
+                    .ok_or("source startup context is unavailable")?;
+                if context.config_dir != request.config_dir
+                    || context.state_dir != request.state_dir
+                    || !state.is_ui_ready()
+                    || state.scene().shutdown
+                {
+                    return Err("migration context is not the exact ready source profile".into());
+                }
+                context.environment =
+                    desktop_pet_update_coordinator::legacy_entry::migration_source_environment(
+                        &context.environment,
+                    );
+                Ok(
+                    serde_json::json!({"version":1,"kind":"legacy-migration-context","context":context}),
+                )
+            }
+            #[cfg(not(desktop_pet_legacy))]
+            {
+                let _ = request;
+                Err("neutral applications cannot approve a legacy source update".into())
+            }
+        })();
+        let response = result.unwrap_or_else(|error| serde_json::json!({"version":1,"kind":"legacy-migration-context","error":error}));
+        let _ = bounded_json(&response, MAX_FRAME_BYTES)
+            .and_then(|bytes| write_frame(&mut stream, &bytes, deadline));
         return;
     }
     if matches!(
@@ -1474,7 +1556,14 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
             .and_then(|bytes| write_frame(&mut stream, &bytes, migration_deadline))
             .is_ok();
         if written && stopping {
+            let delegated =
+                desktop_pet_update_coordinator::migration::read_plan(&request.plan_path)
+                    .and_then(|plan| {
+                        desktop_pet_update_coordinator::migration::delegated_approval(&plan)
+                    })
+                    .unwrap_or(false);
             if desktop_pet_update_coordinator::identity::LEGACY
+                && !delegated
                 && ui::confirm_migration_consent_visibility(&request.operation_id).is_err()
             {
                 return;
@@ -1484,8 +1573,10 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
                 let mut state = lock_unpoisoned(&inner.shared);
                 if !desktop_pet_update_coordinator::identity::LEGACY
                     || (state.migration_authorized(&request.operation_id, &request.token)
-                        && state.update_ui_visible()
-                        && state.update_ui_operation_id() == Some(request.operation_id.as_str()))
+                        && (delegated
+                            || (state.update_ui_visible()
+                                && state.update_ui_operation_id()
+                                    == Some(request.operation_id.as_str()))))
                 {
                     state.request_shutdown();
                     drop(state);
@@ -1514,7 +1605,8 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
         if wire_bytes > extension.max_request_bytes() || !verify_peer_uid(&stream) {
             return;
         }
-        let preferences = crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
+        let preferences =
+            crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
         match extension.handle_frame(&frame, &preferences) {
             Ok(bytes)
                 if bytes.len() <= extension.max_response_bytes()
@@ -2563,9 +2655,6 @@ fn dispatch(inner: &ControlInner, command: &str, endpoint: Option<PathBuf>) -> C
     }
 }
 
-
-
-
 /// Offline counterpart of the common preference transaction. The client must
 /// establish socket absence before calling; recheck under the actual state
 /// lease and retain config-wide ownership through the sole atomic save.
@@ -2735,22 +2824,29 @@ pub(crate) fn access_registered_lifecycle(
     }
     composition.configure_profile(profile.clone())?;
     let mut preferences = Preferences::load_committed(&paths.config_dir)?;
-    preferences.set_integration_extensions(profile.clone(), composition.extensions.lifecycle.clone());
+    preferences
+        .set_integration_extensions(profile.clone(), composition.extensions.lifecycle.clone());
     preferences.refresh_owner_snapshot(&paths.config_dir)?;
     let selection = preferences.observation_host();
     if let Some((key, value)) = change {
         if let Some(prepared) = prepare_registered_lifecycle(
-            &profile, &composition.extensions.lifecycle, &selection, None, key, value,
+            &profile,
+            &composition.extensions.lifecycle,
+            &selection,
+            None,
+            key,
+            value,
         )? {
             preferences.apply_prepared_owner_patch(prepared, &paths.config_dir)?;
             if let Some(error) = preferences.postcommit_error() {
-                return Err(format!("preference saved but adapter application failed: {error}"));
+                return Err(format!(
+                    "preference saved but adapter application failed: {error}"
+                ));
             }
         }
     }
     lifecycle_values(&profile, &composition.extensions.lifecycle, &selection)
 }
-
 
 struct BoundedJson {
     bytes: Vec<u8>,
@@ -4129,26 +4225,49 @@ mod tests {
             value,
         )
         .is_err());
-        assert!(
-            prepare_registered_lifecycle(&profile, &extensions, &selection, None, "unknown_setting", value)
-                .is_err()
-        );
+        assert!(prepare_registered_lifecycle(
+            &profile,
+            &extensions,
+            &selection,
+            None,
+            "unknown_setting",
+            value
+        )
+        .is_err());
         let duplicate = Arc::new(SettingOwner {
             calls: AtomicUsize::new(0),
         });
         let duplicate_extensions: Vec<Arc<dyn LifecycleExtension>> =
             vec![owner.clone(), duplicate.clone()];
         assert!(lifecycle_values(&profile, &duplicate_extensions, &selection).is_err());
-        assert!(
-            prepare_registered_lifecycle(&profile, &duplicate_extensions, &selection, None, key, value).is_err()
-        );
+        assert!(prepare_registered_lifecycle(
+            &profile,
+            &duplicate_extensions,
+            &selection,
+            None,
+            key,
+            value
+        )
+        .is_err());
         assert_eq!(profile.read_object_with_presence().unwrap(), before);
         assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
         assert_eq!(duplicate.calls.load(Ordering::SeqCst), 0);
 
-        assert!(prepare_registered_lifecycle(&profile, &extensions, &selection, Some("other"), key, value).is_err());
+        assert!(prepare_registered_lifecycle(
+            &profile,
+            &extensions,
+            &selection,
+            Some("other"),
+            key,
+            value
+        )
+        .is_err());
         assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
-        assert!(prepare_registered_lifecycle(&profile, &extensions, &selection, None, key, value).unwrap().is_none());
+        assert!(
+            prepare_registered_lifecycle(&profile, &extensions, &selection, None, key, value)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             lifecycle_values(&profile, &extensions, &selection)

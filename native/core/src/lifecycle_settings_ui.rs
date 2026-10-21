@@ -78,11 +78,12 @@ fn accessibility(view: &NSView, value: &str) {
 
 pub(crate) struct LifecycleSettingsCard {
     view: Retained<CardView>,
+    extensions_view: Retained<CardView>,
+    extensions_empty: Retained<NSTextField>,
     heading: Retained<NSTextField>,
     auto_label: Retained<NSTextField>,
-    auto_help: Retained<NSTextField>,
+    error_details: Retained<NSButton>,
     auto_switch: Retained<NSSwitch>,
-    quit_help: Retained<NSTextField>,
     error: Retained<NSTextField>,
     locale: UiLocale,
     error_detail: Option<String>,
@@ -92,6 +93,7 @@ pub(crate) struct LifecycleSettingsCard {
     action_rows: Vec<ActionRow>,
     settings_snapshot: Vec<(String, LifecycleSettingView)>,
     actions_snapshot: Vec<(String, LifecycleActionView)>,
+    extensions_available: bool,
 }
 
 struct SettingRow {
@@ -112,13 +114,25 @@ struct ActionRow {
 impl LifecycleSettingsCard {
     pub(crate) fn new(locale: UiLocale, target: &AnyObject, mtm: MainThreadMarker) -> Self {
         let view = CardView::new(mtm);
+        let extensions_view = CardView::new(mtm);
+        // The provider document is mounted directly in Connections by MenuPanel.
+        let extensions_empty = label("", 10.5, false, true, mtm);
+        extensions_view.addSubview(&extensions_empty);
         unsafe {
             let _: () = msg_send![&*view, setAccessibilityElement: false];
         }
         let heading = label("", 12.5, true, false, mtm);
         let auto_label = label("", 12.0, true, false, mtm);
-        let auto_help = label("", 10.5, false, true, mtm);
-        let quit_help = label("", 10.5, false, true, mtm);
+        let error_details = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(""),
+                Some(target),
+                Some(sel!(openSettingsDetail:)),
+                mtm,
+            )
+        };
+        error_details.setTag(4);
+        error_details.setRefusesFirstResponder(false);
         let error = label("", 10.5, false, false, mtm);
         error.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
             1.0, 0.54, 0.50, 1.0,
@@ -139,20 +153,20 @@ impl LifecycleSettingsCard {
         for child in [
             &*heading as &NSView,
             &*auto_label,
-            &*auto_help,
+            &*error_details,
             &*auto_switch,
-            &*quit_help,
             &*error,
         ] {
             view.addSubview(child);
         }
         let mut card = Self {
             view,
+            extensions_view,
+            extensions_empty,
             heading,
             auto_label,
-            auto_help,
+            error_details,
             auto_switch,
-            quit_help,
             error,
             locale,
             error_detail: None,
@@ -162,6 +176,7 @@ impl LifecycleSettingsCard {
             action_rows: Vec::new(),
             settings_snapshot: Vec::new(),
             actions_snapshot: Vec::new(),
+            extensions_available: true,
         };
         card.set_locale(locale);
         card
@@ -213,9 +228,62 @@ impl LifecycleSettingsCard {
                 NSSize::new(46.0, 30.0),
             ));
         }
-        y += 2.0;
-        place(&self.auto_help, full_width, 0.0, &mut y);
-        y += 6.0;
+        y += 4.0;
+        if !self.error.isHidden() {
+            y += 6.0;
+            place(&self.error, full_width, 0.0, &mut y);
+            y += 4.0;
+            if apply {
+                self.error_details.setFrame(NSRect::new(
+                    NSPoint::new(14.0, y),
+                    NSSize::new(full_width, 26.0),
+                ));
+            }
+            y += 26.0;
+        }
+        y + 10.0
+    }
+
+    pub(crate) fn separate_extensions(&mut self) -> &NSView {
+        &self.extensions_view
+    }
+
+    pub(crate) fn extensions_height(&self, width: f64) -> f64 {
+        self.layout_extensions_content(width, false)
+    }
+
+    pub(crate) fn layout_extensions(&self, frame: NSRect) {
+        self.extensions_view.setFrame(frame);
+        self.layout_extensions_content(frame.size.width, true);
+    }
+
+    fn layout_extensions_content(&self, width: f64, apply: bool) -> f64 {
+        let full_width = (width - 28.0).max(1.0);
+        let text_width = (width - 82.0).max(1.0);
+        let mut y = 0.0;
+        let place = |field: &NSTextField, width: f64, minimum: f64, y: &mut f64| {
+            let height = field
+                .cell()
+                .expect("extension label cell")
+                .cellSizeForBounds(NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(width, 100_000.0),
+                ))
+                .height
+                .ceil()
+                .max(minimum);
+            if apply {
+                field.setFrame(NSRect::new(
+                    NSPoint::new(14.0, *y),
+                    NSSize::new(width, height),
+                ));
+            }
+            *y += height;
+        };
+        if self.extension_rows.is_empty() && self.action_rows.is_empty() {
+            place(&self.extensions_empty, full_width, 14.0, &mut y);
+            y += 6.0;
+        }
         for row in &self.extension_rows {
             let row_y = y;
             place(&row.label, text_width, 32.0, &mut y);
@@ -240,13 +308,7 @@ impl LifecycleSettingsCard {
             }
             y += 34.0;
         }
-        y += 6.0;
-        place(&self.quit_help, full_width, 0.0, &mut y);
-        if !self.error.isHidden() {
-            y += 6.0;
-            place(&self.error, full_width, 0.0, &mut y);
-        }
-        y + 10.0
+        y
     }
 
     pub(crate) fn sync_extensions(&mut self, settings: &[(String, LifecycleSettingView)]) {
@@ -274,7 +336,7 @@ impl LifecycleSettingsCard {
                 let setting_label = label("", 12.0, true, false, self.mtm);
                 let help = label("", 10.5, false, true, self.mtm);
                 for child in [&*toggle as &NSView, &*setting_label, &*help] {
-                    self.view.addSubview(child);
+                    self.extensions_view.addSubview(child);
                 }
                 SettingRow {
                     provider: provider.clone(),
@@ -295,7 +357,8 @@ impl LifecycleSettingsCard {
             } else {
                 NSControlStateValueOff
             });
-            row.toggle.setEnabled(setting.enabled);
+            row.toggle
+                .setEnabled(self.extensions_available && setting.enabled);
             accessibility(&row.toggle, &setting.label);
             accessibility(&row.help, &setting.help);
             self.extension_rows.push(row);
@@ -305,6 +368,8 @@ impl LifecycleSettingsCard {
             row.help.removeFromSuperview();
             row.toggle.removeFromSuperview();
         }
+        self.extensions_empty
+            .setHidden(!self.extension_rows.is_empty() || !self.action_rows.is_empty());
     }
 
     pub(crate) fn sync_actions(&mut self, actions: &[(String, LifecycleActionView)]) {
@@ -329,8 +394,8 @@ impl LifecycleSettingsCard {
                     )
                 };
                 let help = label("", 10.5, false, true, self.mtm);
-                self.view.addSubview(&button);
-                self.view.addSubview(&help);
+                self.extensions_view.addSubview(&button);
+                self.extensions_view.addSubview(&help);
                 ActionRow {
                     provider: provider.clone(),
                     key: action.key.clone(),
@@ -339,7 +404,8 @@ impl LifecycleSettingsCard {
                 }
             };
             row.button.setTitle(&NSString::from_str(&action.label));
-            row.button.setEnabled(action.enabled);
+            row.button
+                .setEnabled(self.extensions_available && action.enabled);
             row.button.setIdentifier(Some(&NSString::from_str(
                 &serde_json::to_string(&(provider, &action.key)).expect("action identifier"),
             )));
@@ -352,6 +418,8 @@ impl LifecycleSettingsCard {
             row.button.removeFromSuperview();
             row.help.removeFromSuperview();
         }
+        self.extensions_empty
+            .setHidden(!self.extension_rows.is_empty() || !self.action_rows.is_empty());
     }
 
     pub(crate) fn set_locale(&mut self, locale: UiLocale) {
@@ -359,15 +427,26 @@ impl LifecycleSettingsCard {
         for (field, message) in [
             (&self.heading, Message::LifecycleHeading),
             (&self.auto_label, Message::LifecycleAutoStart),
-            (&self.auto_help, Message::LifecycleAutoStartHelp),
-            (&self.quit_help, Message::LifecycleQuitHelp),
         ] {
             field.setStringValue(&NSString::from_str(text(locale, message)));
         }
+        let empty = text(locale, Message::SettingsNoAdditionalOptions);
+        self.extensions_empty
+            .setStringValue(&NSString::from_str(empty));
+        accessibility(&self.extensions_empty, empty);
         accessibility(&self.auto_switch, text(locale, Message::LifecycleAutoStart));
+        let help = NSString::from_str(text(locale, Message::LifecycleAutoStartHelp));
+        self.auto_switch.setToolTip(Some(&help));
+        unsafe {
+            let _: () = msg_send![&*self.auto_switch, setAccessibilityHelp: Some(&*help)];
+        }
+        self.error_details.setTitle(&NSString::from_str(text(
+            locale,
+            Message::SettingsDetailsLink,
+        )));
         accessibility(
-            &self.auto_help,
-            text(locale, Message::LifecycleAutoStartHelp),
+            &self.error_details,
+            text(locale, Message::ConnectionDiagnostics),
         );
         self.display_error();
     }
@@ -398,19 +477,55 @@ impl LifecycleSettingsCard {
         self.display_error();
     }
 
+    pub(crate) fn error_detail(&self) -> Option<&str> {
+        self.error_detail.as_deref()
+    }
+
+    pub(crate) fn extension_setting_enabled(&self, provider: &str, key: &str) -> bool {
+        self.extensions_available
+            && self
+                .extension_rows
+                .iter()
+                .any(|row| row.provider == provider && row.key == key && row.toggle.isEnabled())
+    }
+
+    pub(crate) fn extension_action_enabled(&self, provider: &str, key: &str) -> bool {
+        self.extensions_available
+            && self
+                .action_rows
+                .iter()
+                .any(|row| row.provider == provider && row.key == key && row.button.isEnabled())
+    }
+
+    pub(crate) fn set_extensions_available(&mut self, available: bool) {
+        self.extensions_available = available;
+        for row in &self.extension_rows {
+            let enabled = self
+                .settings_snapshot
+                .iter()
+                .find(|(provider, setting)| provider == &row.provider && setting.key == row.key)
+                .is_some_and(|(_, setting)| setting.enabled);
+            row.toggle.setEnabled(available && enabled);
+        }
+        for row in &self.action_rows {
+            let enabled = self
+                .actions_snapshot
+                .iter()
+                .find(|(provider, action)| provider == &row.provider && action.key == row.key)
+                .is_some_and(|(_, action)| action.enabled);
+            row.button.setEnabled(available && enabled);
+        }
+    }
+
     fn display_error(&self) {
-        let message = self
-            .error_detail
-            .as_ref()
-            .map(|detail| {
-                format!(
-                    "{}: {detail}",
-                    text(self.locale, Message::LifecycleSaveFailure)
-                )
-            })
-            .unwrap_or_default();
+        let message = if self.error_detail.is_some() {
+            text(self.locale, Message::LifecycleSaveFailure)
+        } else {
+            ""
+        };
         self.error.setStringValue(&NSString::from_str(&message));
         self.error.setHidden(message.is_empty());
+        self.error_details.setHidden(message.is_empty());
         accessibility(&self.error, &message);
     }
 }

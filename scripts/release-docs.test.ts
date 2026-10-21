@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import {
-  fetchReleases, generateReleaseBody, isPublishedRelease, parseStableTag,
+  fetchReleases, generateReleaseBody, isPublishedRelease, parseReleaseTag, parseStableTag,
   requiredAssetNames, releaseRepository, rewriteRelativeLinks, validateProductMetadata,
 } from "./release-docs.ts";
 import type { ReleaseRecord } from "./release-docs.ts";
@@ -25,19 +25,20 @@ function published(overrides: Partial<ReleaseRecord> = {}): ReleaseRecord {
   };
 }
 
-async function fixture(note = `${heading}\n\nReviewed native-menu improvement.\n`): Promise<string> {
+async function fixture(note = `${heading}\n\nReviewed native-menu improvement.\n`, releaseTag = tag): Promise<string> {
+  const version = releaseTag.slice(1);
   const root = await mkdtemp(join(tmpdir(), "herdr-release-docs-"));
   for (const directory of ["app", "core", "update-coordinator"]) await mkdir(join(root, "native", directory), { recursive: true });
   await mkdir(join(root, "docs/releases"), { recursive: true });
-  await writeFile(join(root, "package.json"), JSON.stringify({ name: "desktop-pet", version: "0.4.0" }));
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "desktop-pet", version }));
   await writeFile(join(root, "bun.lock"), '{"workspaces":{"":{"name":"desktop-pet",},},}\n');
   await writeFile(join(root, "native/Cargo.toml"), '[workspace]\nmembers = ["app", "core", "update-coordinator"]\n');
   const products = [["app", "desktop-pet"], ["core", "desktop-pet-core"], ["update-coordinator", "desktop-pet-update-coordinator"]];
   for (const [directory, name] of products) {
-    await writeFile(join(root, `native/${directory}/Cargo.toml`), `[package]\nname = "${name}"\nversion = "0.4.0"\n`);
+    await writeFile(join(root, `native/${directory}/Cargo.toml`), `[package]\nname = "${name}"\nversion = "${version}"\n`);
   }
-  await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n' + products.map(([, name]) => `[[package]]\nname = "${name}"\nversion = "0.4.0"\n`).join(""));
-  await writeFile(join(root, `docs/releases/${tag}.md`), note);
+  await writeFile(join(root, "native/Cargo.lock"), 'version = 4\n' + products.map(([, name]) => `[[package]]\nname = "${name}"\nversion = "${version}"\n`).join(""));
+  await writeFile(join(root, `docs/releases/${releaseTag}.md`), note);
   return root;
 }
 
@@ -72,6 +73,48 @@ test("stable tags preserve zero versions and reject suffixes, leading zeros, and
     "desktop-pet-install-v0.4.0.sh",
     "desktop-pet-install-v0.4.0.sh.sha256",
   ]);
+});
+
+test("beta release tags retain immutable asset names without entering the stable catalog", () => {
+  const betaTag = "v0.4.13-beta.1";
+  expect(parseReleaseTag(betaTag)).toEqual({ version: "0.4.13-beta.1", major: 0, minor: 4, patch: 13, prerelease: "beta.1" });
+  expect(parseReleaseTag(tag)).toEqual({ version: "0.4.0", major: 0, minor: 4, patch: 0, prerelease: null });
+  expect(() => parseStableTag(betaTag)).toThrow();
+  for (const invalid of ["v0.4.13-beta.0", "v0.4.13-beta.01", "v0.4.13-beta.1\n", "v0.4.13-beta.9007199254740992", "v0.4.13-rc.1", "v0.4.13-beta.1+build"]) {
+    expect(() => parseReleaseTag(invalid)).toThrow();
+  }
+  expect(releaseRepository(betaTag)).toBe(repository);
+  expect(requiredAssetNames(betaTag)).toEqual([
+    "DesktopPet-v0.4.13-beta.1-macos-arm64.tar.gz",
+    "DesktopPet-v0.4.13-beta.1-macos-arm64.tar.gz.sha256",
+    "SHA256SUMS",
+    "DesktopPet-v0.4.13-beta.1-rig-native.json",
+    "desktop-pet-install-v0.4.13-beta.1.sh",
+    "desktop-pet-install-v0.4.13-beta.1.sh.sha256",
+  ]);
+  for (const prerelease of [true, false]) {
+    expect(isPublishedRelease(published({
+      tag_name: betaTag,
+      html_url: `https://github.com/${repository}/releases/tag/${betaTag}`,
+      prerelease,
+      assets: requiredAssetNames(betaTag).map((name) => ({ name, size: 10, state: "uploaded" })),
+    }))).toBe(false);
+  }
+});
+
+test("beta release notes require matching product metadata and freeze links to the beta tag", async () => {
+  const betaTag = "v0.4.13-beta.1";
+  const note = `# Desktop Pet ${betaTag} release notes\n\nReviewed opt-in beta. [Guide](../../readme.md)\n`;
+  const root = await fixture(note, betaTag);
+  try {
+    await writeFile(join(root, "readme.md"), "# Guide\n");
+    const body = await generateReleaseBody(root, betaTag, repository);
+    expect((await rendered(body)).links).toContainEqual({
+      href: `https://github.com/${repository}/blob/${betaTag}/readme.md`, title: null,
+    });
+    await writeFile(join(root, "native/app/Cargo.toml"), '[package]\nname = "desktop-pet"\nversion = "0.4.12"\n');
+    await expect(generateReleaseBody(root, betaTag, repository)).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("publication requires a canonical stable release and all six uploaded nonempty assets", () => {

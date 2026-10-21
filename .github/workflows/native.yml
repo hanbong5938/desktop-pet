@@ -56,6 +56,7 @@ jobs:
           bun test scripts/release-docs.test.ts scripts/wiki-docs.test.ts tools/repair-hair-pockets.test.ts web/rig
           cargo fmt --check --all --manifest-path native/Cargo.toml
           cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml
+          cargo test --locked --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml -p desktop-pet --features test-support --test core_herdr_composition
           cargo tree --locked --manifest-path native/Cargo.toml -p desktop-pet-core --prefix none --format '{p}' | node -e 'const s=require("node:fs").readFileSync(0,"utf8");if(/desktop-pet-(herdr|tern)\b/.test(s))throw Error("concrete host dependency in core graph");'
           cargo metadata --locked --manifest-path native/Cargo.toml --format-version 1 | node -e 'const m=JSON.parse(require("node:fs").readFileSync(0,"utf8"));if(m.packages.filter(p=>p.name==="desktop-pet-contracts").length!==1)throw Error("contracts identity duplicated");'
           bun run build:native

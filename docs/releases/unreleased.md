@@ -1,5 +1,227 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Source-only recovery admission and protected local restart corrections
+
+Eight beta.2–beta.5 review findings are corrected without a version change or publication:
+
+- The service now supplies independent Check/recovery capabilities. An unresolved failed operation can enable its exact authenticated recovery action despite the card's busy presentation; reconciled failure can enable Check while policy switches remain locked. Migration, relocation, active work, journal uncertainty, stale identity and unreleased handoffs remain fenced.
+- Legacy recovery sends one ordinary Stop to the authenticated original peer, verifies its exact shutdown ACK and requires generation `g + 1`. It no longer invokes public CLI Stop, whose client and server can advance twice. Lost/invalid ACKs never trigger retry, helper handoff or startup.
+- NoSpawn recovery recognizes an already-approved fresh Original before requiring a stopped installation. Both Original and Candidate readiness require fresh complete markers and the exact durable startup origin. Recognition preserves Failed / installed=false / applied=false, never replays the manager, and preserves live reservations after a later Stop.
+- Reset confirmation no longer holds the UI RefCell across the native modal loop. Approval revalidates exact context, captured Stop generation and current edit/migration/shutdown blockers; cancellation acquires no handoff.
+- UI Restart uses the private exact-source worker, not public CLI restart. Reset/restart freeze input before returning from admission, remove inherited startup authorization, authenticate one bound Stop and fence startup at its exact successor generation. Native/AX composer, palette and dialogue ingress remain locked. Reporter threads own child creation/reaping; uncertain wait/disconnect or rejected exact release retain the handoff instead of thawing.
+- Appearance-only detail visibility now runs the existing full settings synchronization, including external passthrough changes and rejected-action rollback, without overwriting active drafts, composition or selection.
+
+Final workspace gates passed for both distributions. Legacy requires the repository-pinned `DESKTOP_PET_HERDR_MIGRATION_REV=6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`; distribution-only fixture assumptions and a wording-only error assertion were corrected without relaxing production authority.
+
+| Gate | Neutral | legacy-0.3.16 |
+| --- | --- | --- |
+| Core unit tests | 710 passed, 1 ignored | 704 passed, 1 ignored |
+| Coordinator library | 274 passed | 223 passed |
+| Coordinator executable | 58 passed | 59 passed |
+| Contracts library/model/profile tests | 17 passed | 17 passed |
+| Main-thread composer and production recovery UI executables | Passed | Passed |
+
+The `update_recovery_ui` executable constructs production `Ui`, prepared assets/pack service and real cards/editors on the AppKit main thread. It exercised service-produced recovery capabilities, nested-modal ordinary shutdown, cancellation/stale-approval/contention, delayed reset/restart completion, locked native/IME/AX/control ingress, exact-source release versus foreign/shutdown/disconnect retention, and detail-only external state synchronization with draft/selection preservation. Launch interception exists only after real admission/hold/checkpoint/freeze in this test executable; it is not worker-authentication proof.
+
+Neutral optimized build with debuginfo and packaging passed through the existing identity/revision/resource/signature checks. The isolated bundle is `/private/tmp/desktop-pet-recovery-fixes-stage/DesktopPet.app`, version `0.4.17-beta.5`, compiled revision `07aa2ba709ff9f5b4d2f83848d3b04dd3f42e92a` with the uncommitted corrections. It has an ad-hoc local signature, not official signing/notarization.
+
+Actual native button `performClick:` and modal approval were invoked under the debugger in a private canonical profile, not substituted with private-command calls. Every successor below proved the same config/state, Auto selection, absent explicit asset override and native UI/control readiness:
+
+| Signed-bundle scenario | Source PID / instance | Successor PID / instance | Stop generation |
+| --- | --- | --- | --- |
+| UI Reset all settings → approved native modal | 70616 / `9d15cf4f22e809f32f34921cbd587dd9` | 71860 / `e50520f6d8725e2099b33f1addf4c420` | 0 → 1 |
+| UI Restart App after reset | 71860 / `e50520f6d8725e2099b33f1addf4c420` | 71993 / `740231f50c68b028efc7ed995f8cad54` | 1 → 2 |
+| Separate restart-internal with stale inherited manual authorization | 72080 / `a7d7da0a12fc49ba23d4ce2ecf4ca698` | 72107 / `d997854a06074cee9d81419a6ad22539` | 0 → 1 |
+
+Reset retained an exact pre-reset preference backup, restored defaults, and preserved all 41 imported-pack file hashes plus lifecycle/routing bytes. Wrong source instance and wrong generation each exited 1 before Stop, leaving source PID/instance, configuration hashes and generation unchanged.
+
+Debugger/OS barriers exercised additional ordinary Stop before the bound send, after verified ACK while the source still reported shutdown, and after the replacement daemon was recorded pending but before any control socket/readiness. All workers exited 1, no successor became ready and final running=false; no retry, kill or new baseline manufactured success. The readiness case waited for the existing startup deadline before terminal failure, rather than claiming immediate worker exit.
+
+| Stop boundary | Source / pending PID | Observed generation | Final reservation |
+| --- | --- | --- | --- |
+| Immediately before bound send | 72513 | 2 → 4 | None |
+| After ACK, before exit wait | 72864 | 0 → 1 → 3 | None |
+| Replacement pending, before control readiness | 73262 / 73279 | 0 → 1 → 2 | None |
+
+All five smoke profiles were ordinarily stopped; profile-scoped app/helper processes ended and only their detached failure-alert processes were closed afterward. No installed user/mini app or profile, Tern process, release tag/asset or version was changed.
+
+Limits: `[blocked: isolated account unavailable]` for genuine coordinator NoSpawn crash-boundary and retained legacy-helper/ACK-loss transactions. Isolated temp-global protocol/peer regressions passed, but do not certify those signed end-to-end transactions. Aqua was locked: local native actions and state/selection assertions are not physical keyboard/IME/focus/VoiceOver certification; the cached window bitmap had rendering artifacts and is not clean visual acceptance.
+
+## Source-only compact settings and backed-up reset
+
+Detail windows now fit measured topic content instead of inheriting a large shared minimum height. Each topic retains its intentional user size and reading position; long logs remain screen-capped and scrollable. App Recovery is a seventh detail topic. Completed/applied history now permits automatic-check and beta-policy changes only after exact-context proof that the helper lease and installation/profile scopes are free; unknown/active ownership remains protected, and history is not erased.
+
+**App Recovery → Reset all settings…** adds cancel-first confirmation, unsaved-edit/IME/pending-work admission, a scoped mutation freeze, and an exact-profile detached reset/restart worker. It authenticates the original process before ordinary Stop, preserves a private backup before publication, checks expected settings under existing writer/registry locks, resets native defaults/selected character, and conditionally restores partial writes on failure. Downloaded/imported packs, source images, explicit invocation assets, integration routing/registration, unknown extension metadata and all updater evidence/reservations are preserved. Later user Stop prevents restart. Restart verifies the captured executable before any executable origin probe and again before launch. Failure is durable and does not require dismissing a native alert before reporting back to a still-running source.
+
+The settings field editor now rejects frozen mutations without calling the native setter that discards marked text. A disposable production AppKit fixture passed four-locale compact topics, long-log offsets, intentional per-topic sizes, close/reopen navigation, frozen/busy controls, actual native marked-draft preservation, native reset Cancel and modal-targeted synthetic Return cancellation. Opaque native captures show the reset action and confirmation; physical keyboard/IME/focus are not certified in the locked session.
+
+Real isolated Source executions proved wrong-instance rejection before Stop, saved custom language/theme/dialogue → private backup → defaults → fresh same-profile UI/control readiness, and preservation of both absent and explicit asset overrides. All smoke profiles were stopped and removed. No installed user or mini settings were reset, no Tern process was stopped, and this source change is not a published beta or a mini installation.
+
+## Source-only update recovery UI
+
+Interrupted updates now expose separate recovery, progress and explicitly approved start actions in the compact App update card; selectable logs and navigation remain available during mutation freeze. Recovery is asynchronous, operation/context-bound and reconstructed from durable ownership evidence after reopening. Unknown manager execution stays protected, installation is never replayed, and safe cleanup is not reported as update success.
+
+Original-process observation no longer confuses an inherited completed startup token with permission to start through a new reservation. A distinct **Quit Desktop Pet and recover…** path coordinates the exact retained signed helper without replacing it or interpreting its old journal. Saved-edit/IME/pending-work admission holds a token-free shared mutation gate through the native consent window. Cancel changes nothing; approval stops only the captured Pet/profile, then invokes the original helper's recovery without `--start`. It never automatically restarts or stops Tern/work applications.
+
+Manual startup requires a freshly reverified signed image, free scopes and the selected executable's additive `manual_start_fence_contract:1`. The independent ordinary-start generation fence rejects a later user Stop without inventing updater authorization. Older binaries, including beta2, lack this contract: cleanup can complete, but the coordinator explains why safe in-window Start is unavailable instead of launching unfenced. Original, Source and Homebrew readiness retain exact profile/image/Stop-fence checks. Four UI locales and their guides describe these distinctions.
+
+Observed locally: a disposable production AppKit fixture exercised all four card actions in Korean, English, Japanese and Simplified Chinese, narrow wrapping, bounded evidence/full tooltips, frozen mutation versus logs/navigation, reconciled/unknown/installed projections, retained callback dispatch, and actual native Cancel responses for clicks and modal-targeted synthetic Return/keypad Enter/Escape events. A real isolated debug-source profile reached native UI/control readiness (`pid:94181`, instance `81bd750a2826cd28af432d59d7b83ee7`), was stopped, then rejected stale-generation and mixed updater/manual authorization starts while remaining stopped. Its temporary profile was removed.
+
+Limits: the macOS session was locked (`CGSSessionScreenIsLocked=Yes`); native synthetic event dispatch is not physical keyboard/focus/IME certification. No valid signing identity was available for a newly signed end-to-end old-helper transaction. The affected remote Mac/operation was not recovered or exercised, and no installed user app/profile, existing beta tag/asset, or release version was changed. This is implementation evidence, not beta publication or fresh Tern/Herdr binding.
+
+## Source settings simplification
+
+The basic native panel now uses Appearance / Connections / App tabs and one retained nonmodal window with six directly opened detail topics. Diagnostics, paths, provider controls, color fields, menu-bar options and update policy/history no longer occupy the basic documents. Storage schemas and separate update/migration/relocation approvals are unchanged.
+
+Observed locally: core and full workspace Cargo gates, TypeScript check, neutral release build and ad-hoc packaging passed. A disposable main-thread AppKit checkout exercised production views across six topics and four locales at 480×420, basic visible/AX raw-marker exclusion, frozen model refresh preserving disabled eligibility, profile clearing and empty-provider presentation. The isolated development profile exercised all direct topics on one retained window, persistence across application deactivation, invalid/empty/mixed-case color drafts and UTF-16 selection across close/reopen, external theme conflict, disabled stale Apply, rebase, reset, native picker Cancel without saving/reopening the basic panel, and Japanese CLI plus English/Chinese/Korean native locale changes. Only that development profile was stopped.
+
+Not certified: actual KO/JA IME shortcuts, uninterrupted native Undo/focus continuity, VoiceOver speech and successful/invalid PNG picker imports. Foreground focus/input changed during keyboard automation; an attempted valid-file selection did not establish a saved custom icon. These observations are not updater installation, migration, real Tern connection, official signing or notarization evidence. The installed user app and default profile were not replaced or stopped.
+
+### Focused editing and frozen navigation correction
+
+The detail window now dispatches only Cmd-A/C/X/V/Z and Cmd-Shift-Z to its actual same-window focused text editor; frozen/readonly mutations are consumed without invoking actions or Undo. Scrollers retain their existing enabled state across freeze and model refresh. Runtime reproduction also showed that disabling an actively edited `NSTextField` ends editing and clears native Undo. Its private color-field subclass therefore reports disabled without that destructive setter while retaining a readonly editor; inactive fields keep the ordinary enabled-state snapshot/restore path.
+
+Fresh correction evidence, separate from the earlier observations above: an immutable snapshot preserved all 13 existing changed files, including the eight Rust cutover files. The identical disposable production-view fixture reported **22 failures out of 48 proof rows before correction, then 48/48 passing after correction**. Both `performKeyEquivalent:` and `keyDown:` exercised native insertion, selected-text copy/cut/paste, single-edit Undo/Redo, focus isolation, refresh/rebase continuity, frozen selection reentry/click/typing, frozen model refresh and thawed history. Both readonly diagnostic topics copied their current contents. Actual queued Legacy and Overlay thumb drags reached the final sentinel in 120-row documents while frozen and after frozen refresh; wheel input was checked separately. Initially disabled scrollers and newly disabled provider actions stayed disabled. Clipboard restoration required unchanged fixture ownership and preserved all original item types.
+
+Fresh core and full workspace Cargo gates, `bun run check`, neutral release build and ad-hoc packaging passed. A separate source checkout without smoke bridges passed launcher signature/origin validation and ran an isolated profile through start/status/settings. External `dusty_rose` and `ja` commits reported committed/native-applied, with matching desired/persisted/effective values. Only that profile was stopped afterward. Checkout/archive and cached rig resource permission failures were corrected in disposable inputs before signed repackaging; the canonical source origin was restored in that checkout. No installer, release, real updater/migration operation, installed-user process or default-profile mutation was performed.
+
+Some locked-session cached-view PNGs contain rendering artifacts; they are not clean visual-acceptance evidence. Native text/selection/Undo identities, enabled states and scroll geometry were measured independently.
+
+The packaged app remained behind a locked macOS session (`CGSSessionScreenIsLocked=1`, frontmost `com.apple.loginwindow`); no global input was sent. Each real-app scenario remains explicitly blocked rather than inheriting fixture or earlier-session results:
+
+| Real-app scenario | Current correction verification |
+| --- | --- |
+| 1. Three basic-tab captures / information density | **Blocked**; production-view captures are fixture evidence only. |
+| 2. Six direct openers / retained-window lifetime | **Blocked**; packaged `settings` command succeeded, not six-button interaction. |
+| 3. Draft / selection / Undo across topic and close/reopen | **Blocked**; native fixture editing/history passed, not packaged interaction. |
+| 4. External conflict / actual KO and JA IME | **Blocked**; isolated CLI commits passed, not draft conflict or real composition. |
+| 5. Icon picker Cancel / valid PNG / invalid PNG persistence | **Blocked**; no new picker outcome is certified. |
+| 6. Long diagnostics / copy / empty states / locale | **Blocked**; fixture copy/scroll/empty/four-locale checks passed separately. |
+| 7. Detail-only refresh / freeze navigation / mutation admission | **Blocked**; production-view freeze passed, not real daemon mutation rejection. |
+| 8. Four-locale keyboard / small-screen access / VoiceOver speech | **Blocked**; 480×420 fixture layout/AX checks are not physical keyboard or speech proof. |
+
+## Stable 0.4.16 correction: isolated helper HOME
+
+The [0.4.16 correction](v0.4.16.md) restores only the trusted OS-account HOME after clearing the detached install helper's environment. The affected operation failed its metadata query before ownership ACK or installation; its matching helper settled the unowned preparation without replay, installation or restart. Existing source/profile and Tern work are preserved; actual recovery remains a separate observation.
+
+## Stable 0.4.15 correction: SDK validation-child preflight
+
+The [0.4.15 correction](v0.4.15.md) addresses recovery preflight encountering genuine SDK-generated read-only default-pack validation children while the original Pet was already stopped. Unknown/foreign-profile clients remain blocked; original data, unchanged Tern processes and published tags/assets remain protected. No affected-machine recovery success is claimed, and packages remain ad-hoc signed, not notarized.
+
+## Stable 0.4.14 correction: one-shot peer authentication and approved recovery
+
+Actual read-only diagnosis on the affected Mac reproduced beta.7's helper failure: the server closes a completed control reply, then Darwin `LOCAL_PEERPID` returns `ENOTCONN` on the helper's second query. The previous in-app-only bootstrap assumption was therefore insufficient. The [0.4.14 correction](v0.4.14.md) retains pre-send kernel authentication and revalidates the same process evidence after replies. Original source/profile backup has been verified; the owner explicitly approved SSH recovery with Pet-only normal Stop and later separate Start.
+
+Manual recovery has its own stopped-source purpose and actual `ssh_operator` consent, using existing two-root reservation and atomic disk retention. It cannot fabricate a settled updater parent, native consent, Stop ACK, startup token or applied result. Tern's existing qualified consumer alone saves its route after a verified current private owner is ready. The observed Tern warning was an old approved CLI hash differing from the current executable; source/installed consumer bytes and fresh data connections matched. No Tern reinstall or KV rewrite is indicated.
+
+**한국어:** 실제 beta.7 helper의 소켓 종료 후 PID 재조회 버그를 재현해 수정했습니다. 이전 앱 전용 진입 가정은 불충분했습니다. 원본·프로필 백업을 검증했고 소유자가 SSH 복구·Pet만 정상 종료 및 별도 재시작을 승인했습니다. 실제 설치·private 준비·창별 SDK 연결은 소스 테스트나 공개만으로 성공을 주장하지 않습니다.
+
+## Historical beta.10 existing-user update correction / 기존 사용자 업데이트 수정 기록
+
+The [v0.4.13-beta.10 corrective release](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.13-beta.10) is now public as a testing-only non-latest prerelease, source `67e36d63dddf37c687f5a3d424da3947a43661f2`. [Official release CI 39340644834](https://github.com/hanbong5938/desktop-pet/actions/runs/39340644834) passed all gates and published six assets. Independently downloaded public assets passed all checksum manifests, strict/deep app signatures, exact source/version identity, helper capabilities, full native default rig preparation and the external signed closure's **72 deployed file hashes**. Stable latest remains `v0.4.12`; no installed user application was replaced. This supersedes historical Download-only policy **only for opted-in, separately consented same-owner private Standalone updates**. Homebrew stable-formula admission, exact root/owner, Stop/reservations and readiness remain enforced; migration stays stable `0.4.12`. Old Applications installations are not relocated.
+
+Unsupported/manual installs now offer the validated release's official installation page instead of an unexplained archive. Four-language guidance says to retain existing settings/characters. Both Tern binding consumers decode backend failures before strict evidence validation: a normal control error with `alpha_passthrough` no longer obscures its real diagnostic, and ordinary status never authorizes migration.
+
+Observed before the beta.10 version bump: native workspace passed (Core 657 passed / 1 ignored; coordinator 177; helper 29, plus contract suites). A throwaway main-thread consumer rendered the production AppKit update card in KO/EN/JA/zh-Hans at width 342 for manual/unavailable and Standalone/available states (8 controlled native-card captures), verified the official-page URL and rejected untrusted metadata. A real read-only request to the running app returned `no fresh confirmed Tern local binding`; the corrected production decoder preserved that diagnostic. The public beta.9 archive, checksum and signed resource closure staged successfully through the production staging function. Temporary smoke code was removed. These are not final beta.10/package/CI/publication results.
+
+No existing installation was replaced or relocated, no Pet Stop/restart or Tern/plugin mutation occurred. Native captures used controlled card data; they are not proof of a completed beta.7 → beta.9 user upgrade, actual Apply interaction or Tern reconnection. The affected screenshot's beta.7 installation is unavailable in this environment; the locally running app identifies as `0.4.12`.
+
+테스트용 [beta.10](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.13-beta.10)을 non-latest prerelease로 실제 게시했습니다. 공식 CI와 공개 여섯 자산의 체크섬·심층 서명·소스/버전·72파일 closure·기본 rig 준비 검증이 통과했습니다. 기존 사용자 앱·설정·Tern은 변경하지 않았으며 안정판 latest는 `v0.4.12`입니다. 실제 사용자 업그레이드·옛 Applications 설치 이전·Tern 재연결 성공을 주장하지 않습니다.
+
+
+## Rig CPU and hidden rendering — beta.9 / rig CPU·숨김 렌더 beta.9
+
+The separately authorized [beta.9 candidate](v0.4.13-beta.9.md) adds mesh-level classification and immutable hair powers while retaining exact arithmetic/physics, existing quotas and visible 60 Hz scheduling. Active-hidden hosts stop continuous surface work; current-intent resume, inactive candidate preparation, previews and recovery remain available. Stable/migration target `0.4.12`, beta Download-only policy, private Standalone destination and existing owners remain unchanged. The new CPU/real-host consumers and evidence boundaries are documented in [development checks](../development.md#rig-cpu-and-hidden-host-checks). No installed-user update, physical GUI acceptance or successful personal recovery follows from source/CI/publication alone.
+
+별도 승인된 beta.9는 정점별 반복 계산과 숨김 렌더를 줄이며 60 Hz·물리·수치·quota를 유지합니다. 철회한 개인 Python 복구 스크립트는 다시 배포하지 않습니다. 안정판·기존 소유권·프로필과 플러그인은 바꾸지 않으며 실제 메뉴/화면/물리 클릭 검증은 잠긴 GUI 세션 때문에 별도로 미검증입니다.
+
+## Historical withdrawal and private recovery proposal / 과거 철회·비공개 복구 제안
+
+The previously published Python recovery script and its checksum asset have been withdrawn from beta.8, and the current source/publication workflow no longer distributes them. The six native/installer assets are unchanged; the retained `SHA256SUMS` bytes are historical and do not restore the withdrawn download. The [frozen beta.8 release notes](v0.4.13-beta.8.md) preserve the original publication record, not current recovery instructions or a promise to republish the script. No new release, tag or version bump is introduced.
+
+The historical private-location correction used the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG. Brew retained its verified formula prefix and source its exact checkout. That proposal did not silently relocate an old Applications owner and retained stable/migration target `0.4.12`. The current stable candidate above supersedes its recovery and normal-update policy; independent legacy migration authority remains `0.4.12`.
+
+The earlier private Bash recovery proposal is historical, not current execution guidance. Use the [explicitly approved recovery contract](../usage.md#existing-applications-owner-explicitly-approved-one-time-recovery), retaining exact original config/state, app/sidecar, user data and evidence. Earlier scripts or approvals do not authorize the new stopped-source recovery transaction.
+
+**Evidence boundary:** source availability, dry-runs and fixtures do not prove recovery on the affected Mac. No new canonical UI, original-profile restart, same-window reconnection or external-machine success is claimed here.
+
+**한국어:** 공개 Python 복구 스크립트와 checksum 자산의 철회 기록 및 과거 private Bash 제안입니다. 당시 동결 기록은 현재 실행 안내가 아닙니다. 현재 경로는 위의 정식판 후보 앱 내 업데이트·별도 이관 승인 계약을 따르며 원래 프로필·자료·Tern 작업과 근거를 보존합니다.
+
+## Historical source-only private installation location
+
+This correction is **not included in published beta.7** and does not rewrite immutable installers, tags, assets or release notes. Standalone belongs at the actual OS account home’s `.local/share/desktop-pet/libexec/DesktopPet.app`, independent of `HOME`/XDG overrides. Homebrew retains its verified formula prefix’s `libexec/DesktopPet.app`; source retains the exact core checkout’s `dist/DesktopPet.app`. The current Herdr consumer’s standalone fallback uses the private path. Existing Applications installs are not silently relocated, deleted or adopted; old-owner mismatch fails closed with actionable repair guidance, without launching the old app or changing profiles. Use the installer-reported executable and exact existing config/state paths. Historical pinned v0.4.7/v0.4.8 examples retain their original Applications behavior.
+
+
+## Historical candidate source: v0.4.13-beta.7 / 과거 후보 소스
+
+The following beta.7 text preserves its prepublication source account. Beta.7 is now published; its immutable assets do not contain the beta.8 private-location correction or separate recovery script. Earlier candidate/publication wording and test limitations below are historical, not current beta.8 qualification.
+
+The [beta.7 release-body source](v0.4.13-beta.7.md) follows **public beta.5 and the failed beta.6 tag** with a native-only, testing-only prerelease candidate. Publication is authorized for opt-in testing; this source does not claim a beta.7 commit/tag, successful final checks, official CI, packaging, public assets or successful external-machine recovery. Stable latest and migration target remain `0.4.12`; historical release files and tags, including beta.6, remain immutable.
+
+The pinned prebuilt branch selects a separate native `install-coordinated` transaction for a lower-version, same-owner Standalone installation. Full stage validation precedes Stop. Native consent authorizes **Desktop Pet only**, with the exact original running profile restarted only under proven authority; it does not authorize Tern/window/terminal/agent termination, plugin reload or Configure/KV rewriting. **Save Pet edits first: the public beta.1 compatibility bootstrap uses normal Quit, not draft-aware Prepare.** Cancel/window failure and conflicting active native profiles reject before Stop. Two Tern windows sharing one native profile are an intended supported case; multiple active native profiles are not.
+
+Live-client compatibility is limited to the **exact public beta.1 image with its fully validated signed closure, or new validated paired app/helper releases advertising `installation_client_contract:1`**. Kernel main-image/incarnation, argv and exact profile proof remain required. **Beta.2–beta.5 without that contract are not blanket allowed by version** and may fail strict preflight without stopping Tern or any app. Public beta.1→beta.7 is an intended test path, not a proven live result. Historical capability absence stays inspectable but grants no permission; the failed beta.6 tag adds no historical-image exception.
+
+The immutable approval retains Stop generation `g`; only the exact authenticated Stop ACK and durable authoritative reservation transition to `g+1` establish the bootstrap execution baseline. Lost/partial/mismatched ACK, timeout or generation change alone grants no restart authority. Recovery does not resend Stop; later user Stop wins. Full old bundles and their **original sidecars** stay in private retained storage with **no automatic deletion**. `installed:true` is disk installation, not `applied:true`; applied additionally proves fresh exact-profile UI/control readiness. Originally stopped profiles stay stopped.
+
+Typed operation observation keeps standalone-install approval/outcome/recovery separate from normal updates and migration receipts. Use the reported operation ID/state-dir and retained signed helper's `install-status` / `install-recover`, not normal `recover --start`, repeated installation/manual Stop or deleted markers. Ownership ACK and status exit 0 do not mean successful installation. Preserve durable plans, ACKs, replacement evidence, logs, helper and retained resources. See the [CLI transaction contract](../cli.md#pet-only-standalone-installation-transaction-current-source-contract).
+
+Product version becomes `0.4.13-beta.7`; contracts `0.1.0`, bridge `0.3.16`, protocol 4 / observation 2 / API 1 / handover 1 and consumer/adapter pin `7276c1b658a1728883d90207119df31bce118170` (plugin `0.2.1`) remain unchanged. Beta stays Download-not-Apply; migration/stable/Homebrew selection and ownership are not broadened. No plugin production change or stable/main/Homebrew/wiki rollout is included. Release-docs admission requires exact heading, substantive source text, valid repository links and exact-tag product metadata agreement; the six exact beta.7 asset names are specified in the release-body source, not asserted public.
+
+**Official beta.6 failure overrides prior local qualification:** immutable tag `v0.4.13-beta.6` identifies `58a55d061ee7a1811c0870d5a1beecd1086c9a2c`. [CI 39208257948](https://github.com/hanbong5938/desktop-pet/actions/runs/39208257948) failed **before packaging**, with coordinator **170 passed / 1 failed** in `migration::tests::startup_discovery_retains_old_operation_before_current_runtime_readiness`, at the assertion that the error contained `readiness`. **The actual returned error was not captured.** That workflow produced no beta.6 package assets or published beta.6 release. Its tag and [notes](v0.4.13-beta.6.md) remain unchanged.
+
+The fixture's wrong-instance reply and immediate socket close are corrected in beta.7; a response-socket race is **[INFERENCE]**, not a confirmed cause of the uncaptured CI error. The reply now uses the matching current-runtime instance, serves **two real status connections**, and holds each response socket until client EOF with a bounded three-second wait. The test first decodes actual status and asserts PID/instance/image SHA/path/exact profile, running/control-ready and **not-ready / not-UI-ready**, plus the actual kernel image path. It still requires `latest_for_context` rejection and retains history/evidence invariants, removing only the incidental error-wording assertion. No production transport, readiness, identity or evidence checks are weakened. **No passing beta.7 checks are claimed until observed by the integration owner.**
+
+**Prior evidence scope:** integration-owner results before the beta.6 metadata/provenance cutover include TypeScript checking, Bun 65, coordinator library 171/helper 29, Core 657 passed/1 ignored. Authentic public beta.1 archive/signature/full 72-file closure validation and an unprivileged held-client real atomic swap proved kernel scope/main-image inode/incarnation distinction and old bundle/original-sidecar retention. These remain prior-source/local component results, not beta.7 tagged-source/public-byte qualification or daemon/Tern acceptance. The preceding stage still had the beta.5 label and parent revision; it is not beta.6 or beta.7 provenance. Ad-hoc signing is not notarization.
+
+After the beta.6 version cutover, local `cargo fmt --all`, shell syntax, `bun run check`, Bun **65 / 767 expectations**, and `cargo test --locked --workspace` (one ignored) were reported passing. The subsequent official failure above overrides beta.6 release qualification; these historical local passes do not establish beta.7 checks, packaging, public-byte verification or actual Tern acceptance.
+
+**Actual canonical live transaction, native confirmation, original-profile restart, two real Tern windows with ongoing terminal/agent work, fresh same-window binding and 120 seconds of reconnect/exchange, and pinned prebuilt HTTPS end-to-end installation remain unverified/blocked: an owned signed-in test account/VM is unavailable.** Testing-only publication does not close those gates or establish external-PC recovery. Final tagged-source CI and independent public-byte verification remain separate release gates.
+
+**한국어:** 공개 beta.5와 실패한 beta.6 태그를 잇는 테스트 전용 beta.7 후보입니다. beta.6 공식 CI `39208257948`은 coordinator **170 통과 / 1 실패**로 packaging 전에 중단했고 패키지 자산/공개 릴리스를 만들지 않았습니다. 실제 오류는 캡처되지 않았고 socket race는 **[INFERENCE]**입니다. beta.7 fixture는 일치하는 instance로 실제 status 연결 두 개를 응답하고 각각 client EOF까지 유지합니다(3초 상한). 실제 status/kernel image와 readiness 상태, `latest_for_context` 거절·이력·증거 검증은 보존하며 incidental 오류 문구 assertion만 제거합니다. production transport는 바꾸지 않습니다. beta.6 로컬 통과가 공식 실패를 덮지 않으며 beta.7 검사는 관측 전 통과를 주장하지 않습니다. native 승인은 **Pet만** 종료·허용된 원래 프로필 재시작을 허용하고 Tern/작업 종료나 plugin/KV 변경은 포함하지 않습니다. **Pet 편집을 먼저 저장하세요. beta.1 bootstrap은 일반 Quit입니다.** live client 허용은 정확한 공개 beta.1 전체 closure 또는 새 paired contract-1 빌드에 한정합니다. 같은 프로필의 Tern 두 창은 대상이고 다른 active 프로필은 Stop 전 거절합니다. exact Stop ACK와 durable `g+1` 전이만 재시작 baseline이며 추가 사용자 Stop가 우선합니다. old bundle/원래 sidecar는 자동 삭제 없이 보존하고 typed `install-status`/`install-recover`를 사용합니다. **canonical live·native 승인·두 Tern 창/작업 유지·fresh binding·120초 exchange·prebuilt HTTPS 종단 검증은 소유 로그인 계정/VM 부재로 미검증/차단 상태**입니다. 안정판/마이그레이션 대상 `0.4.12`, plugin pin과 beta.6을 포함한 기존 태그/노트는 유지합니다.
+
+## Historical failed candidate: v0.4.13-beta.6 / 과거 실패 후보
+
+The unchanged [beta.6 release-body source](v0.4.13-beta.6.md) preserves its prepublication source account and prior local results. Its immutable tag remains `58a55d061ee7a1811c0870d5a1beecd1086c9a2c`; official [CI 39208257948](https://github.com/hanbong5938/desktop-pet/actions/runs/39208257948) subsequently failed 170 coordinator tests passed / 1 failed before packaging, with no package assets or published beta.6 release. The error text was not captured; no socket-race diagnosis is established. This historical source wording is not current beta.7 qualification and is not rewritten to conceal the failed official gate.
+
+## Historical candidate: v0.4.13-beta.5 / 과거 후보
+
+The immutable [beta.5 release-body source](v0.4.13-beta.5.md) records its prepublication evidence and limitations. Beta.5 is now public; its historical candidate wording is preserved rather than rewritten. It followed published beta.3 and the failed beta.4 tag, whose official CI stopped before packaging/publication. Its consumer timeout correction and regression-fixture hardening are retained, not treated as proof of beta.7 live installation or Tern acceptance.
+
+The beta.4 entry and earlier “current/unpublished” source snapshots below remain historical records, not current beta.7 qualification or publication claims.
+
+## Historical candidate: v0.4.13-beta.4 / 과거 후보
+
+The [beta.4 release-body source](v0.4.13-beta.4.md) follows published beta.3 and preserves its discovery/history corrections. Its only new functional change pins the bundled Tern consumer and native adapter to immutable `7276c1b658a1728883d90207119df31bce118170` (plugin `0.2.1`): migration-route/handover authority gets 60,000 ms; ordinary setup remains 10,000 ms and exchange 2,600 ms. Verification, errors, retries, signatures, Stop and receipt authority are unchanged. Product `0.4.13-beta.4`, contracts `0.1.0`, bridge `0.3.16`, and protocol 4 / observation 2 / API 1 / handover 1 retain their boundaries; stable/migration target `0.4.12` and beta Download-not-Apply policy do not change.
+
+This is opt-in experimental source delivery, **not proven recovery or a publication claim**. Prior beta.2-based TS/Bun 65/native/AppKit, working-copy adapter 42, controlled Tern 0.9.4 old 199/200 versus corrected 200/200, deadline regressions, and ad-hoc staging are not final beta.4 evidence. Actual packaged cold-load/reload, automatic handover/receipt, real authority wall times, 120-second exchange and external-PC recovery remain unverified/blocked. Ad-hoc signing is not notarization. Existing stable/beta assets and notes stay immutable; no stable/main, Homebrew or wiki rollout is included. Final beta.4 gates are recorded only after actual execution.
+
+공개 beta.3의 탐색·이력 수정을 유지하며 불변 Tern deadline 수정만 번들에 반영하는 선택형 실험 후보입니다. 이전 소스 회귀·staging은 최종 beta.4 검증이나 실제 복구 성공이 아닙니다. 실제 cold-load/reload·handover·receipt·호출 시간·120초 exchange·외부 PC 복구는 미검증이며 안정판/마이그레이션 대상과 Download 전용 베타 정책은 그대로입니다.
+
+The earlier “current/unpublished” entries below retain their original source-snapshot scope, including beta.3's discovery/history evidence; they are not the current beta.4 publication or qualification state.
+
+## Current source: beta discovery and retained migration history
+
+This is an unpublished source repair based on v0.4.13-beta.2, not a new release or a replacement for existing public assets.
+
+- Neutral release discovery and candidate/checksum revalidation use canonical `v{version}` tags, including `v0.4.13-beta.2`. The legacy repository retains `beta/{version}` and its single encoded slash; neutral does not accept that alias. Repository, asset, digest, SemVer and stable-only migration checks remain enforced.
+- Retained integration observations use the original immutable plan/journal as authority and a separately selected runtime profile only for live observation. Config and state paths must both match. Runtime environment, reconnect requirements and Stop generation do not rewrite evidence or bypass signed delivery, current-instance or fresh handover checks.
+- Completed migration remains history only. It hides retired migration controls without replacing the current check/error/status, version, download or executable-update action. An eligible beta remains informational with Download and no Apply; automatic beta installation and a new migration target are not authorized.
+
+현재 미출시 소스 수정입니다. neutral 베타의 정확한 `v` 태그를 인식하고 원본 마이그레이션 증거와 runtime 관찰 프로필을 분리합니다. 완료 이력은 현재 확인·오류 상태를 덮지 않습니다. 베타는 다운로드 안내만 제공하며 설치 권한, 사용자 앱·프로필, 공개 태그·릴리즈는 변경하지 않습니다.
+
+Local proof: the anonymous exact beta.2 catalog changed from zero candidates to `v0.4.13-beta.2`; production candidate revalidation and the anonymously fetched checksum passed. A temporary main-thread AppKit executable reused the real service model, history overlay and native card through Checking → Failed → Current → informational beta → executable stable fixture → busy → idle, in KO/EN at widths 295/420 with options/diagnostics collapsed and expanded (56 captures). Native controls and rendered samples showed beta.1 → beta.2/exact tag, enabled Download and hidden Apply; current/error states remained distinct from completed history. Temporary probe targets, bridges and fixtures were removed. This does not prove the absent user's Tern profile, runtime Check admission on that profile, a successful SDK reconnection or an installed/public binary change.
+
+
+
+**Current successor: Core v0.4.12 / genuine bridge v0.3.16 — not yet published or qualified.** Core v0.4.11 is public (release `414563938`, `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`); all six public assets were independently verified. Its separate Wiki job lacked `WIKI_PUBLISH_TOKEN`. Genuine bridge v0.3.15 CI `38855045701` passed, but no v0.3.15 tag/release was published. Public provenance is not historical-repair acceptance. See [current successor ledger](v0.4.12.md).
+
+**Historical startup defect and permanent correction:** the actual public v0.4.11 historical run in the owned VM failed with `Migration history: current native daemon does not prove the migrated image/profile readiness`; no new receipt or SDK delivery occurred, and SDK 0.1 still reported missing `/opt/homebrew/bin/herdr-desktop-pet`. Startup observation ran before UI readiness and lost the retained operation. The v0.4.12 correction uses read-only historical discovery to retain that operation before Ready; the existing admitted observation/poll delivers later, retaining all current-image/owner/profile, signed-stage, legitimate-runtime-start, Stop and Unknown guards. It never replays the old manager, rewrites the old plan/journal, or requires manual reconnect. The targeted source regression passed; this is not end-to-end qualification.
+
+**Acceptance contract:** one original Update approval covers quiet migration, signed SDK replacement/load, exact saved-route switch, real fresh binding in the same Tern window, automatic native receipt, and only then approved old-owner retirement. Preserve each exact config/state profile, character, dialogue/history, account/provider data and unrelated profiles; no second consent, Configure, Connect, ACK or Resume. Stop and Unknown remain fail-closed. The signed-out, GUI/frame-driven sequence 47 then restart sequence 13 on local 7c source is component evidence only, not autonomous quiet/authenticated delivery, lifecycle or affected-machine acceptance.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 [Versions](README.md) · [Current Core v0.4.7 acceptance](v0.4.7.md) · [Historical v0.3.6 note](v0.3.6.md) · [0.3 historical upgrade guidance](0.3.md) · [Versioning and compatibility](policy.md)
 
 **Current authority, not a new release announcement — 2026-10-15.** Current observed acceptance and pending gates belong to the [Core v0.4.7 ledger](v0.4.7.md). The archived “current/unpublished/unmerged” claims below retain their earlier source-snapshot scope; they are not today's consumer prerequisites, new verification, or evidence that current public prebuilt packages lack Auto. No additional native release, integration version/tag or beta publication is asserted here.

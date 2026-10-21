@@ -1,5 +1,14 @@
 # Desktop Pet 버전 안내
 
+
+**현재 후속판: Core v0.4.12 / genuine bridge v0.3.16 — 아직 검증·공개되지 않았습니다.** Core v0.4.11은 release `414563938`, 공개 시각 `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`으로 공개되었고 6개 공개 자산을 독립 검증했습니다. 별도 Wiki 작업은 `WIKI_PUBLISH_TOKEN`이 없었습니다. Genuine bridge v0.3.15 CI `38855045701`은 성공했지만 태그·릴리스는 공개되지 않았습니다. 공개 출처 검증은 과거 이관 복구 수락 검증이 아닙니다. See [current successor ledger](v0.4.12.md).
+
+**과거 시작 결함과 영구 수정:** 소유 VM의 실제 공개 v0.4.11 과거 작업 실행은 `Migration history: current native daemon does not prove the migrated image/profile readiness`로 실패했습니다. 새 receipt·SDK 전달은 없었고 SDK 0.1은 `/opt/homebrew/bin/herdr-desktop-pet` 누락 오류를 유지했습니다. UI Ready 전 관찰 오류가 보존 작업을 잃게 했습니다. v0.4.12는 읽기 전용 discovery로 Ready 전에 작업을 보존하고 기존의 승인 검증된 observation/poll이 나중에 전달합니다. 현재 image/owner/profile·signed-stage·정당한 runtime 시작·Stop·Unknown guard를 유지하며 옛 manager 재실행·plan/journal 재작성·수동 재연결은 하지 않습니다. 대상 소스 회귀 검증 통과는 end-to-end 성공이 아닙니다.
+
+**수락 계약:** 최초 Update 승인 한 번으로 조용한 이관·서명 SDK 교체/로드·정확한 저장 route 전환·같은 Tern 창의 실제 fresh binding·자동 native receipt 뒤에만 승인된 옛 소유자를 폐기합니다. 두 번째 동의·Configure·Connect·ACK·Resume은 없습니다. 각 원래 config/state profile·캐릭터·대사/이력·계정/provider·무관 profile과 Stop·Unknown을 보존합니다. 로컬 7c signed-out GUI/frame-driven sequence 47 및 재시작 sequence 13은 component 증거일 뿐 quiet/authenticated 전달·전체 lifecycle·다른 컴퓨터 복구 증거가 아닙니다.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 ## 현재 게시 및 수락의 정본
 
 [v0.4.7 정본 릴리스 노트·수락 원장](v0.4.7.md)이 현재 관측과 미완료 gate의 기준입니다. **현재 공개 Core:** [v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, 게시 `2026-10-15T08:39:17Z`, 정확한 소스 `52514da5115f09aac22de5429c08f7acdd993258`. [Release CI 38706583599](https://github.com/hanbong5938/desktop-pet/actions/runs/38706583599), job `116327375871`이 통과했습니다. 익명 자산 6개·strict/deep ad-hoc 서명·protocol 4 / observation 2 / API 1·정확한 68개 파일 리소스 closure를 검증했습니다. Archive SHA-256: `f89ea6c52197bd4c7fb70336846099f1e5eb553f2de9bb4cd43b14b1134da8fa`; installer: `f64a27593058a68c5a5e112f448be644c6abfbb760be109acf992e2f415f5829`.

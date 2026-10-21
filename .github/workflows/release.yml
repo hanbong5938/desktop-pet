@@ -3,7 +3,7 @@ name: Release Desktop Pet
 on:
   push:
     tags:
-      - "v0.4.8"
+      - "v0.4.17-beta.6"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.8'
+    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.17-beta.6'
     runs-on: macos-15
     permissions:
       contents: write
@@ -54,7 +54,7 @@ jobs:
           version="${tag#v}"
           # This approved self-contained installer is pinned, never a mutable
           # latest script or a host manifest-derived app version.
-          [[ "$tag" == v0.4.8 && "$version" == 0.4.8 ]]
+          [[ "$tag" == v0.4.17-beta.6 && "$version" == 0.4.17-beta.6 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
@@ -77,8 +77,10 @@ jobs:
           set -euo pipefail
           bun run check
           bun test scripts/release-docs.test.ts scripts/wiki-docs.test.ts tools/repair-hair-pockets.test.ts web/rig
+          node scripts/check-rig-deformation.mjs --output "$RUNNER_TEMP/rig-deformation"
           cargo fmt --check --all --manifest-path native/Cargo.toml
           cargo test --locked --workspace --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml
+          cargo test --locked --target aarch64-apple-darwin --target-dir native/target/neutral --manifest-path native/Cargo.toml -p desktop-pet --features test-support --test core_herdr_composition
           bun run build:native
 
       - name: Package the real ad-hoc signed app and helper
@@ -120,7 +122,7 @@ jobs:
           "$scratch/bin/desktop-pet" pack export default --config-dir "$scratch/config" --state-dir "$scratch/state" --output "$scratch/default.herdrchar"
           test -s "$scratch/default.herdrchar"
 
-      - name: Create six immutable assets and authenticated rig closure
+      - name: Create six immutable app and installer assets
         shell: bash
         run: |
           set -euo pipefail
@@ -144,14 +146,14 @@ jobs:
           const root='dist/DesktopPet.app/Contents';
           const record=JSON.parse(await readFile('dist/DesktopPet.app.rig-native.json','utf8'));
           const identity=record.distribution_identity;
-          if(record.version!==1||record.paths_relative_to!=='Contents'||record.core_revision!==process.env.GITHUB_SHA||identity?.core_revision!==record.core_revision||identity.distribution!=='neutral'||identity.app_version!=='0.4.8'||identity.protocol!==4||identity.observation_mode!==2||identity.integration_api!==1||identity.herdr_migration_revision!=null)throw Error('invalid signed rig provenance');
+          if(record.version!==1||record.paths_relative_to!=='Contents'||record.core_revision!==process.env.GITHUB_SHA||identity?.core_revision!==record.core_revision||identity.distribution!=='neutral'||identity.app_version!==process.env.DESKTOP_PET_VERSION||identity.protocol!==4||identity.observation_mode!==2||identity.integration_api!==1||identity.migration_handover_protocol!==1||identity.herdr_migration_revision!=null)throw Error('invalid signed rig provenance');
           async function files(dir){const out=[];for(const e of await readdir(dir,{withFileTypes:true})){const p=join(dir,e.name);if(e.isDirectory())out.push(...await files(p));else if(e.isFile())out.push(relative(root,p));else throw Error('nonregular signed resource');}return out.sort();}
           const paths=await files(root);
           if(JSON.stringify(paths)!==JSON.stringify(Object.keys(record.deployed_sha256).sort()))throw Error('signed resource closure mismatch');
           for(const p of paths){if(createHash('sha256').update(await readFile(join(root,p))).digest('hex')!==record.deployed_sha256[p])throw Error(`deployed hash mismatch: ${p}`);}
           NODE
 
-      - name: Publish only the neutral complete release
+      - name: Prepare the complete neutral prerelease draft for qualification
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
@@ -160,8 +162,9 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: false
           body_path: ${{ runner.temp }}/desktop-pet-release-notes.md
-          prerelease: false
-          make_latest: true
+          draft: true
+          prerelease: true
+          make_latest: false
           files: |
             ${{ env.DESKTOP_PET_ASSET_NAME }}
             ${{ env.DESKTOP_PET_ASSET_NAME }}.sha256
@@ -170,12 +173,3 @@ jobs:
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}
             ${{ env.DESKTOP_PET_INSTALLER_NAME }}.sha256
 
-  wiki_sync:
-    needs: release
-    permissions:
-      contents: read
-    uses: ./.github/workflows/wiki.yml
-    with:
-      required_release: ${{ github.ref_name }}
-    secrets:
-      WIKI_PUBLISH_TOKEN: ${{ secrets.WIKI_PUBLISH_TOKEN }}

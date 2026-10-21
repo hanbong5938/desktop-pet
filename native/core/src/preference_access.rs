@@ -33,24 +33,34 @@ impl LivePreferences {
         Self { shared, deadline }
     }
 
-    fn submit(&self, action: DomainAction) -> Result<(crate::automation::SharedAutomation, String, String), String> {
+    fn submit(
+        &self,
+        action: DomainAction,
+    ) -> Result<(crate::automation::SharedAutomation, String, String), String> {
         availability_timeout(self.deadline, CLIENT_TIMEOUT)?;
         let ledger = {
-            let state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+            let state = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?;
             if !state.is_ui_ready() || state.scene().shutdown {
                 return Err("desktop pet UI is not ready".into());
             }
             if matches!(&action, DomainAction::PreferencesSet { .. }) {
                 state.update_mutation_allowed()?;
             }
-            state.automation().ok_or("automation owner is unavailable")?
+            state
+                .automation()
+                .ok_or("automation owner is unavailable")?
         };
         let id = crate::cli::new_operation_id();
         let instance = {
             let mut owner = crate::automation::lock_automation(&ledger);
             let instance = owner.instance().to_owned();
             owner.submit_local_preferences(DomainRequest {
-                instance_id: instance.clone(), operation_id: id.clone(), action,
+                instance_id: instance.clone(),
+                operation_id: id.clone(),
+                action,
             })?;
             instance
         };
@@ -58,16 +68,23 @@ impl LivePreferences {
         Ok((ledger, instance, id))
     }
 
-    fn observe(&self, ledger: &crate::automation::SharedAutomation, instance: &str, id: &str)
-        -> Result<DomainOperation, String>
-    {
+    fn observe(
+        &self,
+        ledger: &crate::automation::SharedAutomation,
+        instance: &str,
+        id: &str,
+    ) -> Result<DomainOperation, String> {
         loop {
-            let operation = crate::automation::lock_automation(ledger).domain_status(instance, id)?;
+            let operation =
+                crate::automation::lock_automation(ledger).domain_status(instance, id)?;
             if operation.state.terminal() {
                 return Ok(operation);
             }
             availability_timeout(self.deadline, CLIENT_TIMEOUT)?;
-            thread::sleep(Duration::from_millis(5).min(self.deadline.saturating_duration_since(Instant::now())));
+            thread::sleep(
+                Duration::from_millis(5)
+                    .min(self.deadline.saturating_duration_since(Instant::now())),
+            );
         }
     }
 
@@ -75,11 +92,17 @@ impl LivePreferences {
         let (ledger, instance, id) = self.submit(DomainAction::PreferencesGet {})?;
         let operation = self.observe(&ledger, &instance, &id)?;
         if operation.state != DomainOperationState::Applied {
-            return Err(operation.error.unwrap_or_else(|| "preference read failed".into()));
+            return Err(operation
+                .error
+                .unwrap_or_else(|| "preference read failed".into()));
         }
         let saved = availability_from_result(operation.result.as_ref(), "persisted")?;
-        let revision = operation.result.as_ref().and_then(|result| result.get("revision"))
-            .and_then(Value::as_u64).ok_or("preference revision is missing")?;
+        let revision = operation
+            .result
+            .as_ref()
+            .and_then(|result| result.get("revision"))
+            .and_then(Value::as_u64)
+            .ok_or("preference revision is missing")?;
         Ok((saved, revision))
     }
 }
@@ -103,7 +126,9 @@ impl PreferenceAccess for LivePreferences {
         match self.observe(&ledger, &instance, &id) {
             Ok(operation) => availability_set_outcome(operation, &instance, &id, &fields),
             Err(_) => Ok(PreferenceCommit::Uncertain {
-                instance_id: instance, operation_id: id, current: None,
+                instance_id: instance,
+                operation_id: id,
+                current: None,
             }),
         }
     }

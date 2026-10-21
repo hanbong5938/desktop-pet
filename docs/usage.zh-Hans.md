@@ -4,9 +4,30 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## 当前公开状态与即将采用的单次批准路径
+
+**历史启动缺陷与永久修正：**自有 VM 中实际公开 v0.4.11 的历史操作运行失败，原文为 `Migration history: current native daemon does not prove the migrated image/profile readiness`。没有新 receipt 或 SDK 交付；SDK 0.1 仍报告 `/opt/homebrew/bin/herdr-desktop-pet` 不存在。UI Ready 前的 observation 错误丢失了保留 operation。v0.4.12 用只读 discovery 在 Ready 前保留 operation，再由既有经批准的 observation/poll 稍后交付；所有 current image/owner/profile、signed-stage、合法 runtime 启动、Stop、Unknown guard 均保留。不重跑旧 manager、不改写 plan/journal、不要求手动重连。针对性 source 回归通过不代表端到端成功。
+
+**独立 fixture 前提：**诊断 fixture 中两个受支持的 Tern.app CLI 位置均不存在。父任务仅在自有 VM 安装了真实完整 SDK app，未触碰 default old consumer/KV。这不是 source 修正，也不证明交付或 fresh binding。tools Mac 和 VM 都不是无法访问的实际受影响电脑；不得修改 host 已安装 app 或声称该电脑已恢复。
+
+
+**当前后继版本：Core v0.4.12 / genuine bridge v0.3.16——尚未完成验证或公开。** Core v0.4.11 已公开：release `414563938`，时间 `2026-10-16T05:16:03Z`，source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`；6个公开资产均已独立验证。单独 Wiki job 缺少 `WIKI_PUBLISH_TOKEN`。genuine bridge v0.3.15 CI `38855045701` 成功，但没有公开 tag/release。公开 provenance 不等于历史迁移修复验收。 See [successor release notes](releases/v0.4.12.md) for the pending correction and immutable predecessor failures. Consumer metadata remains Core v0.4.8 until actual public successor materialization; Tern production stays `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
+**即将采用的常规路径：**一次原始批准 → 精确同一 profile 的 `migrationReady` / Commit → 交付并加载更新的 Tern consumer → SDK optimistic identity guard 与 atomic canonical save → 实际同一 Tern 窗口中的 fresh binding → 自动 native handover receipt → 已批准的旧所有者 retirement。**真实重连和 receipt 必须早于 retirement**。保存路径或 ACK 不代表重连；SDK guard 不是真正的 cross-VM transactional CAS。常规路径不额外要求 B/source review/Migrate 批准，也不要求手动 Configure → Save → Connect / Resume。多个 profile 时，每个受影响 target 均须 start、Commit、rebind；旧 blanket live-profile guard 并非完整方案。独立 profile 不合并。
+
+**精确旧 source 批准边界：**覆盖 stable protocol-3 predecessor v0.3.9–v0.3.14 的真实原始批准，包括实际已安装 v0.3.10/v0.3.11。保留的 matching signed helper、plan/result、已释放 lease 与确定成功且 quiescent 的 manager 结果须认证精确的**当前 v0.3.16 candidate**、image、installation root/owner、原始 config/state profile，并保持 Stop fence。旧 v0.3.11 candidate Completed 不授权当前迁移。Unknown、prerelease/未知 source、protocol 2、hash 变化、无关 profile 与用户 Stop 均不能 fallback 为批准。v0.3.6 与冻结 protocol-2/beta entry 仍为独立兼容路径。额外 B/Migrate 批准或 UI acknowledgement 不能代替原始授权。
+
+**已 Commit 历史修复与失败区分：**实际 othermachine 问题是在已 Commit 的 `AwaitingReconnect` 后仍保存过时路径 `/opt/homebrew/bin/herdr-desktop-pet`，不证明 Commit 失败，也不授权再次执行 manager。same-image 和合格 successor 修复须逐字节保留旧 plan/journal，仅追加新的 repair/handover receipt；不 replay manager、不手动 Configure、不手动 Resume。保留真实旧证据、helper、reservation、config/state、凭据、provider/account 数据、prompt/transcript 与无关 profile。区分明确 no-spawn 失败、已 Commit 但尚未重连、明确且 quiescent 的 retirement 失败、typed cancellation 与 Unknown。绝不 clear/replay Unknown 或改称 cancelled；真实用户 Stop 禁止包括 rollback 在内的重启。所有必要真实 binding/native receipt 完成前阻止 retirement。文档或旧运行不证明当前 tools Mac 的状态。
+
+**历史观察边界：**C1 签名 bundle（neutral 72 / legacy 68 个文件）与 instance `5e2cdb3d4178a864d9b4e995d0b3e763`、sequence `37` 的真实 SDK/native binding 保留为 C1 证据，但未与 headless 隔离，不能证明来自 GUI source。另在 source `7c40127abf79603ca68837f39c6dca362b2acc7c` 与未改变的 Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d` 中，实际 GUI/frame-driven sequence `47` 及正常 native Stop/Start 后的新 sourceWindow、sequence `13` 均无需 Connect、保存 Configure 或 source patch。GUI 自然为 `signed_out`。这些不证明自主 quiet-background scheduling、已认证模型交付、migration、retirement、另一台电脑恢复或 v0.4.12 通过。tools Mac 不是实际受影响机器，不得更改 host 已安装 app 来代替它。
+
+## 历史公开与执行记录——不是即将采用的常规路径
+
+以下版本、PID、SHA、取消/Unknown 观察和验收范围保持原有历史含义。当时的“当前”表述、独立 A/B 批准及手动连接步骤不是即将采用的单次批准路径指令。
+
 **Core v0.4.7:** [Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, source `52514da5115f09aac22de5429c08f7acdd993258` (2026-10-15T08:39:17Z). Six anonymous assets, strict/deep signatures, protocol 4 / observation 2 / API 1 and exact 68-file closure passed. Current observed acceptance: [v0.4.7 ledger](releases/v0.4.7.md). Pages is not yet observed; Wiki publication lacks dedicated `WIKI_PUBLISH_TOKEN`.
 
-**当前路径（公开 Brew A′/B 仍待实际验证）：**运行中 v0.3.10 → 独立 native 同意的常规 v0.3.11 更新 A′ → 保留原始匹配签名 helper 确认 terminal/quiescent settlement → 单独 source review 与最终可见 native **Migrate** 同意进入 Core v0.4.7 B → 精确 profile ready/Commit → 实际所属 manager retirement。不得跳过 A′或复用其同意批准 B。v0.3.6 兼容路径独立；beta 须先采用冻结匹配 v0.3.6 pair。
+**历史 v0.4.7 路径（已取代；当时公开 Brew A′/B 仍待验证）：**运行中 v0.3.10 → 独立 native 同意的常规 v0.3.11 更新 A′ → 保留原始匹配签名 helper 确认 terminal/quiescent settlement → 单独 source review 与最终可见 native **Migrate** 同意进入 Core v0.4.7 B → 精确 profile ready/Commit → 实际所属 manager retirement。当时 A′和 B 需要独立同意。v0.3.6 兼容路径独立；beta 须先采用冻结匹配 v0.3.6 pair。
 
 **同意与恢复：**v0.4.7 区分 bound typed Cancelled 与 VisibleApproved。意外 native 响应、EOF、invalid/foreign/nonzero 或不一致 delivery 保持 Unknown；不得 clear/replay 或将 Unknown manager 改称 cancelled。用户 Stop 禁止包括 rollback start 在内的重启。保留原始 helper/journal/reservation、精确 config/state 及无关 profile；仅在 target ready/Commit 后 retire 已审阅的所属 source。v0.4.6 final-cancel false-Unknown 证据保持不可变历史记录。当前手动 candidate→公开 v0.4.7 观察见 ledger；公开 Brew A′/B、ManagerUnknown、late Stop 与 definite retirement failure/Resume 仍待验证。
 
@@ -26,13 +47,13 @@
 
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。
 
-**Current public bridge v0.3.11:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. Stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves Core v0.4.7 / bridge v0.3.11; beta is unchanged.
+**Historical public bridge v0.3.11 publication:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. At that publication, stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` served Core v0.4.7 / bridge v0.3.11; beta was unchanged.
 
 **历史 v0.3.9/v0.4.4 managed A 完成:**冻结 v0.3.6 Check 选择公开 v0.3.9，仅改变 `preferences/last_update_check`（`1791963743` → `1791965310`）；Check 期间其余四棵 tree 字节、source PID `2467` 及无关默认 PID `2641` 不变。精确 source `0f33f28` native A 同意完成 operation `d5b2bf6f02e031eabb5a8c8fdd805cab`（`completed` / `manager_exited`，installed/applied true）。实际公开 v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`，image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce` 在精确旧 private config/state 上达到配对 protocol 3 / capability 1 / API 1、UI/control ready、Herdr 1 / Tern 0。实际 managed source Git status 完全 clean。保留的原始 v0.3.6 helper 通过 strict/deep 签名，实际 status 确认 completed。baseline 已保存全部87项旧 A 证据和91个 state 文件哈希。
 
 **历史 v0.3.9/v0.4.4 managed B 完成:**单独的 Move preview 与独立 strict/deep 验证通过的公开 v0.4.4 coordinator 收到 native **Migrate** 同意，operation `d729fd740f4e459945edda00bf48d944`、plan SHA-256 `6471e928254229a66a6fc64a88f67095777d6bd890d621feb36b08a4c7d1fc69` 达到 **COMPLETE**。Native Prepare/Stop 停止公开 v0.3.9 PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`，选择合格的既有 Brew v0.4.4 app root/image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`；`target_manager:null` 表示**没有重装**。Target PID `4104` / instance `8912b3aad5419b1c14a78ef3418ae36f` 在精确旧 private config/state 上保留已保存的 Herdr 选择（Herdr 1 / Tern 0），达到 protocol 4 / capability 2 / API 1 及实际 UI/control ready；native_ready 和 target_committed 均为 true。真实 Herdr retirement attempt 1 为 PID = PGID `4140`、exit 0、quiescent true、error null。实际 plugin list 显示不可变 Herdr v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8` 的 enabled integration-only Desktop Pet，managed Git HEAD 一致；真实 manager 输出为 v0.4.1、21 actions、startup/client-attached hooks。Managed dist/app 及旧 PID `3417` 消失，未创建 standalone `DesktopPet.app`。精确 retired v0.4.1 标签的历史 Core v0.4.2-minimum wrapper 实际复用同一 v0.4.4 PID/instance，没有新 app 或 tag。全部87项原始 A 证据 SHA-256 及所有既有旧 source-config 哈希不变；无关默认 config/state 两棵 tree 字节相同，隐藏默认 v0.4.4 PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` 不变且仍运行。仅 adopt private XDG base profile，未与 global default 合并。实际 GUI 已目视确认 Desktop Pet / 内置露贝莉娅及 Settings **Herdr Connected 1 / Tern Disabled 0**；clean-image capture 仍待完成。无 fault 的最终公开 v0.3.9/v0.4.4 A/B happy path，与已单独通过的历史 working metadata `f7edf5e` definite failure/显式 Resume 验证区分。
 
-**Current consumer / SDK boundary:** Herdr integration remains assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`), only for Herdr-managed retirement. Current local consumer scripts/eight evidence files are materialized from public Core v0.4.7, not yet pushed main; no new integration tag or consumer native build. Actual user Mac remains unchanged. Manual same-source v0.3.11 candidate → public Core v0.4.7 B passed, not public Brew owning-manager retirement. Tern requires genuine Configure → Save → Connect of the same executable/config/state pair; account/provider and both-order runtime acceptance are not complete. See [current observations](releases/v0.4.7.md).
+**历史 v0.4.7 consumer / SDK 记录：**Herdr integration 当时为 assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`)。本地 consumer scripts/8项 evidence 来自公开 Core v0.4.7，当时尚未 push main，无新 integration tag 或 consumer native build。手动 same-source v0.3.11 candidate → 公开 Core v0.4.7 B 通过，但不代表公开 Brew owning-manager retirement。当时 consumer 需要对同一 executable/config/state 执行 Configure → Save → Connect；account/provider 与两种启动顺序验收未完成。[历史观察](releases/v0.4.7.md)不是当前 Mac 状态证据。
 
 **Historical v0.4.5 consumer evidence:** **consumer 与 SDK 边界：**Herdr 集成保持公开 v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`（无资产 release `412252863`）；历史 Core v0.4.2 minimum 冻结不变，健康 Core v0.4.3 复用已有实际观察。当前 Herdr consumer scripts 及全部8项 metadata/evidence 文件现已从公开 Core v0.4.5 release `412667385` / 源码 `51dcf22415b1ff0faf07651cb83c1c696c980f43` 实际 materialize；没有新的 Herdr 标签；最终公开 managed retirement 及不可变 wrapper 对 v0.4.4 的复用已由上文实际 B 结果单独确认。Tern v0.2.0 及兼容 Core v0.4.1 pin 不变。Tern 必须显式 **Configure → Save → Connect** 验证可执行文件及实际 config/state 对；不会安装或自动启动应用。真实 Tern keychain/provider 登录和 genuine OMP 18.10.3 providerSignIn/NoModel 仍阻止两种启动顺序的同实例/prompt/transcript/reconnect 验收。不得复制凭据或伪造账户、ACK、完成结果来替代这些关卡。**完整 matrix 尚未完成。** 实际当前 Herdr v0.4.5 reviewed-consumer VM smoke 通过：materialized wrapper 发现同一 Brew v0.4.5 PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`。Hide 后 ensure 不 bootstrap，保持 Hidden / visible false 与同一 instance；显式 Show 恢复显示。当前 Herdr source 验证通过：integration-only ownership v0.4.1、shell/manifests/TypeScript、固定 contracts `85c644cd90d8c6a9e97e9dc313cc4750f344235f`、**104项 Rust adapter test 与一项已有 test 的 child 重跑**（不是105项不同 test，也不是 Bun）；未构建 native app/release。
 
@@ -49,6 +70,22 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 ## 安装与可选集成
 
+**当前稳定版候选所有者策略：**全新 Standalone 与普通更新使用实际 OS home 的 `.local/share/desktop-pet/libexec/DesktopPet.app`，不受 `HOME`/XDG 影响。原有 `Applications/DesktopPet.app` 仅用于旧 helper 完成确认、单独批准的迁移及恢复，不再永久支持原位更新。禁止接管任意 home/custom/system 路径或 symlink。Brew/source 所有者及历史冻结说明不变。
+
+### 现有 Applications 所有者：明确批准的一次恢复
+
+真正 beta.7 helper 可以选择新稳定版，但实机确认了另一个已发布 helper 缺陷：响应后的套接字关闭，再查询 Darwin peer PID 会在安装前报 `cannot authenticate control peer PID`。只检查应用更新无法修复已发布 helper。[0.4.14 修正](releases/v0.4.14.md)修复认证并提供明确批准的操作员恢复。不要反复重试旧 updater，也不要假定此前应用内路径已成功。
+
+经批准的操作员恢复请使用 [v0.4.16 或更新版本](releases/v0.4.16.md)。它包含 SDK 内部默认 pack 验证认证及隔离 helper 的可信 HOME 修正，不会放行任意 pack 命令或其他配置目录。不要为了消除阻塞而停止 Tern 或绕过安装保护。
+
+保留已认证的原 config/state、角色、设置及用户资料。既有 Tern SDK 在 native 事务结算后仅更改保存的 executable，native 不覆盖 KV。不要猜测默认值、合并 profile，或用 Configure/Connect、Tern 重启、plugin reload 隐藏失败。签名原件及事务证据保留在 private retention。
+
+**先保存 Pet 未保存编辑。** 操作员恢复需要原件及 profile 备份，并明确批准只正常停止 Pet、之后另行 Start。停止源安装不伪造 Stop ACK、updater parent 或重启 token。后续用户 Stop 或 scope 变化禁止自动重启。已结算 Stable parent 的同版本 native 迁移是另一条批准路径。
+
+native 安装／就绪与逐窗口 fresh Tern 确认是不同结果。未连接或不兼容 consumer 表示集成待确认，不是 native 安装失败。公开或源码检查不代表真实用户已恢复；不初始化 Tern、不删除未结算 journal，并按实际观察报告结果。
+
+### 历史固定安装示例
+
 **历史 v0.4.4 全新 Brew 安装证明:** 中立 v0.4.4 配方已公开于 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`。合格 Brew v0.4.4 全新安装通过（74个文件 / 44.3 MB，五项内部/外部重新签名），认证检查确认 Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`。安装/检查没有创建中立 config/state 或 standalone app，也没有启动守护进程。仅显式手动 **Start** 后才达到实际 v0.4.4 UI/control ready，PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`。露贝莉娅及实际 Settings 显示 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**；随后显式 Hidden 保留同一默认实例。这是全新安装证明，不是 v0.4.4 常规更新或 managed 迁移完成证明。安装命令：
 
 ```sh
@@ -59,6 +96,8 @@ desktop-pet status
 ```
 
 预构建与源码安装在 **core** 检出目录中执行，而不是 Herdr 集成目录。默认仅预构建，下载或验证失败不会暗中回退源码编译。`--source` 明确仅构建当前 core，并使用该目录的 `dist/DesktopPet.app`。
+
+**Historical pinned v0.4.7 installation examples, not latest-version instructions:** the commands below deliberately select immutable older assets. Core v0.4.11 is public but failed historical repair; consumer metadata remains v0.4.8 pending actual verified v0.4.12 / v0.3.16 publication. Never substitute unpublished assets.
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
@@ -81,11 +120,18 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### 不关闭 Tern 的 Standalone 更新
+
+当前源码为固定 prebuilt 安装器加入 Pet-only transaction；这不代表公开发行已重新发布，也不代表实际 Tern acceptance 已完成。升级较低版本的**同一 Standalone 所有者**时，native 确认窗口展示精确版本、root 和 profile，仅授权**重启 Desktop Pet**。Tern、窗口、终端和 agent 作业保持运行，不要求 plugin reload 或重写 Configure/KV。**请先保存 Pet 编辑内容。** 已验证公开 beta.1 的 bootstrap 使用普通 Quit，而非 draft-aware Prepare。取消、确认窗口失败或不同 active native profile 冲突均在停止任何应用之前拒绝；同一 native profile 的两个 Tern 窗口不算冲突。原本停止的 profile 只安装、不启动，Homebrew/Source 所有权和 beta 设置不变。
+
+`installed` 表示已验证的磁盘替换；`applied` 还要求新的精确 profile 实例及 UI/control ready。因此启动失败后可能是 `installed:true, applied:false`。保留安装器报告的 operation ID、state-dir 和保留的签名 helper，使用其 `install-status` / `install-recover`，不要重复手动 Stop/安装，也不要混用普通 updater 的 `recover --start`。status 退出码 0 只表示观察有效，并非安装成功。丢失的 Stop ACK 或后续 user Stop 不会因恢复同意而变成重启权限。旧 signed bundle 及原始 sidecar 保存在 private storage，当前实现不自动删除；不要手动删除证据或预约 marker。[CLI 合约（英文）](cli.md#pet-only-standalone-installation-transaction-current-source-contract)。
+
+
 ## 配置档、连接与迁移
 
 新配置档默认为 Auto。Connection 显示已注册提供商的实际连接，而非安装检测。提供商 ID 是不透明值，操作权限来自 capability，而非名称前缀或路径。Auto 是同时观察而非回退选择。远程来源只读；Tern 允许回复，不允许删除工作树。接受提交不代表代理完成。
 
-参阅[使用指南](usage.zh-Hans.md)、[准确的配置档与发现契约](development.md#profiles-and-installation-discovery)及 [A→B 迁移](migrations/desktop-pet.md)。把 status / Connection 中的实际可执行文件、config、state 三个值填入 Tern Configure，再 Connect。现有独立 Tern、beta、自定义配置档保留原地，绝不合并。
+参阅[profile 与发现契约](development.md#profiles-and-installation-discovery)及[迁移与保留历史](migrations/desktop-pet.md)。即将采用的迁移自动交接实际 executable/config/state，并在同一 Tern 窗口 fresh rebind 后才 retire。不得额外加入手动 Configure/Connect。迁移之外的首次独立连接仍可显式配置。现有 Tern、beta、自定义 profile 原地保留，绝不合并。
 
 ```sh
 desktop-pet profile show --json
@@ -97,7 +143,7 @@ desktop-pet preferences set --observation-host auto
 
 | 操作 | 效果 |
 | --- | --- |
-| 左键点击菜单栏图标、键盘激活或 AXPress | 打开已有的三标签设置面板（角色、观察来源、气泡/设置）；再次左键将同一面板置前，不关闭也不重置标签。使用兼容 macOS 13 的现行系统 API 请求激活，但系统不保证键盘焦点转移。 |
+| 左键点击菜单栏图标、键盘激活或 AXPress | 打开**外观／连接／应用**三标签设置面板；再次左键将同一面板置前，不重置标签。键盘焦点由 macOS 决定。 |
 | 右键/Control-点击菜单栏图标 | 先隐藏面板再打开原生**设置…**、**退出**及必要时的**显示并启用角色**菜单。 |
 | 点击头部/身体、在头部往复移动 | 触发反应、抚摸角色。 |
 | 拖动角色身体/背景、按 Option 拖动角色窗口；右下角把手 | 移动或调整角色大小。 |
@@ -105,6 +151,8 @@ desktop-pet preferences set --observation-host auto
 | 拖动气泡边缘/角落（可按 Option） | 边缘调单轴，角落调双轴，与角色缩放/字体大小无关。 |
 | 右键/Control-点击气泡背景或卡片标题 | **关闭气泡窗口**仅隐藏气泡；**恢复自动大小**清除紧凑和展开大小覆盖。原生复制/粘贴及其他控件菜单不变。 |
 | 全窗口/透明区域点击穿透 | 全窗口模式同时穿透角色和气泡而无法交互；透明区域模式仅穿透透明角色图像，气泡仍可交互。 |
+
+**退出**仅结束 Desktop Pet 的本次运行，不退出 Herdr 或 Tern，并保留自动启动设置。
 
 **本源码检出：**左键捕获中断后于松键时静默恢复，不伪造点击反应。新按键有自己的拖动锚点；重复或过期事件不能替换锚点或结束别的窗口手势；Control-左键释放不能结束先前点击。普通点击、Option 拖动和缩放把手保持不变。丢失释放回调的有效气泡缩放，在下述跟踪/IME 完成保护下仅接纳一次预览。要获得此变化需重新构建安装本检出；已安装的发行二进制不变。
 
@@ -119,6 +167,10 @@ desktop-pet preferences set --observation-host auto
 ## 会话搜索和排序
 
 卡片优先采用观察到的终端标题，再用命名标签，最后用工作区/目录上下文；无名称有明确回退，重复名称显示区分标记。悬停查看完整标题、工作目录和内部 ID。标题变化保留选择/滚动；断线卡片保留最后标题并显示**离线**。
+
+标题或工作目录相同不代表同一对话。**本地**/**远程**表示来源位置，已连接/**离线**表示可用性。本地来源也可以离线，保留的卡片不代表实时连接。
+
+选择卡片是在 Desktop Pet（Core）中指定回复目标，不会切换 Tern 的活动 pane。角色汇总所有正在观察的来源状态，因此可能与当前聚焦 pane 的状态不同。
 
 **搜索**去除两端空白，对标题、标签/工作区、代理、来源显示名、完整工作目录或备用名做不区分大小写的子串匹配，不搜索 ID 或套接字路径。搜索与**状态**筛选相交，不改变整体观察状态或反应。**排序**可选**稳定**（原顺序）、**名称**、**来源**，分隔线下另有独立的**运行中优先**；所有纳入来源的运行中会话靠前，组内按所选顺序排列。关闭的菜单和辅助功能值都包含两项选择，并非按全部状态排序。GUI 在筛选/排序**后**最多展示 128 张卡片并报告省略数；CLI `sessions list --limit` 是**分页大小**，不是总行上限（[CLI，英文](cli.md#sessions-and-agent-prompt)）。
 
@@ -140,7 +192,7 @@ Tern 回复使用注册适配器重新验证后的**单次 `agents:ask`**，绝�
 
 隐藏角色不改保存的气泡可见性。首次脱离且无独立原点时，采用**实际应用过的附着气泡主体**位置，而非仅计算出的位置；若角色一开始隐藏，普通附着布局提供回退。独立原点与角色位置分开保存，之后即使有标记文本也使用该原点。拖背景仅移动独立气泡；重新显示角色会附着，再隐藏又恢复原点。紧凑/展开、回复和重新测量都保留原点（屏幕裁剪除外）；显示器移除/布局改变会救回屏幕外位置。选择、视图/回复状态和草稿跨本次隐藏/显示保留，不跨重启。独立时改变的附着位置在下次附着时生效，不移动独立原点。`reset` 清除旧独立原点，需要时从新应用的附着布局重新取值，不复制角色坐标或改变可见性。标记回复文本会将隐藏/显示/位置/reset 的原点提交延至取消标记；较新的 reset 优先于旧原点。编辑器回调观察能证明标记文本、已提交草稿和选择保留，不等于真实 IME/焦点认证。
 
-**设置 → 菜单栏图标**有**始终显示**（稳定版 v0.2.0 起默认）和**仅在需要恢复时显示**，与窗口可见性独立。恢复模式只在**两个窗口均隐藏**或开启**全窗口点击穿透**时显示图标；角色单独可交互、独立气泡单独可交互、两者都可见以及仅透明区域穿透时（除非均隐藏）不显示。始终显示模式则均显示。关机阶段两种模式都不显示；透明区域轮询本身不触发恢复。右键/Control-点击图标仅在需要恢复时提供**显示并启用角色**：显示角色、关闭全窗口穿透，保留气泡可见性与透明区域穿透并重新附着可见气泡。菜单关闭后恢复模式隐藏图标；CLI `show` 只显示角色，不显示气泡。原 `bf23ced` 本地预览的条件图标仅为历史记录，并非当今配置继承的首选项（[预览记录，英文](migrations/unreleased.md)）。
+**应用 → 菜单栏设置… → 显示条件**有**始终显示**（稳定版 v0.2.0 起默认）和**仅在需要恢复时显示**，与窗口可见性独立。恢复模式只在**两个窗口均隐藏**或开启**全窗口点击穿透**时显示图标；角色单独可交互、独立气泡单独可交互、两者都可见以及仅透明区域穿透时（除非均隐藏）不显示。始终显示模式则均显示。关机阶段两种模式都不显示；透明区域轮询本身不触发恢复。右键/Control-点击图标仅在需要恢复时提供**显示并启用角色**：显示角色、关闭全窗口穿透，保留气泡可见性与透明区域穿透并重新附着可见气泡。菜单关闭后恢复模式隐藏图标；CLI `show` 只显示角色，不显示气泡。原 `bf23ced` 本地预览的条件图标仅为历史记录，并非当今配置继承的首选项（[预览记录，英文](migrations/unreleased.md)）。
 
 `preferences.json` 的 `menu_bar_mode` 为 `always` 或 `recovery_only`；缺键即默认始终显示，旧条件预览配置也一样。成功修改即时应用、跨重启和其他保存，保留未知字段；保存失败维持原模式/图标。切换模式不改变可见性、点击穿透、位置、草稿或生命周期。
 
@@ -158,15 +210,31 @@ Tern 回复使用注册适配器重新验证后的**单次 `agents:ask`**，绝�
 
 ## 气泡和角色设置
 
-通过菜单栏面板或上下文**设置…**进入。原生下拉菜单可选择气泡主题与 UI 语言：**系统**按 macOS 首选语言顺序解析；直接覆盖可选韩语（`ko`）、英语（`en`）、简体中文（`zh-Hans`）、日语（`ja`）。系统语言识别日语和简体中文（`zh`、`zh-Hans`、`zh-CN`、`zh-SG`）；显式繁体（`zh-Hant`、`zh-TW`、`zh-HK`、`zh-MO`）不会映射为简体，而是继续查找下一种支持语言，最终回退英语。保存的规范语言值只有 `system`、`ko`、`en`、`zh-Hans`、`ja`。主题/语言即时保存，自定义颜色需点**应用颜色**。窗口打开时安静的颜色冲突检查只更新控件资格/标签，不改草稿、色块、焦点、选择和撤销；关窗停止。原生下拉菜单、滚动条或拖动跟踪期间推迟气泡显示/位置变化，结束后应用最新设置/状态。
+**当前源码结构（不表示已经发布）：**352×540 pt 设置面板使用**外观／连接／应用**三个标签、同样的屏幕边界限制和独立的滚动位置。外观保留当前角色／候选／操作摘要、浏览器、显示、大小、气泡位置／主题和位置重置。连接显示所选目标和已注册提供商的实际连接总数；查询失败不会把旧快照当作连接成功。应用保留语言、**允许集成自动启动**、更新版本／状态／操作及测试版启用标记。集成自动启动不是 macOS 登录启动设置。
 
-**气泡 → 状态图标和颜色**默认开，立即生效并持久化；关闭恢复纯文字。运行中蓝色、等待琥珀色、**已验证**成功绿色勾、失败红色。`Done`/空闲但未接受结果则中立，不推断提供方成功。匹配的已验证终结报告可跨空闲/快照维持；新活动、会话身份模糊、报告丢失或断线会清除，身份恢复也不会再次接受同一缓存报告。新来源（包括空快照）在首个连贯快照前一直离线。摘要绿色表示**每个已观察会话**成功验证，与卡片筛选/展示上限无关。状态始终保留文字；图标在辅助功能中为装饰，卡片不重复子节点而呈现完整标题/状态。切换图标不改卡片选择、筛选或草稿。透明区域穿透靠指针轮询；若不能接受点击路由竞态，请关闭。
+七个按钮直接打开同一个非模态、可调整大小的辅助窗口中的对应页面。**外观详细设置**包含状态显示、点击穿透、五种颜色、对话编辑和外观错误；**连接设置**包含自动／提供商选择、连接数及提供商的设置／操作／帮助；**菜单栏设置**包含显示策略和图标；**更新设置**包含自动检查和测试版策略。**诊断信息**只读显示可执行文件、配置／状态／套接字、运行标识及连接／自动启动保存错误；**更新日志**以可选择的等宽只读文本显示安装来源、版本、检查时间、操作／迁移、历史和诊断；**应用恢复**提供设置重置。窗口按每页实际内容调整高度，并保留滚动位置和用户主动调整的尺寸，不把大日志窗口尺寸沿用到短设置页面。关闭基本面板或激活其他应用不会关闭详情，打开页面不会启动更新检查或安装。
 
-**角色**标签有精简的当前角色/候选/操作摘要；无候选且无有意义反馈时隐藏空选择/状态卡片。浏览器和操作详见下文。角色标签高度随内容、标签/状态变化，而气泡/设置保留既有高度/滚动；小屏限制并滚动真实内容。角色包 v5 和 `default@0` Rubelia 未改（[v0.3.3 修复，英文](releases/v0.3.3.md)）。
+**应用恢复 → 重置所有设置…**需要确认；存在未保存编辑、输入法组字、待处理工作或未解决的更新／迁移时会拒绝。先私密备份当前确切配置文件，再将语言、外观、对话修改、角色选择、原生观察、自动启动和更新设置恢复为默认值，仅重启该 Pet。保留已安装角色包、原始图片、启动参数中的资源、集成应用连接／注册、配置文件路径、未知扩展元数据及更新历史与预约。恢复页显示最后结果和备份路径，不把失败报告为成功，更新的用户停止请求会阻止重启。已完成并应用的更新历史，在单独验证预约已释放后不再阻止自动检查／测试版设置；不明或进行中的更新仍受保护。
+
+更新状态图标和标题位于紧凑卡片的外侧上方。菜单栏设置移到语言下方、自动启动上方，与更新分开；更新设置和更新日志位于同一行。日志使用已有的可调整大小、可滚动原生窗口，不会拉长基本面板。
+
+更新中断后，可从**应用 → 应用更新**查看恢复状态。安全清理预约与明确同意后重新启动已验证的应用是不同操作。如果确认安装尚未开始、原应用仍以相同身份正常运行，可在不退出应用的情况下清理。其他助手正在处理时显示进度，不重复执行。结果未知或管理进程尚未确认时保留保护，并允许选择和滚动日志。清理完成不代表更新成功；新更新仍需重新检查并取得同意，用户的停止请求优先。
+
+旧助手无法安全验证仍在运行的原应用时，界面会单独提供**退出 Desktop Pet 并恢复…**。未保存编辑、输入法组合与待处理工作受到保护，未经原生确认不会退出。当前已签名助手协调原来已签名助手读取并清理记录，不退出 Tern 或其他工作，不重新执行安装器，也不自动重启。清理后的手动启动需要另行同意。
+
+手动启动还要求选中的已签名可执行文件支持 `manual_start_fence_contract:1`，以拒绝启动期间发生的更新用户停止请求。beta2 等旧程序不支持此契约；仍可清理预约，但界面会说明缺少启动能力，不执行不安全的启动，也不伪造更新令牌绕过保护。
+
+**自定义**主题保存成功后打开外观详细设置。五种颜色通过**应用颜色**保存，重置颜色也是保存操作。换页、关闭再打开不保存，也不改写无效、空或大小写混合的草稿。仅冲突时显示**重新加载已保存设置**／**保留编辑并更新基准**；前者替换草稿，后者保留编辑。冲突阻止旧基准的应用，不阻止关闭。IME 组合期间延后关闭／换页／图片选择；更新冻结期间仍可选择和滚动只读诊断，但修改控件保持禁用。
+
+**外观 → 气泡主题**与**应用 → 语言**使用原生下拉菜单。**系统**按 macOS 首选语言顺序解析，可明确选择韩语（`ko`）、英语（`en`）、简体中文（`zh-Hans`）、日语（`ja`）。系统识别日语和简体中文（`zh`、`zh-Hans`、`zh-CN`、`zh-SG`）；显式繁体（`zh-Hant`、`zh-TW`、`zh-HK`、`zh-MO`）继续查找下一种支持语言，最终回退英语。保存值的规范拼写不变，主题／语言即时保存。原生跟踪期间延后气泡显示／位置变化，结束后应用最新值。
+
+**外观详细设置 → 显示状态图标和颜色**默认开，立即生效并持久化；关闭恢复纯文字。运行中蓝色、等待琥珀色、**已验证**成功绿色勾、失败红色。`Done`/空闲但未接受结果则中立，不推断提供方成功。匹配的已验证终结报告可跨空闲/快照维持；新活动、会话身份模糊、报告丢失或断线会清除，身份恢复也不会再次接受同一缓存报告。新来源（包括空快照）在首个连贯快照前一直离线。摘要绿色表示**每个已观察会话**成功验证，与卡片筛选/展示上限无关。状态始终保留文字；图标在辅助功能中为装饰，卡片不重复子节点而呈现完整标题/状态。切换图标不改卡片选择、筛选或草稿。透明区域穿透靠指针轮询；若不能接受点击路由竞态，请关闭。
+
+**外观**标签保留当前角色／候选／操作摘要；无候选且无有意义反馈时隐藏空选择／状态卡片。取消角色专用高度特例，三个标签共用相同的受限滚动区域。角色包 v5 和 `default@0` Rubelia 未改（[v0.3.3 修复，英文](releases/v0.3.3.md)）。
 
 ## 编辑角色对话
 
-选择**角色 → 编辑对话…**，打开可调整大小的独立深色编辑器，默认内容 760×560、窗口最小 620×480。不激活也可选择任一可用角色及**原作者修订版**；语言独立于 UI，可选韩语（`ko`）、英语（`en`）、简体中文（`zh-Hans`）、日语（`ja`）；八种事件分别为空闲、运行、等待、未知、点头、点身体、抚摸、观察到任务完成。控件在顶部、事件在左侧、编辑和可展开的原文参照在中央、状态/操作固定在底部；悬停看完整截断的角色名/错误。未保存条目有标记。无覆盖时初始编辑框显示原作者文本，并提供单独参照。用户文本只替换这一条对话，不改观察数/状态转换、反应时机或断线提示。
+选择**外观详细设置 → 编辑对话…**，打开可调整大小的独立深色编辑器，默认内容 760×560、窗口最小 620×480。不激活也可选择任一可用角色及**原作者修订版**；语言独立于 UI，可选韩语（`ko`）、英语（`en`）、简体中文（`zh-Hans`）、日语（`ja`）；八种事件分别为空闲、运行、等待、未知、点头、点身体、抚摸、观察到任务完成。控件在顶部、事件在左侧、编辑和可展开的原文参照在中央、状态/操作固定在底部；悬停看完整截断的角色名/错误。未保存条目有标记。无覆盖时初始编辑框显示原作者文本，并提供单独参照。用户文本只替换这一条对话，不改观察数/状态转换、反应时机或断线提示。
 
 **保存对话**/**Command+S**每次保存一种语言的一个事件，最多 **2048 UTF-8 字节**（不是字符数）。空/纯空白删除该覆盖；回退到角色包/默认/状态文本，不隐藏气泡。活动角色 ID 的覆盖即使编辑历史修订版也更新适用气泡；编辑别的角色不会激活它。**重置此条**在丢弃未保存草稿时要求确认；**重置全部角色对话…**总是确认并删除**所有四种语言**的覆盖。草稿按角色/语言/事件隔离，跨上下文或 UI 语言变化及本次运行的关窗重开保留；仅保存项跨重启。**Command+Z**/**Shift+Command+Z**是按编辑上下文的撤销/重做；保存失败保留草稿和旧已提交文本。
 
@@ -186,7 +254,7 @@ Rubelia（`default@0`）是**唯一内置角色**；可选 PNG/rig 与服装包�
 
 ## 观察来源
 
-当前源码展开默认折叠的 **连接 → 观察范围**；公开 v0.3.6 使用 **设置 → 观察来源**。远程仅用于 Auto/Herdr，Tern 专用隐藏远程／设备控件，但保留已保存选择。
+当前源码打开 **设置 → 连接 → 连接设置**，使用已注册提供商提供的控件；Core 没有公共“观察范围”界面。下文的 **设置 → 观察来源**、**此 Mac**、**远程机器**等保留公开 v0.3.6 及更早 Herdr 观察 UI 与行为的历史记录，不表示当前 Core 提供同一组控件。当时远程仅用于 Auto/Herdr，Tern 专用隐藏远程／设备控件，但保留已保存选择。
 
 远程观察首次出现在 v0.1.6；稳定版 v0.2.0 加入精简观察设置、只复制的重连命令，并修复独立远程模式 watcher 启动。本地**此 Mac**默认开，**远程机器**默认关。远程使用前在**交互式终端**按 [Herdr 保存机器指南（英文）](https://herdr.dev/docs/0.9.2/connecting-machines/)添加并认证 SSH 机器（例如 `herdr machine add workbox`），完成任何被要求的远程服务器安装；再启用远程机器并在**要观察的机器**中明确选择已启用配置。一个配置只观察**一个保存的远程 Herdr 会话**，不是整个主机；注册/attach 本身不会选中。宠物应在显示桌面的**本地 Mac**上运行，兼容的远程 Herdr 服务器**无需**宠物应用/插件；本地 CLI 轮询选中远程配置。
 
@@ -212,10 +280,14 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 ## 应用内更新
 
+**现有所有者恢复：**请参阅[明确批准的一次恢复](#现有-applications-所有者明确批准的一次恢复)。恢复到 canonical private 位置后，普通更新在该处进行。beta opt-in、仅稳定版及 Homebrew 限制不变。
+
+应用内更新不可用时，请保留现有设置和角色。**打开官方安装说明**会打开已验证版本的官方页面，不会只下载没有说明的压缩包或自动执行安装器。请按实际安装方式操作，不要删除配置、重跑旧安装器或猜测默认路径。Tern 控制错误现在显示实际后端诊断，而非 `alpha_passthrough` 模式错误；普通状态／错误响应绝不作为 fresh binding 证据。
+
 **设置 → 应用更新**显示相互独立的自动检查（默认开）和**接收 beta 更新**（默认关）、**立即检查**、运行版本/来源、按策略的最后成功检查时间及明确的来源相关操作。仅稳定版选官方稳定发行；加入 beta 后选合格稳定/beta 中最高 SemVer，同基础版本的正式版优于 beta，退出 beta 不降级。应用打开时自动检查最多每日一次，稳定/含 beta 各有时间戳。改变 beta 策略使原候选失效，仅自动检查开启时按新策略检查。开关和检查不会安装/重启、刷新 Brew 元数据或修改 Git；执行操作需额外原生同意。 检查不改变 lifecycle、安装、运行 image 或所选 profile，但成功检查可写入 `preferences.json` 的策略相关 timestamp 缓存（`last_update_check` / `last_beta_update_check`），并非字节级只读。
 
-- **Standalone：**验证固定的中立 release 字节、stage，并在 native installation admission 下原子替换实际账户 home 的应用。共享 locator 标识真实安装，而非根据宿主 manifest／socket 父路径猜测。可复用已验证现有所有者；live profile／预约阻止不安全替换。常规更新不调用 Herdr plugin manager，旧 Herdr 管理仅属于另行同意的 [A→B 迁移](migrations/desktop-pet.md)。
-- **Homebrew：**保留捕获的管理器/前缀，明确指定目标公式/版本。物理替换范围为跨 keg 的公式 **Cellar 子树**，非整个前缀。确认合格的稳定 ↔ beta 转换占用两处物理安装根，验证刷新的目标元数据并安装/升级目标，不暗中卸载原公式。检查仅读取缓存元数据。
+- **Standalone：**验证固定中立 release、stage，并在 native installation admission 下原子替换实际账户 home 的应用。共享 locator 提供发现依据，不从 host manifest/socket 父目录推测。可复用已验证所有者；live profile/reservation 阻止危险替换。常规中立更新不调用 Herdr plugin manager；旧所有者 retirement 仅属于原始批准的[迁移路径](migrations/desktop-pet.md)。
+- **Homebrew：**保留捕获的管理器／前缀和已批准的稳定版公式／版本。物理替换范围为跨 keg 的公式 **Cellar 子树**，非整个前缀。不通过此公式安装测试版，也不自动转换渠道或接管其他安装所有者。检查仅读取缓存元数据。
 - **本地检出：**明确重建磁盘上当前文件，不执行 Git pull/reset/引用变化；重建结果可执行文件相同也可接受，但替换实例必须确实就绪。
 - **已验证的外部安装：**已签名且兼容 protocol-4 的已安装包可提供**应用已安装更新**而不再运行安装器；即使策略仅稳定版，已明确接受的合格安装 beta 也可如此。手动/未知来源不暗中改标为 Herdr 或 Homebrew。
 
@@ -223,7 +295,7 @@ Core 拥有公共 lifecycle 持久化与 `auto_start`（默认 on），额外键
 
 独立的**已签名助手**、选择的配置/状态和自定义资源必须位于物理可变安装范围外；另一个运行中的配置共享安装会阻止替换。助手保留所选配置、后端和资源，验证新实例的真实就绪，并区分**已安装**与**已应用**；已应用不等于最新公开版。候选启动必须绑定准确、持久的**镜像与安装来源**组合，而非从当前磁盘重造的 pin。兼容的不完整标记可以修复，不重放管理器；不完整 pin、偏移及不确定管理器执行保持阻止。单独验证的 Original 仅能在持久失败更新目的下恢复，不能报成升级。用户 Stop 禁止复活，但允许协调并释放已完整证明安全停止的事务。已证明的 **NoSpawn** 中断且原实例准确就绪时维持运行/解冻；后来新的成功检查可提供新计划而不抹除历史。绝不自动重放管理器或悄悄删日志。离线 `update-status` 报告保留记录，不证明实时进程/签名；使用验证过的私有助手的 `status` 和明确租约 `recover`，参阅[更新器状态/恢复契约（英文）](cli.md#app-update-status-and-recovery)。
 
-旧 protocol-1/2/3 证据保留并阻止，仅由保留的已签名 matching helper 查询／恢复，不转换为 v4。新 `updates-v4/` 与实际 OS 账户 home 的 `.desktop-pet-updates` 和旧 `updates/`／`.herdr-updates` 共存。锁顺序为 old global → new global → 已排序 installation roots，并检查旧 stop-generation。bridge A→neutral B 需独立同意与已验证 v4 `migrate-legacy --plan ABS`。文档／候选 package 不证明公开发布或最终验收完成。[迁移与恢复](migrations/desktop-pet.md)。
+旧 protocol-1/2/3 证据保留并阻止，仅由保留的匹配签名 helper 查询/恢复，不转换成 v4。`updates-v4/` 与实际 OS 账户 home 的 `.desktop-pet-updates` 和旧 `updates/`/`.herdr-updates` 共存。锁顺序为 old global → new global → 排序 installation roots，并检查 legacy stop-generation。**历史** bridge A→neutral B 需要独立同意与已验证 v4 `migrate-legacy --plan ABS`。即将采用的常规路径由原始批准自动完成同一 profile Commit、真实 consumer rebind/native receipt，然后才执行已批准的 retirement。文档与候选 package 不证明公开或验收完成。[迁移与恢复](migrations/desktop-pet.md)。
 
 ## 配置与问题排查
 

@@ -1,5 +1,29 @@
 # Desktop Pet
 
+## rig CPU 및 숨김 host 검사
+
+beta.9의 rig 변경은 표시 60 Hz를 유지하고 active-hidden의 지속적인 surface 작업만 중단합니다. 후보 준비·명시적 preview·일회성 모델/복구 준비는 허용하고 말풍선/provider는 독립적으로 동작합니다. Hair powers는 Float 양자화와 논리 quota를 유지하며 순증가 payload 상한은 모델당 640 KiB입니다(array/allocator 제외).
+
+수정 전 실제 소스 바이트를 보존하세요. CPU runner는 양쪽에 동일한 현재 production consumer·생성 limits·컴파일러·SDK·release flags를 사용합니다. 모든 정점/alpha/hit bit pattern의 정확한 일치와 의미/자원 회귀를 검사하고 12쌍 교대 벤치마크·checksum·생성 시간·별도 process RSS를 기록합니다. 기준선이 없으면 회귀만 검사하고 성능 개선을 주장하지 않습니다.
+
+```sh
+node scripts/check-rig-deformation.mjs --baseline-source "$BASELINE_SOURCE" --output "$WORK/rig-cpu"
+node scripts/check-rig-host-visibility.mjs --source "$PWD" \
+  --runtime "$PWD/native/target/neutral/rig-native/release" \
+  --assets "$PWD/assets/rubelia-default" --expect hidden-stopped --output "$WORK/rig-host"
+```
+
+runtime을 먼저 빌드합니다. 절대 경로와 새/빈 출력 디렉터리만 허용합니다. host runner는 서명 worker/resources를 복사하고 실제 AppKit/Metal로 초기 준비·동기화한 숨김 경합·재표시·preview·복구·취소·catalog 전환을 검사합니다. `--expect existing-hidden-render`와 `--source "$BASELINE_SOURCE"`로 옛 동작을 재현합니다. GUI/Metal/drawable 실패는 skip-success가 아니라 명시적 실패입니다. `RIG_HOST_VISIBILITY_CHECKS` 계측은 shipping binary에 없습니다. [beta.9 범위와 검증 한계](releases/v0.4.13-beta.9.md)를 참고하세요.
+
+
+**현재 후속판: Core v0.4.12 / genuine bridge v0.3.16 — 아직 검증·공개되지 않았습니다.** Core v0.4.11은 release `414563938`, 공개 시각 `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`으로 공개되었고 6개 공개 자산을 독립 검증했습니다. 별도 Wiki 작업은 `WIKI_PUBLISH_TOKEN`이 없었습니다. Genuine bridge v0.3.15 CI `38855045701`은 성공했지만 태그·릴리스는 공개되지 않았습니다. 공개 출처 검증은 과거 이관 복구 수락 검증이 아닙니다. See [current successor ledger](releases/v0.4.12.md).
+
+**과거 시작 결함과 영구 수정:** 소유 VM의 실제 공개 v0.4.11 과거 작업 실행은 `Migration history: current native daemon does not prove the migrated image/profile readiness`로 실패했습니다. 새 receipt·SDK 전달은 없었고 SDK 0.1은 `/opt/homebrew/bin/herdr-desktop-pet` 누락 오류를 유지했습니다. UI Ready 전 관찰 오류가 보존 작업을 잃게 했습니다. v0.4.12는 읽기 전용 discovery로 Ready 전에 작업을 보존하고 기존의 승인 검증된 observation/poll이 나중에 전달합니다. 현재 image/owner/profile·signed-stage·정당한 runtime 시작·Stop·Unknown guard를 유지하며 옛 manager 재실행·plan/journal 재작성·수동 재연결은 하지 않습니다. 대상 소스 회귀 검증 통과는 end-to-end 성공이 아닙니다.
+
+**수락 계약:** 최초 Update 승인 한 번으로 조용한 이관·서명 SDK 교체/로드·정확한 저장 route 전환·같은 Tern 창의 실제 fresh binding·자동 native receipt 뒤에만 승인된 옛 소유자를 폐기합니다. 두 번째 동의·Configure·Connect·ACK·Resume은 없습니다. 각 원래 config/state profile·캐릭터·대사/이력·계정/provider·무관 profile과 Stop·Unknown을 보존합니다. 로컬 7c signed-out GUI/frame-driven sequence 47 및 재시작 sequence 13은 component 증거일 뿐 quiet/authenticated 전달·전체 lifecycle·다른 컴퓨터 복구 증거가 아닙니다.
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 독립적인 네이티브 macOS 데스크톱 캐릭터입니다. 루벨리아는 터치에 반응하고 Herdr·Tern 등 등록된 제공자의 세션을 표시하며 해당 출처가 허용한 경우 답장을 보냅니다. 호스트 없이 캐릭터만 실행할 수도 있습니다.
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
@@ -59,6 +83,10 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
+**현재 소스 설치 계약:** Standalone과 현재 consumer fallback은 `HOME`/XDG가 아닌 실제 OS home의 `.local/share/desktop-pet/libexec/DesktopPet.app`입니다. Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, source는 정확한 checkout의 `dist/DesktopPet.app`을 유지합니다. 일반 설치는 기존 Applications 소유자를 이동하지 않습니다. 공개 설치기·동결 노트는 각 버전의 기록이며 옛 설치기 재실행으로 잘못된 목적지가 복구되지 않습니다. 일회성 복구는 **Bash로 비공개 제공**하며 배포 제품 기능·Rust runtime/route API가 아닙니다. 저장된 Tern KV의 정확한 원래 프로필과 원본 데이터·백업·실행 중 Tern 작업을 보존하세요. [비공개 복구 안내](usage.ko.md#일회성-applications-복구)를 보세요. 이전 공개 Python 복구 자산은 철회됐으며 동결 beta.8 노트는 과거 기록이지 현재 실행 안내가 아닙니다. 새 릴리스·버전 변경은 없습니다.
+
+### 과거 고정 설치 예시
+
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 
 ```sh
@@ -113,7 +141,7 @@ desktop-pet preferences set --observation-host auto
 
 ## Profiles and installation discovery
 
-중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. non-Brew prebuilt는 실제 OS 계정 home의 `Applications/DesktopPet.app`, 승인된 source 설치는 정확한 core의 `dist/DesktopPet.app`입니다. 영구 old-name alias는 정상 탐색 경로가 아닙니다.
+중립 제품은 `DesktopPet.app`(`io.github.hanbong5938.desktop-pet`), CLI `desktop-pet`, helper `desktop-pet-update-coordinator`, release authority `hanbong5938/desktop-pet`, formula `hanbong5938/tap/desktop-pet`을 소유합니다. 현재 소스의 Standalone은 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`, Brew는 검증된 formula prefix의 `libexec/DesktopPet.app`, 승인된 source는 정확한 core의 `dist/DesktopPet.app`입니다. 공개 beta.7과 위 과거 고정 설치기는 옛 Applications 동작을 유지합니다. 영구 old-name alias나 Applications launcher는 현재 소스의 정상 탐색 경로가 아닙니다.
 
 프로필 우선순위는 **명시적 `--config-dir`/`--state-dir` > `DESKTOP_PET_CONFIG_DIR`/`DESKTOP_PET_STATE_DIR` > default-profile record > 중립 XDG 기본값**입니다. 기본값은 `${XDG_CONFIG_HOME:-$HOME/.config}/desktop-pet`, `${XDG_STATE_HOME:-$HOME/.local/state}/desktop-pet`입니다. 기본 config root의 `default-profile.json`은 `{ "version":1, "config_dir":"/absolute/config", "state_dir":"/absolute/state" }`로 두 실제 경로를 원자 기록하며 재귀 profile pointer는 금지합니다. `desktop-pet profile show --json`은 daemon/디렉터리를 만들지 않는 읽기 전용입니다.
 
@@ -127,7 +155,7 @@ desktop-pet profile adopt --config-dir /absolute/config --state-dir /absolute/st
 
 adopt는 pair 선택이지 데이터 복사가 아닙니다. active update/예약, 다른 live daemon, invalid/symlink/nonowned 경로는 변경 전에 실패합니다. 실제 config/state **둘 다** 백업하고 start/status/command/stop에 같은 pair를 사용하세요. core는 `HERDR_PLUGIN_*`를 암묵적 app 기본값으로 해석하지 않습니다. Herdr wrapper만 host 주입 우선순위를 명시 native 인자로 바꾸고 Tern은 검증된 pair를 명시 전달하며 일치하는 중립 환경값을 설정합니다. status/Connection은 실제 실행 파일과 선택 profile을 표시합니다.
 
-공유 locator는 **실제 OS 계정 home**의 `.local/share/desktop-pet/installation.json`이며 `{ "version":1, "executable":"/absolute/path/to/desktop-pet", "kind":"homebrew" }`입니다. kind는 `homebrew|standalone|source`만 허용하고 같은 디렉터리의 install lock 아래 원자 저장합니다. 탐색 순서는 **사용자 명시 절대 실행 파일 → 유효 locator → PATH `desktop-pet` → 실제 `brew --prefix desktop-pet` 실행 파일 → `~/Applications/DesktopPet.app`**입니다. invalid 명시 경로/locator는 fallback하지 않습니다. locator는 권한이 아니며 소유·private regular file, 실제 executable/bundle/signature, capability와 origin을 매번 검증합니다. 실행 이미지/profile 불일치는 몰래 재사용하지 않고 표시합니다. 서명 없는 script·사용자 plugin·버전 문자열은 권한을 얻지 못합니다. 업데이트/migration의 locator 변경은 예약 아래 같은 계약을 따릅니다.
+공유 locator는 **실제 OS 계정 home**의 `.local/share/desktop-pet/installation.json`이며 `{ "version":1, "executable":"/absolute/path/to/desktop-pet", "kind":"homebrew" }`입니다. kind는 `homebrew|standalone|source`만 허용하고 같은 디렉터리의 install lock 아래 원자 저장합니다. 현재 소스의 탐색 순서는 **사용자 명시 절대 실행 파일 → 유효 locator → PATH `desktop-pet` → 실제 `brew --prefix desktop-pet` 실행 파일 → `~/.local/share/desktop-pet/libexec/DesktopPet.app`**입니다. 공개 beta.7/과거 consumer에 이 fallback이 소급 반영되지는 않습니다. invalid 명시 경로/locator는 fallback하지 않습니다. locator는 권한이 아니며 소유·private regular file, 실제 executable/bundle/signature, capability와 origin을 매번 검증합니다. 실행 이미지/profile 불일치는 몰래 재사용하지 않고 표시합니다. 서명 없는 script·사용자 plugin·버전 문자열은 권한을 얻지 못합니다. 업데이트/migration의 locator 변경은 예약 아래 같은 계약을 따릅니다.
 
 새 관찰은 Auto이며 `--host auto|PROVIDER`는 Auto 또는 등록된 불투명 provider를 선택하는 옵션이지 app 변형/고정 열거가 아닙니다. 우선순위는 명시 CLI > `DESKTOP_PET_OBSERVATION_MODE` > 저장 `observation.host` > 새 profile Auto입니다. 구 auto/herdr/tern 선택은 유지하고 `both`→`auto`, host-less→Herdr는 legacy 읽기 이전에만 적용합니다. 새 변경 값으로 `both`를 받지 않습니다. 실제 adapter source 수가 provider 연결 증거이며 control은 private same-UID profile socket입니다. locality/capability만 작업 권한을 결정하고 이름 접두사/경로로 권한을 얻지 못합니다. 공통 설정과 adapter 소유 lifecycle/preferences 키는 같은 atomic profile writer를 사용하고 `exit_with_herdr`/endpoints는 Herdr가 소유합니다.
 

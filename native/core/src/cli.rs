@@ -7,6 +7,7 @@ use crate::control::{
 };
 use crate::daemon::DaemonConfig;
 use crate::lifecycle::Paths;
+use crate::preferences::Preferences;
 use crate::Composition;
 use crate::{
     automation_cli, bubble, bundle, character_renderer, control, daemon, lifecycle, pack_authoring,
@@ -18,11 +19,13 @@ use desktop_pet_contracts::{
 };
 use desktop_pet_update_coordinator::identity;
 use desktop_pet_update_coordinator::protocol::{
-    latest_operation, read_operation, record_user_stop, start_allowed,
+    observe_latest_operation, observe_operation, record_user_stop, start_allowed,
+    OperationObservation,
 };
 use desktop_pet_update_coordinator::{
     detect_origin, executable_identity, InstallOrigin, UpdateContext,
 };
+use std::cell::Cell;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions, Permissions};
@@ -33,7 +36,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,6 +46,10 @@ pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(
 );
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Retain parsed integration options without configuring extensions again when
+// Settings launches the existing restart command.
+static DAEMON_RESTART_OPTIONS: OnceLock<Vec<OsString>> = OnceLock::new();
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const LOG_MODE: u32 = 0o600;
 const MAX_SOURCE_PATH_BYTES: usize = 4096;
@@ -63,6 +70,9 @@ const USAGE: &str = concat!(
     "    installation inspect --json  Verify this executable's actual distribution and owner\n",
     "    installation discover [--executable ABS] --json  Resolve a verified installation\n",
     "    update-status [OPID] Show offline durable updater outcome (--state-dir PATH)\n",
+    "    update --yes        Approve the successor bridge's bounded automatic migration; requires both profile paths\n",
+    "    legacy-migration-route  Authenticate a committed original integration route from bounded stdin JSON\n",
+    "    migration-integration-handover  Confirm loaded consumer and fresh same-window binding from bounded stdin JSON\n",
     "    show                Show character; reattach visible bubble\n",
     "    hide                Hide character; leave enabled bubble standalone\n",
     "    toggle              Toggle character visibility, independently of bubble\n",
@@ -148,12 +158,17 @@ enum CommandKind {
     Start,
     Stop,
     Restart,
+    RestartInternal,
+    SettingsReset,
     Status,
     UpdateCapabilities,
     UpdateStatus,
     Profile,
     Installation,
     DistributionIdentity,
+    LegacyMigrationRoute,
+    MigrationIntegrationHandover,
+    Update,
     Extension,
     Settings,
     Show,
@@ -189,11 +204,16 @@ impl CommandKind {
             "start" => Self::Start,
             "stop" => Self::Stop,
             "restart" => Self::Restart,
+            "restart-internal" => Self::RestartInternal,
+            "settings-reset-internal" => Self::SettingsReset,
             "status" => Self::Status,
             "update-capabilities" => Self::UpdateCapabilities,
             "profile" => Self::Profile,
             "installation" => Self::Installation,
             "distribution-identity" => Self::DistributionIdentity,
+            "legacy-migration-route" => Self::LegacyMigrationRoute,
+            "migration-integration-handover" => Self::MigrationIntegrationHandover,
+            "update" => Self::Update,
             "update-status" => Self::UpdateStatus,
             "settings" => Self::Settings,
             "show" => Self::Show,
@@ -236,8 +256,13 @@ impl CommandKind {
             Self::Profile => "profile",
             Self::Installation => "installation",
             Self::DistributionIdentity => "distribution-identity",
+            Self::LegacyMigrationRoute => "legacy-migration-route",
+            Self::MigrationIntegrationHandover => "migration-integration-handover",
+            Self::Update => "update",
             Self::Extension => "extension",
             Self::Restart => "restart",
+            Self::RestartInternal => "restart-internal",
+            Self::SettingsReset => "settings-reset-internal",
             Self::Status => "status",
             Self::Show => "show",
             Self::Settings => "settings",
@@ -324,6 +349,7 @@ struct Cli {
     state_dir: Option<PathBuf>,
     version: bool,
     help: bool,
+    approve_update: bool,
 }
 
 pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
@@ -369,6 +395,9 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
                 | CommandKind::Profile
                 | CommandKind::Installation
                 | CommandKind::Extension
+                | CommandKind::LegacyMigrationRoute
+                | CommandKind::MigrationIntegrationHandover
+                | CommandKind::Update
         )
     {
         return Err("--assets is not valid with this command".into());
@@ -432,11 +461,109 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
         };
         return update_status(&state_dir, cli.update_operation.as_deref());
     }
+    if command == CommandKind::Update {
+        if !identity::LEGACY
+            || !cli.approve_update
+            || cli.config_dir.is_none()
+            || cli.state_dir.is_none()
+        {
+            return Err("update --yes is an explicit successor bridge approval and requires both --config-dir ABS and --state-dir ABS".into());
+        }
+        let paths = Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?;
+        let (plan, path) = desktop_pet_update_coordinator::migration::approve_profile_update(
+            &paths.config_dir,
+            &paths.state_dir,
+            identity::herdr_migration_revision(),
+        )?;
+        let helper = plan
+            .target
+            .staged_bundle
+            .join("Contents/MacOS")
+            .join(identity::neutral::HELPER);
+        // Replace this legacy CLI process so real source-root retirement is not
+        // obstructed by an otherwise idle waiter mapped from the retiring image.
+        let error = Command::new(helper)
+            .args(["migrate-legacy", "--plan"])
+            .arg(path)
+            .env_clear()
+            .envs(&plan.profiles[0].environment)
+            .stdin(Stdio::null())
+            .exec();
+        return Err(format!(
+            "verified automatic update helper could not execute: {error}"
+        ));
+    }
+    if command == CommandKind::LegacyMigrationRoute {
+        if identity::LEGACY {
+            return Err("legacy distributions cannot authorize neutral integration routes".into());
+        }
+        if cli.config_dir.is_none() || cli.state_dir.is_none() {
+            return Err(
+                "legacy-migration-route requires both original absolute profile directories".into(),
+            );
+        }
+        let paths = Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?;
+        let mut input = Vec::new();
+        io::stdin()
+            .lock()
+            .take(16385)
+            .read_to_end(&mut input)
+            .map_err(|e| e.to_string())?;
+        if input.len() > 16384 {
+            return Err("migration route request exceeds its bound".into());
+        }
+        let route = desktop_pet_update_coordinator::migration::committed_route(
+            &paths.config_dir,
+            &paths.state_dir,
+            &input,
+        )?;
+        let executable = bundle::executable().map_err(|e| e.to_string())?;
+        if route["target"]["executable"].as_str() != executable.to_str() {
+            return Err("migration route target is not this verified executable".into());
+        }
+        return print_json(&route);
+    }
+    if command == CommandKind::MigrationIntegrationHandover {
+        if identity::LEGACY {
+            return Err("legacy distributions cannot confirm neutral integration handovers".into());
+        }
+        let (config_dir, state_dir) = migration_handover_profile(&cli)?;
+        let mut input = Vec::new();
+        io::stdin()
+            .lock()
+            .take(16385)
+            .read_to_end(&mut input)
+            .map_err(|e| e.to_string())?;
+        if input.len() > 16384 {
+            return Err("migration handover request exceeds its bound".into());
+        }
+        let response = desktop_pet_update_coordinator::migration::integration_handover(
+            config_dir, state_dir, &input,
+        )?;
+        return print_json(&response);
+    }
     let paths = if command == CommandKind::Extension || command == CommandKind::Status {
         Paths::resolve_readonly(cli.config_dir.as_deref(), cli.state_dir.as_deref())?
     } else {
         Paths::resolve(cli.config_dir.as_deref(), cli.state_dir.as_deref())?
     };
+    if command == CommandKind::RestartInternal {
+        if cli.config_dir.is_none() || cli.state_dir.is_none() {
+            return Err("restart requires the captured explicit profile".into());
+        }
+        return run_restart(&paths, cli.assets.as_deref(), &cli.extension_options);
+    }
+    if command == CommandKind::SettingsReset {
+        if cli.config_dir.is_none() || cli.state_dir.is_none() {
+            return Err("settings reset requires the captured explicit profile".into());
+        }
+        return run_settings_reset(
+            &paths,
+            cli.assets.as_deref(),
+            &cli.extension_options,
+            &composition,
+        );
+    }
     if command == CommandKind::Extension {
         if cli.assets.is_some() {
             return Err("--assets is not valid with integration commands".into());
@@ -555,14 +682,32 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
         cli.assets
     };
     if command == CommandKind::Daemon {
-        let (generation, token) = updater_start_authorization()?;
-        admit_startup(&paths, generation, token.as_deref(), &observation_mode)?;
+        let (generation, token) = startup_authorization()?;
+        admit_startup(
+            &paths,
+            generation,
+            token.as_deref(),
+            &observation_mode,
+            &Cell::new(None),
+        )?;
         let automatic_start = match env::var("DESKTOP_PET_AUTOMATIC_START") {
             Ok(value) if value == "1" => true,
             Ok(value) if value == "0" => false,
             Err(env::VarError::NotPresent) => false,
             _ => return Err("invalid DESKTOP_PET_AUTOMATIC_START".into()),
         };
+        let mut restart_options = cli.extension_options;
+        if assets_override {
+            restart_options.push("--assets".into());
+            restart_options.push(
+                assets
+                    .as_ref()
+                    .ok_or("daemon assets unavailable")?
+                    .as_os_str()
+                    .to_owned(),
+            );
+        }
+        let _ = DAEMON_RESTART_OPTIONS.set(restart_options);
         return daemon::run(DaemonConfig {
             paths,
             assets: assets.ok_or("daemon assets unavailable")?,
@@ -586,6 +731,29 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
         composition,
         cli.extension_options,
     )
+}
+
+fn migration_handover_profile(cli: &Cli) -> Result<(&Path, &Path), String> {
+    let config_dir = cli
+        .config_dir
+        .as_deref()
+        .ok_or("migration-integration-handover requires --config-dir ABS")?;
+    let state_dir = cli
+        .state_dir
+        .as_deref()
+        .ok_or("migration-integration-handover requires --state-dir ABS")?;
+    if !config_dir.is_absolute() || !state_dir.is_absolute() {
+        return Err(
+            "migration-integration-handover requires both original absolute profile directories"
+                .into(),
+        );
+    }
+    if cli.host.is_some() || cli.assets.is_some() || !cli.extension_options.is_empty() {
+        return Err(
+            "migration-integration-handover accepts only the original profile directories".into(),
+        );
+    }
+    Ok((config_dir, state_dir))
 }
 
 fn require_profile_identity(response: &ControlResponse, paths: &Paths) -> Result<(), String> {
@@ -679,6 +847,10 @@ fn execute_command(
                 composition,
                 extension_options,
             )
+        }
+        CommandKind::SettingsReset => unreachable!("internal reset is dispatched before startup"),
+        CommandKind::RestartInternal => {
+            unreachable!("internal restart is dispatched before startup")
         }
         CommandKind::Stop => stop(paths),
         CommandKind::Status => status(paths, observation_mode, &composition),
@@ -1033,7 +1205,14 @@ pub(crate) fn new_operation_id() -> String {
     format!("{nanos:x}-{:x}-{counter:x}", std::process::id())
 }
 
-fn startup_origin(paths: &Paths, selection: ObservationSelection) -> Result<InstallOrigin, String> {
+/// `verified` is this launch's already verified installation owner. Owner classification fully
+/// validates the app bundle, so it is not repeated for every admission (as in the daemon); the
+/// context, migration authorization and updater fences are still rebuilt and re-read each time.
+fn startup_origin(
+    paths: &Paths,
+    selection: ObservationSelection,
+    verified: Option<InstallOrigin>,
+) -> Result<InstallOrigin, String> {
     let executable = bundle::executable().map_err(|e| e.to_string())?;
     let context = UpdateContext {
         running: executable_identity(&executable)?,
@@ -1049,27 +1228,50 @@ fn startup_origin(paths: &Paths, selection: ObservationSelection) -> Result<Inst
         herdr_socket: desktop_pet_update_coordinator::legacy_entry::herdr_socket(),
         running_origin: None,
         assets_override: None,
-        environment: daemon::captured_environment(selection, |key| env::var(key).ok())?,
+        environment: desktop_pet_update_coordinator::native_runtime::captured_environment(
+            selection,
+            |key| env::var(key).ok(),
+        )?,
         locale: "en".into(),
     };
     daemon::validate_migration_startup_context(&context)?;
-    Ok(detect_origin(&context).unwrap_or_else(|reason| InstallOrigin::Unknown { reason }))
+    Ok(verified.unwrap_or_else(|| {
+        detect_origin(&context).unwrap_or_else(|reason| InstallOrigin::Unknown { reason })
+    }))
 }
 
-fn updater_start_authorization() -> Result<(Option<u64>, Option<String>), String> {
-    let generation = env::var("DESKTOP_PET_UPDATER_GENERATION")
-        .ok()
+const MANUAL_START_GENERATION_ENV: &str = "DESKTOP_PET_MANUAL_START_STOP_GENERATION";
+
+fn parse_startup_authorization(
+    updater_generation: Option<String>,
+    updater_token: Option<String>,
+    manual_generation: Option<String>,
+) -> Result<(Option<u64>, Option<String>), String> {
+    if manual_generation.is_some() && (updater_generation.is_some() || updater_token.is_some()) {
+        return Err("independent manual start cannot use updater authorization".into());
+    }
+    if updater_generation.is_some() != updater_token.is_some() {
+        return Err("updater start needs both token and generation".into());
+    }
+    let generation = updater_generation
+        .or(manual_generation)
         .map(|value| {
             value
                 .parse::<u64>()
-                .map_err(|_| "invalid updater generation".to_owned())
+                .map_err(|_| "invalid startup Stop generation".to_owned())
         })
         .transpose()?;
-    let token = env::var("DESKTOP_PET_UPDATER_TOKEN").ok();
-    if generation.is_some() != token.is_some() {
-        return Err("updater start needs both token and generation".into());
-    }
-    Ok((generation, token))
+    Ok((generation, updater_token))
+}
+
+/// An independent manual start carries a Stop fence, never updater authority.
+/// Daemon admission must consume the same fence all the way through readiness.
+pub(crate) fn startup_authorization() -> Result<(Option<u64>, Option<String>), String> {
+    parse_startup_authorization(
+        env::var("DESKTOP_PET_UPDATER_GENERATION").ok(),
+        env::var("DESKTOP_PET_UPDATER_TOKEN").ok(),
+        env::var(MANUAL_START_GENERATION_ENV).ok(),
+    )
 }
 
 fn admit_startup(
@@ -1077,14 +1279,21 @@ fn admit_startup(
     expected_generation: Option<u64>,
     updater_token: Option<&str>,
     observation_mode: &ObservationSelection,
+    verified_origin: &Cell<Option<InstallOrigin>>,
 ) -> Result<(), String> {
-    let origin = startup_origin(paths, observation_mode.clone())?;
-    start_allowed(
+    let origin = startup_origin(paths, observation_mode.clone(), verified_origin.take())?;
+    let allowed = start_allowed(
         &origin,
         &paths.state_dir,
         expected_generation,
         updater_token,
-    )
+    );
+    // An unverified owner is re-detected next time so a transient validation failure never
+    // relaxes later installation reservation checks.
+    if !matches!(origin, InstallOrigin::Unknown { .. }) {
+        verified_origin.set(Some(origin));
+    }
+    allowed
 }
 
 fn ensure(
@@ -1101,8 +1310,17 @@ fn ensure(
     if settings_request && control::control_socket_is_live(&paths.control_socket, CONTROL_TIMEOUT) {
         return open_settings(&paths);
     }
-    let (generation, token) = updater_start_authorization()?;
-    let admit = || admit_startup(&paths, generation, token.as_deref(), &observation_mode);
+    let (generation, token) = startup_authorization()?;
+    let verified_origin = Cell::new(None);
+    let admit = || {
+        admit_startup(
+            &paths,
+            generation,
+            token.as_deref(),
+            &observation_mode,
+            &verified_origin,
+        )
+    };
     admit()?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let mut last_error = None;
@@ -1360,15 +1578,44 @@ fn update_status_payload(
     operation_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let record = if let Some(id) = operation_id {
-        read_operation(state_dir, id)?
+        observe_operation(state_dir, id)?
             .ok_or_else(|| format!("no durable update operation found for {id}"))?
     } else {
-        let Some(record) = latest_operation(state_dir)? else {
+        let Some(record) = observe_latest_operation(state_dir)? else {
             return Ok(serde_json::json!({
                 "type": "update-status", "record": null, "recovery": "No update operation recorded for this profile."
             }));
         };
         record
+    };
+    let record = match record {
+        OperationObservation::Update(record) => record,
+        OperationObservation::StandaloneInstall(record) => {
+            let plan = desktop_pet_update_coordinator::standalone_install::read_plan(
+                state_dir,
+                &record.operation_id,
+            )?;
+            record.validate(&plan)?;
+            let helper = &plan.helper_image.path;
+            let staged = fs::symlink_metadata(helper).ok().is_some_and(|metadata| {
+                metadata.is_file()
+                    && metadata.uid() == lifecycle::effective_uid()
+                    && metadata.permissions().mode() & 0o077 == 0
+            });
+            return Ok(serde_json::json!({
+                "type": "update-status",
+                "kind": "standalone_install",
+                "operation_id": record.operation_id,
+                "record": record,
+                "plan": plan,
+                "live_process_evidence": "Not inspected by this offline journal command.",
+                "staged_helper_present_private": staged,
+                "staged_helper_signature_verified": false,
+                "helper_status_command": staged.then(|| serde_json::json!([helper, "install-status", "--state-dir", state_dir, "--operation-id", record.operation_id])),
+                "helper_recover_command": staged.then(|| serde_json::json!([helper, "install-recover", "--state-dir", state_dir, "--operation-id", record.operation_id])),
+                "recovery": "Verify the retained private helper signature and identity against the immutable plan, then use install-status and install-recover. Recovery reconciles existing authority; it does not grant a new restart or repeat Stop."
+            }));
+        }
     };
     let plan = desktop_pet_update_coordinator::read_plan(state_dir, &record.operation_id);
     let helper = state_dir
@@ -1385,6 +1632,7 @@ fn update_status_payload(
     let last_durable_phase = record.phase;
     Ok(serde_json::json!({
         "type": "update-status",
+        "kind": "update",
         "operation_id": id,
         "record": record,
         "last_durable_phase": last_durable_phase,
@@ -1577,6 +1825,30 @@ fn wait_for_ready(
     })))
 }
 
+fn configure_startup_authorization(
+    command: &mut Command,
+    (generation, token): (Option<u64>, Option<String>),
+) {
+    command
+        .env_remove("DESKTOP_PET_UPDATER_GENERATION")
+        .env_remove("DESKTOP_PET_UPDATER_TOKEN")
+        .env_remove(MANUAL_START_GENERATION_ENV);
+    match (generation, token) {
+        (Some(generation), Some(token)) => {
+            command
+                .env("DESKTOP_PET_UPDATER_GENERATION", generation.to_string())
+                .env("DESKTOP_PET_UPDATER_TOKEN", token);
+        }
+        (Some(generation), None) => {
+            command.env(MANUAL_START_GENERATION_ENV, generation.to_string());
+        }
+        (None, None) => {}
+        (None, Some(_)) => {
+            unreachable!("startup authorization parser rejects incomplete updater pair")
+        }
+    }
+}
+
 fn spawn_daemon(
     paths: &Paths,
     assets: Option<&Path>,
@@ -1630,15 +1902,7 @@ fn spawn_daemon(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_stderr));
     command.args(extension_options);
-    if let (Some(generation), Some(token)) = updater_start_authorization()? {
-        command
-            .env("DESKTOP_PET_UPDATER_GENERATION", generation.to_string())
-            .env("DESKTOP_PET_UPDATER_TOKEN", token);
-    } else {
-        command
-            .env_remove("DESKTOP_PET_UPDATER_GENERATION")
-            .env_remove("DESKTOP_PET_UPDATER_TOKEN");
-    }
+    configure_startup_authorization(&mut command, startup_authorization()?);
     if assets_override {
         command
             .arg("--assets")
@@ -1656,6 +1920,579 @@ fn spawn_daemon(
         .spawn()
         .map(|child| child.id())
         .map_err(|error| format!("cannot start detached desktop-pet daemon: {error}"))
+}
+
+const RESTART_SOURCE_ENV: &str = "DESKTOP_PET_RESTART_SOURCE_PID";
+const RESTART_INSTANCE_ENV: &str = "DESKTOP_PET_RESTART_SOURCE_INSTANCE";
+const RESTART_GENERATION_ENV: &str = "DESKTOP_PET_RESTART_STOP_GENERATION";
+const SETTINGS_RESET_SOURCE_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_SOURCE_PID";
+const SETTINGS_RESET_GENERATION_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_STOP_GENERATION";
+const SETTINGS_RESET_INSTANCE_ENV: &str = "DESKTOP_PET_SETTINGS_RESET_SOURCE_INSTANCE";
+
+pub(crate) fn spawn_restart(
+    paths: &Paths,
+    observation_mode: &ObservationSelection,
+    source_instance: &str,
+    expected_stop_generation: u64,
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+    let command = shutdown_worker_command(
+        paths,
+        observation_mode,
+        source_instance,
+        expected_stop_generation,
+        false,
+    )?;
+    let log_path = paths.log_file.clone();
+    spawn_shutdown_reporter(command, log_path.clone(), move |status| {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "restart worker exited with {status}; inspect {}",
+                log_path.display()
+            ))
+        }
+    })
+}
+
+/// A receiver carries only a proved child exit (or failure to spawn), never an
+/// uncertain wait. The source retains its exact handoff if delivery is lost.
+pub(crate) fn spawn_settings_reset(
+    paths: &Paths,
+    observation_mode: &ObservationSelection,
+    source_instance: &str,
+    expected_stop_generation: u64,
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+    let command = shutdown_worker_command(
+        paths,
+        observation_mode,
+        source_instance,
+        expected_stop_generation,
+        true,
+    )?;
+    let paths = paths.clone();
+    spawn_shutdown_reporter(command, paths.log_file.clone(), move |status| {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(crate::settings_recovery::load_last_result(&paths)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    format!(
+                        "settings reset worker exited with {status}; inspect {}",
+                        paths.log_file.display()
+                    )
+                }))
+        }
+    })
+}
+
+fn shutdown_worker_command(
+    paths: &Paths,
+    observation_mode: &ObservationSelection,
+    source_instance: &str,
+    expected_stop_generation: u64,
+    reset: bool,
+) -> Result<Command, String> {
+    let options = DAEMON_RESTART_OPTIONS
+        .get()
+        .ok_or("running daemon restart options are unavailable")?;
+    let executable = bundle::executable().map_err(|e| e.to_string())?;
+    let log = private_shutdown_log(&paths.log_file)?;
+    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let mut command = Command::new(executable);
+    command
+        .arg(if reset {
+            "settings-reset-internal"
+        } else {
+            "restart-internal"
+        })
+        .arg("--config-dir")
+        .arg(&paths.config_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .arg("--host")
+        .arg(observation_mode.as_str())
+        .args(options)
+        .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+        .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+        .env(OBSERVATION_SELECTION_ENV, observation_mode.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+    clear_shutdown_authorization(&mut command);
+    let (pid, instance, generation) = if reset {
+        (
+            SETTINGS_RESET_SOURCE_ENV,
+            SETTINGS_RESET_INSTANCE_ENV,
+            SETTINGS_RESET_GENERATION_ENV,
+        )
+    } else {
+        (
+            RESTART_SOURCE_ENV,
+            RESTART_INSTANCE_ENV,
+            RESTART_GENERATION_ENV,
+        )
+    };
+    command
+        .env(pid, std::process::id().to_string())
+        .env(instance, source_instance)
+        .env(generation, expected_stop_generation.to_string());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(command)
+}
+
+fn clear_shutdown_authorization(command: &mut Command) {
+    configure_startup_authorization(command, (None, None));
+    for name in [
+        "DESKTOP_PET_STARTUP_TOKEN",
+        SETTINGS_RESET_SOURCE_ENV,
+        SETTINGS_RESET_INSTANCE_ENV,
+        SETTINGS_RESET_GENERATION_ENV,
+        RESTART_SOURCE_ENV,
+        RESTART_INSTANCE_ENV,
+        RESTART_GENERATION_ENV,
+    ] {
+        command.env_remove(name);
+    }
+}
+
+fn private_shutdown_log(path: &Path) -> Result<fs::File, String> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(LOG_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| format!("cannot open shutdown worker log: {e}"))?;
+    let metadata = log.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("shutdown worker log must be private and owned".into());
+    }
+    Ok(log)
+}
+
+fn spawn_shutdown_reporter(
+    mut command: Command,
+    log_path: PathBuf,
+    completion: impl FnOnce(std::process::ExitStatus) -> Result<(), String> + Send + 'static,
+) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Establish the owner before creating a child. A Builder failure therefore
+    // proves that no detached worker can still act on the held source.
+    thread::Builder::new().name("shutdown-worker-reporter".into()).spawn(move || {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = sender.send(Err(format!("cannot launch shutdown worker: {error}")));
+                return;
+            }
+        };
+        let mut reported_wait_error = false;
+        loop {
+            match child.wait() {
+                Ok(status) => {
+                    let _ = sender.send(completion(status));
+                    return;
+                }
+                Err(error) => {
+                    if !reported_wait_error {
+                        if let Ok(mut log) = private_shutdown_log(&log_path) {
+                            let _ = writeln!(log, "Cannot prove shutdown worker exit; retaining child and retrying reap: {error}");
+                        }
+                        reported_wait_error = true;
+                    }
+                    thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+    }).map_err(|error| format!("cannot create shutdown worker reporter: {error}"))?;
+    Ok(receiver)
+}
+
+fn next_shutdown_generation(generation: u64) -> Result<u64, String> {
+    generation
+        .checked_add(1)
+        .ok_or_else(|| "Stop generation overflow".into())
+}
+
+fn verify_shutdown_source(
+    source: &ControlResponse,
+    paths: &Paths,
+    image: &desktop_pet_update_coordinator::ExecutableIdentity,
+    source_pid: u32,
+    source_instance: &str,
+    selection: &ObservationSelection,
+) -> Result<(), String> {
+    if !source.ok || source.version != control::PROTOCOL_VERSION || source.command != "status" {
+        return Err("source status used an unsupported control response".into());
+    }
+    require_profile_identity(source, paths)?;
+    if source_pid == 0
+        || source.pid != source_pid
+        || source.running_sha256 != image.sha256
+        || source.observation_mode != selection.as_str()
+        || source_instance.is_empty()
+        || source.instance_id != source_instance
+        || source.shutdown
+        || !source.ready
+        || !source.running
+        || !source.ui_ready
+        || !source.control_ready
+    {
+        return Err(
+            "authenticated source instance, image, readiness or observation changed".into(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_shutdown_ack(
+    source: &ControlResponse,
+    reply: &ControlResponse,
+    paths: &Paths,
+) -> Result<(), String> {
+    require_profile_identity(reply, paths)?;
+    if !reply.ok
+        || reply.version != control::PROTOCOL_VERSION
+        || reply.command != "stop"
+        || !reply.shutdown
+        || reply.pid != source.pid
+        || reply.instance_id != source.instance_id
+        || reply.executable_path != source.executable_path
+        || reply.running_sha256 != source.running_sha256
+        || reply.config_dir != source.config_dir
+        || reply.state_dir != source.state_dir
+    {
+        return Err("Stop was not acknowledged by the exact authenticated source".into());
+    }
+    Ok(())
+}
+
+fn wait_shutdown_source(
+    paths: &Paths,
+    source_pid: u32,
+    admit: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        admit()?;
+        let absent = unsafe { libc::kill(source_pid as i32, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        let socket_gone = fs::symlink_metadata(&paths.control_socket)
+            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+        if absent && socket_gone && !lifecycle::startup_pending(&paths.config_dir)? {
+            return admit();
+        }
+        if Instant::now() >= deadline {
+            return Err("authenticated source process/socket/startup exit is unproved".into());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn run_restart(
+    paths: &Paths,
+    assets: Option<&Path>,
+    extension_options: &[OsString],
+) -> Result<(), String> {
+    let result = (|| {
+        use desktop_pet_update_coordinator::{native_runtime, protocol};
+        let source_pid: u32 = env::var(RESTART_SOURCE_ENV)
+            .map_err(|_| "restart requires source UI admission")?
+            .parse()
+            .map_err(|_| "invalid restart source PID")?;
+        let source_instance = env::var(RESTART_INSTANCE_ENV)
+            .map_err(|_| "restart requires the admitted source instance")?;
+        let generation: u64 = env::var(RESTART_GENERATION_ENV)
+            .map_err(|_| "restart requires a captured Stop fence")?
+            .parse()
+            .map_err(|_| "invalid restart Stop fence")?;
+        let selection = env::var(OBSERVATION_SELECTION_ENV)
+            .map_err(|_| "restart requires captured observation context")?
+            .parse::<ObservationSelection>()?;
+        let origin = startup_origin(paths, selection.clone(), None)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        let (source, peer): (ControlResponse, _) = native_runtime::exchange_observed(
+            &paths.control_socket,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"status"}),
+            CONTROL_TIMEOUT,
+        )?;
+        let image = executable_identity(&bundle::executable().map_err(|e| e.to_string())?)?;
+        verify_shutdown_source(
+            &source,
+            paths,
+            &image,
+            source_pid,
+            &source_instance,
+            &selection,
+        )?;
+        if peer.incarnation().pid != source_pid || peer.path() != image.path {
+            return Err("restart source kernel peer differs from the authenticated image".into());
+        }
+        let assets_override =
+            authenticated_source_assets_override(assets, source.assets_override.as_deref())?;
+        let restart_generation = next_shutdown_generation(generation)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        // Exactly one bound ordinary Stop. An uncertain ACK never permits a retry
+        // or a launch, even if the source happens to disappear afterwards.
+        let reply: ControlResponse = native_runtime::exchange_observed_peer(
+            &paths.control_socket, &peer,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"stop"}),
+            CONTROL_TIMEOUT,
+        ).map_err(|e| format!("Stop acknowledgement could not be verified; no retry or restart was performed: {e}"))?;
+        verify_shutdown_ack(&source, &reply, paths)
+            .map_err(|e| format!("Stop acknowledgement could not be verified; no retry or restart was performed: {e}"))?;
+        let admit =
+            || protocol::start_allowed(&origin, &paths.state_dir, Some(restart_generation), None);
+        wait_shutdown_source(paths, source_pid, admit)?;
+        let mut command = Command::new(&image.path);
+        command
+            .arg("start")
+            .arg("--config-dir")
+            .arg(&paths.config_dir)
+            .arg("--state-dir")
+            .arg(&paths.state_dir)
+            .arg("--host")
+            .arg(selection.as_str())
+            .args(extension_options)
+            .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+            .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+            .env(OBSERVATION_SELECTION_ENV, selection.as_str())
+            .stdin(Stdio::null());
+        clear_shutdown_authorization(&mut command);
+        configure_startup_authorization(&mut command, (Some(restart_generation), None));
+        if let Some(assets) = assets_override {
+            command.arg("--assets").arg(assets);
+        }
+        let status = restart_if_source_unchanged(
+            &image,
+            &origin,
+            || startup_origin(paths, selection.clone(), None),
+            || {
+                admit()?;
+                command
+                    .status()
+                    .map_err(|e| format!("restart could not launch: {e}"))
+            },
+        )?;
+        if !status.success() {
+            return Err(format!("restart failed ({status}); a later Stop or updater reservation may have superseded restart"));
+        }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        let message = format!(
+            "Native restart did not complete: {error}. See {} for details.",
+            paths.log_file.display()
+        );
+        eprintln!("{message}");
+        if source_process_absent(RESTART_SOURCE_ENV) {
+            let _ = Command::new("/usr/bin/osascript")
+                .arg("-e").arg("on run argv\n display alert \"Native restart\" message (item 1 of argv) as critical buttons {\"OK\"} default button \"OK\"\nend run")
+                .arg(&message).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        }
+    }
+    result
+}
+
+fn source_process_absent(variable: &str) -> bool {
+    env::var(variable).ok().and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .is_some_and(|pid| unsafe { libc::kill(pid as i32, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+}
+
+fn run_settings_reset(
+    paths: &Paths,
+    assets: Option<&Path>,
+    extension_options: &[OsString],
+    composition: &Composition,
+) -> Result<(), String> {
+    let mut backup = None;
+    let result = (|| {
+        use desktop_pet_update_coordinator::{native_runtime, protocol};
+        let source_pid: u32 = env::var(SETTINGS_RESET_SOURCE_ENV)
+            .map_err(|_| "settings reset requires source UI admission")?
+            .parse()
+            .map_err(|_| "invalid settings reset source")?;
+        let source_instance = env::var(SETTINGS_RESET_INSTANCE_ENV)
+            .map_err(|_| "settings reset requires the admitted source instance")?;
+        let generation: u64 = env::var(SETTINGS_RESET_GENERATION_ENV)
+            .map_err(|_| "settings reset requires a captured Stop fence")?
+            .parse()
+            .map_err(|_| "invalid settings reset Stop fence")?;
+        let selection = env::var(OBSERVATION_SELECTION_ENV)
+            .map_err(|_| "settings reset requires captured observation context")?
+            .parse::<ObservationSelection>()?;
+        let origin = startup_origin(paths, selection.clone(), None)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        let (source, peer): (ControlResponse, _) = native_runtime::exchange_observed(
+            &paths.control_socket,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"status"}),
+            CONTROL_TIMEOUT,
+        )?;
+        let image = executable_identity(&bundle::executable().map_err(|e| e.to_string())?)?;
+        verify_shutdown_source(
+            &source,
+            paths,
+            &image,
+            source_pid,
+            &source_instance,
+            &selection,
+        )?;
+        if peer.incarnation().pid != source_pid || peer.path() != image.path {
+            return Err(
+                "settings reset source kernel peer differs from the authenticated image".into(),
+            );
+        }
+        let assets_override =
+            authenticated_source_assets_override(assets, source.assets_override.as_deref())?;
+        Preferences::load_committed(&paths.config_dir)?;
+        lifecycle::read_settings(&paths.config_dir)?;
+        let listing = PackStore::new_read_only(paths.config_dir.clone(), None).list()?;
+        if let Some(error) = listing.error {
+            return Err(format!(
+                "character registry needs recovery before settings reset: {error}"
+            ));
+        }
+        // Unlike cli::stop, this worker does not record a client-side Stop.
+        // The ordinary server handler alone records the one increment before
+        // acknowledging shutdown; never retry Stop or refresh this baseline.
+        let restart_generation = next_shutdown_generation(generation)?;
+        let expected = crate::settings_recovery::capture(paths)?;
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None)?;
+        let reply: ControlResponse = native_runtime::exchange_observed_peer(
+            &paths.control_socket,
+            &peer,
+            &serde_json::json!({"version":control::PROTOCOL_VERSION,"command":"stop"}),
+            CONTROL_TIMEOUT,
+        )?;
+        verify_shutdown_ack(&source, &reply, paths)?;
+        let admit =
+            || protocol::start_allowed(&origin, &paths.state_dir, Some(restart_generation), None);
+        wait_shutdown_source(paths, source_pid, admit)?;
+        let profile = ProfileStore::acquire(&paths.config_dir, &paths.state_dir)?
+            .with_preferences_validator(Preferences::validate_committed_object);
+        let retained = crate::settings_recovery::reset(
+            paths,
+            &profile,
+            &composition.extensions.lifecycle,
+            &expected,
+            &admit,
+        )?;
+        backup = Some(retained);
+        drop(profile);
+        admit()?;
+        let defaults = Preferences::load_committed(&paths.config_dir)?.observation_host();
+        let mut command = Command::new(&image.path);
+        command
+            .arg("start")
+            .arg("--config-dir")
+            .arg(&paths.config_dir)
+            .arg("--state-dir")
+            .arg(&paths.state_dir)
+            .arg("--host")
+            .arg(defaults.as_str())
+            .args(extension_options)
+            .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+            .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+            .env(OBSERVATION_SELECTION_ENV, defaults.as_str())
+            .stdin(Stdio::null());
+        clear_shutdown_authorization(&mut command);
+        if let Some(assets) = &assets_override {
+            command.arg("--assets").arg(assets);
+        }
+        configure_startup_authorization(&mut command, (Some(restart_generation), None));
+        let status = restart_if_source_unchanged(
+            &image,
+            &origin,
+            || startup_origin(paths, selection.clone(), None),
+            || {
+                command.status().map_err(|e| {
+                    format!("settings reset committed, but restart could not launch: {e}")
+                })
+            },
+        )?;
+        if !status.success() {
+            return Err(format!("settings reset committed, but restart failed ({status}); a later Stop or updater reservation may have superseded restart"));
+        }
+        crate::settings_recovery::record_result(paths, "Native settings reset and restart completed. Installed character packs, integration routing and updater evidence were preserved.", backup.as_deref())?;
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        let message = format!(
+            "Native settings reset did not complete; settings may already be partly or fully reset: {error}. Inspect the saved result and retained backup before retrying. See {} for details.",
+            paths.log_file.display()
+        );
+        let _ = crate::settings_recovery::record_result(paths, &message, backup.as_deref());
+        eprintln!("{message}");
+        // A live source receives this error through the coordinator. Only a
+        // proven-absent source needs a separate native alert; its presentation
+        // must never keep the transaction worker or source admission frozen.
+        let source_absent = source_process_absent(SETTINGS_RESET_SOURCE_ENV);
+        if source_absent {
+            let _ = Command::new("/usr/bin/osascript")
+                .arg("-e").arg("on run argv\n display alert \"Native settings reset\" message (item 1 of argv) as critical buttons {\"OK\"} default button \"OK\"\nend run")
+                .arg(&message).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        }
+    }
+    result
+}
+
+/// Renderer preflight must not promote the resolved builtin assets directory
+/// into an external override. The authenticated source owns that distinction.
+fn authenticated_source_assets_override(
+    invocation: Option<&Path>,
+    source_override: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let resolved = resolve_assets(source_override.map(Path::new))?;
+    if let Some(invocation) = invocation {
+        if source_override.is_none() || resolve_assets(Some(invocation))? != resolved {
+            return Err("invocation assets differ from the authenticated source override".into());
+        }
+    }
+    Ok(source_override.map(|_| resolved))
+}
+
+/// Revalidate the captured installation and executable immediately before
+/// launch. Source checkouts intentionally retain their unsigned dev baseline,
+/// but not permission to execute replacement bytes at the same mutable path.
+fn restart_if_source_unchanged<T>(
+    image: &desktop_pet_update_coordinator::ExecutableIdentity,
+    origin: &InstallOrigin,
+    current_origin: impl FnOnce() -> Result<InstallOrigin, String>,
+    restart: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let blocked = |detail| {
+        format!("Restart blocked because the authenticated source image or installation changed: {detail}")
+    };
+    // Origin discovery may execute --version/capability probes for installed
+    // apps. Authenticate bytes before permitting even that probe boundary.
+    let current_image = executable_identity(&image.path).map_err(&blocked)?;
+    if &current_image != image {
+        return Err(blocked("executable path or SHA-256 differs".to_owned()));
+    }
+    let current_origin = current_origin().map_err(&blocked)?;
+    if &current_origin != origin {
+        return Err(blocked("installation origin differs".to_owned()));
+    }
+    let current_image = executable_identity(&image.path).map_err(&blocked)?;
+    if &current_image != image {
+        return Err(blocked("executable path or SHA-256 differs".to_owned()));
+    }
+    restart()
 }
 
 fn print_response(response: &ControlResponse) -> Result<(), String> {
@@ -1694,6 +2531,13 @@ where
     let mut automation_tokens = Vec::new();
     let mut update_tokens = Vec::new();
     while let Some(argument) = arguments.next() {
+        if argument == "--yes" && cli.command == Some(CommandKind::Update) {
+            if cli.approve_update {
+                return Err("--yes was supplied more than once".into());
+            }
+            cli.approve_update = true;
+            continue;
+        }
         if cli.command == Some(CommandKind::Preferences) {
             let is_extension_value = automation_tokens.last().is_some_and(|last: &String| {
                 composition.extensions.lifecycle.iter().any(|extension| {
@@ -2722,6 +3566,458 @@ fn validate_assets_path(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shutdown_response(paths: &Paths) -> ControlResponse {
+        let image = executable_identity(&bundle::executable().unwrap()).unwrap();
+        serde_json::from_value(serde_json::json!({
+            "type":"status", "version":control::PROTOCOL_VERSION, "app_version":"test",
+            "updater_protocol":4, "observation_capability":1, "integration_api":1,
+            "update_ui_visible":false, "migration_gated":false, "ok":true, "command":"status",
+            "ready":true, "running":true, "phase":"idle", "observation_mode":"auto",
+            "ui_ready":true, "control_ready":true, "registration_accepted":false,
+            "data_connected":false, "connected_sources":0, "disconnected_sources":0,
+            "sessions":0, "working":0, "blocked":0, "done":0, "unknown":0,
+            "visible":true, "passthrough":false, "scale":1.0, "shutdown":false,
+            "auto_start":true, "pid":std::process::id(), "instance_id":"source-instance",
+            "running_sha256":image.sha256, "executable_path":image.path,
+            "config_dir":paths.config_dir, "state_dir":paths.state_dir
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn shutdown_authentication_requires_exact_live_source_and_stop_identity() {
+        let root = tempfile::Builder::new()
+            .prefix("pet-shutdown-identity-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let paths = Paths::resolve(
+            Some(&root.path().join("config")),
+            Some(&root.path().join("state")),
+        )
+        .unwrap();
+        let source = shutdown_response(&paths);
+        let image = executable_identity(&bundle::executable().unwrap()).unwrap();
+        let selection = ObservationSelection::Auto;
+        let verify = |value: &ControlResponse| {
+            verify_shutdown_source(
+                value,
+                &paths,
+                &image,
+                source.pid,
+                &source.instance_id,
+                &selection,
+            )
+        };
+        verify(&source).unwrap();
+        for mutate in [
+            |value: &mut ControlResponse| value.pid += 1,
+            |value: &mut ControlResponse| value.instance_id.push('x'),
+            |value: &mut ControlResponse| value.running_sha256.push('0'),
+            |value: &mut ControlResponse| value.executable_path.push('x'),
+            |value: &mut ControlResponse| value.config_dir.push('x'),
+            |value: &mut ControlResponse| value.state_dir.push('x'),
+            |value: &mut ControlResponse| value.observation_mode = "unselected".into(),
+            |value: &mut ControlResponse| value.ready = false,
+            |value: &mut ControlResponse| value.ui_ready = false,
+            |value: &mut ControlResponse| value.control_ready = false,
+            |value: &mut ControlResponse| value.shutdown = true,
+        ] {
+            let mut changed = source.clone();
+            mutate(&mut changed);
+            assert!(verify(&changed).is_err());
+        }
+        let mut ack = source.clone();
+        ack.command = "stop".into();
+        ack.shutdown = true;
+        ack.ready = false;
+        verify_shutdown_ack(&source, &ack, &paths).unwrap();
+        for mutate in [
+            |value: &mut ControlResponse| value.version += 1,
+            |value: &mut ControlResponse| value.command = "status".into(),
+            |value: &mut ControlResponse| value.ok = false,
+            |value: &mut ControlResponse| value.shutdown = false,
+            |value: &mut ControlResponse| value.pid += 1,
+            |value: &mut ControlResponse| value.instance_id.push('x'),
+            |value: &mut ControlResponse| value.running_sha256.push('0'),
+            |value: &mut ControlResponse| value.executable_path.push('x'),
+            |value: &mut ControlResponse| value.config_dir.push('x'),
+            |value: &mut ControlResponse| value.state_dir.push('x'),
+        ] {
+            let mut changed = ack.clone();
+            mutate(&mut changed);
+            assert!(verify_shutdown_ack(&source, &changed, &paths).is_err());
+        }
+    }
+
+    #[test]
+    fn shutdown_child_replaces_stale_manual_and_updater_authorization() {
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(
+            "test \"$DESKTOP_PET_MANUAL_START_STOP_GENERATION\" = 9 && test -z \"${DESKTOP_PET_UPDATER_GENERATION+x}${DESKTOP_PET_UPDATER_TOKEN+x}${DESKTOP_PET_STARTUP_TOKEN+x}${DESKTOP_PET_SETTINGS_RESET_SOURCE_PID+x}${DESKTOP_PET_RESTART_SOURCE_INSTANCE+x}\"",
+        );
+        for name in [
+            MANUAL_START_GENERATION_ENV,
+            "DESKTOP_PET_UPDATER_GENERATION",
+            "DESKTOP_PET_UPDATER_TOKEN",
+            "DESKTOP_PET_STARTUP_TOKEN",
+            SETTINGS_RESET_SOURCE_ENV,
+            RESTART_INSTANCE_ENV,
+        ] {
+            child.env(name, "stale");
+        }
+        clear_shutdown_authorization(&mut child);
+        configure_startup_authorization(&mut child, (Some(9), None));
+        assert!(child.status().unwrap().success());
+    }
+
+    #[test]
+    fn shutdown_reporter_delivers_only_spawn_failure_or_reaped_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("worker.log");
+        let missing = spawn_shutdown_reporter(
+            Command::new(root.path().join("missing")),
+            log.clone(),
+            |_| panic!("no child was spawned"),
+        )
+        .unwrap();
+        assert!(missing
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err()
+            .contains("cannot launch"));
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg("exit 17");
+        let exit = spawn_shutdown_reporter(child, log, |status| {
+            assert_eq!(status.code(), Some(17));
+            Err("proved terminal failure".into())
+        })
+        .unwrap();
+        assert_eq!(
+            exit.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err("proved terminal failure".into())
+        );
+    }
+
+    #[test]
+    fn shutdown_stop_fence_accepts_only_one_increment_and_later_stop_wins() {
+        use desktop_pet_update_coordinator::protocol;
+        let root = tempfile::Builder::new()
+            .prefix("pet-shutdown-fence-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let paths = Paths::resolve(
+            Some(&root_path.join("config")),
+            Some(&root_path.join("state")),
+        )
+        .unwrap();
+        let origin = InstallOrigin::Source { root: root_path };
+        let generation = protocol::stop_generation(&paths.state_dir).unwrap();
+        let next = next_shutdown_generation(generation).unwrap();
+        assert!(next_shutdown_generation(u64::MAX).is_err());
+        protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None).unwrap();
+        assert_eq!(protocol::record_user_stop(&paths.state_dir).unwrap(), next);
+        assert!(
+            protocol::start_allowed(&origin, &paths.state_dir, Some(generation), None).is_err()
+        );
+        let admit = || protocol::start_allowed(&origin, &paths.state_dir, Some(next), None);
+        let mut exited = Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = exited.id();
+        assert!(exited.wait().unwrap().success());
+        // A proved absent source and free socket/startup are sufficient only
+        // while the originally computed g+1 fence still holds.
+        wait_shutdown_source(&paths, pid, admit).unwrap();
+        assert_eq!(
+            protocol::record_user_stop(&paths.state_dir).unwrap(),
+            next + 1
+        );
+        assert!(wait_shutdown_source(&paths, pid, admit).is_err());
+        let launched = Cell::new(false);
+        let image = executable_identity(&bundle::executable().unwrap()).unwrap();
+        assert!(restart_if_source_unchanged(
+            &image,
+            &origin,
+            || Ok(origin.clone()),
+            || {
+                admit()?;
+                launched.set(true);
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(
+            !launched.get(),
+            "g+2 or a late ordinary Stop must never launch"
+        );
+    }
+
+    #[test]
+    fn settings_reset_preserves_asset_override_semantics_not_resolved_default() {
+        // A real resolvable builtin directory is a prerequisite, not an
+        // invocation override. Keeping None allows normal character selection.
+        let default_assets = resolve_assets(None).unwrap();
+        assert!(default_assets.join("manifest.json").is_file());
+        assert!(authenticated_source_assets_override(None, None)
+            .unwrap()
+            .is_none());
+        assert!(authenticated_source_assets_override(Some(&default_assets), None).is_err());
+
+        let root = tempfile::tempdir().unwrap();
+        let external = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("external-character");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("manifest.json"), b"{}").unwrap();
+        let source_override = external.to_str().unwrap();
+        assert_eq!(
+            authenticated_source_assets_override(None, Some(source_override)).unwrap(),
+            Some(external.clone()),
+        );
+        assert_eq!(
+            authenticated_source_assets_override(Some(&external), Some(source_override)).unwrap(),
+            Some(external.clone()),
+        );
+        assert!(
+            authenticated_source_assets_override(Some(&default_assets), Some(source_override))
+                .is_err()
+        );
+        fs::remove_file(external.join("manifest.json")).unwrap();
+        assert!(authenticated_source_assets_override(None, Some(source_override)).is_err());
+    }
+
+    #[test]
+    fn settings_reset_never_restarts_replaced_executable_or_changed_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let executable = root_path.join("captured-source");
+        let original = b"#!/bin/sh\nprintf original > \"$1\"\n";
+        let replacement = b"#!/bin/sh\nprintf replacement > \"$1\"\n";
+        fs::write(&executable, original).unwrap();
+        fs::set_permissions(&executable, Permissions::from_mode(0o700)).unwrap();
+        let image = executable_identity(&executable).unwrap();
+        let origin = InstallOrigin::Source {
+            root: root_path.clone(),
+        };
+        let launched = Cell::new(false);
+        let probe_marker = root_path.join("origin-probe-executed");
+        fs::write(&executable, replacement).unwrap();
+        let error = restart_if_source_unchanged(
+            &image,
+            &origin,
+            || {
+                // This is a real executable probe, not a substitute result: a
+                // pre-authentication invocation would run replacement bytes.
+                Command::new(&executable)
+                    .arg(&probe_marker)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                Ok(origin.clone())
+            },
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            !probe_marker.exists(),
+            "replacement ran during origin discovery"
+        );
+        assert!(!launched.get());
+        assert!(error.contains(
+            "Restart blocked because the authenticated source image or installation changed:"
+        ));
+        assert!(error.contains("SHA-256"));
+        fs::write(&executable, original).unwrap();
+        let changed_origin = InstallOrigin::Source {
+            root: root_path.join("different-owner"),
+        };
+        let error = restart_if_source_unchanged(
+            &image,
+            &origin,
+            || Ok(changed_origin),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!launched.get());
+        assert!(error.contains("installation origin differs"));
+        let error = restart_if_source_unchanged(
+            &image,
+            &origin,
+            || {
+                fs::write(&executable, replacement).unwrap();
+                Ok(origin.clone())
+            },
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!launched.get());
+        assert!(error.contains("SHA-256"));
+        fs::write(&executable, original).unwrap();
+        restart_if_source_unchanged(
+            &image,
+            &origin,
+            || Ok(origin.clone()),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(launched.get());
+    }
+    #[test]
+    fn independent_manual_start_has_generation_but_no_updater_authority() {
+        assert_eq!(
+            parse_startup_authorization(None, None, Some("7".into())).unwrap(),
+            (Some(7), None)
+        );
+        assert_eq!(
+            parse_startup_authorization(None, None, None).unwrap(),
+            (None, None)
+        );
+        assert_eq!(
+            parse_startup_authorization(Some("7".into()), Some("token".into()), None).unwrap(),
+            (Some(7), Some("token".into()))
+        );
+        for (generation, token, manual) in [
+            (Some("7"), None, None),
+            (None, Some("token"), None),
+            (Some("7"), Some("token"), Some("7")),
+            (None, Some("token"), Some("7")),
+            (Some("7"), None, Some("7")),
+            (None, None, Some("not-a-generation")),
+        ] {
+            assert!(parse_startup_authorization(
+                generation.map(str::to_owned),
+                token.map(str::to_owned),
+                manual.map(str::to_owned),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(not(desktop_pet_legacy))]
+    fn update_status_observes_standalone_without_normal_plan_or_start_authority() {
+        use desktop_pet_update_coordinator::{
+            installation::{InstallationKind, InstallationRecord},
+            native_runtime::ProfilePaths,
+            standalone_install::{
+                self, InstallRestart, InstallSource, InstallStatus, StandaloneInstallPhase,
+                StandaloneInstallPlan, StandaloneInstallRecord, StandaloneInstallResult,
+            },
+            ExecutableIdentity,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let state = temp.path().join("state");
+        for path in [&config, &state] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, Permissions::from_mode(0o700)).unwrap();
+        }
+        let bundle = desktop_pet_update_coordinator::installation::standalone_bundle().unwrap();
+        let executable = bundle.join("Contents/MacOS/desktop-pet");
+        let candidate = temp.path().join("candidate/DesktopPet.app");
+        let helper = temp.path().join("helper");
+        fs::write(&helper, b"private fixture; never executed").unwrap();
+        fs::set_permissions(&helper, Permissions::from_mode(0o700)).unwrap();
+        let profile = ProfilePaths {
+            config_dir: config,
+            state_dir: state.clone(),
+        };
+        let plan = StandaloneInstallPlan {
+            version: 2,
+            purpose: standalone_install::StandaloneInstallPurpose::Upgrade,
+            operation_id: "a".repeat(32),
+            original: InstallationRecord {
+                version: 1,
+                executable: executable.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: "0.4.13-beta.1".into(),
+                protocol: 4,
+                observation_mode: 1,
+                integration_api: 1,
+                origin: InstallOrigin::Standalone { bundle },
+                image: ExecutableIdentity {
+                    path: executable,
+                    sha256: "1".repeat(64),
+                },
+            },
+            candidate_bundle: candidate.clone(),
+            candidate_image: ExecutableIdentity {
+                path: candidate.join("Contents/MacOS/desktop-pet"),
+                sha256: "2".repeat(64),
+            },
+            candidate_version: "0.4.13-beta.5".into(),
+            helper_image: ExecutableIdentity {
+                path: helper.clone(),
+                sha256: "3".repeat(64),
+            },
+            profile: profile.clone(),
+            source: InstallSource::Stopped { profile },
+            original_stop_generation: 0,
+            control_token: "4".repeat(64),
+        };
+        standalone_install::write_plan(&plan).unwrap();
+        let record = StandaloneInstallRecord {
+            version: 1,
+            operation_id: plan.operation_id.clone(),
+            phase: StandaloneInstallPhase::Replacing,
+            result: StandaloneInstallResult {
+                version: 1,
+                operation_id: plan.operation_id.clone(),
+                state_dir: state.clone(),
+                status: InstallStatus::Running,
+                installation: None,
+                installed: false,
+                applied: false,
+                restart: InstallRestart::NotRequested,
+                retained_bundle: None,
+                error: None,
+            },
+        };
+        standalone_install::write_record(&state, &record).unwrap();
+        for id in [None, Some(plan.operation_id.as_str())] {
+            let value = update_status_payload(&state, id).unwrap();
+            assert_eq!(value["kind"], "standalone_install");
+            assert_eq!(value["record"], serde_json::to_value(&record).unwrap());
+            assert_eq!(value["staged_helper_signature_verified"], false);
+            assert_eq!(
+                value["helper_status_command"],
+                serde_json::json!([
+                    helper,
+                    "install-status",
+                    "--state-dir",
+                    state,
+                    "--operation-id",
+                    plan.operation_id
+                ])
+            );
+            assert_eq!(
+                value["helper_recover_command"],
+                serde_json::json!([
+                    helper,
+                    "install-recover",
+                    "--state-dir",
+                    state,
+                    "--operation-id",
+                    plan.operation_id
+                ])
+            );
+            assert!(desktop_pet_update_coordinator::read_plan(&state, &plan.operation_id).is_err());
+        }
+    }
+
     #[test]
     #[cfg(not(desktop_pet_legacy))]
     fn startup_capture_preserves_selected_opaque_provider() {
@@ -2729,9 +4025,10 @@ mod tests {
             ObservationSelection::Auto,
             ObservationSelection::Provider("provider-x".into()),
         ] {
-            let captured = daemon::captured_environment(mode.clone(), |key| {
-                (key == "HOME").then(|| "/tmp/home".into())
-            })
+            let captured = desktop_pet_update_coordinator::native_runtime::captured_environment(
+                mode.clone(),
+                |key| (key == "HOME").then(|| "/tmp/home".into()),
+            )
             .expect("capture");
             assert_eq!(captured.get("HOME").map(String::as_str), Some("/tmp/home"));
             assert_eq!(

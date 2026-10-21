@@ -27,8 +27,8 @@ validate_compiled_bridge() {
   caps="$("$executable" distribution-identity 2>/dev/null)" || fail "missing compiled bridge identity"
   for field in distribution app_version app_name executable helper bundle_id core_revision herdr_migration_revision protocol observation_mode integration_api; do
     case "$field" in
-      distribution) expected=legacy-0.3.12 ;;
-      app_version) expected=0.3.12 ;;
+      distribution) expected=legacy-0.3.16 ;;
+      app_version) expected=0.3.16 ;;
       app_name) expected=HerdrDesktopPet.app ;;
       executable) expected=herdr-desktop-pet ;;
       helper) expected=herdr-update-coordinator ;;
@@ -40,6 +40,9 @@ validate_compiled_bridge() {
     esac
     [[ "$(plutil -extract "$field" raw -o - - <<< "$caps" 2>/dev/null)" == "$expected" ]] || fail "compiled bridge identity disagrees on $field"
   done
+  if plutil -extract migration_handover_protocol raw -o - - <<< "$caps" >/dev/null 2>&1; then
+    fail "genuine legacy bridge must not advertise neutral handover capability"
+  fi
 }
 extract_archive() {
   local archive="$1" destination="$2" app_name=HerdrDesktopPet.app entry found=0
@@ -80,11 +83,12 @@ validate_app() {
     caps="$("$executable" update-capabilities 2>/dev/null)" || fail "cannot read updater capabilities"
     [[ "$(plutil -extract protocol raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 3 ]] || fail "protocol-3 matched pair required; protocol-2 cannot directly update to this bridge"
     [[ "$(plutil -extract observation_mode raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 1 ]] || fail "observation capability 1 required"
-    if [[ "$version" == 0.3.12 ]]; then
+    if [[ "$version" == 0.3.16 ]]; then
       [[ "$(plutil -extract integration_api raw -expect integer -o - - <<< "$caps" 2>/dev/null)" == 1 ]] || fail "bridge integration API 1 required"
       validate_compiled_bridge "$executable"
     fi
   done
+  [[ ! -e "$app/Contents/Resources/integrations/tern-desktop-pet" && ! -L "$app/Contents/Resources/integrations/tern-desktop-pet" ]] || fail "genuine legacy image must not contain the neutral replacement SDK"
   commands="$(otool -l "$helper")" || fail "cannot inspect helper loader commands"
   [[ "$commands" != *"cmd LC_RPATH"* ]] || fail "helper has loader search paths"
   dependencies="$(otool -L "$helper")" || fail "cannot inspect helper dependencies"

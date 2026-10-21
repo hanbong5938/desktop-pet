@@ -2,11 +2,38 @@
 use desktop_pet_update_coordinator::migration::{
     MigrationPhase, MigrationPlan, MigrationPresentation,
 };
+use desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan;
 use desktop_pet_update_coordinator::{identity, InstallOrigin, UpdatePlan};
 use sha2::{Digest, Sha256};
 
+pub fn legacy_cleanup_result(locale: &str) -> &'static str {
+    match Locale::from_token(locale) {
+        Locale::Ko => "원래 도우미의 복구 확인이 끝났으며 앱은 종료된 상태입니다. 업데이트 성공을 뜻하지 않습니다. 검증된 앱을 시작하려면 별도의 승인이 필요합니다. 설치를 다시 실행하거나 자동으로 앱을 시작하지 않습니다.",
+        Locale::Ja => "元のヘルパーによる復旧確認が終わり、アプリは停止したままです。更新の成功ではありません。検証済みのアプリを起動するには別の承認が必要です。再インストールや自動起動は行いません。",
+        Locale::ZhHans => "原始助手的恢复核对已结束，应用仍处于停止状态。这不代表更新成功。启动已验证的应用需要单独批准，不会重新安装或自动启动。",
+        Locale::En => "The original helper finished recovery checks. The app remains stopped; this is NOT update success. Starting the verified app requires separate approval. No installer is replayed and no app restarts automatically.",
+    }
+}
+
+pub fn legacy_manual_start_unavailable(locale: &str) -> &'static str {
+    match Locale::from_token(locale) {
+        Locale::Ko => "이전 앱은 이후의 중지 요청을 안전하게 우선하는 독립 시작 기능을 지원하지 않아 여기서 시작할 수 없습니다. 복구 정리 결과는 유지되며 앱은 자동으로 시작되지 않습니다. 기존 도우미나 앱을 바꾸지 않습니다.",
+        Locale::Ja => "以前のアプリは、後の停止要求を優先する独立した起動機能に対応していないため、ここからは起動できません。復旧の整理結果は保たれ、自動起動は行いません。元のヘルパーやアプリは置き換えません。",
+        Locale::ZhHans => "旧应用不支持让后续停止请求优先的独立启动功能，因此无法在此安全启动。恢复清理结果保留，应用不会自动启动，也不会替换原始助手或应用。",
+        Locale::En => "This older app cannot be started safely here: it does not support an independent ordinary-start Stop fence. Recovery cleanup remains valid and the app stays stopped. The retained helper and app are not replaced.",
+    }
+}
+
 fn migration_digest(plan: &MigrationPlan) -> Result<[u8; 32], String> {
     Ok(Sha256::digest(serde_json::to_vec(plan).map_err(|e| e.to_string())?).into())
+}
+
+fn legacy_stop_confirmation_response(response: isize) -> Result<bool, String> {
+    match response {
+        1000 => Ok(false),
+        1001 => Ok(true),
+        _ => Err("native legacy Stop approval was interrupted or unavailable".into()),
+    }
 }
 
 fn migration_confirmation_response(response: isize) -> Result<bool, String> {
@@ -16,6 +43,177 @@ fn migration_confirmation_response(response: isize) -> Result<bool, String> {
         _ => Err(format!(
             "native migration consent ended without an explicit decision: {response}"
         )),
+    }
+}
+
+fn install_digest(plan: &StandaloneInstallPlan) -> Result<[u8; 32], String> {
+    Ok(Sha256::digest(serde_json::to_vec(plan).map_err(|e| e.to_string())?).into())
+}
+
+fn require_install_authorization(
+    expected: Option<[u8; 32]>,
+    actual: [u8; 32],
+    visible: bool,
+) -> Result<(), String> {
+    if expected != Some(actual) {
+        return Err("install window is not bound to this source/target/profile approval".into());
+    }
+    if !visible {
+        return Err("independent native install window is not visible".into());
+    }
+    Ok(())
+}
+
+fn install_confirmation_response(
+    expected: Option<[u8; 32]>,
+    actual: [u8; 32],
+    visible: bool,
+    response: isize,
+) -> Result<bool, String> {
+    require_install_authorization(expected, actual, visible)?;
+    match response {
+        1000 => Ok(true),
+        1001 => Ok(false),
+        _ => Err(format!(
+            "native install consent ended without an explicit decision: {response}"
+        )),
+    }
+}
+
+fn install_summary(
+    plan: &StandaloneInstallPlan,
+    locale: Locale,
+    recovery: bool,
+) -> Result<String, String> {
+    let source = desktop_pet_update_coordinator::physical_install_root(plan.origin())?;
+    let target = desktop_pet_update_coordinator::physical_install_root(plan.installed_origin())?;
+    let relocation = !plan.purpose.is_upgrade();
+    let (version_label, config_label, state_label, action) = match locale {
+        Locale::Ko => (
+            "버전",
+            "설정",
+            "상태",
+            if recovery {
+                "복구는 원래 승인만 조정합니다. 새 위치 이관 동의가 아니며 종료를 재전송하거나 이후의 중지를 무시하거나 새 재시작 권한을 부여하지 않습니다."
+            } else if plan.running().is_some() {
+                "Desktop Pet만 종료하고 이 정확한 프로필로 다시 시작합니다. 계속하기 전에 저장하지 않은 Pet 편집 내용을 저장하세요. Tern과 창, 터미널, 작업은 계속 유지됩니다."
+            } else {
+                "Desktop Pet은 중지된 상태를 유지합니다. Tern과 창, 터미널, 작업은 계속 유지됩니다."
+            },
+        ),
+        Locale::En => (
+            "Version",
+            "Config",
+            "State",
+            if recovery {
+                "Recovery only reconciles the original approval; it is not new relocation consent. It cannot replay Quit, override a later Stop, or grant new restart permission."
+            } else if plan.running().is_some() {
+                "Only Desktop Pet quits and restarts with this exact profile. Save any unsaved Pet edits before continuing. Tern, its windows, terminals and work stay running."
+            } else {
+                "Desktop Pet is stopped and will remain stopped. Tern, its windows, terminals and work stay running."
+            },
+        ),
+        Locale::Ja => (
+            "バージョン",
+            "設定",
+            "状態",
+            if recovery {
+                "復旧は元の承認内容のみを照合します。新たな移動の同意ではありません。終了の再送、後の停止の無視、新たな再起動権限の付与はできません。"
+            } else if plan.running().is_some() {
+                "Desktop Pet だけを終了し、この同じプロファイルで再起動します。続行する前に未保存の Pet の編集を保存してください。Tern、ウィンドウ、ターミナル、作業はそのまま維持されます。"
+            } else {
+                "Desktop Pet は停止したままです。Tern、ウィンドウ、ターミナル、作業はそのまま維持されます。"
+            },
+        ),
+        Locale::ZhHans => (
+            "版本",
+            "设置",
+            "状态",
+            if recovery {
+                "恢复仅核对原批准内容，不是新的迁移同意。不能再次发送退出、忽略之后的停止或授予新的重启权限。"
+            } else if plan.running().is_some() {
+                "仅退出 Desktop Pet 并使用完全相同的配置重启。继续前请保存未保存的 Pet 编辑。Tern、窗口、终端和工作保持运行。"
+            } else {
+                "Desktop Pet 将保持停止状态。Tern、窗口、终端和工作保持运行。"
+            },
+        ),
+    };
+    let version = if relocation {
+        match locale {
+            Locale::Ko => format!("{} (같은 버전 · 서명된 동일한 앱)", plan.candidate_version),
+            Locale::En => format!(
+                "{} (same version · identical signed app)",
+                plan.candidate_version
+            ),
+            Locale::Ja => format!(
+                "{}（同じバージョン・同一の署名済みアプリ）",
+                plan.candidate_version
+            ),
+            Locale::ZhHans => format!(
+                "{}（相同版本 · 完全相同的已签名应用）",
+                plan.candidate_version
+            ),
+        }
+    } else {
+        format!("{} → {}", plan.original.app_version, plan.candidate_version)
+    };
+    Ok(format!(
+        "{}\n→ {}\n{version_label}: {version}\n{config_label}: {}\n{state_label}: {}\n\n{action}",
+        source.display(),
+        target.display(),
+        plan.profile.config_dir.display(),
+        plan.profile.state_dir.display()
+    ))
+}
+
+fn install_buttons(
+    locale: Locale,
+    relocation: bool,
+    recovery: bool,
+) -> (&'static str, &'static str, &'static str) {
+    match (locale, relocation, recovery) {
+        (Locale::Ko, _, true) => ("승인된 Desktop Pet 설치를 조정할까요?", "조정", "취소"),
+        (Locale::En, _, true) => (
+            "Reconcile approved Desktop Pet installation?",
+            "Reconcile",
+            "Cancel",
+        ),
+        (Locale::Ja, _, true) => (
+            "承認済みの Desktop Pet インストールを照合しますか？",
+            "照合",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, _, true) => ("核对已批准的 Desktop Pet 安装？", "核对", "取消"),
+        (Locale::Ko, true, false) => (
+            "Desktop Pet을 전용 업데이트 위치로 옮길까요?",
+            "이동하고 다시 시작",
+            "취소",
+        ),
+        (Locale::En, true, false) => (
+            "Move Desktop Pet to its private update location?",
+            "Move and restart",
+            "Cancel",
+        ),
+        (Locale::Ja, true, false) => (
+            "Desktop Pet を専用の更新場所へ移動しますか？",
+            "移動して再起動",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, true, false) => {
+            ("将 Desktop Pet 移至专用更新位置？", "移动并重启", "取消")
+        }
+        (Locale::Ko, false, false) => (
+            "Desktop Pet만 업데이트할까요?",
+            "Desktop Pet 업데이트",
+            "취소",
+        ),
+        (Locale::En, false, false) => ("Update only Desktop Pet?", "Update Desktop Pet", "Cancel"),
+        (Locale::Ja, false, false) => (
+            "Desktop Pet だけを更新しますか？",
+            "Desktop Pet を更新",
+            "キャンセル",
+        ),
+        (Locale::ZhHans, false, false) => ("仅更新 Desktop Pet？", "更新 Desktop Pet", "取消"),
     }
 }
 
@@ -129,10 +327,10 @@ impl Locale {
 
     fn recovery(self) -> &'static str {
         match self {
-            Self::En => "Recover verified start",
-            Self::Ko => "확인 후 다시 시작",
-            Self::ZhHans => "确认后重新启动",
-            Self::Ja => "確認後に再起動",
+            Self::En => "Reconcile update",
+            Self::Ko => "업데이트 상태 조정",
+            Self::ZhHans => "核对更新状态",
+            Self::Ja => "更新状態を照合",
         }
     }
 }
@@ -235,7 +433,8 @@ fn release_summary(plan: &UpdatePlan, locale: Locale) -> String {
 }
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::UpdatePlan;
+    use super::{Locale, UpdatePlan};
+    use block2::RcBlock;
     use std::ffi::{c_char, c_void, CString};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -302,6 +501,128 @@ mod mac {
         let call: unsafe extern "C" fn(Obj, Obj, i8) =
             std::mem::transmute(objc_msgSend as *const ());
         call(receiver, selector(message), value as i8);
+    }
+
+    struct ConsentCancelMonitor {
+        token: Obj,
+        _handler: RcBlock<dyn Fn(Obj) -> Obj>,
+    }
+
+    impl Drop for ConsentCancelMonitor {
+        fn drop(&mut self) {
+            unsafe {
+                send_object(class("NSEvent"), "removeMonitor:", self.token);
+                send_void(self.token, "release");
+            }
+        }
+    }
+
+    unsafe fn install_consent_cancel_monitor(
+        app: Obj,
+        window: Obj,
+        cancel_button: Obj,
+    ) -> Result<ConsentCancelMonitor, String> {
+        let handler: RcBlock<dyn Fn(Obj) -> Obj> = RcBlock::new(move |event: Obj| {
+            if event.is_null() {
+                return event;
+            }
+            let key_code: unsafe extern "C" fn(Obj, Obj) -> u16 =
+                std::mem::transmute(objc_msgSend as *const ());
+            let flags: unsafe extern "C" fn(Obj, Obj) -> usize =
+                std::mem::transmute(objc_msgSend as *const ());
+            let code = key_code(event, selector("keyCode"));
+            // Shift, Control, Option and Command; allow the keypad/function
+            // flags carried by a physical Enter key.
+            let modifiers = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20);
+            if matches!(code, 36 | 76 | 53)
+                && flags(event, selector("modifierFlags")) & modifiers == 0
+                && object(event, "window") == window
+                && object(app, "modalWindow") == window
+            {
+                // Dispatch the real Cancel action, not an invented modal
+                // return code. Consume the key before any focused control can
+                // reinterpret Return/Enter as destructive approval.
+                send_object(cancel_button, "performClick:", std::ptr::null_mut());
+                std::ptr::null_mut()
+            } else {
+                event
+            }
+        });
+        let install: unsafe extern "C" fn(
+            Obj,
+            Obj,
+            usize,
+            &block2::DynBlock<dyn Fn(Obj) -> Obj>,
+        ) -> Obj = std::mem::transmute(objc_msgSend as *const ());
+        // NSEventMaskKeyDown. Match both the event's own window and the active
+        // application modal window; global keyboard focus is not authorization
+        // for this cancel-only handler, and no other window's input is consumed.
+        let token = install(
+            class("NSEvent"),
+            selector("addLocalMonitorForEventsMatchingMask:handler:"),
+            1 << 10,
+            &handler,
+        );
+        if token.is_null() {
+            return Err("native recovery keyboard cancellation is unavailable".into());
+        }
+        send_void(token, "retain");
+        Ok(ConsentCancelMonitor {
+            token,
+            _handler: handler,
+        })
+    }
+    // Keep exact paths and multi-profile details scrollable, without moving
+    // affirmative/cancel controls beyond a small display's available height.
+    unsafe fn set_consent_details(alert: Obj, summary: &str) {
+        let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
+            std::mem::transmute(objc_msgSend as *const ());
+        let frame = Rect {
+            origin: Point { x: 0., y: 0. },
+            size: Size {
+                width: 520.,
+                height: 320.,
+            },
+        };
+        let details = init_view(
+            object(class("NSTextView"), "alloc"),
+            selector("initWithFrame:"),
+            frame,
+        );
+        send_bool(details, "setEditable:", false);
+        send_bool(details, "setSelectable:", true);
+        send_bool(details, "setRichText:", false);
+        send_object(
+            details,
+            "setTextColor:",
+            object(class("NSColor"), "labelColor"),
+        );
+        send_bool(details, "setDrawsBackground:", false);
+        send_bool(details, "setHorizontallyResizable:", false);
+        send_bool(details, "setVerticallyResizable:", true);
+        let set_size: unsafe extern "C" fn(Obj, Obj, Size) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let maximum = Size {
+            width: 520.,
+            height: f64::MAX,
+        };
+        set_size(details, selector("setMaxSize:"), maximum);
+        let container = object(details, "textContainer");
+        set_size(container, selector("setContainerSize:"), maximum);
+        send_bool(container, "setWidthTracksTextView:", true);
+        send_object(details, "setString:", string(summary));
+        let scroll = init_view(
+            object(class("NSScrollView"), "alloc"),
+            selector("initWithFrame:"),
+            frame,
+        );
+        send_object(scroll, "setDocumentView:", details);
+        send_bool(scroll, "setHasVerticalScroller:", true);
+        send_bool(scroll, "setAutohidesScrollers:", true);
+        send_bool(scroll, "setDrawsBackground:", false);
+        send_object(alert, "setAccessoryView:", scroll);
+        send_void(details, "release");
+        send_void(scroll, "release");
     }
     struct AutoreleasePool(Obj);
     impl AutoreleasePool {
@@ -651,6 +972,7 @@ mod mac {
         expanded: std::cell::Cell<bool>,
         migration_authorization: Option<[u8; 32]>,
         migration_description: Option<String>,
+        install_authorization: Option<[u8; 32]>,
     }
     impl Panel {
         pub fn new(locale: &str, plan: &UpdatePlan) -> Result<Self, String> {
@@ -674,6 +996,60 @@ mod mac {
             panel.migration_description = Some(super::migration_summary(plan));
             panel.show(Phase::Preparing, panel.migration_description.as_deref());
             Ok(panel)
+        }
+        pub fn for_install(
+            locale: &str,
+            plan: &super::StandaloneInstallPlan,
+        ) -> Result<Self, String> {
+            plan.validate()?;
+            let summary = super::install_summary(plan, super::Locale::from_token(locale), false)?;
+            let mut panel = Self::new_summary(locale, &summary, None)?;
+            panel.install_authorization = Some(super::install_digest(plan)?);
+            Ok(panel)
+        }
+        pub fn confirm_install(
+            &self,
+            plan: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+            recovery: bool,
+        ) -> Result<bool, String> {
+            plan.validate()?;
+            self.require_install_visible(plan)?;
+            self.activate();
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                let alert = object(object(class("NSAlert"), "alloc"), "init");
+                if alert.is_null() {
+                    return Err("native install consent alert unavailable".into());
+                }
+                let (title, affirmative, cancel) =
+                    super::install_buttons(self.locale, !plan.purpose.is_upgrade(), recovery);
+                send_object(alert, "setMessageText:", string(title));
+                set_consent_details(alert, &super::install_summary(plan, self.locale, recovery)?);
+                send_object(alert, "addButtonWithTitle:", string(affirmative));
+                send_object(alert, "addButtonWithTitle:", string(cancel));
+                let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let response = modal(alert, selector("runModal"));
+                send_void(alert, "release");
+                self.pump();
+                super::install_confirmation_response(
+                    self.install_authorization,
+                    super::install_digest(plan)?,
+                    self.visible(),
+                    response,
+                )
+            }
+        }
+        pub fn require_install_visible(
+            &self,
+            plan: &super::StandaloneInstallPlan,
+        ) -> Result<(), String> {
+            self.pump();
+            super::require_install_authorization(
+                self.install_authorization,
+                super::install_digest(plan)?,
+                self.visible(),
+            )
         }
         fn new_summary(
             locale: &str,
@@ -826,6 +1202,7 @@ mod mac {
                     expanded: std::cell::Cell::new(false),
                     migration_authorization,
                     migration_description: None,
+                    install_authorization: None,
                 };
                 panel.show(Phase::Preparing, None);
                 send_void(window, "center");
@@ -863,60 +1240,7 @@ mod mac {
                         "Migrate Herdr to Desktop Pet?"
                     }),
                 );
-                // Exact details for up to 64 profiles must not push the
-                // confirmation controls beyond the available screen.
-                let init_view: unsafe extern "C" fn(Obj, Obj, Rect) -> Obj =
-                    std::mem::transmute(objc_msgSend as *const ());
-                let frame = Rect {
-                    origin: Point { x: 0., y: 0. },
-                    size: Size {
-                        width: 520.,
-                        height: 320.,
-                    },
-                };
-                let details = init_view(
-                    object(class("NSTextView"), "alloc"),
-                    selector("initWithFrame:"),
-                    frame,
-                );
-                send_bool(details, "setEditable:", false);
-                send_bool(details, "setSelectable:", true);
-                send_bool(details, "setRichText:", false);
-                send_object(
-                    details,
-                    "setTextColor:",
-                    object(class("NSColor"), "labelColor"),
-                );
-                send_bool(details, "setDrawsBackground:", false);
-                send_bool(details, "setHorizontallyResizable:", false);
-                send_bool(details, "setVerticallyResizable:", true);
-                let set_size: unsafe extern "C" fn(Obj, Obj, Size) =
-                    std::mem::transmute(objc_msgSend as *const ());
-                let maximum = Size {
-                    width: 520.,
-                    height: f64::MAX,
-                };
-                set_size(details, selector("setMaxSize:"), maximum);
-                let container = object(details, "textContainer");
-                set_size(container, selector("setContainerSize:"), maximum);
-                send_bool(container, "setWidthTracksTextView:", true);
-                send_object(
-                    details,
-                    "setString:",
-                    string(&super::migration_summary(plan)),
-                );
-                let scroll = init_view(
-                    object(class("NSScrollView"), "alloc"),
-                    selector("initWithFrame:"),
-                    frame,
-                );
-                send_object(scroll, "setDocumentView:", details);
-                send_bool(scroll, "setHasVerticalScroller:", true);
-                send_bool(scroll, "setAutohidesScrollers:", true);
-                send_bool(scroll, "setDrawsBackground:", false);
-                send_object(alert, "setAccessoryView:", scroll);
-                send_void(details, "release");
-                send_void(scroll, "release");
+                set_consent_details(alert, &super::migration_summary(plan));
                 send_object(
                     alert,
                     "addButtonWithTitle:",
@@ -1037,6 +1361,134 @@ mod mac {
             }
             self.pump();
         }
+        pub fn offer_recovery_start(&self) {
+            self.offer_recovery();
+            unsafe {
+                send_object(
+                    self.recovery_button,
+                    "setTitle:",
+                    string(match self.locale {
+                        Locale::En => "Review verified start…",
+                        Locale::Ko => "검증된 시작 검토…",
+                        Locale::ZhHans => "确认已验证的启动…",
+                        Locale::Ja => "検証済みの起動を確認…",
+                    }),
+                );
+            }
+        }
+        /// Cancel is deliberately the default; this is not updater Stop consent.
+        pub fn confirm_legacy_recovery_stop(&self, plan: &UpdatePlan) -> Result<bool, String> {
+            self.activate();
+            if !self.visible() {
+                return Err("legacy recovery requires a visible native window".into());
+            }
+            let (title, cancel, stop, body) = match self.locale {
+                Locale::Ko => ("앱 종료 후 복구할까요?", "취소", "앱 종료 후 복구", "캡처된 Pet 앱과 이 프로필만 종료합니다. Tern과 작업 중인 앱은 종료하지 않습니다. 저장하지 않은 Pet 변경 사항을 먼저 저장하세요. 보관된 원래 도우미가 복구 기록만 확인합니다. 설치를 다시 실행하거나 앱을 자동으로 시작하지 않습니다."),
+                Locale::Ja => ("アプリを終了して復旧しますか？", "キャンセル", "終了して復旧", "記録されたPetアプリとこのプロファイルだけを終了します。Ternや作業中のアプリは終了しません。Petの変更を先に保存してください。保管された元のヘルパーが記録を照合します。インストーラーの再実行や自動起動は行いません。"),
+                Locale::ZhHans => ("退出应用后恢复？", "取消", "退出并恢复", "仅退出记录的Pet应用及此配置，不会退出Tern或工作应用。请先保存Pet更改。保留的原始助手只核对恢复记录，不会重新安装或自动启动应用。"),
+                Locale::En => ("Quit the app and recover?", "Cancel", "Quit and recover", "Quit only the captured Pet app and this profile, not Tern or your work apps. Save Pet changes first. The retained original helper will reconcile its own recovery evidence. No installer is replayed and the app will NOT restart automatically."),
+            };
+            let details = format!(
+                "{body}\n\n{}\nConfig: {}\nState: {}\nOperation: {}",
+                plan.running.path.display(),
+                plan.context.config_dir.display(),
+                plan.context.state_dir.display(),
+                plan.operation_id,
+            );
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                let alert = object(object(class("NSAlert"), "alloc"), "init");
+                if alert.is_null() {
+                    return Err("native legacy recovery approval unavailable".into());
+                }
+                send_object(alert, "setMessageText:", string(title));
+                set_consent_details(alert, &details);
+                let add_button: unsafe extern "C" fn(Obj, Obj, Obj) -> Obj =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let cancel_button =
+                    add_button(alert, selector("addButtonWithTitle:"), string(cancel));
+                let stop_button = add_button(alert, selector("addButtonWithTitle:"), string(stop));
+                send_void(alert, "layout");
+                let window = object(alert, "window");
+                let cancel_cell = object(cancel_button, "cell");
+                if window.is_null() || cancel_cell.is_null() {
+                    send_void(alert, "release");
+                    return Err("native legacy recovery Cancel default is unavailable".into());
+                }
+                // AppKit gives a button named Cancel the Escape equivalent;
+                // being first is not itself a reliable Return/default binding.
+                // Bind the window's actual default cell, retain Escape on
+                // Cancel, and never give the destructive action a key equivalent.
+                send_object(stop_button, "setKeyEquivalent:", string(""));
+                send_object(cancel_button, "setKeyEquivalent:", string("\u{1b}"));
+                send_object(window, "setDefaultButtonCell:", cancel_cell);
+                let cancel_monitor =
+                    match install_consent_cancel_monitor(self.app, window, cancel_button) {
+                        Ok(monitor) => monitor,
+                        Err(error) => {
+                            send_void(alert, "release");
+                            return Err(error);
+                        }
+                    };
+                let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let response = modal(alert, selector("runModal"));
+                drop(cancel_monitor);
+                send_void(alert, "release");
+                if !self.visible() {
+                    return Err("legacy recovery window closed before approval".into());
+                }
+                super::legacy_stop_confirmation_response(response)
+            }
+        }
+        pub fn confirm_recovery_start(
+            &self,
+            plan: &UpdatePlan,
+            installed: &desktop_pet_update_coordinator::VerifiedInstallation,
+            original: bool,
+        ) -> Result<bool, String> {
+            self.activate();
+            if !self.visible() {
+                return Err("recovery start requires a visible native window".into());
+            }
+            let (title, body, approve, cancel) = match self.locale {
+                Locale::En => ("Start the verified app?", "Start only this captured profile. No installer is replayed and no running app will be stopped. Restoring the original version is not an update. A later Stop always wins.", "Start", "Not now"),
+                Locale::Ko => ("검증된 앱을 시작할까요?", "캡처된 이 프로필만 시작합니다. 설치를 다시 실행하거나 실행 중인 앱을 종료하지 않습니다. 원래 버전 복구는 업데이트가 아닙니다. 이후의 중지는 항상 우선합니다.", "시작", "나중에"),
+                Locale::ZhHans => ("启动已验证的应用？", "仅启动此已记录的配置。不会重新运行安装程序或停止正在运行的应用。恢复原版本不是更新。之后的停止操作始终优先。", "启动", "暂不"),
+                Locale::Ja => ("検証済みのアプリを起動しますか？", "記録済みのこのプロファイルだけを起動します。インストーラーの再実行や実行中のアプリの停止は行いません。元の版の復元は更新ではありません。後の停止操作が常に優先されます。", "起動", "後で"),
+            };
+            let details = format!(
+                "{body}\n\n{}\n{}\n\nConfig: {}\nState: {}\n\n{}",
+                installed.image.path.display(),
+                installed.image.sha256,
+                plan.context.config_dir.display(),
+                plan.context.state_dir.display(),
+                if original {
+                    "Original version — NOT updated"
+                } else {
+                    "Verified installed candidate"
+                },
+            );
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                let alert = object(object(class("NSAlert"), "alloc"), "init");
+                if alert.is_null() {
+                    return Err("native recovery start approval unavailable".into());
+                }
+                send_object(alert, "setMessageText:", string(title));
+                set_consent_details(alert, &details);
+                send_object(alert, "addButtonWithTitle:", string(approve));
+                send_object(alert, "addButtonWithTitle:", string(cancel));
+                let modal: unsafe extern "C" fn(Obj, Obj) -> isize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let response = modal(alert, selector("runModal"));
+                send_void(alert, "release");
+                if !self.visible() {
+                    return Err("recovery start window closed before approval".into());
+                }
+                super::migration_confirmation_response(response)
+            }
+        }
         pub fn recovery_requested(&self) -> bool {
             if RECOVER_REQUESTED.swap(false, Ordering::AcqRel) {
                 unsafe {
@@ -1145,6 +1597,22 @@ impl Panel {
     pub fn for_migration(_: &str, _: &MigrationPlan) -> Result<Self, String> {
         Err("native migration requires macOS AppKit".into())
     }
+    pub fn for_install(
+        _: &str,
+        _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+    ) -> Result<Self, String> {
+        Err("native install requires macOS AppKit".into())
+    }
+    pub fn confirm_install(
+        &self,
+        _: &desktop_pet_update_coordinator::standalone_install::StandaloneInstallPlan,
+        _: bool,
+    ) -> Result<bool, String> {
+        Err("native install requires macOS AppKit".into())
+    }
+    pub fn require_install_visible(&self, _: &StandaloneInstallPlan) -> Result<(), String> {
+        Err("native install requires macOS AppKit".into())
+    }
     pub fn confirm_migration(&self, _: &MigrationPlan, _: bool) -> Result<bool, String> {
         Err("native migration requires macOS AppKit".into())
     }
@@ -1162,6 +1630,18 @@ impl Panel {
         false
     }
     pub fn offer_recovery(&self) {}
+    pub fn offer_recovery_start(&self) {}
+    pub fn confirm_legacy_recovery_stop(&self, _: &UpdatePlan) -> Result<bool, String> {
+        Err("native legacy recovery approval requires macOS AppKit".into())
+    }
+    pub fn confirm_recovery_start(
+        &self,
+        _: &UpdatePlan,
+        _: &desktop_pet_update_coordinator::VerifiedInstallation,
+        _: bool,
+    ) -> Result<bool, String> {
+        Err("native recovery approval requires macOS AppKit".into())
+    }
     pub fn recovery_requested(&self) -> bool {
         false
     }
@@ -1206,6 +1686,11 @@ impl MigrationPresentation for Panel {
                 "Desktop Pet native-ready",
                 "Legacy retirement and reconnect are not yet complete.",
             ),
+            MigrationPhase::Integrating => (
+                Phase::Finalizing,
+                "Connecting approved integrations",
+                "App committed. Waiting automatically for the loaded consumer and actual same-profile SDK binding before legacy retirement.",
+            ),
             MigrationPhase::Retiring => (
                 Phase::Installing,
                 "Retiring legacy installation",
@@ -1213,8 +1698,8 @@ impl MigrationPresentation for Panel {
             ),
             MigrationPhase::RetirementFailed => (
                 Phase::Attention(Attention::Interrupted),
-                "Legacy retirement failed",
-                "Desktop Pet native-ready is not migration complete. Explicit resume only.",
+                "Migration incomplete; retirement pending",
+                "App state and integration errors are retained. The legacy owner is not removed before every required connection is verified.",
             ),
             MigrationPhase::ManagerUnknown => (
                 Phase::Attention(Attention::Interrupted),
@@ -1223,13 +1708,13 @@ impl MigrationPresentation for Panel {
             ),
             MigrationPhase::AwaitingReconnect => (
                 Phase::Attention(Attention::Completion),
-                "Awaiting Tern reconnect",
-                "Native readiness alone is not reconnect confirmation.",
+                "App cutover recorded; integration status is separate",
+                "Current-owner verification can settle this retained record without manager replay.",
             ),
             MigrationPhase::Complete => (
                 Phase::Finalizing,
                 "Migration complete",
-                "Native readiness, legacy retirement and required reconnect verified.",
+                "Every affected profile committed and required integrations connected before approved legacy retirement.",
             ),
             MigrationPhase::RollingBack => (
                 Phase::RestoringOriginal,
@@ -1266,7 +1751,19 @@ impl MigrationPresentation for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::migration_confirmation_response;
+    use super::{
+        install_confirmation_response, migration_confirmation_response,
+        require_install_authorization,
+    };
+
+    #[test]
+    fn legacy_stop_consent_defaults_to_cancel_and_rejects_interrupted_modal() {
+        assert!(!super::legacy_stop_confirmation_response(1000).unwrap());
+        assert!(super::legacy_stop_confirmation_response(1001).unwrap());
+        for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
+            assert!(super::legacy_stop_confirmation_response(response).is_err());
+        }
+    }
 
     #[test]
     fn native_final_consent_only_accepts_real_approve_or_cancel_responses() {
@@ -1275,5 +1772,127 @@ mod tests {
         for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
             assert!(migration_confirmation_response(response).is_err());
         }
+    }
+
+    #[test]
+    fn install_consent_requires_exact_approval_and_visible_window() {
+        let digest = [7; 32];
+        assert!(require_install_authorization(Some(digest), digest, true).is_ok());
+        assert!(require_install_authorization(None, digest, true).is_err());
+        assert!(require_install_authorization(Some([8; 32]), digest, true).is_err());
+        assert!(require_install_authorization(Some(digest), digest, false).is_err());
+        assert!(install_confirmation_response(Some(digest), digest, true, 1000).unwrap());
+        assert!(!install_confirmation_response(Some(digest), digest, true, 1001).unwrap());
+        assert!(install_confirmation_response(Some(digest), digest, false, 1000).is_err());
+        assert!(install_confirmation_response(Some([8; 32]), digest, true, 1000).is_err());
+        for response in [-1002, -1001, 0, 1, 1002, isize::MIN, isize::MAX] {
+            assert!(install_confirmation_response(Some(digest), digest, true, response).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod install_authorization_tests {
+    use super::*;
+    use desktop_pet_update_coordinator::installation::{InstallationKind, InstallationRecord};
+    use desktop_pet_update_coordinator::native_runtime::ProfilePaths;
+    use desktop_pet_update_coordinator::standalone_install::{
+        InstallSource, StandaloneInstallPurpose,
+    };
+    use desktop_pet_update_coordinator::standalone_relocation::SettledRelocationParent;
+    use desktop_pet_update_coordinator::ExecutableIdentity;
+    use std::path::PathBuf;
+
+    #[test]
+    fn displayed_approval_digest_binds_source_target_profile_and_purpose() {
+        let source = PathBuf::from("/approval-fixture/Applications/DesktopPet.app");
+        let image = ExecutableIdentity {
+            path: source.join("Contents/MacOS/desktop-pet"),
+            sha256: "a".repeat(64),
+        };
+        let profile = ProfilePaths {
+            config_dir: "/approval-fixture/config".into(),
+            state_dir: "/approval-fixture/state".into(),
+        };
+        let parent = SettledRelocationParent {
+            version: 1,
+            operation_id: "2".repeat(32),
+            plan_sha256: "b".repeat(64),
+            generation: 7,
+            candidate_image: image.clone(),
+            source_closure_sha256: "c".repeat(64),
+            profile: profile.clone(),
+            result_sha256: "d".repeat(64),
+        };
+        let mut plan = StandaloneInstallPlan {
+            version: 2,
+            operation_id: "1".repeat(32),
+            purpose: StandaloneInstallPurpose::PrivateRelocation {
+                target: InstallOrigin::Standalone {
+                    bundle: "/approval-fixture/private/DesktopPet.app".into(),
+                },
+                parent,
+                source_closure_sha256: "c".repeat(64),
+                tern: None,
+            },
+            original: InstallationRecord {
+                version: 1,
+                executable: image.path.clone(),
+                kind: InstallationKind::Standalone,
+                app_version: "0.4.13".into(),
+                protocol: 4,
+                observation_mode: 2,
+                integration_api: 1,
+                origin: InstallOrigin::Standalone { bundle: source },
+                image: image.clone(),
+            },
+            candidate_bundle: "/approval-fixture/stage/DesktopPet.app".into(),
+            candidate_image: image.clone(),
+            candidate_version: "0.4.13".into(),
+            helper_image: image,
+            source: InstallSource::Stopped {
+                profile: profile.clone(),
+            },
+            profile,
+            original_stop_generation: 7,
+            control_token: "e".repeat(64),
+        };
+        let displayed = install_digest(&plan).unwrap();
+        let original = plan.clone();
+        plan.profile.state_dir = "/approval-fixture/other-state".into();
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original.clone();
+        plan.original.image.sha256 = "f".repeat(64);
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original.clone();
+        if let StandaloneInstallPurpose::PrivateRelocation { target, .. } = &mut plan.purpose {
+            *target = InstallOrigin::Standalone {
+                bundle: "/approval-fixture/other-target/DesktopPet.app".into(),
+            };
+        }
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
+        plan = original;
+        plan.purpose = StandaloneInstallPurpose::Upgrade;
+        assert!(require_install_authorization(
+            Some(displayed),
+            install_digest(&plan).unwrap(),
+            true
+        )
+        .is_err());
     }
 }

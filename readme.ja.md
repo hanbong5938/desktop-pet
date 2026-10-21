@@ -1,5 +1,14 @@
 # Desktop Pet
 
+
+**現在の後継: Core v0.4.12 / genuine bridge v0.3.16 — 適格性確認・公開は未完了です。** Core v0.4.11 は release `414563938`、公開時刻 `2026-10-16T05:16:03Z`、source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0` から公開され、公開6資産を独立検証済みです。別 Wiki job は `WIKI_PUBLISH_TOKEN` がありませんでした。genuine bridge v0.3.15 CI `38855045701` は成功しましたが tag/release は未公開です。公開 provenance は過去移行修復の受入証拠ではありません。 See [current successor ledger](docs/releases/v0.4.12.md).
+
+**過去の起動欠陥と恒久修正:** 所有 VM の実際の公開 v0.4.11 履歴実行は `Migration history: current native daemon does not prove the migrated image/profile readiness` で失敗しました。新 receipt・SDK 配信はなく SDK 0.1 は `/opt/homebrew/bin/herdr-desktop-pet` 不在エラーのままでした。UI Ready 前の観測エラーが保持 operation を失わせました。v0.4.12 は read-only discovery で Ready 前に operation を保持し、既存の認可済み observation/poll が後で配信します。current image/owner/profile・signed-stage・正当な runtime 起動・Stop・Unknown guard を維持し、旧 manager 再実行・plan/journal 書換え・手動再接続はしません。対象ソース回帰の成功は end-to-end 成功ではありません。
+
+**受入契約:** 最初の Update 承認1回で quiet 移行・署名 SDK 交換/ロード・正確な保存 route 切替・同じ Tern 窓の実際の fresh binding・自動 native receipt を経て初めて承認済み旧 owner を retirement します。追加同意・Configure・Connect・ACK・Resume は不要です。各元 config/state profile・キャラクター・台詞/履歴・account/provider・無関係 profile と Stop・Unknown を保存します。local 7c の signed-out GUI/frame-driven sequence 47 と再起動 sequence 13 は component 証拠のみで quiet/authenticated 配信・全 lifecycle・別コンピュータ復旧の証拠ではありません。
+
+**Historical records below:** earlier “current” publication, selector and acceptance statements retain their named release scope; they are not v0.4.12 / v0.3.16 qualification. Consumer metadata stays Core v0.4.8 pending actual public materialization; Tern production remains frozen at `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
 独立したネイティブ macOS デスクトップコンパニオンです。ルベリアはタッチに反応し、Herdr・Tern など登録済みプロバイダーのセッションを表示して、許可された送信先に返信します。ホストなしでも動作します。
 
 [English](readme.md) · [한국어](readme.ko.md) · [日本語](readme.ja.md) · [简体中文](readme.zh-Hans.md)
@@ -67,6 +76,8 @@
 Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、Node.js/npm、Xcode Command Line Tools が必要ですが、プリビルドには不要です。ad-hoc 署名で、公証されていません。Herdr スナップショットは互換ローカルサーバー（0.9.0+）、返信は別途 `agent.prompt` が必要です。任意の client-attach 自動起動には公式 Herdr 0.9.3 に[連携所有のパッチとホスト手順](https://github.com/hanbong5938/herdr-desktop-pet/blob/main/integrations/herdr/README.md)を適用するか、実際にフック対応のホストが必要です。標準 0.9.0/0.9.3 にはフックがなく、プラグイン導入はホストをパッチしません。
 
 ## インストールと任意の連携
+
+**現行ソースの private 導入先:** Standalone は実 OS アカウント home の `.local/share/desktop-pet/libexec/DesktopPet.app` を使用し、`HOME`/XDG で変更しません。Brew は検証済み formula prefix の `libexec/DesktopPet.app`、source は正確な checkout の `dist/DesktopPet.app` のままです。通常導入は旧 Applications owner を自動移動しません。公開インストーラーと凍結リリースノートは各版の記録で、旧インストーラーの再実行は誤った導入先の修復になりません。一回限りの修復は **Bash として非公開で提供**し、配布製品機能・native 修復コマンド・updater・プラグイン機能ではありません。保存済み Tern KV の元の config/state、元データとバックアップを保持し、Tern と作業を継続します。[非公開の修復案内](docs/usage.ja.md#one-time-applications-recovery)を参照してください。以前公開した Python 修復アセットは撤回済みで、過去の beta.8 ノートは現行手順ではありません。新リリースやバージョン変更はありません。
 
 **過去の v0.4.4 新規 Brew 導入証明:** 中立 v0.4.4 formula は tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586` に公開済みです。適格な Brew v0.4.4 新規導入は通過しました（74ファイル / 44.3 MB、内外の再署名5個）。認証済み検査で Homebrew 派生 image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312` を確認しました。導入・検査は中立 config/state・standalone app を作成せず、デーモンも起動しませんでした。明示的な手動 **Start** の後だけ実際の v0.4.4 UI/control ready、PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470` に達しました。ルベリアと実際の Settings は **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0** を表示し、その後の明示 Hidden は同じ既定 instance を保持しました。新規導入の証拠であり、v0.4.4 通常更新や managed 移行の完了証明ではありません。導入コマンド:
 

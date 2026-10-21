@@ -4,9 +4,30 @@
 
 [English](../readme.md) · [한국어](../readme.ko.md) · [日本語](../readme.ja.md) · [简体中文](../readme.zh-Hans.md)
 
+## 현재 공개 상태와 예정된 단일 승인 경로
+
+**과거 시작 결함과 영구 수정:** 소유 VM의 실제 공개 v0.4.11 과거 작업 실행은 `Migration history: current native daemon does not prove the migrated image/profile readiness`로 실패했습니다. 새 receipt·SDK 전달은 없었고 SDK 0.1은 `/opt/homebrew/bin/herdr-desktop-pet` 누락 오류를 유지했습니다. UI Ready 전 관찰 오류가 보존 작업을 잃게 했습니다. v0.4.12는 읽기 전용 discovery로 Ready 전에 작업을 보존하고 기존의 승인 검증된 observation/poll이 나중에 전달합니다. 현재 image/owner/profile·signed-stage·정당한 runtime 시작·Stop·Unknown guard를 유지하며 옛 manager 재실행·plan/journal 재작성·수동 재연결은 하지 않습니다. 대상 소스 회귀 검증 통과는 end-to-end 성공이 아닙니다.
+
+**별도 fixture 전제:** 진단 fixture에는 지원되는 Tern.app CLI 두 위치가 모두 없었습니다. 부모는 소유 VM에만 진짜 전체 SDK app을 설치했고 default old consumer/KV는 건드리지 않았습니다. 이는 소스 수정이나 전달·binding 증거가 아닙니다. tools Mac·VM은 접근 불가능한 실제 문제 컴퓨터가 아니며 host 설치 앱을 변경하거나 그 컴퓨터의 복구를 주장하지 않습니다.
+
+
+**현재 후속판: Core v0.4.12 / genuine bridge v0.3.16 — 아직 검증·공개되지 않았습니다.** Core v0.4.11은 release `414563938`, 공개 시각 `2026-10-16T05:16:03Z`, source `7d5215f4b4a2442d18438b453cc5afae14c2f4a0`으로 공개되었고 6개 공개 자산을 독립 검증했습니다. 별도 Wiki 작업은 `WIKI_PUBLISH_TOKEN`이 없었습니다. Genuine bridge v0.3.15 CI `38855045701`은 성공했지만 태그·릴리스는 공개되지 않았습니다. 공개 출처 검증은 과거 이관 복구 수락 검증이 아닙니다. See [successor release notes](releases/v0.4.12.md) for the pending correction and immutable predecessor failures. Consumer metadata remains Core v0.4.8 until actual public successor materialization; Tern production stays `69696023e00a0fcda8b85b332a075bfa26d6c26d`.
+
+**예정된 일반 경로:** 최초 승인 한 번 → 정확히 같은 profile의 `migrationReady` / Commit → 갱신된 Tern consumer 전달·로드 → SDK optimistic identity guard와 atomic canonical save → 실제 같은 Tern 창의 fresh binding → 자동 native handover receipt → 승인된 옛 소유자 retirement 순서입니다. **실제 재연결·receipt가 retirement보다 먼저**입니다. 저장이나 ACK는 재연결이 아니며 SDK guard는 진정한 cross-VM transactional CAS가 아닙니다. 별도 B/source review/Migrate 승인이나 수동 Configure → Save → Connect / Resume은 이 일반 경로의 단계가 아닙니다. 여러 profile이면 영향받는 각 target이 start·Commit·rebind해야 하며 옛 blanket live-profile guard만으로는 완성되지 않습니다. 독립 profile은 병합하지 않습니다.
+
+**정확한 옛 source 승인 경계:** 실제 설치 v0.3.10/v0.3.11을 포함한 허용 stable protocol-3 predecessor v0.3.9–v0.3.14의 진짜 원래 승인만 사용합니다. 보존된 matching signed helper·plan/result·해제된 lease·확정 성공/quiescent manager 결과가 정확한 **현재 v0.3.16 candidate**, image·설치 root/owner·원래 config/state profile을 인증하고 Stop fence는 불변이어야 합니다. 과거 v0.3.11 candidate Completed는 현재 이관 권한이 아닙니다. Unknown·prerelease/미지 source·protocol 2·hash 변경·무관 profile·사용자 Stop은 fallback 권한이 아닙니다. v0.3.6 및 동결 protocol-2/beta entry는 별도 호환 경로입니다. 추가 B/Migrate 승인·UI acknowledgement로 원래 권한을 대체하지 않습니다.
+
+**Commit된 과거 기록 복구·실패 구분:** 실제 othermachine 문제는 Commit된 `AwaitingReconnect` 뒤 저장 경로 `/opt/homebrew/bin/herdr-desktop-pet`가 낡은 것이며 Commit 실패나 manager 재실행 근거가 아닙니다. same-image 및 적격 successor 복구는 옛 plan/journal을 바이트 단위로 보존하고 새 repair/handover receipt만 추가합니다. manager replay·수동 Configure·수동 Resume은 하지 않습니다. 실제 옛 증거·helper·reservation·config/state·자격 증명·provider/account 데이터·prompt/transcript·무관 profile을 보존합니다. definite no-spawn 실패, Commit 후 미재연결, 확정된 quiescent retirement 실패, typed cancellation, Unknown은 구별합니다. Unknown은 clear/replay하거나 cancelled로 바꾸지 않으며 실제 사용자 Stop은 rollback을 포함한 재시작을 금지합니다. 모든 필요한 실제 binding·native receipt 전에는 retirement를 막습니다. 문서나 옛 실행으로 현재 tools Mac 상태를 단정하지 않습니다.
+
+**과거 관측 경계:** C1 서명 bundle(중립 72 / legacy 68개 파일)과 instance `5e2cdb3d4178a864d9b4e995d0b3e763`, sequence `37`의 실제 SDK/native binding은 C1 증거지만 headless와 격리되지 않아 GUI source 귀속은 입증되지 않았습니다. 별도로 source `7c40127abf79603ca68837f39c6dca362b2acc7c`와 불변 Tern source `69696023e00a0fcda8b85b332a075bfa26d6c26d`에서 실제 GUI/frame-driven sequence `47`, 정상 native Stop/Start 후 새 sourceWindow·sequence `13`을 Connect·저장 Configure·source patch 없이 관측했습니다. GUI는 자연스러운 `signed_out`였습니다. 자동 quiet-background scheduling·인증된 모델 전달·migration·retirement·다른 컴퓨터 복구나 v0.4.12 통과 증거가 아닙니다. tools Mac은 실제 문제 기기가 아니며 그 기기 대신 host 설치 앱을 변경하지 않습니다.
+
+## 과거 공개·실행 기록 — 예정된 일반 경로가 아님
+
+아래 버전·PID·SHA·취소/Unknown 관측·수락 한계는 원래 과거 범위 그대로입니다. 당시 “현재”라는 표현과 별도 A/B 승인·수동 연결 단계는 예정된 단일 승인 경로의 지침이 아닙니다.
+
 **Core v0.4.7:** [Desktop Pet v0.4.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.7), release `413584934`, source `52514da5115f09aac22de5429c08f7acdd993258` (2026-10-15T08:39:17Z). Six anonymous assets, strict/deep signatures, protocol 4 / observation 2 / API 1 and exact 68-file closure passed. Current observed acceptance: [v0.4.7 ledger](releases/v0.4.7.md). Pages is not yet observed; Wiki publication lacks dedicated `WIKI_PUBLISH_TOKEN`.
 
-**현재 경로(공개 Brew A′/B는 아직 대기):** 실행 중 v0.3.10 → 별도 native 동의의 일반 v0.3.11 업데이트 A′ → 보존한 원래 일치 서명 helper로 terminal/quiescent 정리 확인 → 독립 source review·최종 표시 native **Migrate** 동의로 Core v0.4.7 B → 정확한 profile ready/Commit → 실제 소유 manager의 retirement. A′를 생략하거나 동의를 B에 재사용하지 않습니다. v0.3.6 호환 경로는 별도이며 beta는 먼저 동결 일치 v0.3.6 pair가 필요합니다.
+**과거 v0.4.7 경로(대체됨; 당시 공개 Brew A′/B 대기):** 실행 중 v0.3.10 → 별도 native 동의의 일반 v0.3.11 업데이트 A′ → 보존한 원래 일치 서명 helper로 terminal/quiescent 정리 확인 → 독립 source review·최종 표시 native **Migrate** 동의로 Core v0.4.7 B → 정확한 profile ready/Commit → 실제 소유 manager의 retirement. 당시 A′와 B는 별도 동의가 필요했습니다. v0.3.6 호환 경로는 별도였으며 beta는 먼저 동결 일치 v0.3.6 pair가 필요했습니다.
 
 **동의·복구:** v0.4.7은 bound typed Cancelled와 VisibleApproved를 구분합니다. 예상 밖 native 응답·EOF·invalid/foreign/nonzero·불일치 delivery는 Unknown입니다. Unknown manager를 clear/replay하거나 cancelled로 바꾸지 마세요. 사용자 Stop은 rollback start를 포함한 재시작을 금지합니다. 원래 helper/journal/reservation·정확한 config/state·무관한 profile을 보존하며 target ready/Commit 후 검토한 소유 source만 retire합니다. v0.4.6 final-cancel false-Unknown 증거는 불변 과거 기록입니다. 현재 수동 candidate→공개 v0.4.7 결과는 ledger를 참조하세요. 공개 Brew A′/B·ManagerUnknown·late Stop·definite retirement failure/Resume은 대기 중입니다.
 
@@ -26,13 +47,13 @@
 
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다.
 
-**Current public bridge v0.3.11:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. Stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` serves Core v0.4.7 / bridge v0.3.11; beta is unchanged.
+**Historical public bridge v0.3.11 publication:** [Genuine Herdr bridge v0.3.11](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.11), release `413623057`, tag object `a907424e89c10d484f8646f41d5f020fa93ba8bc`, built from exact public Core `52514da5115f09aac22de5429c08f7acdd993258`. Five anonymous assets, genuine legacy bundle/executable/helper, protocol 3 / observation 1 / API 1 and exact 68-file closure passed. At that publication, stable tap `6693cd9db26e6dba9a257bbe76acaf78cb502c2f` served Core v0.4.7 / bridge v0.3.11; beta was unchanged.
 
 **과거 v0.3.9/v0.4.4 managed A 완료:** 동결 v0.3.6 Check는 공개 v0.3.9를 선택하고 `preferences/last_update_check`만 바꿨습니다(`1791963743` → `1791965310`). Check 중 다른 네 tree bytes·source PID `2467`·무관한 기본 PID `2641`은 불변입니다. 정확한 source `0f33f28` native A 동의로 operation `d5b2bf6f02e031eabb5a8c8fdd805cab`가 완료됐습니다(`completed` / `manager_exited`, installed/applied true). 실제 공개 v0.3.9 native PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`, image `0ed12d159b6bbb83ada833d39b4524ac5f7eccb1253b7acaf9aa2b71cbf833ce`는 정확한 옛 private config/state에서 일치 protocol 3 / capability 1 / API 1·UI/control ready·Herdr 1 / Tern 0에 도달했습니다. 실제 managed source Git status는 완전히 clean입니다. 보존한 원래 v0.3.6 helper의 strict/deep 서명과 실제 completed status도 통과했습니다. baseline은 옛 A 증거 87개와 전체 state 파일 91개를 해시로 보존합니다. 
 
 **과거 v0.3.9/v0.4.4 managed B 완료:** 별도 Move preview와 독립 strict/deep 검증을 통과한 공개 v0.4.4 coordinator가 native **Migrate** 동의를 받아 operation `d729fd740f4e459945edda00bf48d944`, plan SHA-256 `6471e928254229a66a6fc64a88f67095777d6bd890d621feb36b08a4c7d1fc69`으로 **COMPLETE**에 도달했습니다. Native Prepare/Stop으로 공개 v0.3.9 PID `3417` / instance `b42b25d48315e66bd87e7685e58cfb14`를 종료하고 적격 기존 Brew v0.4.4 app root/image `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 사용했습니다. `target_manager:null`이므로 **재설치가 없었습니다**. Target PID `4104` / instance `8912b3aad5419b1c14a78ef3418ae36f`는 정확한 옛 private config/state와 저장된 Herdr 선택(Herdr 1 / Tern 0)을 유지하며 protocol 4 / capability 2 / API 1·실제 UI/control ready에 도달했고 native_ready·target_committed가 true입니다. 실제 Herdr retirement attempt 1은 PID = PGID `4140`, exit 0, quiescent true, error null입니다. 실제 plugin list는 불변 Herdr v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`의 enabled integration-only Desktop Pet을 표시했고 managed Git HEAD도 일치합니다. 실제 manager 출력은 v0.4.1·actions 21개·startup/client-attached 훅입니다. Managed dist/app 및 옛 PID `3417`은 사라졌고 standalone `DesktopPet.app`은 만들지 않았습니다. 정확한 retired v0.4.1 태그의 역사적 Core v0.4.2-minimum wrapper는 같은 v0.4.4 PID/instance를 실제 재사용했습니다. 새 앱·새 태그는 없습니다. 원래 A 증거 87개 SHA-256·기존 옛 source-config 해시는 모두 불변이고 무관한 기본 config/state 두 tree는 byte-identical입니다. 숨겨진 기본 v0.4.4 PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`은 변경 없이 실행 중입니다. Private XDG base profile만 adopt했고 global default와 병합하지 않았습니다. 실제 GUI는 Desktop Pet / 내장 루벨리아·Settings **Herdr Connected 1 / Tern Disabled 0**으로 시각 확인했으며 clean-image 캡처는 아직 대기 중입니다. Fault 없는 최종 공개 v0.3.9/v0.4.4 A/B happy path는 별도로 통과한 과거 working metadata `f7edf5e` definite failure/명시 Resume 검증과 구분합니다.
 
-**Current consumer / SDK boundary:** Herdr integration remains assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`), only for Herdr-managed retirement. Current local consumer scripts/eight evidence files are materialized from public Core v0.4.7, not yet pushed main; no new integration tag or consumer native build. Actual user Mac remains unchanged. Manual same-source v0.3.11 candidate → public Core v0.4.7 B passed, not public Brew owning-manager retirement. Tern requires genuine Configure → Save → Connect of the same executable/config/state pair; account/provider and both-order runtime acceptance are not complete. See [current observations](releases/v0.4.7.md).
+**과거 v0.4.7 consumer / SDK 기록:** Herdr integration은 당시 assetless v0.4.1 (`6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`)이었습니다. 로컬 consumer scripts/evidence 8개는 공개 Core v0.4.7에서 materialize됐고 당시 main push·새 integration tag·consumer native build는 없었습니다. 수동 same-source v0.3.11 candidate → 공개 Core v0.4.7 B는 통과했지만 공개 Brew owning-manager retirement 증거는 아닙니다. 당시 consumer는 같은 executable/config/state를 Configure → Save → Connect해야 했고 account/provider·양쪽 시작 순서 수락은 미완료였습니다. [과거 관측](releases/v0.4.7.md)은 현재 Mac 상태 증거가 아닙니다.
 
 **Historical v0.4.5 consumer evidence:** **consumer·SDK 경계:** Herdr 연동은 공개 v0.4.1 `6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`(자산 없는 release `412252863`)을 유지합니다. 역사적 Core v0.4.2 minimum은 동결 상태이고 정상 Core v0.4.3 재사용은 관측됐습니다. 현재 Herdr consumer scripts 및 metadata/evidence 파일 8개는 공개 Core v0.4.5 release `412667385` / 소스 `51dcf22415b1ff0faf07651cb83c1c696c980f43`에서 실제 materialize됐습니다. 새 Herdr 태그는 없으며 최종 공개 managed retirement와 불변 wrapper의 v0.4.4 재사용은 위 실제 B 결과로 별도 확인했습니다. Tern v0.2.0과 호환 Core v0.4.1 pin은 불변입니다. Tern은 검증된 실행 파일과 실제 config/state 쌍을 명시적 **Configure → Save → Connect**로 연결하며 앱을 설치·자동 시작하지 않습니다. 실제 Tern keychain/provider 로그인 및 genuine OMP 18.10.3 providerSignIn/NoModel은 양쪽 시작 순서의 동일 instance/prompt/transcript/reconnect 수락을 여전히 막습니다. 자격 증명 복사·가짜 계정·ACK·완료를 만들지 않습니다. **전체 matrix는 완료되지 않았습니다.** 실제 현재 Herdr v0.4.5 reviewed-consumer VM smoke 통과: materialized wrapper는 같은 Brew v0.4.5 PID `10377` / instance `37953e017fc9208bfcc785a4ff138494`을 발견했습니다. Hide 후 ensure는 bootstrap 없이 Hidden / visible false·같은 instance를 유지했고 명시 Show로 복원했습니다. 현재 Herdr source 검증 통과: integration-only ownership v0.4.1·shell/manifests/TypeScript·고정 contracts `85c644cd90d8c6a9e97e9dc313cc4750f344235f`·**Rust adapter test 104개와 포함 test의 child 재실행 1개**(서로 다른 105개 test·Bun 아님). Native app/release 빌드는 없습니다.
 
@@ -49,6 +70,22 @@ Apple Silicon Mac, macOS 13 이상. 소스 빌드는 Rust/Cargo·Bun·Node.js/np
 
 ## 설치와 선택형 연동
 
+**현재 정식판 후보 소유자 정책:** 새 Standalone 설치와 일반 업데이트는 실제 OS 계정 home의 `.local/share/desktop-pet/libexec/DesktopPet.app`을 사용하며 `HOME`/XDG와 무관합니다. 원래 `Applications/DesktopPet.app`은 구 helper의 완료 확인·별도 승인 이관·복구에만 인식하며 영구적인 제자리 업데이트 위치가 아닙니다. 임의 home/custom/system 경로·symlink 인수는 금지합니다. Brew/source 소유자와 과거 동결 릴리스 노트는 유지합니다.
+
+### 기존 Applications 소유자: 명시적으로 승인한 일회성 복구
+
+진짜 beta.7 helper는 새 정식판을 선택할 수 있지만, 실제 Mac에서 별도 버그가 확인됐습니다. 응답을 마친 소켓이 닫힌 뒤 Darwin peer PID를 다시 조회하여 설치 전에 `cannot authenticate control peer PID`로 실패합니다. 앱의 업데이트 확인만으로 이미 배포된 helper를 고칠 수 없습니다. [0.4.14 수정](releases/v0.4.14.md)은 인증 문제와 명시적으로 승인한 운영자 복구 경로를 제공합니다. 옛 업데이트를 반복하거나 이전 앱 전용 경로가 성공했다고 주장하지 마세요.
+
+승인한 운영자 복구에는 [v0.4.16 이상](releases/v0.4.16.md)을 사용하세요. SDK 내부 기본 팩 검증 인증과 격리 helper의 안전한 HOME 전달 수정을 포함하며, 임의의 pack 명령이나 다른 프로필을 허용하지 않습니다. 차단을 없애려고 Tern을 종료하거나 설치 보호장치를 우회하지 마세요.
+
+인증된 원래 config/state·캐릭터·설정·사용자 자료를 유지합니다. 기존 Tern SDK가 native 작업 정산 후 저장된 executable만 바꾸며 native는 KV를 덮어쓰지 않습니다. 기본값 추측·프로필 adopt/병합·Configure/Connect·Tern 재시작·plugin reload로 실패를 숨기지 마세요. 서명된 원본과 트랜잭션 근거는 private retention에 보존합니다.
+
+**Pet의 미저장 편집을 먼저 저장하세요.** 운영자 복구는 원본 앱·프로필 백업과 Pet만 정상 종료한 뒤 별도로 시작하는 작업에 대한 명시적 승인이 필요합니다. 이미 종료된 소스의 설치 작업은 Stop ACK·업데이트 parent·재시작 token을 만들어내지 않습니다. 이후 사용자 Stop·scope 변경은 자동 재시작을 금지합니다. 실제 정산된 정식판의 같은 버전 native 이관은 별개 경로이며 그 동의가 수동 복구 동의는 아닙니다.
+
+native 설치·준비와 창별 fresh Tern 확인은 별개입니다. 미연결·비호환 consumer는 연동 대기이지 native 설치 실패가 아닙니다. 공개·소스 검사만으로 실제 사용자 복구를 주장하지 않으며 Tern 초기화나 미확정 journal 삭제 없이 실제 관측 결과를 구분해 보고합니다.
+
+### 과거 고정 설치 예시
+
 **과거 v0.4.4 새 Brew 설치 증거:** 중립 v0.4.4 포뮬러는 tap `2aa9a4be9517e0232a3f2b8e2b3c748045c69586`에 공개됐습니다. 적격 Brew v0.4.4 새 설치가 통과했습니다(74개 파일 / 44.3 MB, 내부·외부 재서명 5개). 인증된 검사로 Homebrew 파생 이미지 `8ec4308c59c874140c431a2f86ad3d0a1f13a8365bdd994e9da14d7788e5c312`를 확인했습니다. 설치·검사는 중립 config/state·standalone 앱을 만들거나 데몬을 시작하지 않았습니다. 명시적 수동 **Start** 이후에만 실제 v0.4.4 UI/control ready, PID `2641` / instance `b530f4ff84abaa4e64fcacf3828ad470`가 확인됐습니다. 루벨리아와 실제 Settings는 **Desktop Pet / Auto / Herdr Waiting 0 / Tern Waiting 0**을 표시했고 이후 명시적 Hidden은 같은 기본 인스턴스를 보존했습니다. 새 설치의 증거이지 v0.4.4 일반 업데이트·managed 이전 완료 증거는 아닙니다. 설치 명령:
 
 ```sh
@@ -59,6 +96,8 @@ desktop-pet status
 ```
 
 사전 빌드·소스 설치는 Herdr 연동이 아니라 **core** 체크아웃에서 실행합니다. 기본 설치는 prebuilt-only이며 다운로드·검증 실패를 소스 빌드로 숨기지 않습니다. `--source`는 현재 core 체크아웃만 빌드하고 그 `dist/DesktopPet.app`을 사용합니다.
+
+**Historical pinned v0.4.7 installation examples, not latest-version instructions:** the commands below deliberately select immutable older assets. Core v0.4.11 is public but failed historical repair; consumer metadata remains v0.4.8 pending actual verified v0.4.12 / v0.3.16 publication. Never substitute unpublished assets.
 
 ```sh
 git clone https://github.com/hanbong5938/desktop-pet.git
@@ -89,11 +128,18 @@ herdr plugin install hanbong5938/herdr-desktop-pet
 tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 ```
 
+### Tern을 닫지 않는 Standalone 업데이트
+
+현재 소스는 고정 prebuilt 설치기에 Pet-only transaction을 연결합니다. 공개 릴리스 재게시나 실제 Tern acceptance 완료의 증거는 아닙니다. 낮은 버전의 **동일 Standalone 소유자**를 올릴 때 native 창에서 정확한 버전·root·프로필과 **Desktop Pet만 재시작**하는 동의를 받습니다. Tern·창·터미널·agent 작업은 그대로 유지하며 플러그인 reload나 Configure/KV 재작성으로 해결하지 않습니다. **Pet 편집 내용을 먼저 저장하세요.** 검증된 공개 beta.1 bootstrap은 draft-aware Prepare가 아닌 일반 Quit입니다. Cancel/승인창 생성 실패와 서로 다른 active native profile 충돌은 어떤 앱도 멈추기 전에 종료합니다. 같은 native profile의 Tern 두 창은 충돌이 아닙니다. 원래 stopped인 프로필은 설치만 하고 시작하지 않으며 Homebrew/Source 소유권과 beta 설정도 바꾸지 않습니다.
+
+`installed`는 검증된 디스크 교체이고 `applied`는 새 exact-profile 인스턴스와 UI/control 준비까지 확인한 상태입니다. 재시작 실패 뒤 `installed:true, applied:false`가 남을 수 있습니다. 설치기가 표시한 operation ID·state-dir·보존된 서명 helper를 유지하고 그 helper의 `install-status` / `install-recover`를 사용하세요. 수동 Stop/설치 반복이나 일반 updater의 `recover --start`와 혼용하지 않습니다. status exit 0은 유효한 관찰이지 성공이 아닙니다. Stop ACK 유실이나 추가 사용자 Stop는 복구 동의로 재시작 권한이 되지 않습니다. old signed bundle과 원래 sidecar는 private storage에 보존하며 자동 삭제하지 않습니다. 증거·예약 표식을 임의 삭제하지 마세요. [CLI 계약](cli.md#tern을-유지하는-standalone-설치-transaction-현재-소스-계약).
+
+
 ## 프로필·연결·이전
 
 새 프로필은 Auto입니다. Connection은 등록된 제공자의 실제 연결을 표시하며 설치 여부로 추측하지 않습니다. 제공자 ID는 불투명 값이고 작업 권한은 출처 이름 접두사·경로가 아니라 capability로 결정합니다. Auto는 동시 관찰이지 fallback이 아닙니다. 원격은 읽기 전용이며 Tern은 답장만 지원하고 worktree 제거는 지원하지 않습니다. 접수는 에이전트 완료가 아닙니다.
 
-[사용법](usage.ko.md), [정확한 프로필·탐색 계약](development.md#profiles-and-installation-discovery), [A→B 이전 안내](migrations/desktop-pet.md)를 확인하세요. status 또는 Connection의 실제 실행 파일/config/state 세 값을 Tern Configure에 입력하고 Connect하세요. 기존 별도 Tern·beta·custom 프로필은 그 자리에서 보존하고 병합하지 않습니다.
+[프로필·탐색 계약](development.md#profiles-and-installation-discovery)과 [이전·보존 기록](migrations/desktop-pet.md)을 확인하세요. 예정된 이전은 실제 executable/config/state를 자동 인계하고 같은 Tern 창을 fresh rebind한 뒤 retire합니다. 이 경로에 수동 Configure/Connect를 추가하지 않습니다. 이전과 무관한 최초 독립 연결은 명시 설정할 수 있습니다. 기존 별도 Tern·beta·custom profile은 보존하며 병합하지 않습니다.
 
 ```sh
 desktop-pet profile show --json
@@ -105,7 +151,7 @@ desktop-pet preferences set --observation-host auto
 
 | 조작 | 동작 |
 | --- | --- |
-| 메뉴 막대 아이콘 좌클릭, 키보드 활성화 또는 AXPress | 캐릭터·관찰 대상·말풍선/설정의 기존 3탭 패널을 엽니다. 다시 좌클릭하면 닫거나 선택한 탭을 초기화하지 않고 앞으로 가져옵니다. 최신 macOS API와 macOS 13 호환 경로로 활성화를 요청하지만 키보드 포커스 이전은 macOS가 결정합니다. |
+| 메뉴 막대 아이콘 좌클릭, 키보드 활성화 또는 AXPress | **꾸미기 / 연결 / 앱 설정** 3탭 패널을 엽니다. 다시 좌클릭하면 선택 탭을 초기화하지 않고 앞으로 가져옵니다. 키보드 포커스 이전은 macOS가 결정합니다. |
 | 메뉴 막대 아이콘 우클릭/Control-click | 패널을 숨긴 뒤 **설정…**, **종료**, 필요 시 **캐릭터 표시·조작 복구** 네이티브 메뉴를 엽니다. |
 | 머리·몸통 탭; 머리 위에서 좌우로 움직이기 | 반응; 캐릭터 쓰다듬기. |
 | 몸통·배경 드래그 또는 캐릭터 창 Option-드래그; 오른쪽 아래 조절점 | 캐릭터 이동; 크기 변경. |
@@ -113,6 +159,8 @@ desktop-pet preferences set --observation-host auto
 | 말풍선 본문 변·모서리 드래그(Option 포함) | 변은 한 축, 모서리는 두 축의 크기 변경. 캐릭터 배율·글자 크기와 독립. |
 | 말풍선 배경·카드 헤더 우클릭/Control-click | **대화창 닫기**는 말풍선만 숨기고 **자동 크기로 복원**은 접힌·펼친 모드의 사용자 크기를 모두 해제. 텍스트 복사/붙여넣기 메뉴와 다른 컨트롤의 기본 동작은 유지. |
 | 전체 창 / 투명 영역 클릭 통과 | 전체 창 모드는 캐릭터·말풍선 모두 클릭이 통과되어 조작 불가; 투명 영역 모드는 캐릭터 그림의 투명 부분만 통과하여 말풍선 조작 가능. |
+
+**종료**는 Desktop Pet의 현재 실행만 끝냅니다. Herdr·Tern은 종료하지 않으며 자동 시작 설정도 유지합니다.
 
 **이 소스 체크아웃:** 좌버튼을 놓았는데 놓기 콜백이 유실된 경우 포인터 캡처를 조용히 복구하며 가짜 탭 반응을 만들지 않습니다. 새로운 누르기는 새 드래그 시작점을 사용하고, 중복·오래된 이벤트는 이를 바꾸거나 다른 창의 조작을 끝낼 수 없습니다. Control-left의 놓기는 이전 탭을 확정하지 않습니다. 정상 탭·Option-드래그·크기 조절점의 동작은 유지합니다. 유효한 말풍선 크기 조절에서 놓기 콜백이 유실되면 아래의 기존 추적·IME 종료 조건에 따라 미리보기를 한 번 확정합니다. 이 변경을 사용하려면 체크아웃을 다시 빌드·설치해야 하며 이미 설치된 공개 바이너리는 바뀌지 않습니다.
 
@@ -127,6 +175,10 @@ desktop-pet preferences set --observation-host auto
 ## 세션 검색과 정렬
 
 카드 이름은 관측한 터미널 제목, 이름이 있는 탭, 작업 공간·디렉터리 문맥 순서로 선택합니다. 이름이 없으면 대체 이름을, 중복이면 눈에 보이는 구분자를 붙입니다. 마우스를 올리면 전체 제목·작업 경로·내부 ID가 보입니다. 제목이 바뀌어도 선택·스크롤을 유지하며 단절된 카드는 마지막 제목과 **오프라인** 상태를 표시합니다.
+
+제목이나 작업 디렉터리가 같아도 같은 대화라는 뜻은 아닙니다. **로컬**/**원격**은 출처 위치를, 연결됨/**오프라인**은 가용성을 나타냅니다. 로컬 출처도 오프라인일 수 있으며 보존된 카드가 실시간 연결을 뜻하지는 않습니다.
+
+카드 선택은 Desktop Pet(Core)의 답장 대상을 정하며 Tern의 활성 pane을 전환하지 않습니다. 캐릭터는 관찰 중인 모든 출처의 상태를 집계하므로 현재 포커스된 pane의 상태와 다를 수 있습니다.
 
 **검색**은 앞뒤 공백을 제거하고 제목·탭/작업 공간·에이전트·관찰 대상 표시 이름·전체 작업 디렉터리·대체 이름의 일부를 대소문자 구별 없이 찾습니다. ID와 소켓 경로는 검색하지 않습니다. **상태** 필터와 검색은 교집합이며 전체 관찰 상태 요약과 반응을 바꾸지 않습니다. **정렬**에는 **기본순**(원래 순서)·**이름순**·**출처순**이 있고 구분선 뒤에 독립적인 **실행 중 우선**이 있습니다. 실행 중 카드를 모든 포함 출처에서 먼저 묶고 각 묶음에 선택한 정렬을 적용합니다. 닫힌 메뉴 제목·접근성 값에도 두 선택을 표시합니다. 모든 상태별 정렬은 아닙니다. GUI는 필터·정렬 후 최대 **128개** 카드를 표시하고 생략 수를 알립니다. CLI `sessions list --limit`는 총 행 한도가 아니라 **페이지 크기**입니다([CLI](cli.md#세션과-에이전트-프롬프트)).
 
@@ -148,11 +200,11 @@ Tern 답장은 등록 어댑터가 다시 검증한 **일회 `agents:ask`**를 �
 
 캐릭터를 숨겨도 말풍선 표시 설정은 그대로입니다. 저장된 단독 위치가 없다면 첫 분리는 계산만 한 위치가 아니라 **실제로 적용된 부착 말풍선 본문** 위치를 사용합니다. 처음부터 캐릭터가 숨겨졌다면 일반 부착 배치가 대체 위치입니다. 위치는 캐릭터 좌표와 별도 저장되며 이후 분리는 IME 조합 중에도 저장된 위치를 우선합니다. 단독 배경 드래그는 말풍선만 옮기고 캐릭터를 켜면 붙고 다시 끄면 단독 위치로 돌아갑니다. 접힘/펼침·답장·재측정에서는 화면 제한 외에 단독 위치를 유지하고 화면 제거·배치 변경으로 화면 밖에 나가면 남은 화면에 복구합니다. 실행 중 선택·보기·답장·초안은 숨김/표시를 지나도 유지되지만 초안은 재시작 후 복원되지 않습니다. 단독 중 바꾼 배치는 재부착할 때만 적용합니다. `reset`은 표시 설정을 유지하고 예전 단독 위치를 지워 필요 시 새로 적용한 부착 배치에서 다시 정하며 캐릭터 좌표를 복사하지 않습니다. 답장 미확정 입력 중 숨김/표시·배치·초기화는 단독 위치 확정을 조합 종료까지 미루고 나중의 초기화는 이전 위치보다 우선합니다. AppKit 콜백에서 조합 문자·확정 초안·선택은 유지됐으나 물리적 IME/포커스 인증은 아닙니다.
 
-**설정 → 메뉴 막대 아이콘**의 **항상 표시**(안정판 v0.2.0 이후 기본)와 **복구가 필요할 때만 표시**는 창 표시와 독립적입니다. 복구 모드에서는 **두 창 모두 숨김** 또는 **전체 창 클릭 통과**일 때 아이콘을 표시합니다. 캐릭터만/단독 말풍선만/둘 다 보이는 조작 가능 상태나 투명 영역 클릭 통과만 켠 상태에서는 두 창이 숨겨지지 않은 한 숨깁니다. 항상 표시는 이들 모든 상태에서 아이콘을 표시합니다. 종료 중에는 어느 모드에도 표시하지 않으며 알파 포인터 폴링만으로 복구 조건을 바꾸지 않습니다. 아이콘 우클릭/Control-click의 **캐릭터 표시·조작 복구**는 복구 필요 시에만 나타나고 캐릭터를 보이게 하며 전체 창 클릭 통과를 끕니다. 말풍선 표시와 투명 영역 클릭 통과는 유지하며 켜진 말풍선은 재부착됩니다. 복구 모드 아이콘은 메뉴를 닫으면 다시 사라지고 CLI `show`는 말풍선을 켜지 않고 캐릭터만 표시합니다. 과거 `bf23ced` 조건부 아이콘은 현재 설정을 상속하는 것이 아닌 [과거 프리뷰](migrations/unreleased.ko.md)의 동작입니다.
+**현재 소스의 설정 → 일반 → 표시 조건**은 **항상 표시**(안정판 v0.2.0 이후 기본)와 **복구가 필요할 때만 표시**를 제공하며 창 표시와 독립적입니다. 복구 모드에서는 **두 창 모두 숨김** 또는 **전체 창 클릭 통과**일 때 아이콘을 표시합니다. 캐릭터만/단독 말풍선만/둘 다 보이는 조작 가능 상태나 투명 영역 클릭 통과만 켠 상태에서는 두 창이 숨겨지지 않은 한 숨깁니다. 항상 표시는 이들 모든 상태에서 아이콘을 표시합니다. 종료 중에는 어느 모드에도 표시하지 않으며 알파 포인터 폴링만으로 복구 조건을 바꾸지 않습니다. 아이콘 우클릭/Control-click의 **캐릭터 표시·조작 복구**는 복구 필요 시에만 나타나고 캐릭터를 보이게 하며 전체 창 클릭 통과를 끕니다. 말풍선 표시와 투명 영역 클릭 통과는 유지하며 켜진 말풍선은 재부착됩니다. 복구 모드 아이콘은 메뉴를 닫으면 다시 사라지고 CLI `show`는 말풍선을 켜지 않고 캐릭터만 표시합니다. 과거 `bf23ced` 조건부 아이콘은 현재 설정을 상속하는 것이 아닌 [과거 프리뷰](migrations/unreleased.ko.md)의 동작입니다.
 
 `preferences.json`의 `menu_bar_mode`는 `always`/`recovery_only`를 저장합니다. 키 없는 기존 프로필(과거 조건부 프리뷰 포함)도 항상 표시로 시작합니다. 저장 성공은 즉시 적용되어 재시작·다른 설정 저장 후 유지되고 미지의 필드는 보존합니다. 실패하면 이전 모드·아이콘을 유지하며 모드 변경은 창 표시·클릭 통과·위치·초안·실행 관리를 바꾸지 않습니다.
 
-**설정 → 메뉴 막대 아이콘 → 이미지 선택…**에서 **정적 PNG**를 가져옵니다(인코딩 ≤4 MiB, 디코딩 ≤100만 픽셀). 애니메이션·손상·잘림·완전 투명 파일은 거절합니다. 원래 색을 유지해 18 pt 안에 비율대로 맞추고 1×/2× Retina를 제공합니다. 성공한 사본은 설정 디렉터리 `menu-bar-icons/`에 관리하고 선택적 `preferences.json`의 `menu_bar_icon.asset`으로 참조하므로 외부 원본을 이동해도 됩니다. `preferences.json`, `lifecycle.json`, `characters/`와 함께 백업하세요. 설정이 없으면 발바닥 기본 그림을 표시합니다. 가져오기/저장 실패는 이전 선택을 유지하고, 재시작 때 관리 그림이 없어지거나 손상되면 **오류와 기본 그림**을 표시하면서 메타데이터는 유지합니다. **기본 아이콘 복원**은 그림만 바꾸며 모드·창·클릭 통과·위치·초안·실행 관리는 보존합니다. 가져오기는 네이티브 디코딩 전 **모든 PNG 청크 CRC**(보조 청크·IEND 포함), IDAT zlib Adler-32와 색 형식·인터레이스 패스별 정확한 압축 해제 스캔라인 길이를 확인합니다. 관리 사본은 기존 파일을 대체하지 않고 원자적으로 게시합니다. 구형 중단 작업의 개인 임시 하드 링크는 소유·접근 제한·동일 inode가 확인된 별칭일 때만 **동일한 정상 PNG를 명시적으로 다시 가져와** 복구할 수 있습니다. 시작 시 일괄 정리하거나 다른 링크·파일·손상된 PNG를 복구하지 않습니다. [과거 beta 기록](releases/unreleased.md)은 실제 이미지 선택기·VoiceOver 인증이 아닙니다.
+**현재 소스의 설정 → 일반 → 아이콘 사용자 지정 → 이미지 선택…**에서 **정적 PNG**를 가져옵니다(인코딩 ≤4 MiB, 디코딩 ≤100만 픽셀). **아이콘 사용자 지정**은 처음에 접혀 있으며 미리보기·현재 아이콘 상태와 가져오기/불러오기/저장 오류는 접어도 표시합니다. 애니메이션·손상·잘림·완전 투명 파일은 거절합니다. 원래 색을 유지해 18 pt 안에 비율대로 맞추고 1×/2× Retina를 제공합니다. 성공한 사본은 설정 디렉터리 `menu-bar-icons/`에 관리하고 선택적 `preferences.json`의 `menu_bar_icon.asset`으로 참조하므로 외부 원본을 이동해도 됩니다. `preferences.json`, `lifecycle.json`, `characters/`와 함께 백업하세요. 설정이 없으면 발바닥 기본 그림을 표시합니다. 가져오기/저장 실패는 이전 선택을 유지하고, 재시작 때 관리 그림이 없어지거나 손상되면 **오류와 기본 그림**을 표시하면서 메타데이터는 유지합니다. **기본 아이콘 복원**은 그림만 바꾸며 모드·창·클릭 통과·위치·초안·실행 관리는 보존합니다. 가져오기는 네이티브 디코딩 전 **모든 PNG 청크 CRC**(보조 청크·IEND 포함), IDAT zlib Adler-32와 색 형식·인터레이스 패스별 정확한 압축 해제 스캔라인 길이를 확인합니다. 관리 사본은 기존 파일을 대체하지 않고 원자적으로 게시합니다. 구형 중단 작업의 개인 임시 하드 링크는 소유·접근 제한·동일 inode가 확인된 별칭일 때만 **동일한 정상 PNG를 명시적으로 다시 가져와** 복구할 수 있습니다. 시작 시 일괄 정리하거나 다른 링크·파일·손상된 PNG를 복구하지 않습니다. [과거 beta 기록](releases/unreleased.md)은 실제 이미지 선택기·VoiceOver 인증이 아닙니다.
 
 ## 워크트리 삭제
 
@@ -166,15 +218,27 @@ Tern 답장은 등록 어댑터가 다시 검증한 **일회 `agents:ask`**를 �
 
 ## 말풍선과 캐릭터 설정
 
-메뉴 막대 패널이나 문맥 **설정…**을 여세요. 말풍선 테마와 UI 언어는 네이티브 드롭다운입니다. **시스템**은 macOS 선호 언어 순서를 따르고 직접 지정할 수 있는 언어는 한국어(`ko`), 영어(`en`), 중국어 간체(`zh-Hans`), 일본어(`ja`)입니다. 시스템 언어에서 일본어와 간체 중국어(`zh`, `zh-Hans`, `zh-CN`, `zh-SG`)를 인식하며 명시적 번체(`zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`)는 다음 지원 언어를 찾고 없으면 영어로 돌아갑니다. 저장하는 언어 값은 정확히 `system`, `ko`, `en`, `zh-Hans`, `ja`입니다. 테마·언어는 변경 시 저장하고 사용자 지정 색상은 **색상 적용**을 눌러야 합니다. 열린 창의 조용한 색상 충돌 확인은 컨트롤 가능 여부·라벨만 갱신하고 초안·색상 견본·포커스·선택·실행 취소를 건드리지 않으며 닫으면 멈춥니다. 네이티브 드롭다운·스크롤러·드래그 추적 중 말풍선 표시/배치 변경은 미루고 종료 후 최신 설정/상태를 적용합니다.
+메뉴 막대 패널이나 문맥 **설정…**을 여세요. **공개 배포를 뜻하지 않는 현재 소스 기준:** 352×540pt 기본 패널은 **꾸미기 / 연결 / 앱 설정** 3탭과 동일한 화면 제한 스크롤 viewport를 사용하며 탭별 읽던 위치를 유지합니다. 꾸미기에는 현재 캐릭터·후보·작업 요약, 브라우저, 표시·크기, 말풍선 위치·테마, 위치 초기화가 있습니다. 연결에는 선택 대상과 등록 제공자의 실제 연결 상태·합계가 있습니다. 조회 실패는 stale snapshot을 실제 연결 성공으로 바꾸지 않습니다. 앱 설정에는 언어, **연동 자동 시작 허용**, 업데이트 버전·상태·동작, beta 활성 표시가 있습니다. 연동 자동 시작은 macOS 로그인 실행 설정이 아닙니다.
 
-**말풍선 → 상태 아이콘·색상 표시**는 기본 켜짐이며 즉시 적용·재시작 후 유지됩니다. 끄면 문자만 표시합니다. 작업 중 파랑, 확인 대기 주황, **검증된** 성공 초록 체크, 실패 빨강이며 `Done`/승인 결과 없는 유휴는 성공으로 추측하지 않고 중립색입니다. 동일 세션의 변하지 않은 검증 완료 보고는 유휴 이벤트/스냅샷에도 유지되지만 새 작업·세션 정체성 모호함·보고 소실·단절 시 해제되며 모호함이 해소되어도 같은 캐시 보고를 재수락하지 않습니다. 새 출처는 빈 스냅샷을 포함해 첫 일관된 스냅샷 전까지 오프라인입니다. 전체 요약의 초록 체크는 **관찰 중 모든 세션의 검증된 성공**을 뜻하며 카드 필터/표시 한도와 무관합니다. 상태에는 텍스트도 항상 있고 장식 아이콘은 접근성 트리에서 제외하며 카드는 전체 제목/상태를 중복 자식 없이 제공합니다. 표시 ON/OFF는 카드 선택·필터·초안을 유지합니다. 투명 영역 클릭 통과는 포인터 폴링 방식이므로 클릭 경합을 허용할 수 없다면 끄세요.
+일곱 버튼은 하나의 비모달·크기 조절 가능한 보조창에서 해당 topic을 바로 엽니다. **꾸미기 세부 설정**은 상태 아이콘·클릭 통과·다섯 색상·대사 편집·표시 오류, **연결 설정**은 자동/제공자 선택·개수·제공자 설정/동작/도움말, **메뉴 막대 설정**은 표시 정책·아이콘, **업데이트 설정**은 자동 확인·beta 정책입니다. **진단 정보**는 실행 파일·설정/상태·소켓·실행 식별자·연결/자동 시작 저장 오류를, **업데이트 로그**는 설치 출처·릴리스·확인 시간·작업/이관·이력·진단을 선택 가능한 고정폭 읽기 전용 텍스트로 표시하며 **앱 복구**는 설정 초기화를 제공합니다. topic별 내용에 맞춰 창 높이를 정하고 스크롤 위치와 사용자가 직접 정한 크기를 보존하므로 큰 로그 창 크기가 짧은 설정 화면에 남지 않습니다. 기본 메뉴를 닫거나 다른 앱을 활성화해도 보조창은 남으며 로그 열기만으로 업데이트 확인·설치를 시작하지 않습니다.
 
-**캐릭터** 탭은 현재/후보/작업 요약이 간결하며 후보도 의미 있는 상태도 없으면 빈 선택 카드를 숨깁니다. 아래에서 브라우저·작업 안내를 설명합니다. 탭 전환·상태 갱신 시 캐릭터 탭은 보이는 내용에 맞춰 높이가 바뀌고 말풍선·설정 탭은 기존 높이/스크롤을 유지하며 작은 화면에서는 실제 내용을 스크롤합니다. 팩 v5와 루벨리아 `default@0`은 변경되지 않았습니다([v0.3.3 수정](releases/v0.3.3.md#한국어)).
+**앱 복구 → 모든 설정 초기화…**는 확인 후 실행하며 미저장 초안·IME·진행 작업·미정산 업데이트/이전 소유권이 있으면 거절합니다. 정확한 현재 프로필의 설정을 비공개 백업한 뒤 언어·꾸미기·대사 수정·캐릭터 선택·앱의 관찰 설정·자동 시작·업데이트 설정을 기본값으로 되돌리고 해당 Pet만 다시 시작합니다. 설치·가져온 팩, 원본 이미지, 실행 인자의 에셋 경로, 연동 앱의 연결/등록 정보, 프로필 경로, 알 수 없는 확장 메타데이터 및 업데이트 기록·예약은 보존합니다. 복구 화면에 마지막 결과와 백업 경로를 표시하며 실패를 성공으로 취급하지 않고, 이후 사용자 Stop은 재시작을 막습니다. 완료·적용된 업데이트 이력은 설치·프로필 예약이 비었음을 별도 입증하면 자동 확인·beta 설정 변경을 막지 않으며 불명/진행 작업은 계속 보호합니다.
+
+업데이트 상태 아이콘과 제목은 간결한 카드 바깥 상단에 표시합니다. 메뉴 막대 설정은 업데이트와 분리해 언어 아래·자동 시작 위에 두며, 업데이트 설정과 업데이트 로그는 한 행에 표시합니다. 로그는 기존 크기 조절·스크롤 가능한 네이티브 보조창을 사용하므로 기본 패널을 늘리지 않습니다.
+
+작은 설정 패널 하단의 **앱 재시작**은 **종료** 바로 왼쪽에 있으며 위치 초기화는 **꾸미기**에 그대로 있습니다. 현재 실행 파일·설정/상태 프로필·관찰 모드·사용자 지정 에셋을 유지해 다시 실행하며 업데이트 확인·설치·프로필 전환은 하지 않습니다. 저장된 설정은 유지됩니다. 저장하지 않은 초안·IME 조합·진행 중인 작업·업데이트/이전 인계 등 기존 재시작 차단 조건이 있으면 재시작하지 않습니다. 편집 내용을 저장하거나 명시적으로 버린 뒤 다시 시도하세요. 재시작이 메모리의 초안을 저장하지는 않으며 업데이트 컨트롤이 동결된 동안에는 재시작 버튼도 비활성화됩니다.
+
+**사용자 지정** 테마는 저장 성공 후 꾸미기 세부 설정을 엽니다. 다섯 색상은 **색상 적용**으로 저장하며 **색상 초기화**도 저장 동작입니다. topic 이동·닫기/다시 열기는 저장하지 않고 invalid·빈 값·대소문자 혼합을 포함한 초안을 유지합니다. 저장값 충돌 때만 **저장값 불러오기**와 **편집 유지 및 기준 갱신**이 나타납니다. 불러오기는 초안을 교체하고 기준 갱신은 초안을 유지합니다. 충돌은 stale 적용을 막지만 닫기는 막지 않습니다. IME 조합 중 닫기·topic·picker 전환은 조합 종료까지 보류합니다. 업데이트 freeze 중에도 진단 선택·스크롤은 가능하고 변경 컨트롤은 비활성화됩니다.
+
+**꾸미기 → 말풍선 테마**, **앱 설정 → 언어**는 네이티브 드롭다운입니다. **시스템**은 macOS 선호 언어 순서를 따르며 직접 지정 값은 한국어(`ko`), 영어(`en`), 중국어 간체(`zh-Hans`), 일본어(`ja`)입니다. 시스템 언어에서 일본어와 간체 중국어(`zh`, `zh-Hans`, `zh-CN`, `zh-SG`)를 인식하며 명시적 번체(`zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`)는 다음 지원 언어를 찾고 없으면 영어로 돌아갑니다. 저장 값의 canonical spelling은 그대로이며 테마·언어는 변경 시 저장합니다. 네이티브 추적 중 말풍선 표시/배치 변경은 종료 후 최신 값으로 적용합니다.
+
+**꾸미기 세부 설정 → 상태 아이콘·색상 표시**는 기본 켜짐이며 즉시 적용·재시작 후 유지됩니다. 끄면 문자만 표시합니다. 작업 중 파랑, 확인 대기 주황, **검증된** 성공 초록 체크, 실패 빨강이며 `Done`/승인 결과 없는 유휴는 성공으로 추측하지 않고 중립색입니다. 동일 세션의 변하지 않은 검증 완료 보고는 유휴 이벤트/스냅샷에도 유지되지만 새 작업·세션 정체성 모호함·보고 소실·단절 시 해제되며 모호함이 해소되어도 같은 캐시 보고를 재수락하지 않습니다. 새 출처는 빈 스냅샷을 포함해 첫 일관된 스냅샷 전까지 오프라인입니다. 전체 요약의 초록 체크는 **관찰 중 모든 세션의 검증된 성공**을 뜻하며 카드 필터/표시 한도와 무관합니다. 상태에는 텍스트도 항상 있고 장식 아이콘은 접근성 트리에서 제외하며 카드는 전체 제목/상태를 중복 자식 없이 제공합니다. 표시 ON/OFF는 카드 선택·필터·초안을 유지합니다. 투명 영역 클릭 통과는 포인터 폴링 방식이므로 클릭 경합을 허용할 수 없다면 끄세요.
+
+**꾸미기** 탭은 현재/후보/작업 요약을 유지하며 후보도 의미 있는 상태도 없으면 빈 선택 카드를 숨깁니다. 캐릭터 전용 높이 특례 없이 3탭이 같은 제한 viewport를 사용합니다. 팩 v5와 루벨리아 `default@0`은 변경되지 않았습니다([v0.3.3 수정](releases/v0.3.3.md#한국어)).
 
 ## 대사 편집
 
-**캐릭터 → 대사 편집…**에서 별도의 크기 조절 가능한 다크 테마 창을 엽니다(기본 내용 영역 760×560, 최소 창 620×480). 실행 중 캐릭터를 바꾸지 않고 사용 가능한 캐릭터와 **원문 리비전**을 선택하고 UI 언어와 독립적인 한국어(`ko`)·영어(`en`)·중국어 간체(`zh-Hans`)·일본어(`ja`) 및 8개 항목(대기·작업 중·확인 대기·상태 불명·머리 터치·몸 터치·쓰다듬기·관측된 작업 완료)을 고릅니다. 상단 선택, 왼쪽 이벤트, 중앙 입력·펼칠 수 있는 별도 원본 참조, 하단 고정 상태/동작 영역으로 구성합니다. 긴 이름·오류는 마우스를 올려 전문을 봅니다. 배지는 미저장 수정을 표시합니다. 사용자 문구가 없으면 원본 문구가 처음 입력란에 채워집니다. 사용자 문구는 해당 대사만 대체하고 관측 세션 수·상태 전환·반응 시간·단절 안내는 바꾸지 않습니다.
+**꾸미기 세부 설정 → 대사 편집…**에서 별도의 크기 조절 가능한 다크 테마 창을 엽니다(기본 내용 영역 760×560, 최소 창 620×480). 실행 중 캐릭터를 바꾸지 않고 사용 가능한 캐릭터와 **원문 리비전**을 선택하고 UI 언어와 독립적인 한국어(`ko`)·영어(`en`)·중국어 간체(`zh-Hans`)·일본어(`ja`) 및 8개 항목(대기·작업 중·확인 대기·상태 불명·머리 터치·몸 터치·쓰다듬기·관측된 작업 완료)을 고릅니다. 상단 선택, 왼쪽 이벤트, 중앙 입력·펼칠 수 있는 별도 원본 참조, 하단 고정 상태/동작 영역으로 구성합니다. 긴 이름·오류는 마우스를 올려 전문을 봅니다. 배지는 미저장 수정을 표시합니다. 사용자 문구가 없으면 원본 문구가 처음 입력란에 채워집니다. 사용자 문구는 해당 대사만 대체하고 관측 세션 수·상태 전환·반응 시간·단절 안내는 바꾸지 않습니다.
 
 **대사 저장**/**Command+S**는 언어·항목 하나만 저장하며 항목당 **2048 UTF-8 바이트**(글자 수 아님)까지 허용합니다. 빈 문자열/공백만 저장하면 해당 사용자 대사를 제거하며 팩/기본 반응/상태 문구로 돌아갈 뿐 말풍선을 숨기지 않습니다. 현재 실행 캐릭터와 ID가 같으면 과거 리비전에서 저장해도 해당 말풍선 문구를 갱신하고, 다른 캐릭터를 편집해도 활성화하지 않습니다. **이 대사 초기화**는 미저장 초안이 사라질 때 확인하며 **캐릭터 대사 전체 초기화…**는 항상 확인하고 네 언어의 모든 사용자 대사를 제거합니다. 초안은 캐릭터·언어·항목별로 분리되고 문맥/UI 언어 변경과 창 닫기/다시 열기를 지나 실행 중 메모리에 남지만 재시작 후에는 저장된 항목만 남습니다. **Command+Z**/**Shift+Command+Z** 실행 취소/다시 실행은 현재 편집 문맥별입니다. 저장 실패 시 초안과 이전 확정 문구를 유지합니다.
 
@@ -194,7 +258,9 @@ Tern 답장은 등록 어댑터가 다시 검증한 **일회 `agents:ask`**를 �
 
 ## 관찰 대상 설정
 
-현재 소스에서는 기본 접힘 상태의 **연결 → 관찰 범위**를 펼치세요. 공개 v0.3.6은 **설정 → 관찰 대상** 경로를 사용합니다. 원격 관찰은 Auto/Herdr에만 있고 Tern 전용은 원격·머신 컨트롤을 숨기되 저장 선택을 유지합니다.
+현재 소스에서는 기본 접힘 상태의 **설정 → 연결 → 연결 설정**을 펼쳐 등록 연동의 관찰 제어를 확인하세요. 별도 Core **관찰 범위** 영역이 아닌 제공자 소유 설정입니다. 공개 v0.3.6은 **설정 → 관찰 대상** 경로를 사용합니다. Herdr 원격 관찰은 Auto/Herdr에만 해당하고 Tern 전용에는 해당하지 않으며 제공자 제어를 숨겨도 저장 선택을 지우지 않습니다.
+
+아래 원격 머신 제어와 동작은 공개된 Herdr 관찰 흐름을 설명하며 현재 중립 Core에 별도 관찰 패널이 있음을 뜻하지 않습니다.
 
 원격 관찰은 v0.1.6에 처음 배포됐고 안정판 v0.2.0에는 간결한 관찰 설정·재연결 명령 복사·단독 원격 전용 watcher 시작 수정이 포함됩니다. 로컬 **이 Mac**은 기본 켜짐, **원격 머신**은 기본 꺼짐입니다. 원격에서는 먼저 **대화형 터미널**에서 [Herdr 저장 머신 안내](https://herdr.dev/docs/0.9.2/connecting-machines/)에 따라 SSH 머신을 추가·인증하세요(예: `herdr machine add workbox`). 원격 서버 설치/승인 질문도 터미널에서 해결합니다. 그런 다음 원격 머신을 켜고 **관찰할 머신**에서 활성 저장 프로필을 명시적으로 선택합니다. 프로필 하나는 호스트 전체가 아니라 **저장된 원격 Herdr 세션 하나**를 관찰합니다. 등록·attach만으로 선택되지 않습니다. 화면을 표시할 **로컬 Mac**에서 앱을 실행하세요. 원격 호스트에는 호환 Herdr 서버만 필요하고 앱/플러그인은 필요 없으며 로컬 CLI로 조회합니다.
 
@@ -220,10 +286,16 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 ## 앱 내 업데이트
 
-**설정 → 앱 업데이트**에는 독립적인 자동 확인(기본 켜짐)·**베타 업데이트 받기**(기본 꺼짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인과 명시적 버튼이 있습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다. 확인은 lifecycle·설치·실행 이미지·선택 프로필을 바꾸지 않지만 성공 확인은 `preferences.json`의 정책별 timestamp 캐시(`last_update_check` / `last_beta_update_check`)를 쓸 수 있으므로 바이트 단위 읽기 전용은 아닙니다.
+현재 소스에서 업데이트 옵션은 처음에 접혀 있습니다.
 
-- **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 update는 Herdr plugin manager를 호출하지 않으며 레거시 Herdr 관리는 별도 동의한 [A→B 이전](migrations/desktop-pet.md)에만 속합니다.
-- **Homebrew:** 캡처한 manager·prefix를 유지하고 대상 포뮬러·버전을 명시합니다. 실제 교체 경계는 prefix 전체가 아닌 **그 포뮬러의 모든 keg를 포괄하는 Cellar 하위 트리**입니다. 승인된 적격 안정판 ↔ 베타 이전은 양쪽 물리 설치 루트를 예약하고 대상 메타데이터를 재검증해 대상 포뮬러를 설치·업그레이드하며 원본 포뮬러를 몰래 제거하지 않습니다. 확인은 캐시 메타데이터만 읽습니다.
+**기존 소유자 복구:** [위의 명시적으로 승인한 일회성 복구](#기존-applications-소유자-명시적으로-승인한-일회성-복구)를 확인하세요. 정상 private 위치로 복구한 후 일반 업데이트는 그 소유자에 적용됩니다. 베타 opt-in·안정판 전용·Homebrew 제한은 그대로입니다.
+
+앱 내 업데이트를 사용할 수 없어도 기존 설정과 캐릭터를 삭제하지 마세요. **공식 설치 안내 열기**는 검증된 릴리스의 공식 페이지를 엽니다. 설명 없는 압축파일 다운로드나 설치기 자동 실행이 아닙니다. 실제 설치 소유자에 맞는 절차를 사용하고 프로필 삭제·옛 설치기 재실행·추측한 기본 경로로 시작하지 마세요. Tern 제어 오류는 이제 `alpha_passthrough` 스키마 오류가 아닌 실제 백엔드 원인을 보여줍니다. 일반 상태·오류 응답은 fresh binding 증명으로 인정하지 않습니다.
+
+**설정 → 앱 업데이트**는 **업데이트 자동 확인**(기본 켜짐), **지금 확인**, 실행 버전·출처, 정책별 마지막 성공 확인, 상태/오류와 사용 가능한 출처별 동작을 계속 표시합니다. 현재 소스에서 **업데이트 옵션 보기**를 펼치면 **베타 업데이트 받기**(기본 꺼짐)와 경고가 나오고 **업데이트 옵션 숨기기**로 접습니다. 접어도 정책을 유지하며 베타가 켜져 있으면 **베타 업데이트 받기 켜짐** 요약이 남습니다. 이 접기는 업데이트 실패나 사용 가능한 업데이트/복구 동작을 숨기지 않습니다. 안정판만 받으면 공식 안정판을, 베타를 선택하면 적격 안정판·베타 중 SemVer상 가장 높은 버전을 확인합니다. 같은 기본 버전의 정식판은 베타보다 우선하며 베타를 꺼도 다운그레이드하지 않습니다. 앱 실행 중 자동 확인은 정책별 성공 시각에 따라 하루 최대 한 번입니다. 베타 선택 변경은 이전 후보를 무효화하고 자동 확인이 켜져 있을 때만 새 정책으로 확인합니다. 스위치와 확인만으로 설치·재시작·Brew 메타데이터 갱신·Git 변경은 일어나지 않으며 실행에는 별도 네이티브 동의가 필요합니다. 확인은 lifecycle·설치·실행 이미지·선택 프로필을 바꾸지 않지만 성공 확인은 `preferences.json`의 정책별 timestamp 캐시(`last_update_check` / `last_beta_update_check`)를 쓸 수 있으므로 바이트 단위 읽기 전용은 아닙니다.
+
+- **Standalone:** 고정된 중립 릴리스 바이트를 검증·stage하고 native 설치 admission 아래 계정 home 앱을 원자 교체합니다. 공유 locator가 실제 설치를 식별하며 host manifest/socket 부모로 추측하지 않습니다. 검증된 기존 소유자는 재사용할 수 있고 live profile/예약은 위험한 교체를 막습니다. 일반 중립 update는 Herdr plugin manager를 호출하지 않으며 옛 소유자 retirement는 최초 승인한 [이전 경로](migrations/desktop-pet.md)에만 속합니다.
+- **Homebrew:** 캡처한 manager·prefix와 승인된 안정판 포뮬러·버전을 유지합니다. 실제 교체 경계는 prefix 전체가 아닌 **그 포뮬러의 모든 keg를 포괄하는 Cellar 하위 트리**입니다. 이 포뮬러로 베타를 설치하거나 자동 채널 전환·다른 설치 소유권 인수를 하지 않습니다. 확인은 캐시 메타데이터만 읽습니다.
 - **로컬 체크아웃:** 디스크의 현재 파일을 명시적으로 다시 빌드하고 Git pull/reset/ref 변경은 하지 않습니다. 동일 실행 파일로 재빌드됐어도 새 인스턴스가 실제 준비돼야 적용입니다.
 - **검증된 외부 설치:** 이미 설치된 서명·protocol-4 호환 패키지라면 설치기를 재실행하지 않는 **설치된 업데이트 적용**을 제안할 수 있습니다. 안정판만 받는 정책에서도 적격 기설치 베타를 명시적으로 승인해 적용할 수 있습니다. 수동/불명 출처를 Herdr/Homebrew로 몰래 바꾸지 않습니다.
 
@@ -231,7 +303,23 @@ Core는 공통 lifecycle 저장과 `auto_start`(기본 on)를 소유하고 추�
 
 독립 **서명 도우미**와 선택 설정·상태·사용자 에셋은 실제 교체할 설치 경로 밖에 있어야 하며 같은 물리 설치를 공유하는 다른 실행 프로필도 교체를 막습니다. 도우미는 선택 프로필·백엔드·에셋을 유지하고 새 인스턴스의 실제 준비를 확인하며 **설치**와 **적용**을 구분합니다. 적용됨은 “공개 최신판”이 아닙니다. 후보 시작에는 영속화된 정확한 **이미지와 설치 출처** 쌍이 필요하며 현재 디스크에서 누락된 pin을 추정하지 않습니다. 호환되는 일부 예약 표식은 manager 재실행 없이 복구할 수 있지만 불완전한 pin·변경된 근거·불명확한 manager 실행은 차단합니다. 독립적으로 검증된 Original도 영속화된 업데이트 실패 목적에서만 복원하며 업그레이드로 보고하지 않습니다. 사용자 Stop은 재시작을 금지하지만 안전하게 중지된 작업이 완전히 입증되면 조정·예약 해제를 허용합니다. 정확한 원본이 준비된 **NoSpawn** 중단만 입증되면 원본을 재시작하지 않고 해동하며 이후 새 Check는 기존 이력을 지우지 않고 새 계획을 제안할 수 있습니다. 관리자 자동 재실행이나 저널 자동 삭제는 하지 않습니다. 오프라인 `update-status`는 저장 기록이지 현재 프로세스/서명 증명이 아닙니다. 검증한 비공개 도우미의 `status`와 lease를 갖는 명시적 `recover`를 [상태·복구 계약](cli.md#앱-업데이트-상태와-복구)에 따라 사용하세요.
 
-구 protocol-1/2/3 근거는 차단·보존하며 matching signed helper로만 조회·복구하고 v4로 바꾸지 않습니다. 새 `updates-v4/`와 실제 계정 home `.desktop-pet-updates`는 구 `updates/`/`.herdr-updates`와 공존합니다. lock 순서는 old global → new global → 정렬 installation roots이며 legacy stop-generation도 검사합니다. bridge A→neutral B는 별도 동의와 검증된 v4 `migrate-legacy --plan ABS`가 필요합니다. 문서·후보 패키지는 공개 게시나 최종 수락 완료의 증거가 아닙니다. [이전·복구](migrations/desktop-pet.md).
+구 protocol-1/2/3 근거는 차단·보존하며 matching signed helper로만 조회·복구하고 v4로 바꾸지 않습니다. 새 `updates-v4/`와 실제 계정 home `.desktop-pet-updates`는 구 `updates/`/`.herdr-updates`와 공존합니다. lock 순서는 old global → new global → 정렬 installation roots이며 legacy stop-generation도 검사합니다. **과거** bridge A→neutral B는 별도 동의와 검증된 v4 `migrate-legacy --plan ABS`가 필요했습니다. 예정된 일반 경로는 최초 승인으로 같은 profile Commit·실제 consumer rebind·native receipt 이후 승인된 retirement까지 자동 진행합니다. 문서·후보 패키지는 공개 게시나 최종 수락 완료의 증거가 아닙니다. [이전·복구](migrations/desktop-pet.md).
+
+### 터미널 없이 중단된 업데이트 복구
+
+**설정 → 앱 업데이트**를 여세요. **업데이트 복구 확인**은 보존된 작업을 검사하고 안전함이 입증된 범위만 조정하며 업데이트 설치나 앱 재시작은 하지 않습니다. 설치 전에 실패했고 정확한 원본 인스턴스가 여전히 준비된 경우, 해당 작업에서 안전하게 해제할 수 있는 예약만 해제하고 재시작 없이 조작을 복원합니다. **설치 전에 실패했습니다**는 원래 앱·프로필이 보존됐다는 뜻이지 업데이트 성공이 아닙니다. **작업을 안전하게 정리했습니다** 역시 업데이트·적용 완료가 아니며, 다시 확인하여 새 업데이트 계획을 받아야 합니다.
+
+**복구 진행 상황 보기**는 다른 업데이터를 실행하지 않고 원래 실행 중인 도우미를 열거나 앞으로 가져옵니다. 설치됐지만 미적용인 상태는 설치 전 실패와 구별합니다. **복구 후 시작…**은 해당 작업에 저장된 정확한 프로필로 검증된 설치 후보 또는 원본의 복구를 요청합니다. Desktop Pet 중지·시작에는 명시적인 네이티브 화면 승인이 필요하며 취소하면 시작하지 않습니다. 사용자 **중지**는 항상 우선하며 복구 재시작을 금지합니다. 복구는 설치기 재실행·기본 프로필 추측·다른 프로필 변경을 하지 않으며 롤백을 보장하지 않습니다.
+
+복구는 보존된 도우미를 실행하기 전에 정확한 작업 결합·정규 경로·이미지·서명을 영속 저널과 대조합니다. 원래 근거를 해석하는 주체는 보존된 도우미이며 현재 설치의 도우미나 오류 문구가 그 권한을 대신하지 않습니다. 새 명령을 얻으려고 구 도우미를 교체하지 않습니다.
+
+**앱 종료 후 복구…**는 자체 복구에서도 token/자기 예약 오류에 다시 빠지는 보존된 beta2 도우미를 위한 경로입니다. 현재 서명된 번들 도우미는 `recover-legacy-ui --state-dir ABS --operation-id ID`를 표시되는 네이티브 UI 조정자로만 실행하며, 업데이터나 근거 해석자를 대체하지 않습니다. 변경 불가한 현행 protocol 계획·보존된 원래 도우미의 서명과 해시·캡처한 lifecycle·실행 중인 정확한 원본 인스턴스를 검증하며 지원하지 않는 명령을 시험하고 재시도하지 않습니다. 앱은 이 경로를 열기 전에 편집 저장·IME 조합·진행 작업을 확인합니다. 이어 조정자가 별도 네이티브 화면에서 명시적인 확인을 요청하며 취소하면 아무것도 바꾸지 않습니다. 승인하면 정확한 원래 CLI와 저장된 config/state로 캡처한 Desktop Pet만 종료하고 Tern과 다른 작업은 유지합니다.
+
+실제 종료를 확인한 뒤 조정자는 바로 그 보존된 도우미의 `recover`를 **`--start` 없이** 호출하고 출력을 비동기로 관찰·수신하며, 원래 Pet이 종료된 뒤에도 복구창을 유지합니다. 재설치·설치기 재실행·구 도우미 교체·추측에 따른 예약 삭제·자동 재시작은 하지 않습니다. 불확실한 관리자 실행·다른 실행 주체·다른 작업의 활성 lease·이번에 승인한 Stop 이외의 lifecycle generation 변경은 차단하고 도우미·저널·예약을 보존합니다. 안전한 정리는 업데이트 성공이 아닙니다. 정리가 끝나고 설치·프로필 scope가 비었을 때만 기존 지원 소스 CLI의 `start`를 통해 검증된 원본이나 후보의 **별도로 승인한 수동 시작**을 제안할 수 있습니다. 이는 updater 재시작 권한이 아니며 updater의 UserStop을 무시하지 않습니다.
+
+수동 시작에는 선택한 서명 실행 파일의 `manual_start_fence_contract:1` 지원도 필요합니다. 실행 도중 발생한 더 새로운 사용자 Stop을 일반 시작 경로에서도 거절하기 위한 계약입니다. beta2를 포함한 구 실행 파일은 이를 지원하지 않습니다. 예약 정리는 가능하지만 조정자는 부족한 시작 capability를 설명하며, 위험한 시작이나 가짜 updater token으로 우회하지 않습니다.
+
+**업데이트 로그**는 조작 동결 중에도 읽기 전용으로 접근할 수 있습니다. 설정을 닫았다 열거나 앱을 다시 시작하면 메모리 worker가 사라진 것을 성공으로 간주하지 않고 영속 작업 근거를 다시 읽습니다. 로그·저장 상태는 현재 프로세스의 준비 증명이 아니며 설치만으로 적용을 입증하지 않습니다. 이 복구 안내는 소스 동작을 설명합니다. 정확한 프로필의 실제 네이티브 준비 관측만 실제 복구를 입증하며, fresh Tern/Herdr 연결이나 릴리스 공개까지 입증하지는 않습니다.
 
 ## 설정과 문제 해결
 

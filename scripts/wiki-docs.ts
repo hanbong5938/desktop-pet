@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:f
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  CORE_REPOSITORY, LEGACY_REPOSITORY, fetchReleases, isPublishedRelease, parseStableTag, releaseHeading, releaseRepository, rewriteRelativeLinks,
+  CORE_REPOSITORY, LEGACY_REPOSITORY, fetchReleases, isPublishedRelease, parseReleaseTag, parseStableTag, releaseHeading, releaseRepository, rewriteRelativeLinks,
   type ReleaseRecord,
 } from "./release-docs";
 
@@ -186,6 +186,11 @@ async function scanSources(root: string): Promise<Map<string, string>> {
     for (const entry of entries) {
       if (!entry.name.endsWith(".md")) continue;
       const path = `${directory}/${entry.name}`;
+      // Beta notes stay tag-addressable source documents, not stable Wiki pages.
+      if (directory === "docs/releases" && entry.isFile() && /^v\d+\.\d+\.\d+-beta\.\d+\.md$/.test(entry.name)) {
+        parseReleaseTag(entry.name.slice(0, -3));
+        continue;
+      }
       const slug = sourceSlug(path);
       if (!entry.isFile() || !slug) throw new Error(`Unsupported canonical Markdown filename: ${path}`);
       if (sources.has(slug)) throw new Error(`Duplicate Wiki slug: ${slug}`);

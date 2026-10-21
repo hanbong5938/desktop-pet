@@ -61,12 +61,17 @@ fn context_valid(c: &UpdateContext) -> Result<(), String> {
                 | "DESKTOP_PET_STATE_DIR"
                 | "XDG_CONFIG_HOME"
                 | "XDG_STATE_HOME"
+                | "TERN_CONFIG_DIR"
+                | "TERN_DAEMON_SOCKET"
                 | "HOME"
                 | identity::OBSERVATION_ENV
         ) || value.len() > 4096
             || value.contains('\0')
         {
             return Err(format!("unapproved profile environment variable {key}"));
+        }
+        if matches!(key.as_str(), "TERN_CONFIG_DIR" | "TERN_DAEMON_SOCKET") {
+            ensure_absolute(Path::new(value))?;
         }
     }
     if c.running_origin.is_none() && executable_identity(&c.executable)? != c.running {
@@ -137,11 +142,6 @@ pub fn validate_standalone_bundle(
     Ok(app.image)
 }
 
-fn standalone_bundle() -> Result<PathBuf, String> {
-    let home = os_home()?;
-    Ok(home.join("Applications").join(identity::APP_NAME))
-}
-
 fn brew_origin(path: &Path) -> Result<Option<InstallOrigin>, String> {
     let parts: Vec<_> = path
         .components()
@@ -196,14 +196,29 @@ fn brew_origin(path: &Path) -> Result<Option<InstallOrigin>, String> {
     }))
 }
 
-pub(crate) fn origin_for_executable(path: &Path) -> Result<InstallOrigin, String> {
+/// `validated` is a full bundle validation the caller just performed for this executable; the
+/// standalone owner reuses it only for that exact physical bundle instead of validating it twice.
+pub(crate) fn origin_for_executable(
+    path: &Path,
+    validated: Option<&crate::installation::ValidatedApp>,
+) -> Result<InstallOrigin, String> {
     let path = normalized(path)?;
     if let Some(origin) = brew_origin(&path)? {
         return Ok(origin);
     }
-    let bundle = standalone_bundle()?;
-    if app_binary(&bundle) == path && normalized(&bundle)? == bundle {
-        let proof = crate::installation::validate_staged_app(&bundle)?;
+    for bundle in crate::installation::standalone_bundles()? {
+        if app_binary(&bundle) != path {
+            continue;
+        }
+        crate::installation::validate_standalone_owner(&bundle)?;
+        let fresh;
+        let proof = match validated {
+            Some(app) if app.bundle == bundle => app,
+            _ => {
+                fresh = crate::installation::validate_staged_app(&bundle)?;
+                &fresh
+            }
+        };
         if proof.image.path != path {
             return Err("standalone image escaped bundle".into());
         }
@@ -240,21 +255,21 @@ fn locator(origin: &InstallOrigin) -> Result<PathBuf, String> {
 pub fn detect_origin(c: &UpdateContext) -> Result<InstallOrigin, String> {
     context_valid(c)?;
     let Some(captured) = &c.running_origin else {
-        return origin_for_executable(&c.running.path);
+        return origin_for_executable(&c.running.path, None);
     };
     let current = match captured.as_ref() {
         InstallOrigin::Homebrew {
             cellar_formula_root,
             ..
         } if c.running.path.starts_with(cellar_formula_root) => {
-            origin_for_executable(&locator(captured)?)
+            origin_for_executable(&locator(captured)?, None)
         }
         InstallOrigin::Source { root } if source_binary(root) == c.running.path => {
             validate_source_root(root)?;
             Ok((**captured).clone())
         }
         InstallOrigin::Standalone { bundle } if app_binary(bundle) == c.running.path => {
-            origin_for_executable(&locator(captured)?)
+            origin_for_executable(&locator(captured)?, None)
         }
         InstallOrigin::Manual { locator } if *locator == c.running.path => Ok((**captured).clone()),
         _ => Err("captured running image is outside its installation".into()),
@@ -310,6 +325,15 @@ pub fn check(c: &UpdateContext, policy: UpdatePolicy) -> Result<CheckSnapshot, S
         release: None,
         checked_at: Some(now()?),
     };
+    if !identity::LEGACY
+        && matches!(&origin, InstallOrigin::Standalone { bundle }
+        if crate::installation::standalone_bundle().is_ok_and(|private| private != *bundle))
+    {
+        view.detail =
+            "This installation must move to the private update location before another update."
+                .into();
+        return Ok(view);
+    }
     if let Ok(candidates) = releases::fetch_candidates() {
         view.release = releases::select_candidate(&candidates, &c.version, policy)?;
     }
@@ -347,11 +371,10 @@ pub fn check(c: &UpdateContext, policy: UpdatePolicy) -> Result<CheckSnapshot, S
         return Ok(view);
     }
     if let Some(release) = &view.release {
-        // Beta is informational until a distinct maintained installation is approved.
-        if release.channel != crate::ReleaseChannel::Stable {
-            view.detail =
-                "Beta release is informational; the approved neutral installation remains stable"
-                    .into();
+        if matches!(origin, InstallOrigin::Homebrew { .. })
+            && release.channel != crate::ReleaseChannel::Stable
+        {
+            view.detail = "Homebrew updates require an approved stable release".into();
             return Ok(view);
         }
         let action = match origin {
@@ -405,11 +428,11 @@ pub fn validate_plan_target(plan: &UpdatePlan) -> Result<(), String> {
         return Err("release target changes policy, manager, physical root or precedence".into());
     }
     match (&plan.origin, &plan.action) {
-        (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace)
-            if *bundle == standalone_bundle()?
-                && target.release.channel == crate::ReleaseChannel::Stable =>
-        {
-            Ok(())
+        (InstallOrigin::Standalone { bundle }, UpdateAction::StandaloneReplace) => {
+            if !identity::LEGACY && *bundle != crate::installation::standalone_bundle()? {
+                return Err("historical Applications owner requires private relocation, not an in-place update".into());
+            }
+            crate::installation::validate_standalone_owner(bundle)
         }
         (InstallOrigin::Homebrew { formula, .. }, UpdateAction::HomebrewUpgrade)
             if *formula == format!("{OFFICIAL_TAP}{STABLE_FORMULA}")
@@ -526,7 +549,7 @@ fn installed_image(plan: &UpdatePlan, original: bool) -> Result<VerifiedInstalla
         plan.target_origin()
     };
     let path = locator(expected)?;
-    let actual = origin_for_executable(&path)?;
+    let actual = origin_for_executable(&path, None)?;
     if &actual != expected {
         return Err("installed candidate changed origin".into());
     }
@@ -731,6 +754,9 @@ pub(crate) fn verify_migration_brew_release(
         environment,
     )?;
     let details = brew_metadata_details(STABLE_FORMULA, formula, &output)?;
+    if details.get("revision").and_then(Value::as_u64) != Some(0) {
+        return Err("approved migration Brew target does not permit a revisioned keg path".into());
+    }
     brew_matches_release(&details, release)
 }
 
@@ -1004,6 +1030,29 @@ mod tests {
     }
 
     #[test]
+    fn immutable_context_preserves_exact_tern_routing_and_rejects_invalid_values() {
+        let mut c = context();
+        for key in ["TERN_CONFIG_DIR", "TERN_DAEMON_SOCKET"] {
+            c.environment
+                .insert(key.into(), "/isolated/tern/endpoint".into());
+            assert!(context_valid(&c).is_ok());
+            let bytes = serde_json::to_vec(&c).unwrap();
+            let retained: UpdateContext = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(retained, c);
+            for invalid in [
+                "".to_owned(),
+                "relative".into(),
+                "/bad\0path".into(),
+                format!("/{}", "x".repeat(4096)),
+            ] {
+                c.environment.insert(key.into(), invalid);
+                assert!(context_valid(&c).is_err());
+            }
+            c.environment.remove(key);
+        }
+    }
+
+    #[test]
     fn unsupported_manual_installation_cannot_gain_manager_authority() {
         let c = context();
         let origin = detect_origin(&c).unwrap();
@@ -1024,9 +1073,104 @@ mod tests {
     fn standalone_installation_requires_an_approved_exact_target() {
         let c = context();
         let origin = InstallOrigin::Standalone {
-            bundle: standalone_bundle().unwrap(),
+            bundle: crate::installation::standalone_bundle().unwrap(),
         };
         let plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
+        assert!(validate_plan_target(&plan).is_err());
+    }
+
+    #[test]
+    fn standalone_beta_target_requires_opt_in_and_exact_owner_and_release() {
+        let mut c = context();
+        c.version = "0.4.13-beta.7".into();
+        let origin = InstallOrigin::Standalone {
+            bundle: crate::installation::standalone_bundle().unwrap(),
+        };
+        let mut plan = new_plan(&c, &origin, UpdateAction::StandaloneReplace, None).unwrap();
+        let version = "0.4.13-beta.9";
+        let tag = format!("{}{version}", if identity::LEGACY { "beta/" } else { "v" });
+        let asset_name = format!("{}-v{version}-macos-arm64.tar.gz", identity::ARCHIVE_PREFIX);
+        let archive_url = format!("{}{tag}/{asset_name}", identity::RELEASE_DOWNLOAD);
+        plan.target = Some(ReleaseTarget {
+            policy: UpdatePolicy::StableAndBeta,
+            release: ReleaseCandidate {
+                version: version.into(),
+                channel: crate::ReleaseChannel::Beta,
+                tag,
+                release_id: 17,
+                asset_name,
+                checksum_url: format!("{archive_url}.sha256"),
+                archive_url,
+                archive_size: 123,
+                sha256: "a".repeat(64),
+            },
+            origin: origin.clone(),
+            resolved_commit: None,
+        });
+        validate_plan_target(&plan).unwrap();
+        let approved = plan.clone();
+        plan.target.as_mut().unwrap().policy = UpdatePolicy::StableOnly;
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().release.channel = crate::ReleaseChannel::Stable;
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().release.archive_url =
+            "https://github.com/attacker/repo/releases/download/v0.4.13-beta.9/archive".into();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.target.as_mut().unwrap().origin = InstallOrigin::Standalone {
+            bundle: "/tmp/other-owner/DesktopPet.app".into(),
+        };
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        let original = InstallOrigin::Standalone {
+            bundle: crate::installation::os_home()
+                .unwrap()
+                .join("Applications/DesktopPet.app"),
+        };
+        plan.target.as_mut().unwrap().origin = original.clone();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.origin = original;
+        assert!(validate_plan_target(&plan).is_err());
+        // Neither changing both ends together nor equal ownership can reopen H for new updates.
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
+        assert!(validate_plan_target(&plan).is_err());
+        for forbidden in [
+            "/Applications/DesktopPet.app",
+            "/tmp/other-home/Applications/DesktopPet.app",
+            "/tmp/custom/DesktopPet.app",
+        ] {
+            plan = approved.clone();
+            plan.origin = InstallOrigin::Standalone {
+                bundle: forbidden.into(),
+            };
+            plan.target.as_mut().unwrap().origin = plan.origin.clone();
+            assert!(validate_plan_target(&plan).is_err());
+        }
+        plan = approved.clone();
+        plan.origin = InstallOrigin::Standalone {
+            bundle: "/tmp/other-owner/DesktopPet.app".into(),
+        };
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.candidate = Some(c.running.clone());
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved.clone();
+        plan.context.version = version.into();
+        assert!(validate_plan_target(&plan).is_err());
+        plan = approved;
+        plan.origin = InstallOrigin::Homebrew {
+            brew: "/opt/homebrew/bin/brew".into(),
+            prefix: "/opt/homebrew".into(),
+            cellar_formula_root: "/opt/homebrew/Cellar/desktop-pet".into(),
+            formula: format!("{OFFICIAL_TAP}{STABLE_FORMULA}"),
+            locator: "/opt/homebrew/bin/desktop-pet".into(),
+        };
+        plan.action = UpdateAction::HomebrewUpgrade;
+        plan.target.as_mut().unwrap().origin = plan.origin.clone();
         assert!(validate_plan_target(&plan).is_err());
     }
 

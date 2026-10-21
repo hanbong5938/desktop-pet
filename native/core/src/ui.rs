@@ -48,14 +48,14 @@ use crate::dialogue_editor::{
 };
 use crate::display_geometry::{DisplayGeometry, BASE_HEIGHT, BASE_WIDTH};
 use crate::i18n::{
-    default_dialogue, disconnected_sources, language_save_failure, resolve_language,
-    status_indicator_summary, task_disclosure, task_status, text, worktree_remove_confirmation,
-    LanguagePreference, Message, TaskStatus, UiLocale,
+    default_dialogue, disconnected_sources, resolve_language, status_indicator_summary,
+    task_disclosure, task_status, text, worktree_remove_confirmation, LanguagePreference, Message,
+    TaskStatus, UiLocale,
 };
 use crate::interaction::{GestureAction, Interaction, Point, RegionPolicy};
 use crate::lifecycle::{LifecycleSetting, Paths};
 use crate::menu_bar_icon;
-use crate::menu_panel::MenuPanel;
+use crate::menu_panel::{MenuPanel, SettingsDetailPage, SettingsTab};
 use crate::official_characters::OfficialCharacters;
 use crate::operations::{PromptSender, WorktreeRemoveSender};
 use crate::pointer_capture::{CaptureId, CaptureState, DownDecision, EventIdentity, PointerSource};
@@ -70,12 +70,13 @@ use crate::state::{AppState, Phase, Scene, MAX_SCALE, MIN_SCALE};
 use crate::status_indicator::{
     semantic_color, StatusIcon, STATUS_ICON_GAP, STATUS_ICON_SIZE, STATUS_ROW_HEIGHT,
 };
+use crate::update_card::UpdateCardPrimaryAction;
 use block2::RcBlock;
 use desktop_pet_contracts::{
     PromptError, PromptReceipt, PromptResult, RequestOrigin, SessionKey, WorktreeRemoveError,
     WorktreeRemoveTarget,
 };
-use desktop_pet_update_coordinator::UpdatePolicy;
+use desktop_pet_update_coordinator::{UpdateContext, UpdatePolicy};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -115,6 +116,47 @@ use std::time::{Duration, Instant};
 static NEXT_UI_OPERATION: AtomicU64 = AtomicU64::new(1);
 static UI_USER_STOP_RECORDED: AtomicBool = AtomicBool::new(false);
 static SETTINGS_REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+enum SettingsDetailIntent {
+    Open(SettingsDetailPage),
+    Close,
+    ChooseMenuBarIcon,
+}
+
+fn overlay_update_capabilities(
+    model: &mut crate::update_card::UpdateCardModel,
+    check_admitted: bool,
+    migration_busy: bool,
+    frozen: bool,
+) {
+    model.check_enabled &= check_admitted && !migration_busy;
+    if migration_busy {
+        model.primary_action = None;
+        model.recovery_enabled = false;
+    } else if frozen
+        && !matches!(
+            model.primary_action,
+            Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress)
+        )
+    {
+        model.primary_action = None;
+        model.recovery_enabled = false;
+    }
+}
+
+fn clear_overridden_relocation_summary(
+    model: &mut crate::update_card::UpdateCardModel,
+    legacy_incomplete: bool,
+    approved_waiting: bool,
+    launch_error: bool,
+    migration_busy: bool,
+    frozen: bool,
+) {
+    if legacy_incomplete || approved_waiting || launch_error || migration_busy || frozen {
+        model.relocation_summary.clear();
+    }
+}
 
 enum PendingNative {
     Preparing {
@@ -172,14 +214,22 @@ struct LifecycleRequestState {
 impl LifecycleRequestState {
     fn begin(&self) -> bool {
         if Instant::now() >= self.deadline {
-            let _ = self.state.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+            let _ = self
+                .state
+                .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
             return false;
         }
-        self.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        self.state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     fn cancel(&self) -> &'static str {
-        if self.state.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        if self
+            .state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             "lifecycle request timed out before execution; no setting was saved"
         } else {
             "lifecycle request execution outcome is unknown; reread settings"
@@ -187,14 +237,16 @@ impl LifecycleRequestState {
     }
 }
 
-static LIFECYCLE_PENDING: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static LIFECYCLE_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const MAX_LIFECYCLE_PENDING: usize = 32;
 
 fn reserve_lifecycle_slot(pending: &std::sync::atomic::AtomicUsize) -> Result<(), String> {
-    pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-        (count < MAX_LIFECYCLE_PENDING).then_some(count + 1)
-    }).map(|_| ()).map_err(|_| "lifecycle owner inbox is busy".to_owned())
+    pending
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_LIFECYCLE_PENDING).then_some(count + 1)
+        })
+        .map(|_| ())
+        .map_err(|_| "lifecycle owner inbox is busy".to_owned())
 }
 
 pub(crate) fn set_registered_lifecycle_on_main(
@@ -208,13 +260,19 @@ pub(crate) fn set_registered_lifecycle_on_main(
     }
     reserve_lifecycle_slot(&LIFECYCLE_PENDING)?;
     let request = Arc::new(LifecycleRequestState {
-        state: std::sync::atomic::AtomicU8::new(0), deadline,
+        state: std::sync::atomic::AtomicU8::new(0),
+        deadline,
     });
     let (sender, receiver) = mpsc::sync_channel(1);
     enqueue_bridge(DeferredBridge::Lifecycle {
-        provider, key, value, request: request.clone(), sender,
+        provider,
+        key,
+        value,
+        request: request.clone(),
+        sender,
     });
-    receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| request.cancel().to_owned())?
 }
 
@@ -237,6 +295,9 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static STARTUP_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     static SCREEN_CHANGE_PENDING: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_DETAIL_INTENT: Cell<Option<SettingsDetailIntent>> = const { Cell::new(None) };
+    static SETTINGS_DETAIL_DISPATCHED: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS_DETAIL_OPENER: RefCell<Option<Retained<NSButton>>> = const { RefCell::new(None) };
     static DEFERRED_BRIDGES: RefCell<VecDeque<DeferredBridge>> = const { RefCell::new(VecDeque::new()) };
     // Readable while UI is mutably borrowed; only binds sparse reentrant events to
     // their original down. CaptureState in Ui remains the sole lifecycle authority.
@@ -459,9 +520,10 @@ fn expanded_heights(
         + (cards_need - cards_share).min((surplus - cards_share - message_share).max(0.0));
     let message_extra = message_share
         + (message_need - message_share).min((surplus - cards_extra - message_share).max(0.0));
+    let message = message_floor + message_extra;
     ExpandedHeights {
-        cards: cards_floor + cards_extra,
-        message: message_floor + message_extra,
+        cards: (remaining - message).max(0.0),
+        message,
     }
 }
 
@@ -764,6 +826,7 @@ struct BubbleViewIvars {
 #[derive(Debug)]
 struct ComposerViewIvars {
     normalizing: Cell<bool>,
+    update_frozen: Cell<bool>,
 }
 
 define_class!(
@@ -775,6 +838,38 @@ define_class!(
     unsafe impl NSObjectProtocol for ComposerView {}
 
     impl ComposerView {
+        #[unsafe(method(shouldChangeTextInRange:replacementString:))]
+        fn should_change_text(&self, range: NSRange, replacement: Option<&NSString>) -> bool {
+            if self.ivars().update_frozen.get() {
+                false
+            } else {
+                unsafe { msg_send![super(self), shouldChangeTextInRange: range, replacementString: replacement] }
+            }
+        }
+        #[unsafe(method(setAccessibilityValue:))]
+        fn set_accessibility_value(&self, value: Option<&AnyObject>) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilityValue: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedText:))]
+        fn set_accessibility_selected_text(&self, value: Option<&NSString>) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedText: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedTextRange:))]
+        fn set_accessibility_selected_text_range(&self, range: NSRange) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedTextRange: range] };
+            }
+        }
+        #[unsafe(method(insertText:))]
+        fn insert_text(&self, value: &AnyObject) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), insertText: value] };
+            }
+        }
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) {
             let _: () = unsafe { msg_send![super(self), didChangeText] };
@@ -800,6 +895,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            if self.ivars().update_frozen.get() { return; }
             // Some window dispatch paths bypass performKeyEquivalent:.
             if self.handle_edit_shortcut(event) {
                 return;
@@ -821,6 +917,7 @@ define_class!(
         }
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), unmarkText] };
             self.normalize_committed_text();
             wake();
@@ -828,6 +925,7 @@ define_class!(
 
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text_replacement_range(&self, text: &AnyObject, range: NSRange) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), insertText: text, replacementRange: range] };
             self.normalize_committed_text();
             wake();
@@ -840,6 +938,7 @@ define_class!(
             selected: NSRange,
             replacement: NSRange,
         ) {
+            if self.ivars().update_frozen.get() { return; }
             let was_normalizing = self.ivars().normalizing.replace(true);
             let _: () = unsafe {
                 msg_send![super(self), setMarkedText: text, selectedRange: selected, replacementRange: replacement]
@@ -851,6 +950,7 @@ define_class!(
 
         #[unsafe(method(cancelOperation:))]
         fn cancel_operation(&self, sender: Option<&AnyObject>) {
+            if self.ivars().update_frozen.get() { return; }
             if !self.discard_composition() {
                 with_ui_mut(|ui| ui.fold_reply());
             }
@@ -858,12 +958,14 @@ define_class!(
 
         #[unsafe(method(paste:))]
         fn paste(&self, sender: Option<&AnyObject>) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), paste: sender] };
             self.normalize_committed_text();
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if self.ivars().update_frozen.get() { return; }
             if let Some(window) = self.window() {
                 let _ = window.makeFirstResponder(Some(self));
             }
@@ -896,6 +998,9 @@ impl ComposerView {
         let Ok(key) = u8::try_from(key.characterAtIndex(0)) else {
             return false;
         };
+        if self.ivars().update_frozen.get() {
+            return matches!(key.to_ascii_lowercase(), b'a' | b'c' | b'x' | b'v');
+        }
         match key.to_ascii_lowercase() {
             b'a' => unsafe { self.selectAll(None) },
             b'c' => unsafe { self.copy(None) },
@@ -965,6 +1070,7 @@ impl ComposerView {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ComposerViewIvars {
             normalizing: Cell::new(false),
+            update_frozen: Cell::new(false),
         });
         unsafe {
             msg_send![super(this), initWithFrame: NSRect::new(
@@ -1414,6 +1520,7 @@ enum MigrationLaunchOutcome {
 #[derive(Default)]
 struct MigrationUiState {
     busy: bool,
+    automatic_preparing: bool,
     launch_error: Option<String>,
     plan: Option<desktop_pet_update_coordinator::migration::MigrationPlan>,
     record: Option<desktop_pet_update_coordinator::migration::MigrationRecord>,
@@ -1421,7 +1528,14 @@ struct MigrationUiState {
 
 impl MigrationUiState {
     fn review_allowed(&self) -> bool {
-        !self.busy && self.launch_error.is_none()
+        !self.busy
+            && self.launch_error.is_none()
+            && self.record.as_ref().is_none_or(|record| {
+                record.phase
+                    == desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed
+                    && record.target_committed
+                    && record.retirement_attempt > 0
+            })
     }
 
     /// Return only the operation whose owned preparation window may close.
@@ -1577,12 +1691,27 @@ struct Ui {
     app_update: AppUpdateService,
     painted_app_update: Option<(u64, UiLocale, bool)>,
     update_frozen: Option<String>,
+    legacy_recovery_handoff: Option<(UpdateContext, String, Option<u64>)>,
+    settings_reset_handoff: Option<(
+        UpdateContext,
+        String,
+        Option<mpsc::Receiver<Result<(), String>>>,
+    )>,
+    restart_handoff: Option<(
+        UpdateContext,
+        String,
+        Option<mpsc::Receiver<Result<(), String>>>,
+    )>,
     update_consent: Option<(String, Retained<NSAlert>)>,
     migration: MigrationUiState,
     migration_plan_receiver: Option<
         mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationPlan, String>>,
     >,
     migration_launch_receiver: Option<mpsc::Receiver<Result<MigrationLaunchOutcome, String>>>,
+    migration_approved_waiting: Option<(
+        desktop_pet_update_coordinator::migration::MigrationPlan,
+        bool,
+    )>,
     migration_journal_receiver: Option<
         mpsc::Receiver<Result<desktop_pet_update_coordinator::migration::MigrationRecord, String>>,
     >,
@@ -1693,6 +1822,7 @@ define_class!(
         fn tick(&self, _timer: &NSTimer) {
             with_ui_internal(|ui| ui.frame_tick());
             present_requested_settings();
+            present_requested_settings_detail();
         }
 
         #[unsafe(method(prepareTick:))]
@@ -1720,6 +1850,13 @@ define_class!(
 
         #[unsafe(method(languageTick:))]
         fn language_tick(&self, _timer: &NSTimer) {
+            with_ui_internal(|ui| {
+                ui.menu_panel.refresh_detail_layout();
+                if ui.menu_panel.appearance_detail_visible() {
+                    ui.menu_panel.refresh_bubble_color_controls();
+                }
+            });
+            present_requested_settings_detail();
             with_ui_mut(|ui| {
                 ui.try_finalize_pending_bubble_resize();
                 if ui.pending_language.is_some() {
@@ -1753,7 +1890,7 @@ define_class!(
                 {
                     ui.sync_dialogue_editor_content(false);
                 }
-                if ui.menu_panel.is_visible() {
+                if ui.menu_panel.settings_surface_visible() {
                     ui.menu_panel.refresh_bubble_color_controls();
                 }
                 if !ui.pending_preference_operations.is_empty() {
@@ -1762,6 +1899,9 @@ define_class!(
                 if !ui.pending_ui_updates() {
                     ui.stop_language_timer();
                 }
+            });
+            with_ui_internal(|ui| {
+                if !ui.pending_ui_updates() { ui.stop_language_timer(); }
             });
         }
     }
@@ -2394,7 +2534,7 @@ define_class!(
 
         #[unsafe(method(chooseMenuBarIcon:))]
         fn choose_menu_bar_icon(&self, _sender: Option<&AnyObject>) {
-            choose_menu_bar_icon();
+            request_settings_detail(SettingsDetailIntent::ChooseMenuBarIcon);
         }
 
         #[unsafe(method(resetMenuBarIcon:))]
@@ -2430,9 +2570,40 @@ define_class!(
             schedule_app_update_confirmation();
         }
 
+        #[unsafe(method(recoverAppUpdate:))]
+        fn recover_app_update(&self, _sender: Option<&AnyObject>) {
+            with_ui_recovery_action(|ui| ui.recover_app_update(false));
+        }
+
+        #[unsafe(method(startAppUpdateRecovery:))]
+        fn start_app_update_recovery(&self, _sender: Option<&AnyObject>) {
+            schedule_app_update_recovery_start();
+        }
+
+        #[unsafe(method(recoverStoppedOriginalAppUpdate:))]
+        fn recover_stopped_original_app_update(&self, _sender: Option<&AnyObject>) {
+            schedule_stopped_original_recovery();
+        }
+
+        #[unsafe(method(showAppUpdateRecoveryProgress:))]
+        fn show_app_update_recovery_progress(&self, _sender: Option<&AnyObject>) {
+            with_ui_recovery_action(|ui| {
+                ui.app_update.show_recovery_progress();
+                ui.refresh_app_update();
+            });
+        }
+
         #[unsafe(method(migrateLegacyInstallation:))]
         fn migrate_legacy_installation(&self, _sender: Option<&AnyObject>) {
             with_ui_update_action(|ui| ui.begin_legacy_migration());
+        }
+        #[unsafe(method(relocateStandaloneInstallation:))]
+        fn relocate_standalone_installation(&self, _sender: Option<&AnyObject>) {
+            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+            let block = RcBlock::new(|| {
+                with_ui_update_action(|ui| ui.begin_standalone_relocation());
+            });
+            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
         }
         #[unsafe(method(downloadAppUpdate:))]
         fn download_app_update(&self, _sender: Option<&AnyObject>) {
@@ -2440,12 +2611,12 @@ define_class!(
         }
 
 
-        #[unsafe(method(toggleUpdateDiagnostics:))]
-        fn toggle_update_diagnostics(&self, _sender: Option<&AnyObject>) {
-            with_ui_internal(|ui| {
-                ui.menu_panel.toggle_update_diagnostics();
-                ui.sync_character_menu_frame();
-            });
+        #[unsafe(method(openSettingsDetail:))]
+        fn open_settings_detail(&self, sender: Option<&AnyObject>) {
+            let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else { return; };
+            let Some(page) = SettingsDetailPage::from_tag(button.tag()) else { return; };
+            request_settings_detail(SettingsDetailIntent::Open(page));
+            SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = Some(button.retain()));
         }
 
 
@@ -2480,28 +2651,17 @@ define_class!(
         }
 
 
-        #[unsafe(method(toggleConnectionSettings:))]
-        fn toggle_connection_settings(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_connection_settings();
-                ui.reanchor_menu_panel();
-            });
-        }
-
-        #[unsafe(method(toggleConnectionDiagnostics:))]
-        fn toggle_connection_diagnostics(&self, _sender: Option<&AnyObject>) {
-            with_ui_mut(|ui| {
-                ui.menu_panel.toggle_connection_diagnostics();
-                ui.reanchor_menu_panel();
-            });
-        }
 
         #[unsafe(method(toggleIntegrationSetting:))]
         fn toggle_integration_setting(&self, sender: Option<&AnyObject>) {
             let Some(toggle) = sender.and_then(|sender| sender.downcast_ref::<NSSwitch>()) else { return };
             let Some(identifier) = toggle.identifier() else { return };
             let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
-            with_ui_mut(|ui| ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn));
+            with_ui_mut(|ui| {
+                if ui.menu_panel.extension_setting_enabled(&provider, &key) {
+                    ui.apply_integration_setting(&provider, &key, toggle.state() == NSControlStateValueOn);
+                }
+            });
         }
 
         #[unsafe(method(activateIntegrationAction:))]
@@ -2511,6 +2671,9 @@ define_class!(
             let Some(identifier) = button.identifier() else { return };
             let Ok((provider, key)) = serde_json::from_str::<(String, String)>(&identifier.to_string()) else { return };
             let context = with_ui_read(|ui| {
+                if ui.update_frozen.is_some() || !ui.menu_panel.extension_action_enabled(&provider, &key) {
+                    return Err("integration action is no longer available".to_owned());
+                }
                 let state = ui.shared.lock().map_err(|_| "native state lock is poisoned".to_owned())?;
                 let extension = state.lifecycle_extensions().iter()
                     .find(|extension| extension.provider() == provider).cloned()
@@ -2542,8 +2705,9 @@ define_class!(
                     extension.activate_action(&store, &selection, &key, locale.tag(), preferences)
                 }
             });
-            if let Err(error) = result {
-                with_ui_mut(|ui| ui.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error));
+            match result {
+                Err(error) => with_ui_mut(|ui| ui.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error)),
+                Ok(()) => with_ui_mut(|ui| ui.menu_panel.clear_connection_operation_error()),
             }
         }
 
@@ -2684,14 +2848,8 @@ define_class!(
             let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else {
                 return;
             };
-            let Ok(index) = usize::try_from(button.tag()) else {
-                return;
-            };
-            if index >= 3 {
-                return;
-            }
-
-            with_ui_mut(|ui| ui.select_menu_tab(index));
+            let Some(tab) = SettingsTab::from_tag(button.tag()) else { return; };
+            with_ui_internal(|ui| ui.select_menu_tab(tab));
         }
         #[unsafe(method(setDialogueLocale:))]
         fn set_dialogue_locale(&self, sender: Option<&AnyObject>) {
@@ -2849,6 +3007,20 @@ define_class!(
         #[unsafe(method(packDiagnose:))]
         fn pack_diagnose(&self, _sender: Option<&AnyObject>) {
             show_character_diagnostics();
+        }
+
+        #[unsafe(method(resetAppSettings:))]
+        fn reset_app_settings(&self, _sender: Option<&AnyObject>) {
+            schedule_settings_reset_confirmation();
+        }
+
+        #[unsafe(method(restartApp:))]
+        fn restart_app(&self, _sender: Option<&AnyObject>) {
+            // Leave button/menu tracking before taking the same draft/IME
+            // snapshot used by update preparation.
+            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+            let block = RcBlock::new(|| with_ui_update_action(|ui| ui.restart_app()));
+            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
         }
 
 
@@ -3409,6 +3581,9 @@ pub fn wake() {
                 ui.handle_screen_change();
             }
             ui.refresh();
+            if SETTINGS_DETAIL_INTENT.with(|pending| pending.get().is_some()) {
+                ui.queue_language_apply();
+            }
         });
     });
 }
@@ -3459,7 +3634,13 @@ fn run_bridge(request: DeferredBridge) -> Option<DeferredBridge> {
             return true;
         };
         match request {
-            DeferredBridge::Lifecycle { provider, key, value, request, sender } => {
+            DeferredBridge::Lifecycle {
+                provider,
+                key,
+                value,
+                request,
+                sender,
+            } => {
                 LIFECYCLE_PENDING.fetch_sub(1, Ordering::AcqRel);
                 let result = if !request.begin() {
                     Err("lifecycle request cancelled before execution".into())
@@ -4144,6 +4325,9 @@ fn menu_event_is_inside(event: &NSEvent, ui: &Ui) -> bool {
     if event_window_number == ui.menu_panel.window().windowNumber() {
         return true;
     }
+    if event_window_number == ui.menu_panel.detail_window().windowNumber() {
+        return false;
+    }
     if event_window_number == ui.panel.windowNumber()
         || event_window_number == ui.bubble_panel.windowNumber()
     {
@@ -4202,11 +4386,25 @@ fn with_ui_update_action<F>(f: F)
 where
     F: FnOnce(&mut Ui) + Send + 'static,
 {
+    with_ui_retained_action(f, false);
+}
+
+fn with_ui_recovery_action<F>(f: F)
+where
+    F: FnOnce(&mut Ui) + Send + 'static,
+{
+    with_ui_retained_action(f, true);
+}
+
+fn with_ui_retained_action<F>(f: F, allow_frozen: bool)
+where
+    F: FnOnce(&mut Ui) + Send + 'static,
+{
     let mut f = Some(f);
     let deferred = UI.with(|cell| match cell.try_borrow_mut() {
         Ok(mut slot) => {
             if let Some(ui) = slot.as_mut() {
-                if ui.update_frozen.is_none() {
+                if allow_frozen || ui.update_frozen.is_none() {
                     f.take().expect("update action once")(ui);
                 }
             }
@@ -4217,7 +4415,7 @@ where
     drain_deferred_pointers();
     if deferred {
         let f = f.expect("deferred update action");
-        DispatchQueue::main().exec_async(move || with_ui_update_action(f));
+        DispatchQueue::main().exec_async(move || with_ui_retained_action(f, allow_frozen));
     }
 }
 
@@ -4243,8 +4441,7 @@ fn present_requested_settings() {
         let slot = cell.try_borrow_mut().map_err(|_| ())?;
         SETTINGS_REQUEST_PENDING.store(false, Ordering::Release);
         Ok(slot.as_ref().and_then(|ui| {
-            if ui.update_frozen.is_some()
-                || ui.composer_marked()
+            if ui.composer_marked()
                 || ui.cards.is_composing()
                 || ui.menu_panel.bubble_colors_marked()
                 || ui.menu_bar_icon_shutdown()
@@ -4269,15 +4466,15 @@ fn present_requested_settings() {
         }))
     });
     if let Ok(Some(anchor)) = anchor {
-        present_settings_at(anchor, Some(2));
+        present_settings_at(anchor, Some(SettingsTab::App));
     }
     // A nested AppKit callback may still hold UI. Leave the coalesced intent
     // pending for the existing frame timer after its UI borrow is released.
 }
 
-fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
+fn present_settings_at(anchor: NSRect, tab: Option<SettingsTab>) {
     let mut shown_on = None;
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if ui.composer_marked()
             || ui.cards.is_composing()
             || ui.menu_panel.bubble_colors_marked()
@@ -4316,6 +4513,111 @@ fn present_settings_at(anchor: NSRect, tab: Option<usize>) {
     }
 }
 
+fn request_settings_detail(intent: SettingsDetailIntent) {
+    SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = None);
+    SETTINGS_DETAIL_INTENT.with(|pending| pending.set(Some(intent)));
+    if !SETTINGS_DETAIL_DISPATCHED.with(|scheduled| scheduled.replace(true)) {
+        DispatchQueue::main().exec_async(present_requested_settings_detail);
+    }
+    wake();
+}
+
+pub(crate) fn request_settings_detail_close() {
+    request_settings_detail(SettingsDetailIntent::Close);
+}
+
+fn present_requested_settings_detail() {
+    SETTINGS_DETAIL_DISPATCHED.with(|scheduled| scheduled.set(false));
+    let Some(intent) = SETTINGS_DETAIL_INTENT.with(Cell::take) else {
+        return;
+    };
+    let opener = SETTINGS_DETAIL_OPENER.with(|opener| opener.borrow_mut().take());
+    let mut window = None;
+    let mut activate = None;
+    let mut choose = false;
+    let consumed = UI.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return false;
+        };
+        let Some(ui) = slot.as_mut() else {
+            return true;
+        };
+        if ui.menu_bar_icon_shutdown() {
+            return true;
+        }
+        if ui.menu_panel.bubble_colors_marked() || ui.menu_bar_icon_busy {
+            ui.queue_language_apply();
+            return false;
+        }
+        match intent {
+            SettingsDetailIntent::Close => {
+                let closed = ui.menu_panel.finish_detail_close();
+                if !closed {
+                    ui.queue_language_apply();
+                }
+                closed
+            }
+            SettingsDetailIntent::Open(page) => {
+                ui.sync_menu_panel_state();
+                ui.refresh_app_update();
+                if page == SettingsDetailPage::AppRecovery && ui.settings_reset_handoff.is_none() {
+                    let detail =
+                        match crate::settings_recovery::load_last_result(&ui.lifecycle_paths) {
+                            Ok(Some(detail)) => detail,
+                            Ok(None) => String::new(),
+                            Err(error) => error,
+                        };
+                    ui.menu_panel.set_settings_recovery_status(&detail);
+                }
+                window = ui.menu_panel.prepare_detail(page);
+                if window.is_some() {
+                    ui.menu_panel.set_detail_opener(opener.as_deref());
+                    if matches!(
+                        page,
+                        SettingsDetailPage::Connections | SettingsDetailPage::ConnectionDiagnostics
+                    ) {
+                        ui.refresh_observation_panel();
+                    }
+                    ui.menu_panel.refresh_bubble_color_controls();
+                    ui.menu_panel.refresh_detail_layout();
+                    ui.queue_language_apply();
+                    activate = Some(ui.mtm);
+                    true
+                } else {
+                    ui.queue_language_apply();
+                    false
+                }
+            }
+            SettingsDetailIntent::ChooseMenuBarIcon => {
+                choose = ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+                    && ui.update_frozen.is_none()
+                    && ui.menu_bar_icon_operation_allowed();
+                true
+            }
+        }
+    });
+    if !consumed {
+        SETTINGS_DETAIL_INTENT.with(|pending| {
+            if pending.get().is_none() {
+                pending.set(Some(intent));
+                SETTINGS_DETAIL_OPENER.with(|slot| *slot.borrow_mut() = opener);
+            }
+        });
+        wake();
+        return;
+    }
+    // No RefCell or state mutex is held while AppKit activates or runs its picker loop.
+    if let Some(window) = window {
+        window.makeKeyAndOrderFront(None);
+    }
+    if let Some(mtm) = activate {
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+    if choose {
+        choose_menu_bar_icon();
+    }
+}
+
 pub(crate) fn composer_is_composing() -> bool {
     UI.with(|cell| match cell.try_borrow() {
         Ok(slot) => slot
@@ -4335,6 +4637,93 @@ fn schedule_app_update_confirmation() {
     // before performClick returns. Confirmation belongs to the default mode.
     unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
 }
+
+fn schedule_app_update_recovery_start() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(confirm_app_update_recovery_start);
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn schedule_stopped_original_recovery() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(|| {
+        with_ui_recovery_action(|ui| ui.recover_stopped_original_app_update());
+    });
+    // Admission must see settled button/gesture tracking, and contention must
+    // retain the action rather than dropping the user's request.
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn recovery_shutdown_admission(
+    frozen: bool,
+    migration_busy: bool,
+    blockers: &[String],
+) -> Result<(), String> {
+    if frozen {
+        return Err("another update is already prepared".into());
+    }
+    if migration_busy {
+        return Err("migration is still pending".into());
+    }
+    if !blockers.is_empty() {
+        return Err(blockers.join("; "));
+    }
+    Ok(())
+}
+
+fn confirm_app_update_recovery_start() {
+    // Leave button tracking and release the UI borrow before any native modal
+    // loop. New helpers own their approval; only older helpers need this alert.
+    let preflight = with_ui_read(|ui| {
+        if ui.update_frozen.is_some() {
+            return None;
+        }
+        ui.app_update.recovery_operation_id().map(|id| {
+            (
+                ui.mtm,
+                ui.locale,
+                id.to_owned(),
+                ui.app_update.recovery_start_requires_confirmation(),
+            )
+        })
+    });
+    let Some(preflight) = preflight else {
+        schedule_app_update_recovery_start();
+        return;
+    };
+    let Some((mtm, locale, operation_id, needs_confirmation)) = preflight else {
+        return;
+    };
+    if needs_confirmation && !confirm_legacy_recovery_start(mtm, locale) {
+        return;
+    }
+    with_ui_recovery_action(move |ui| {
+        if ui.app_update.recovery_operation_id() == Some(operation_id.as_str())
+            && ui.app_update.recovery_start_requires_confirmation() == needs_confirmation
+        {
+            ui.recover_app_update(true);
+        }
+    });
+}
+
+fn confirm_legacy_recovery_start(mtm: MainThreadMarker, locale: UiLocale) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryConfirmTitle,
+    )));
+    alert.setInformativeText(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryConfirmBody,
+    )));
+    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
+    alert.addButtonWithTitle(&NSString::from_str(text(
+        locale,
+        Message::AppUpdateRecoveryStart,
+    )));
+    alert.runModal() == NSAlertSecondButtonReturn
+}
+
 pub(crate) fn confirm_migration_consent_visibility(operation_id: &str) -> Result<(), String> {
     let operation_id = operation_id.to_owned();
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -4384,8 +4773,15 @@ fn migration_consent_detail(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!(
-        "{}\n\n{}: {}\nSHA-256: {}\n{}\n\n{} {}: {}\nSHA-256: {}\n{}\n\n{}\n\n{}\n{}",
+    let delegation = match locale {
+        UiLocale::Ko => "업데이트를 한 번 승인하면 아래의 정확한 설치와 모든 기존 프로필을 자동으로 이전하고, 준비된 새 앱으로 전환한 뒤 구형 설치를 정리합니다. 설정된 연동은 자동으로 재연결하며 외부 서비스의 실제 오류는 별도로 표시합니다. 추가 이전·재연결 승인 창은 없습니다.",
+        UiLocale::En => "This one update approval authorizes automatic migration of the exact installations and existing profiles below, switching only after native readiness and then retiring the legacy installation. Configured integrations reconnect automatically; real external-service failures remain separately visible. No additional migration or reconnect approval is required.",
+        UiLocale::ZhHans => "本次更新批准授权自动迁移下列确切安装和现有配置，仅在新应用就绪后切换并清理旧安装。已配置的集成自动重新连接，外部服务的真实错误另行显示。无需再次批准迁移或重新连接。",
+        UiLocale::Ja => "この一度の更新承認で、以下の正確なインストールと既存プロファイルの自動移行を許可します。新アプリの準備確認後に切り替えて旧アプリを整理します。設定済みの連携は自動再接続し、外部サービスの実際のエラーは別に表示します。追加の移行・再接続承認は不要です。",
+    };
+    let mut detail = format!(
+        "{}\n\n{}\n\n{}: {}\nSHA-256: {}\n{}\n\n{} {}: {}\nSHA-256: {}\n{}\n\n{}\n\n{}\n{}",
+        delegation,
         text(locale, Message::MigrationConsentExplanation),
         text(locale, Message::AppUpdateSource),
         plan.source_image.path.display(),
@@ -4406,7 +4802,43 @@ fn migration_consent_detail(
             }
         ),
         text(locale, Message::MigrationRetirementConsent)
-    )
+    );
+    if let Some(delivery) = &plan.tern_delivery {
+        let permission = match locale {
+            UiLocale::Ko => "설정된 Tern consumer만 공식 Tern CLI로 자동 갱신·재연결합니다. 기존 Tern KV와 프로필 쌍은 보존합니다.",
+            UiLocale::En => "Automatically update/reconnect only the configured Tern consumer through the official Tern CLI, preserving saved KV and the original profile pair.",
+            UiLocale::ZhHans => "仅通过官方 Tern CLI 自动更新并重新连接已配置的 Tern consumer，保留保存的 KV 和原配置目录对。",
+            UiLocale::Ja => "公式 Tern CLI で設定済み Tern consumer のみを自動更新・再接続し、保存済み KV と元のプロファイルの組を保持します。",
+        };
+        detail.push_str(&format!("\n\n{permission}\nTern CLI: {}\nSHA-256: {}\nConsumer revision: {}\nPackage SHA-256: {}",
+            delivery.program.path.display(), delivery.program.sha256, delivery.revision, delivery.package_sha256));
+    } else if let Some(error) = &plan.tern_delivery_problem {
+        detail.push_str(&format!("\n\nTern integration: {error}"));
+    }
+    if let Some(previous) = &plan.target.previous_installation {
+        detail.push_str(&format!(
+            "\n\nApproved existing owner upgrade: {} → {}\n{}\nSHA-256: {}\n{}",
+            previous.app_version,
+            plan.target.release.version,
+            previous.executable.display(),
+            previous.image.sha256,
+            app_update::source_description(&previous.origin)
+        ));
+    }
+    for profile in &plan.readonly_target_profiles {
+        detail.push_str(&format!("\n\nOther profile retained read-only (not stopped/restarted):\n{}\n{}\n{}\nSHA-256: {}\nPID {} · {}",
+            profile.config_dir.display(), profile.state_dir.display(), profile.image.path.display(),
+            profile.image.sha256, profile.pid, profile.instance_id));
+    }
+    if let Some(delivery) = &plan.tern_delivery {
+        detail.push_str(&format!(
+            "\nSaved Tern executable: {}\nSaved KV: {}\nKV SHA-256: {}",
+            delivery.configuration.connection.executable.display(),
+            delivery.configuration.path.display(),
+            delivery.configuration.sha256
+        ));
+    }
+    detail
 }
 
 fn set_migration_alert_detail(alert: &NSAlert, mtm: MainThreadMarker, detail: &str) {
@@ -4462,17 +4894,21 @@ fn confirm_legacy_migration(
     plan: desktop_pet_update_coordinator::migration::MigrationPlan,
     resume: bool,
 ) {
+    let expected_image = if resume {
+        desktop_pet_update_coordinator::migration::read_record(&plan).and_then(|record| {
+            desktop_pet_update_coordinator::migration::target_image(&plan, &record).cloned()
+        })
+    } else {
+        Ok(plan.source_image.clone())
+    };
     let Some((mtm, locale, admitted)) = with_ui_read(|ui| {
         let admitted = ui.update_frozen.is_none()
             && ui.shared.lock().is_ok_and(|state| {
                 state.update_mutation_allowed().is_ok()
                     && state.update_context().is_some_and(|context| {
-                        let image = if resume {
-                            &plan.target.image
-                        } else {
-                            &plan.source_image
-                        };
-                        context.running == *image
+                        expected_image
+                            .as_ref()
+                            .is_ok_and(|image| context.running == *image)
                             && plan.profiles.iter().any(|profile| {
                                 profile.config_dir == context.config_dir
                                     && profile.state_dir == context.state_dir
@@ -4486,76 +4922,105 @@ fn confirm_legacy_migration(
     if !admitted {
         with_ui_internal(|ui| {
             ui.migration.busy = false;
+            if !resume && ui.migration.record.is_none() {
+                if let Some(context) = ui
+                    .shared
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.update_context().cloned())
+                {
+                    ui.app_update.migration_history_checked(&context, true);
+                }
+            }
             ui.painted_app_update = None;
-            ui.app_update.set_problem(
-                "Migration source or target image/profile changed; review again".into(),
-            );
+            ui.app_update
+                .set_problem(expected_image.err().unwrap_or_else(|| {
+                    "Migration source or target image/profile changed; no operation was started"
+                        .into()
+                }));
             ui.refresh_app_update();
         });
         return;
     }
-    let alert = NSAlert::new(mtm);
-    let title = if resume {
-        Message::MigrationResume
-    } else {
-        Message::MigrationTitle
-    };
-    alert.setMessageText(&NSString::from_str(text(locale, title)));
-    set_migration_alert_detail(&alert, mtm, &migration_consent_detail(&plan, locale));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, title)));
-    if alert.runModal() != NSAlertSecondButtonReturn {
-        with_ui_internal(|ui| {
-            ui.migration.busy = false;
-            ui.painted_app_update = None;
-            ui.refresh_app_update();
-        });
-        return;
+    let delegated = desktop_pet_update_coordinator::migration::delegated_approval(&plan);
+    match delegated {
+        Ok(true) => {}
+        Ok(false) => {
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str(text(
+                locale,
+                Message::AppUpdateConfirmTitle,
+            )));
+            set_migration_alert_detail(&alert, mtm, &migration_consent_detail(&plan, locale));
+            alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateLater)));
+            alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::AppUpdateInstall)));
+            if alert.runModal() != NSAlertSecondButtonReturn {
+                with_ui_internal(|ui| {
+                    ui.migration.busy = false;
+                    if !resume && ui.migration.record.is_none() {
+                        if let Some(context) = ui
+                            .shared
+                            .lock()
+                            .ok()
+                            .and_then(|state| state.update_context().cloned())
+                        {
+                            ui.app_update.migration_history_checked(&context, true);
+                        }
+                    }
+                    ui.painted_app_update = None;
+                    ui.refresh_app_update();
+                });
+                return;
+            }
+        }
+        Err(error) => {
+            with_ui_internal(|ui| {
+                ui.migration.busy = false;
+                if !resume && ui.migration.record.is_none() {
+                    if let Some(context) = ui
+                        .shared
+                        .lock()
+                        .ok()
+                        .and_then(|state| state.update_context().cloned())
+                    {
+                        ui.app_update.migration_history_checked(&context, true);
+                    }
+                }
+                ui.app_update.set_problem(error);
+                ui.refresh_app_update();
+            });
+            return;
+        }
     }
-    // Keep AppKit objects on the main thread. Only the approved plan crosses
-    // the potentially deferred update action; it creates and retains its own
-    // visible consent window before the helper can prepare the migration.
-    drop(alert);
+    launch_legacy_migration(plan, resume);
+}
+
+fn launch_legacy_migration(
+    plan: desktop_pet_update_coordinator::migration::MigrationPlan,
+    resume: bool,
+) {
     with_ui_update_action(move |ui| {
+        ui.app_update.migration_preparing();
         let blockers = ui.restart_blockers_snapshot();
         if !blockers.is_empty() {
-            ui.migration.busy = false;
-            ui.app_update.set_problem(blockers.join("; "));
+            ui.migration_approved_waiting = Some((plan, resume));
+            ui.migration.busy = true;
+            ui.painted_app_update = None;
+            ui.refresh_app_update();
             return;
         }
-        let alert = NSAlert::new(ui.mtm);
-        set_migration_alert_detail(&alert, ui.mtm, &migration_consent_detail(&plan, ui.locale));
-        alert.addButtonWithTitle(&NSString::from_str(text(
-            ui.locale,
-            Message::AppUpdateLater,
-        )));
-        alert.addButtonWithTitle(&NSString::from_str(text(ui.locale, title)));
-        for button in alert.buttons().iter() {
-            button.setEnabled(false);
-        }
-        alert.setMessageText(&NSString::from_str(text(
-            ui.locale,
-            Message::MigrationPreparing,
-        )));
-        alert.layout();
-        alert.window().orderFrontRegardless();
-        if !alert.window().isVisible() {
-            ui.migration.busy = false;
-            ui.app_update
-                .set_problem("Migration consent window is not visible".into());
-            return;
-        }
-        ui.clear_update_consent();
-        ui.update_consent = Some((plan.operation_id.clone(), alert));
-        ui.sync_update_consent_visibility();
         ui.migration.plan = Some(plan.clone());
         ui.migration.busy = true;
         ui.painted_app_update = None;
         let (sender, receiver) = mpsc::sync_channel(1);
         ui.migration_launch_receiver = Some(receiver);
         std::thread::spawn(move || {
+            use std::io::Read;
             use std::os::unix::process::CommandExt;
             let result = (|| -> Result<MigrationLaunchOutcome, String> {
+                if !desktop_pet_update_coordinator::migration::delegated_approval(&plan)? {
+                    desktop_pet_update_coordinator::migration::authorize_update_approval(&plan)?;
+                }
                 let directory = plan.profiles[0].state_dir.join("updates-v4");
                 let path = if resume {
                     directory.join(format!("{}.migration-plan.json", plan.operation_id))
@@ -4565,7 +5030,7 @@ fn confirm_legacy_migration(
                     if existing.exists() {
                         if desktop_pet_update_coordinator::migration::read_plan(&existing)? != plan
                         {
-                            return Err("Migration consent evidence changed".into());
+                            return Err("Approved migration plan changed".into());
                         }
                         existing
                     } else {
@@ -4587,7 +5052,7 @@ fn confirm_legacy_migration(
                     .envs(&plan.profiles[0].environment)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null());
+                    .stderr(std::process::Stdio::piped());
                 unsafe {
                     command.pre_exec(|| {
                         if libc::setsid() == -1 {
@@ -4600,15 +5065,30 @@ fn confirm_legacy_migration(
                 let mut child = command.spawn().map_err(|error| {
                     format!("Verified migration helper could not start: {error}")
                 })?;
-                match desktop_pet_update_coordinator::migration::wait_for_final_consent(
+                let stderr = child
+                    .stderr
+                    .take()
+                    .ok_or("Migration helper error channel missing")?;
+                let errors = std::thread::spawn(move || {
+                    let mut reader = stderr;
+                    let mut bytes = Vec::new();
+                    let _ = reader.by_ref().take(65536).read_to_end(&mut bytes);
+                    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                    String::from_utf8_lossy(&bytes).into_owned()
+                });
+                let outcome = desktop_pet_update_coordinator::migration::wait_for_final_consent(
                     &mut child, &plan, &path, resume,
-                )? {
+                );
+                let detail = errors
+                    .join()
+                    .map_err(|_| "Migration helper error reader failed")?;
+                match outcome.map_err(|error| if detail.is_empty() { error } else { format!("{error}: {}", detail.trim()) })? {
                     desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::Cancelled => {
                         Ok(MigrationLaunchOutcome::Cancelled { plan, retirement_only: resume })
                     }
-                    desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::VisibleApproved => {
-                        desktop_pet_update_coordinator::migration::read_record(&plan)
-                            .map(MigrationLaunchOutcome::Recorded)
+                    desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::DelegatedApproved
+                    | desktop_pet_update_coordinator::migration::MigrationFinalConsentOutcome::VisibleApproved => {
+                        desktop_pet_update_coordinator::migration::read_record(&plan).map(MigrationLaunchOutcome::Recorded)
                     }
                 }
             })();
@@ -4619,6 +5099,10 @@ fn confirm_legacy_migration(
 }
 
 fn confirm_app_update() {
+    if desktop_pet_update_coordinator::identity::LEGACY {
+        with_ui_update_action(|ui| ui.begin_legacy_migration());
+        return;
+    }
     // Default-mode scheduling leaves native button tracking first; NSAlert
     // must also never hold UI's RefCell borrow while spinning its modal loop.
     let preflight = with_ui_read(|ui| {
@@ -4914,6 +5398,15 @@ fn install_alert_escape_monitor(
     alert: &NSAlert,
     cancel: &NSButton,
 ) -> Option<AlertEscapeMonitor> {
+    install_alert_cancel_monitor(mtm, alert, cancel, false)
+}
+
+fn install_alert_cancel_monitor(
+    mtm: MainThreadMarker,
+    alert: &NSAlert,
+    cancel: &NSButton,
+    include_return: bool,
+) -> Option<AlertEscapeMonitor> {
     let window = alert.window();
     let cancel = objc2::Message::retain(cancel);
     let app = NSApplication::sharedApplication(mtm);
@@ -4925,12 +5418,12 @@ fn install_alert_escape_monitor(
                 | NSEventModifierFlags::Control
                 | NSEventModifierFlags::Option
                 | NSEventModifierFlags::Shift;
-            if event.keyCode() == 53
+            if (event.keyCode() == 53 || (include_return && matches!(event.keyCode(), 36 | 76)))
                 && !event.modifierFlags().intersects(modifiers)
                 && event
                     .window(mtm)
                     .is_some_and(|current| current.windowNumber() == window.windowNumber())
-                && window.isKeyWindow()
+                && (include_return || window.isKeyWindow())
                 && app
                     .modalWindow()
                     .is_some_and(|current| current.windowNumber() == window.windowNumber())
@@ -4946,6 +5439,112 @@ fn install_alert_escape_monitor(
             token,
             _main_thread: mtm,
         })
+}
+
+fn schedule_settings_reset_confirmation() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(confirm_settings_reset_start);
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn confirm_settings_reset_start() {
+    // Distinguish an empty UI slot from real RefCell contention: only the
+    // latter owns a still-live request which must be retried in default mode.
+    let preflight = UI.with(|cell| match cell.try_borrow() {
+        Ok(slot) => Ok(slot.as_ref().map(|ui| {
+            ui.settings_reset_preflight()
+                .map(|(context, generation)| (ui.mtm, ui.locale, context, generation))
+        })),
+        Err(_) => Err(()),
+    });
+    let snapshot = match preflight {
+        Err(()) => {
+            schedule_settings_reset_confirmation();
+            return;
+        }
+        Ok(None) => return,
+        Ok(Some(Err(error))) => {
+            with_ui_recovery_action(move |ui| ui.settings_reset_error(&error));
+            return;
+        }
+        Ok(Some(Ok(snapshot))) => snapshot,
+    };
+    let (mtm, locale, context, generation) = snapshot;
+    // No UI or state borrow crosses AppKit's nested modal loop. Stop can abort
+    // it, and approval re-enters through the retained action's fresh guards.
+    if confirm_settings_reset(mtm, locale, &context.config_dir, &context.state_dir) {
+        with_ui_update_action(move |ui| ui.reset_app_settings(context, generation));
+    }
+}
+
+fn spawn_restart_worker(
+    paths: &Paths,
+    observation: &desktop_pet_contracts::ObservationSelection,
+    instance: &str,
+    generation: u64,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    #[cfg(test)]
+    if let Some(result) =
+        recovery_ui_regressions::intercept_launch(false, paths, observation, instance, generation)
+    {
+        return result;
+    }
+    crate::cli::spawn_restart(paths, observation, instance, generation)
+}
+
+fn spawn_settings_reset_worker(
+    paths: &Paths,
+    observation: &desktop_pet_contracts::ObservationSelection,
+    instance: &str,
+    generation: u64,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    #[cfg(test)]
+    if let Some(result) =
+        recovery_ui_regressions::intercept_launch(true, paths, observation, instance, generation)
+    {
+        return result;
+    }
+    crate::cli::spawn_settings_reset(paths, observation, instance, generation)
+}
+
+fn confirm_settings_reset(
+    mtm: MainThreadMarker,
+    locale: UiLocale,
+    config: &Path,
+    state: &Path,
+) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(text(
+        locale,
+        Message::ResetAppSettingsConfirmTitle,
+    )));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "{}\n\nConfig: {}\nState: {}",
+        text(locale, Message::ResetAppSettingsConfirmBody),
+        config.display(),
+        state.display()
+    )));
+    let cancel = alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
+    cancel.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    let reset =
+        alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::ResetAndRestart)));
+    reset.setKeyEquivalent(&NSString::from_str(""));
+    alert.layout();
+    let Some(cell) = cancel
+        .cell()
+        .and_then(|cell| cell.downcast::<NSButtonCell>().ok())
+    else {
+        return false;
+    };
+    alert.window().setDefaultButtonCell(Some(&cell));
+    let Some(monitor) = install_alert_cancel_monitor(mtm, &alert, &cancel, true) else {
+        return false;
+    };
+    #[cfg(test)]
+    recovery_ui_regressions::schedule_modal_action();
+    let response = alert.runModal();
+    drop(monitor);
+    response == NSAlertSecondButtonReturn
 }
 
 fn begin_worktree_remove(target: WorktreeRemoveTarget) {
@@ -5072,46 +5671,37 @@ fn begin_worktree_remove(target: WorktreeRemoveTarget) {
     });
 }
 
-fn begin_menu_bar_icon_operation(
-    hide_settings: bool,
-) -> Option<(MainThreadMarker, UiLocale, Option<NSRect>, PathBuf)> {
+fn begin_menu_bar_icon_operation() -> Option<(MainThreadMarker, UiLocale, PathBuf)> {
     let mut started = None;
     with_ui_mut(|ui| {
         if ui.menu_bar_icon_busy
-            || !ui.menu_panel.is_visible()
+            || ui.menu_panel.detail_page() != Some(SettingsDetailPage::MenuBar)
+            || ui.menu_panel.bubble_colors_marked()
             || !ui.menu_bar_icon_operation_allowed()
         {
             return;
         }
         ui.menu_bar_icon_busy = true;
         ui.menu_panel.set_menu_bar_icon_busy(true);
-        let anchor = if hide_settings {
-            ui.settings_anchor
-        } else {
-            None
-        };
-        if hide_settings {
-            ui.menu_panel.hide();
-        }
-        started = Some((
-            ui.mtm,
-            ui.locale,
-            anchor,
-            ui.lifecycle_paths.config_dir.clone(),
-        ));
+        started = Some((ui.mtm, ui.locale, ui.lifecycle_paths.config_dir.clone()));
     });
     started
 }
 
 fn choose_menu_bar_icon() {
-    let Some((mtm, locale, anchor, config_dir)) = begin_menu_bar_icon_operation(true) else {
+    let Some((mtm, locale, config_dir)) = begin_menu_bar_icon_operation() else {
         return;
     };
     // No UI RefCell borrow is held across the modal loop or image decoding/publishing.
     let result = match choose_menu_bar_icon_source(mtm, locale) {
         Ok(Some(path)) => {
-            if with_ui_read(|ui| ui.menu_bar_icon_busy && ui.menu_bar_icon_operation_allowed())
-                != Some(true)
+            if with_ui_read(|ui| {
+                ui.menu_bar_icon_busy
+                    && ui.menu_bar_icon_operation_allowed()
+                    && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+                    && !SETTINGS_DETAIL_INTENT
+                        .with(|pending| matches!(pending.get(), Some(SettingsDetailIntent::Close)))
+            }) != Some(true)
             {
                 None
             } else {
@@ -5128,12 +5718,16 @@ fn choose_menu_bar_icon() {
         Ok(None) => None,
         Err(error) => Some(Err((Message::MenuBarIconImportFailure, error))),
     };
-    let mut reopen_anchor = None;
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if !ui.menu_bar_icon_busy {
             return;
         }
-        if ui.menu_bar_icon_operation_allowed() {
+        if ui.update_frozen.is_none()
+            && ui.menu_bar_icon_operation_allowed()
+            && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+            && !SETTINGS_DETAIL_INTENT
+                .with(|pending| matches!(pending.get(), Some(SettingsDetailIntent::Close)))
+        {
             if let Some(result) = result {
                 match result {
                     Ok((preference, image)) => ui.commit_menu_bar_icon(preference, image),
@@ -5143,25 +5737,23 @@ fn choose_menu_bar_icon() {
         }
         ui.menu_bar_icon_busy = false;
         ui.menu_panel.set_menu_bar_icon_busy(false);
-        if !ui.menu_bar_icon_shutdown() {
-            reopen_anchor = anchor;
-        }
     });
-    if let Some(anchor) = reopen_anchor {
-        present_settings_at(anchor, None);
-    }
+    present_requested_settings_detail();
 }
 
 fn reset_menu_bar_icon() {
-    let Some((mtm, locale, _, _)) = begin_menu_bar_icon_operation(false) else {
+    let Some((mtm, locale, _)) = begin_menu_bar_icon_operation() else {
         return;
     };
     let image = menu_bar_icon::default_image(mtm, text(locale, Message::MenuBarMenuTitle));
-    with_ui_mut(|ui| {
+    with_ui_internal(|ui| {
         if !ui.menu_bar_icon_busy {
             return;
         }
-        if ui.menu_bar_icon_operation_allowed() {
+        if ui.update_frozen.is_none()
+            && ui.menu_bar_icon_operation_allowed()
+            && ui.menu_panel.detail_page() == Some(SettingsDetailPage::MenuBar)
+        {
             match image {
                 Ok(image) => ui.commit_default_menu_bar_icon(image),
                 Err(error) => {
@@ -6060,6 +6652,9 @@ impl Ui {
             app_update,
             painted_app_update: None,
             update_frozen: None,
+            legacy_recovery_handoff: None,
+            settings_reset_handoff: None,
+            restart_handoff: None,
             update_consent: None,
             migration: MigrationUiState {
                 busy: migration_plan.is_some(),
@@ -6068,6 +6663,7 @@ impl Ui {
             },
             migration_plan_receiver: None,
             migration_launch_receiver: None,
+            migration_approved_waiting: None,
             migration_journal_receiver: None,
             migration_next_poll: Instant::now(),
             update_composer_editable: None,
@@ -6132,18 +6728,24 @@ impl Ui {
         ui.update_bubble_frame();
         ui.prepare_initial_rig_surface()?;
         if let Some(plan) = ui.migration.plan.as_ref() {
-            let alert = NSAlert::new(ui.mtm);
-            alert.setMessageText(&NSString::from_str(text(
-                ui.locale,
-                Message::MigrationPreparing,
-            )));
-            set_migration_alert_detail(&alert, ui.mtm, &migration_consent_detail(plan, ui.locale));
-            alert.layout();
-            alert.window().orderFrontRegardless();
-            if !alert.window().isVisible() {
-                return Err("Migration progress window is not visible".into());
+            if !desktop_pet_update_coordinator::migration::delegated_approval(plan)? {
+                let alert = NSAlert::new(ui.mtm);
+                alert.setMessageText(&NSString::from_str(text(
+                    ui.locale,
+                    Message::MigrationPreparing,
+                )));
+                set_migration_alert_detail(
+                    &alert,
+                    ui.mtm,
+                    &migration_consent_detail(plan, ui.locale),
+                );
+                alert.layout();
+                alert.window().orderFrontRegardless();
+                if !alert.window().isVisible() {
+                    return Err("Migration progress window is not visible".into());
+                }
+                ui.update_consent = Some((plan.operation_id.clone(), alert));
             }
-            ui.update_consent = Some((plan.operation_id.clone(), alert));
         }
         ui.refresh();
         ui.start_update_timer();
@@ -6254,13 +6856,14 @@ impl Ui {
     fn queue_bubble_appearance_error(&self, title: Message, detail: &str) {
         let detail = detail.to_owned();
         DispatchQueue::main().exec_async(move || {
-            let Some((mtm, locale)) = with_ui_read(|ui| (ui.mtm, ui.locale)) else {
-                return;
-            };
-            // Let the menu action and UI borrow finish before entering AppKit's
-            // nested modal loop, as with language-save failures.
-            with_ui_mut(|ui| ui.menu_panel.hide());
-            show_bubble_appearance_error(mtm, locale, title, &detail);
+            with_ui_internal(|ui| {
+                let value = format!("{}: {detail}", text(ui.locale, title));
+                if title == Message::ObservationSaveFailed {
+                    ui.menu_panel.set_connection_operation_error(&value);
+                } else {
+                    ui.menu_panel.set_presentation_error(Some(&value));
+                }
+            });
         });
     }
 
@@ -6276,8 +6879,7 @@ impl Ui {
 
     fn apply_custom_bubble_colors(&mut self) {
         if self.menu_panel.bubble_colors_conflicted() || self.menu_panel.bubble_colors_marked() {
-            // Keep the local draft and field editor intact. The panel displays
-            // its inline conflict status until an explicit reload or rebase.
+            // Preserve the field editor and conflict until an explicit reload or rebase.
             return;
         }
         match self.menu_panel.custom_bubble_palette() {
@@ -6307,6 +6909,11 @@ impl Ui {
                 self.menu_panel.bubble_colors_saved(appearance);
                 if reload_colors {
                     self.menu_panel.reload_bubble_colors();
+                }
+                if reload_colors && appearance.theme == BubbleTheme::Custom {
+                    request_settings_detail(SettingsDetailIntent::Open(
+                        SettingsDetailPage::Appearance,
+                    ));
                 }
             }
             Err(error) => {
@@ -6422,6 +7029,7 @@ impl Ui {
             || self.composer_marked()
             || self.character_browser.has_marked_text()
             || self.cards.is_composing()
+            || self.menu_panel.bubble_colors_marked()
             || NSEvent::pressedMouseButtons() != 0
             || appkit_event_tracking_active()
     }
@@ -6431,7 +7039,8 @@ impl Ui {
             || self.pending_bubble_scene.is_some()
             || self.pending_bubble_resize.is_some()
             || !self.pending_preference_operations.is_empty()
-            || self.menu_panel.is_visible()
+            || self.menu_panel.settings_surface_visible()
+            || SETTINGS_DETAIL_INTENT.with(|pending| pending.get().is_some())
             || self.character_browser.is_visible()
             || (self.dialogue_editor.is_visible() && self.dialogue_editor.needs_initial_hydration())
             || self.has_pending_native_dialogue()
@@ -6519,14 +7128,7 @@ impl Ui {
     }
 
     fn queue_language_save_failure(&self, error: &str) {
-        let error = error.to_owned();
-        DispatchQueue::main().exec_async(move || {
-            let Some((mtm, locale)) = with_ui_read(|ui| (ui.mtm, ui.locale)) else {
-                return;
-            };
-            with_ui_mut(|ui| ui.menu_panel.hide());
-            show_language_save_failure(mtm, locale, &error);
-        });
+        self.queue_bubble_appearance_error(Message::LanguageSaveFailed, error);
     }
 
     fn prepare_native(
@@ -7068,16 +7670,24 @@ impl Ui {
     fn sync_menu_panel_state(&mut self) {
         let scene = self.last_scene.clone();
         let status = status_text(&scene, self.locale);
-        if let Ok(state) = self.shared.lock() {
+        let snapshot = self.shared.lock().ok().map(|state| {
+            (
+                state.lifecycle_settings(),
+                state.observation_preferences().clone(),
+                state.provider_labels().clone(),
+                state.host_connections().clone(),
+            )
+        });
+        if let Some((lifecycle, observation, providers, connections)) = snapshot {
             self.menu_panel.sync(
                 &scene,
                 self.prefs.menu_bar_mode(),
                 self.prefs.language(),
                 &status,
-                state.lifecycle_settings(),
-                state.observation_preferences(),
-                state.provider_labels(),
-                state.host_connections(),
+                lifecycle,
+                &observation,
+                &providers,
+                &connections,
             );
         }
     }
@@ -7111,7 +7721,7 @@ impl Ui {
         let height_changed = self
             .menu_panel
             .set_character_content_height(self.character_menu.natural_height());
-        if self.menu_panel.is_visible() && !self.last_scene.shutdown {
+        if self.menu_panel.settings_surface_visible() && !self.last_scene.shutdown {
             self.sync_menu_panel_state();
         }
         let active_key = self
@@ -7176,7 +7786,7 @@ impl Ui {
             self.start_browser_timer();
         }
         self.browser_preview_revision = self.character_previews.revision();
-        if height_changed && self.menu_panel.is_visible() && self.menu_panel.is_character_tab() {
+        if height_changed && self.menu_panel.is_visible() {
             self.reanchor_menu_panel();
         } else {
             self.sync_character_menu_frame();
@@ -7532,18 +8142,7 @@ impl Ui {
             }
             Err(error) => {
                 self.cards.reject_options(self.prefs.session_list());
-                let locale = self.locale;
-                DispatchQueue::main().exec_async(move || {
-                    let Some(mtm) = with_ui_read(|ui| ui.mtm) else {
-                        return;
-                    };
-                    show_bubble_appearance_error(
-                        mtm,
-                        locale,
-                        Message::SessionListSaveFailure,
-                        &error,
-                    );
-                });
+                self.queue_bubble_appearance_error(Message::SessionListSaveFailure, &error);
             }
         }
     }
@@ -7651,6 +8250,9 @@ impl Ui {
     }
 
     fn sync_composer(&mut self) {
+        if self.update_frozen.is_some() {
+            return;
+        }
         if self.resize_frozen && !self.resize_staging {
             self.defer_bubble_content();
             return;
@@ -8469,6 +9071,27 @@ impl Ui {
         self.update_pointer_policy(scene);
     }
 
+    fn begin_standalone_relocation(&mut self) {
+        if self.update_frozen.is_some()
+            || self.migration.busy
+            || !self.app_update.model(self.locale).relocation_available
+            || !self
+                .shared
+                .lock()
+                .is_ok_and(|state| state.is_ui_ready() && state.update_mutation_allowed().is_ok())
+        {
+            return;
+        }
+        let blockers = self.restart_blockers_snapshot();
+        if !blockers.is_empty() {
+            self.app_update.set_problem(blockers.join("; "));
+        } else {
+            self.app_update.begin_standalone_relocation();
+        }
+        self.painted_app_update = None;
+        self.refresh_app_update();
+    }
+
     fn begin_legacy_migration(&mut self) {
         if !self.migration.review_allowed() || self.update_frozen.is_some() {
             return;
@@ -8500,6 +9123,7 @@ impl Ui {
         let (sender, receiver) = mpsc::sync_channel(1);
         self.migration_plan_receiver = Some(receiver);
         self.migration.busy = true;
+        self.app_update.migration_preparing();
         self.painted_app_update = None;
         std::thread::spawn(move || {
             let result = desktop_pet_update_coordinator::migration::prepare_bridge_plan(
@@ -8512,6 +9136,14 @@ impl Ui {
     }
 
     fn poll_legacy_migration(&mut self) {
+        if self.migration_approved_waiting.is_some() && self.restart_blockers_snapshot().is_empty()
+        {
+            if let Some((plan, resume)) = self.migration_approved_waiting.take() {
+                let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+                let block = RcBlock::new(move || launch_legacy_migration(plan.clone(), resume));
+                unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+            }
+        }
         if let Some(receiver) = &self.migration_plan_receiver {
             let result = match receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -8527,6 +9159,14 @@ impl Ui {
                     Ok(plan) => schedule_migration_confirmation(plan, false),
                     Err(error) => {
                         self.migration.busy = false;
+                        if let Some(context) = self
+                            .shared
+                            .lock()
+                            .ok()
+                            .and_then(|state| state.update_context().cloned())
+                        {
+                            self.app_update.migration_history_checked(&context, true);
+                        }
                         self.app_update.set_problem(error);
                     }
                 }
@@ -8549,6 +9189,19 @@ impl Ui {
                     self.clear_update_consent();
                     self.migration_journal_receiver = None;
                     self.migration_next_poll = Instant::now();
+                    if self.migration.record.is_none() {
+                        if let Some(context) = self
+                            .shared
+                            .lock()
+                            .ok()
+                            .and_then(|state| state.update_context().cloned())
+                        {
+                            self.app_update.migration_history_checked(&context, true);
+                        }
+                    }
+                }
+                if let Some(record) = &self.migration.record {
+                    self.app_update.migration_observed(record);
                 }
                 self.painted_app_update = None;
             }
@@ -8567,6 +9220,7 @@ impl Ui {
                 self.painted_app_update = None;
                 match result {
                     Ok(record) => {
+                        self.app_update.migration_observed(&record);
                         self.migration.busy = !matches!(record.phase,
                             desktop_pet_update_coordinator::migration::MigrationPhase::Complete
                             | desktop_pet_update_coordinator::migration::MigrationPhase::RetirementFailed
@@ -8579,6 +9233,14 @@ impl Ui {
                             self.migration.launch_error = None;
                         } else if self.migration.launch_error.is_some() {
                             self.migration.busy = false;
+                        }
+                        if !self.migration.busy
+                            && self.update_frozen.as_deref() == Some(record.operation_id.as_str())
+                            && self.shared.lock().is_ok_and(|state| {
+                                !state.migration_gated() && !state.scene().shutdown
+                            })
+                        {
+                            self.cancel_update_prepare(&record.operation_id);
                         }
                         self.migration.record = Some(record);
                         if self.migration.record.as_ref().is_some_and(|record| record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete) && self.update_frozen.is_none() {
@@ -8603,10 +9265,21 @@ impl Ui {
             if let Some(plan) = self.migration.plan.clone() {
                 let (sender, receiver) = mpsc::sync_channel(1);
                 self.migration_journal_receiver = Some(receiver);
+                let context = self
+                    .shared
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.update_context().cloned());
                 std::thread::spawn(move || {
-                    let _ = sender.send(desktop_pet_update_coordinator::migration::read_record(
-                        &plan,
-                    ));
+                    let result = match context {
+                        Some(context) => {
+                            desktop_pet_update_coordinator::migration::observe_for_context(
+                                &plan, &context,
+                            )
+                        }
+                        None => desktop_pet_update_coordinator::migration::read_record(&plan),
+                    };
+                    let _ = sender.send(result);
                 });
             }
         }
@@ -8635,28 +9308,18 @@ impl Ui {
                     },
                 ),
             );
+        } else {
+            self.menu_panel.clear_connection_profile();
         }
         let mut model = self.app_update.model(self.locale);
-        let migration_was_primary =
-            model.primary_action == Some(crate::update_card::UpdateCardPrimaryAction::Migrate);
         if let Some(plan) = &self.migration.plan {
-            model.primary_action = None;
             if self.migration.record.as_ref().is_some_and(|record| {
                 record.phase == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
             }) {
-                model.migration_visible = false;
-                model.migration_available = false;
-                if migration_was_primary {
-                    model.status = desktop_pet_update_coordinator::CheckStatus::Applied;
-                    model.status_text = text(self.locale, Message::MigrationRetired).to_owned();
-                    model.detail = model.status_text.clone();
-                }
-                model.history.push_str(&format!(
-                    "\n{} · {}",
-                    plan.operation_id,
-                    text(self.locale, Message::MigrationRetired)
-                ));
+                model.retain_completed_migration(&plan.operation_id, self.locale);
             } else {
+                model.primary_action = None;
+                model.recovery_enabled = false;
                 model.migration_visible = true;
                 model.action = None;
                 model.download_url = None;
@@ -8670,9 +9333,18 @@ impl Ui {
                     use desktop_pet_update_coordinator::migration::MigrationPhase;
                     let message = match record.phase {
                         MigrationPhase::Complete => Message::MigrationRetired,
+                        MigrationPhase::RetirementFailed
+                            if record.retirement_attempt == 0 && record.target_committed =>
+                        {
+                            Message::MigrationReconnectPending
+                        }
+                        MigrationPhase::RetirementFailed if record.retirement_attempt == 0 => {
+                            Message::AppUpdateFailed
+                        }
                         MigrationPhase::RetirementFailed => Message::MigrationRetirementFailed,
                         MigrationPhase::ManagerUnknown => Message::MigrationManagerUnknown,
                         MigrationPhase::AwaitingReconnect => Message::MigrationReconnectPending,
+                        MigrationPhase::Integrating => Message::MigrationIntegrating,
                         MigrationPhase::UserStopped => Message::AppUpdateUserStopped,
                         MigrationPhase::Failed | MigrationPhase::RolledBack => {
                             Message::AppUpdateFailed
@@ -8695,7 +9367,9 @@ impl Ui {
                     } else {
                         desktop_pet_update_coordinator::CheckStatus::Checking
                     };
-                    model.migration_available = record.phase == MigrationPhase::RetirementFailed;
+                    model.migration_available = record.phase == MigrationPhase::RetirementFailed
+                        && record.target_committed
+                        && record.retirement_attempt > 0;
                     if model.migration_available {
                         model.migration_title =
                             text(self.locale, Message::MigrationResume).to_owned();
@@ -8744,9 +9418,76 @@ impl Ui {
                     model.migration_available = !self.migration.busy;
                 }
             }
+            if let Some(record) = &self.migration.record {
+                for target in &record.target_profiles {
+                    model.diagnostics.push_str(&format!(
+                        "\nTarget profile: config {} · state {} · PID {:?} · instance {:?} · native ready {} · Commit requested {} · committed {}",
+                        target.config_dir.display(), target.state_dir.display(), target.pid, target.instance_id,
+                        target.native_ready, target.commit_requested, target.committed,
+                    ));
+                }
+                for integration in &record.integration_status {
+                    let health = format!(
+                        "{} · {} · config {} · state {}{}",
+                        integration.provider,
+                        if integration.connected {
+                            "observed connected"
+                        } else {
+                            "not connected"
+                        },
+                        integration.config_dir.display(),
+                        integration.state_dir.display(),
+                        integration
+                            .error
+                            .as_ref()
+                            .map(|error| format!("\n{error}"))
+                            .unwrap_or_default(),
+                    );
+                    model
+                        .diagnostics
+                        .push_str(&format!("\nIntegration: {health}"));
+                    if !integration.connected {
+                        model.detail.push_str(&format!(
+                            "\n\n{}: {health}",
+                            text(self.locale, Message::MigrationReconnectPending)
+                        ));
+                    }
+                }
+                if let Some(error) = &record.integration_delivery_error {
+                    model
+                        .diagnostics
+                        .push_str(&format!("\nTern integration delivery: {error}"));
+                    if plan.tern_reconnect_required
+                        && plan
+                            .profiles
+                            .iter()
+                            .filter(|profile| profile.tern_reconnect_required)
+                            .any(|profile| {
+                                !record.integration_status.iter().any(|integration| {
+                                    integration.provider == "tern"
+                                        && integration.connected
+                                        && integration.config_dir == profile.config_dir
+                                        && integration.state_dir == profile.state_dir
+                                })
+                            })
+                    {
+                        model
+                            .detail
+                            .push_str(&format!("\n\nTern integration: {error}"));
+                    }
+                }
+            }
+        }
+        if self.migration_approved_waiting.is_some() {
+            model.status_text = text(self.locale, Message::MigrationPreparing).to_owned();
+            model.detail = format!(
+                "Approved automatic update is waiting for native work to settle: {}",
+                self.restart_blockers_snapshot().join("; ")
+            );
         }
         if let Some(error) = &self.migration.launch_error {
             model.primary_action = None;
+            model.recovery_enabled = false;
             model.busy = false;
             model.status = desktop_pet_update_coordinator::CheckStatus::Failed;
             model.status_text = text(self.locale, Message::AppUpdateOutcomeUnknown).to_owned();
@@ -8755,12 +9496,31 @@ impl Ui {
         }
         if self.migration.busy {
             model.busy = true;
-            model.primary_action = None;
             model.migration_available = false;
+            if self.migration.automatic_preparing {
+                model.status = desktop_pet_update_coordinator::CheckStatus::Checking;
+                model.status_text = text(self.locale, Message::MigrationPreparing).to_owned();
+                model.detail = model.status_text.clone();
+            }
         }
-        if self.update_frozen.is_some() {
-            model.primary_action = None;
-        }
+        overlay_update_capabilities(
+            &mut model,
+            self.update_check_admitted(),
+            self.migration.busy,
+            self.update_frozen.is_some(),
+        );
+        clear_overridden_relocation_summary(
+            &mut model,
+            self.migration.plan.is_some()
+                && !self.migration.record.as_ref().is_some_and(|record| {
+                    record.phase
+                        == desktop_pet_update_coordinator::migration::MigrationPhase::Complete
+                }),
+            self.migration_approved_waiting.is_some(),
+            self.migration.launch_error.is_some(),
+            self.migration.busy,
+            self.update_frozen.is_some(),
+        );
         if let Some((operation_id, alert)) = &self.update_consent {
             if self
                 .migration
@@ -8823,6 +9583,19 @@ impl Ui {
             self.app_update.check_due();
         }
         self.app_update.poll_operation();
+        // This timer also runs during tracking/modal loops. A second native
+        // consent may only be admitted once the real UI is ready in default mode.
+        if capture_dispatch_safe()
+            && self.update_frozen.is_none()
+            && !self.migration.busy
+            && self.restart_blockers_snapshot().is_empty()
+            && self
+                .shared
+                .lock()
+                .is_ok_and(|state| state.is_ui_ready() && state.update_mutation_allowed().is_ok())
+        {
+            self.app_update.poll_relocation();
+        }
         while let Some(event) = self.app_update.next_event() {
             match event {
                 app_update::Event::Checked {
@@ -8896,10 +9669,14 @@ impl Ui {
                     operation_id,
                     result,
                     prepared_recovery,
+                    completed_history,
                 } => {
-                    let reconciled =
-                        self.app_update
-                            .journal(&operation_id, result, prepared_recovery);
+                    let reconciled = self.app_update.journal(
+                        &operation_id,
+                        result,
+                        prepared_recovery,
+                        completed_history,
+                    );
                     if let Some(context) = reconciled {
                         if self.update_frozen.as_deref() == Some(operation_id.as_str())
                             && self.shared.lock().is_ok_and(|mut state| {
@@ -8912,6 +9689,43 @@ impl Ui {
                     }
                 }
                 app_update::Event::LatestJournal(result) => self.app_update.latest_journal(result),
+                app_update::Event::RelocationAdmission { context, result } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update.relocation_admission(context, result);
+                    }
+                }
+                app_update::Event::RelocationFinished {
+                    context,
+                    operation_id,
+                    result,
+                } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update
+                            .relocation_finished(context, operation_id, result);
+                    }
+                }
+                app_update::Event::RelocationTernObserved {
+                    context,
+                    operation_id,
+                    result,
+                } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        self.app_update
+                            .relocation_tern_observed(context, operation_id, result);
+                    }
+                }
                 app_update::Event::MigrationEligibility { context, result } => {
                     self.app_update.migration_eligibility(context, result)
                 }
@@ -8925,6 +9739,9 @@ impl Ui {
                     }
                     self.app_update
                         .migration_history_checked(&context, result.is_ok());
+                    if let Ok(Some((_, record))) = &result {
+                        self.app_update.migration_observed(record);
+                    }
                     match result {
                         Ok(Some((plan, record)))
                             if self.migration.plan.is_none() && !self.migration.busy =>
@@ -8951,8 +9768,62 @@ impl Ui {
                             .set_problem(format!("Migration history: {error}")),
                     }
                 }
+                app_update::Event::AutomaticMigrationStarted { context } => {
+                    if self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                        && self.migration.plan.is_none()
+                        && !self.migration.busy
+                    {
+                        self.migration.automatic_preparing = true;
+                        self.app_update.migration_preparing();
+                        self.migration.busy = true;
+                        self.painted_app_update = None;
+                    }
+                }
+                app_update::Event::AutomaticMigration { context, result } => {
+                    if !self
+                        .shared
+                        .lock()
+                        .is_ok_and(|state| state.update_context() == Some(&context))
+                    {
+                        if self.migration.automatic_preparing {
+                            self.migration.automatic_preparing = false;
+                            self.migration.busy = false;
+                            self.app_update.set_problem("Source instance or profile changed during automatic update staging; no source was stopped".into());
+                        }
+                        continue;
+                    }
+                    if self.migration.plan.is_some()
+                        || (self.migration.busy && !self.migration.automatic_preparing)
+                    {
+                        continue;
+                    }
+                    self.migration.automatic_preparing = false;
+                    self.migration.busy = false;
+                    self.painted_app_update = None;
+                    match result {
+                        Ok(Some(plan)) => {
+                            self.migration.busy = true;
+                            self.painted_app_update = None;
+                            // The settled original update owns this exact delegated plan.
+                            // Default-mode scheduling avoids native event tracking.
+                            schedule_migration_confirmation(plan, false);
+                        }
+                        Ok(None) => self.app_update.migration_history_checked(&context, true),
+                        Err(error) => {
+                            self.app_update.migration_history_checked(&context, true);
+                            self.app_update
+                                .set_problem(format!("Automatic update migration: {error}"));
+                        }
+                    }
+                }
             }
         }
+        self.poll_legacy_recovery_handoff();
+        self.poll_settings_reset();
+        self.poll_restart();
         self.refresh_app_update();
     }
 
@@ -9152,10 +10023,15 @@ impl Ui {
             {
                 return Err("migration source image, operation or profile changed".into());
             }
-            if !self
-                .update_consent
-                .as_ref()
-                .is_some_and(|(id, alert)| id == operation_id && alert.window().isVisible())
+            self.migration.plan = Some(plan.clone());
+            self.migration.busy = true;
+            self.app_update.migration_preparing();
+            self.painted_app_update = None;
+            if !desktop_pet_update_coordinator::migration::delegated_approval(&plan)?
+                && !self
+                    .update_consent
+                    .as_ref()
+                    .is_some_and(|(id, alert)| id == operation_id && alert.window().isVisible())
             {
                 let alert = NSAlert::new(self.mtm);
                 alert.setMessageText(&NSString::from_str(text(
@@ -9185,6 +10061,27 @@ impl Ui {
             }
         }
         let blockers = self.restart_blockers_snapshot();
+        self.checkpoint_update_shutdown(&blockers)?;
+        self.freeze_update_controls(operation_id);
+        Ok(())
+    }
+
+    fn freeze_update_controls(&mut self, operation_id: &str) {
+        self.update_composer_editable = Some(self.composer_view.isEditable());
+        self.update_composer_send_enabled = Some(self.composer_send.isEnabled());
+        self.composer_view.ivars().update_frozen.set(true);
+        self.composer_view.setEditable(false);
+        self.composer_send.setEnabled(false);
+        self.menu_panel.set_update_frozen(true);
+        self.dialogue_editor.set_update_frozen(true);
+        self.character_browser.set_update_frozen(true);
+        self.cards.set_update_frozen(true);
+        self.panel.setIgnoresMouseEvents(true);
+        self.bubble_panel.setIgnoresMouseEvents(true);
+        self.update_frozen = Some(operation_id.to_owned());
+    }
+
+    fn checkpoint_update_shutdown(&mut self, blockers: &[String]) -> Result<(), String> {
         if !blockers.is_empty() {
             return Err(blockers.join("; "));
         }
@@ -9206,17 +10103,6 @@ impl Ui {
             self.save_position_only(Some(Some(position)))?;
         }
         self.save_position_only(None)?;
-        self.update_composer_editable = Some(self.composer_view.isEditable());
-        self.update_composer_send_enabled = Some(self.composer_send.isEnabled());
-        self.composer_view.setEditable(false);
-        self.composer_send.setEnabled(false);
-        self.menu_panel.set_update_frozen(true);
-        self.dialogue_editor.set_update_frozen(true);
-        self.character_browser.set_update_frozen(true);
-        self.cards.set_update_frozen(true);
-        self.panel.setIgnoresMouseEvents(true);
-        self.bubble_panel.setIgnoresMouseEvents(true);
-        self.update_frozen = Some(operation_id.to_owned());
         Ok(())
     }
 
@@ -9226,6 +10112,7 @@ impl Ui {
         }
         self.update_frozen = None;
         self.clear_update_consent();
+        self.composer_view.ivars().update_frozen.set(false);
         self.composer_view
             .setEditable(self.update_composer_editable.take().unwrap_or(true));
         self.composer_send
@@ -9237,6 +10124,14 @@ impl Ui {
         // refresh recomputes the intended passthrough/hit-testing policy;
         // do not briefly enable click ingress for an intentionally passive pet.
         self.refresh();
+    }
+
+    fn update_check_admitted(&self) -> bool {
+        self.update_frozen.is_none()
+            && self
+                .shared
+                .lock()
+                .is_ok_and(|state| state.update_mutation_allowed().is_ok())
     }
 
     fn update_setting_admitted(&self) -> bool {
@@ -9303,13 +10198,133 @@ impl Ui {
     }
 
     fn check_app_update(&mut self) {
-        if self.update_frozen.is_none()
-            && self
+        if self.update_check_admitted() {
+            self.app_update.check_now();
+        }
+        self.refresh_app_update();
+    }
+
+    fn recover_app_update(&mut self, start: bool) {
+        if start {
+            let blockers = self.restart_blockers_snapshot();
+            if let Err(error) = recovery_shutdown_admission(
+                self.update_frozen.is_some(),
+                self.migration.busy,
+                &blockers,
+            ) {
+                self.app_update.set_problem(format!(
+                    "{}\n{}",
+                    text(self.locale, Message::AppUpdateRecoveryNotStarted),
+                    error
+                ));
+                self.refresh_app_update();
+                return;
+            }
+        }
+        // Recovery validates the retained operation, not installation admission:
+        // the very reservation being reconciled intentionally blocks installation.
+        self.app_update.recover(start);
+        self.refresh_app_update();
+    }
+
+    fn prepare_legacy_recovery_handoff(&mut self) -> Result<(UpdateContext, String), String> {
+        let blockers = self.restart_blockers_snapshot();
+        recovery_shutdown_admission(self.update_frozen.is_some(), self.migration.busy, &blockers)?;
+        let plan = self
+            .app_update
+            .recovery_stop_plan()
+            .ok_or("retained recovery operation changed; no source was stopped")?;
+        let context = plan.context;
+        let operation_id = plan.operation_id;
+        {
+            let mut state = self
                 .shared
                 .lock()
-                .is_ok_and(|state| state.update_mutation_allowed().is_ok())
+                .map_err(|_| "native state lock is poisoned")?;
+            if state.update_context() != Some(&context) || context.running != plan.running {
+                return Err("running executable, instance or profile changed".into());
+            }
+            state.hold_recovery_prepare(&operation_id, &context)?;
+        }
+        // The local gate covers AX, control, automation and domain writes as
+        // well as widgets, without borrowing a reservation or updater token.
+        // Hold it before checkpointing and before any external consent can open.
+        if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
+            if !self.release_local_shutdown_handoff(&context, &operation_id) {
+                self.freeze_update_controls(&operation_id);
+                self.legacy_recovery_handoff = Some((context, operation_id, None));
+            }
+            return Err(error);
+        }
+        self.freeze_update_controls(&operation_id);
+        Ok((context, operation_id))
+    }
+
+    fn release_local_shutdown_handoff(
+        &mut self,
+        context: &UpdateContext,
+        operation_id: &str,
+    ) -> bool {
+        let released = self
+            .shared
+            .lock()
+            .is_ok_and(|mut state| state.release_recovery_prepare(operation_id, context));
+        if released {
+            self.cancel_update_prepare(operation_id);
+        }
+        released
+    }
+
+    fn poll_legacy_recovery_handoff(&mut self) {
+        let Some((context, operation_id, Some(request))) = self.legacy_recovery_handoff.as_ref()
+        else {
+            return;
+        };
+        if self
+            .app_update
+            .legacy_recovery_handoff_active(context, operation_id, *request)
+            || !self
+                .app_update
+                .legacy_recovery_handoff_releasable(context, operation_id, *request)
         {
-            self.app_update.check_now();
+            return;
+        }
+        let (context, operation_id, request) = self
+            .legacy_recovery_handoff
+            .take()
+            .expect("matched recovery handoff");
+        if !self.release_local_shutdown_handoff(&context, &operation_id) {
+            // A changed source, claimed Stop, or unknown outcome must not reopen
+            // mutation ingress. Keep the exact scope for subsequent safe proof.
+            self.legacy_recovery_handoff = Some((context, operation_id, request));
+        }
+    }
+
+    fn recover_stopped_original_app_update(&mut self) {
+        let admission = self.prepare_legacy_recovery_handoff();
+        let (context, operation_id) = match admission {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.app_update.set_problem(format!(
+                    "{}\n{}",
+                    text(self.locale, Message::AppUpdateRecoveryNotStarted),
+                    error
+                ));
+                self.refresh_app_update();
+                return;
+            }
+        };
+        // This only hands off to the authenticated bundled coordinator. That
+        // separate visible UI must obtain consent before stopping the original;
+        // this app never issues Stop or restarts either executable.
+        if let Some(scope) = self.app_update.recover_stopped_original() {
+            self.legacy_recovery_handoff = Some((scope.0, scope.1, Some(scope.2)));
+        } else {
+            // None means admission rejected before a coordinator worker was
+            // accepted. Only this exact locally held original may be released.
+            if !self.release_local_shutdown_handoff(&context, &operation_id) {
+                self.legacy_recovery_handoff = Some((context, operation_id, None));
+            }
         }
         self.refresh_app_update();
     }
@@ -9327,7 +10342,7 @@ impl Ui {
         let Some(url) = self.app_update.download_url() else {
             return;
         };
-        let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) else {
+        let Some(url) = NSURL::URLWithString(&NSString::from_str(&url)) else {
             return;
         };
         NSWorkspace::sharedWorkspace().openURL(&url);
@@ -10198,7 +11213,7 @@ impl Ui {
                 })
                 .unwrap_or(false);
                 if !inside && !context_opening {
-                    with_ui_mut(|ui| {
+                    with_ui_internal(|ui| {
                         if ui.menu_panel.is_visible() {
                             ui.menu_panel.hide();
                         }
@@ -10214,7 +11229,7 @@ impl Ui {
 
         let global: RcBlock<dyn Fn(NonNull<NSEvent>)> = RcBlock::new(|_event: NonNull<NSEvent>| {
             with_ui_mut(|ui| ui.fold_reply());
-            with_ui_mut(|ui| {
+            with_ui_internal(|ui| {
                 if ui.menu_panel.is_visible() {
                     ui.menu_panel.hide();
                 }
@@ -10265,6 +11280,11 @@ impl Ui {
     }
 
     fn shutdown(&mut self) {
+        SETTINGS_DETAIL_INTENT.with(|pending| pending.set(None));
+        SETTINGS_DETAIL_DISPATCHED.with(|pending| pending.set(false));
+        SETTINGS_DETAIL_OPENER.with(|opener| *opener.borrow_mut() = None);
+        SETTINGS_REQUEST_PENDING.store(false, Ordering::Release);
+        self.menu_bar_icon_busy = false;
         self.clear_update_consent();
         self.invalidate_pointer_capture();
         self.stop_capture_timer();
@@ -11871,6 +12891,11 @@ impl Ui {
                 .setTextColor(Some(&semantic_color(self.status_summary.status, surface)));
             self.status_label
                 .setStringValue(&NSString::from_str(&self.status_text));
+            self.status_label
+                .setToolTip(Some(&NSString::from_str(&self.status_text)));
+            if let Some(cell) = self.status_label.cell() {
+                set_accessibility_cell_text(&cell, &self.status_text, Some(&self.status_text));
+            }
         }
         set_attributed_field_text(
             &self.bubble,
@@ -13312,17 +14337,23 @@ impl Ui {
             if let Err(error) = self.commit_gui_observation_patch(patch) {
                 self.menu_panel.revert_observation_controls();
                 self.sync_observation_panel();
-                self.queue_bubble_appearance_error(
-                    if error.code == "revision_conflict" {
-                        Message::PreferenceRevisionConflict
-                    } else {
-                        Message::ObservationSaveFailed
-                    },
-                    &error.detail,
+                let detail = format!(
+                    "{}: {}",
+                    text(
+                        self.locale,
+                        if error.code == "revision_conflict" {
+                            Message::PreferenceRevisionConflict
+                        } else {
+                            Message::ObservationSaveFailed
+                        }
+                    ),
+                    error.detail
                 );
+                self.menu_panel.set_connection_operation_error(&detail);
                 return;
             }
         }
+        self.menu_panel.clear_connection_operation_error();
         self.menu_panel.revert_observation_controls();
         self.sync_observation_panel();
         self.settle_preference_operations();
@@ -13330,52 +14361,72 @@ impl Ui {
     }
 
     fn sync_observation_panel(&mut self) {
-        if !self.menu_panel.is_visible() {
-            return;
+        if self.menu_panel.connection_content_visible() {
+            self.refresh_observation_panel();
         }
-        let settings_context = self.shared.lock().ok().map(|state| {
-            self.menu_panel.sync_observation(
-                self.prefs.observation(),
-                state.provider_labels(),
-                state.host_connections(),
-            );
-            (
-                state.lifecycle_extensions().to_vec(),
-                state.profile_store().cloned(),
-            )
-        });
-        if let Some((extensions, Some(store))) = settings_context {
-            let mut views = Vec::new();
-            let mut actions = Vec::new();
-            let mut errors = Vec::new();
-            let selection = self.prefs.observation_host();
-            for extension in extensions {
-                match extension.settings(&store, &selection, self.locale.tag()) {
-                    Ok(settings) => views.extend(
-                        settings
-                            .into_iter()
-                            .map(|view| (extension.provider().to_owned(), view)),
-                    ),
-                    Err(error) => errors.push(error),
-                }
-                match extension.actions(&store, &selection, self.locale.tag()) {
-                    Ok(items) => actions.extend(
-                        items
-                            .into_iter()
-                            .map(|view| (extension.provider().to_owned(), view)),
-                    ),
-                    Err(error) => errors.push(error),
-                }
+    }
+
+    fn refresh_observation_panel(&mut self) {
+        // Clone domain data only. No AppKit call or provider callback runs under the state lock.
+        let snapshot = self
+            .shared
+            .lock()
+            .map(|state| {
+                (
+                    state.provider_labels().clone(),
+                    state.host_connections().clone(),
+                    state.lifecycle_extensions().to_vec(),
+                    state.profile_store().cloned(),
+                )
+            })
+            .map_err(|_| "native state lock is poisoned".to_owned());
+        let (providers, connections, extensions, store) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.menu_panel
+                    .set_connection_snapshot_unavailable(&error.to_string());
+                return;
             }
-            let error = errors.join("\n");
-            self.menu_panel.sync_integration_settings(
-                &views,
-                &actions,
-                (!error.is_empty()).then_some(error.as_str()),
-            );
-        } else {
-            self.menu_panel.sync_integration_settings(&[], &[], None);
+        };
+        self.menu_panel
+            .sync_observation(self.prefs.observation(), &providers, &connections);
+        let Some(store) = store else {
+            if providers.is_empty() && extensions.is_empty() {
+                self.menu_panel.sync_integration_settings(&[], &[], None);
+            } else {
+                self.menu_panel
+                    .set_connection_snapshot_unavailable("profile store is not available");
+            }
+            return;
+        };
+        let mut views = Vec::new();
+        let mut actions = Vec::new();
+        let mut errors = Vec::new();
+        let selection = self.prefs.observation_host();
+        for extension in extensions {
+            let provider = extension.provider().to_owned();
+            if !providers.contains_key(&provider) {
+                continue;
+            }
+            let settings = extension.settings(&store, &selection, self.locale.tag());
+            let items = extension.actions(&store, &selection, self.locale.tag());
+            match settings {
+                Ok(settings) => {
+                    views.extend(settings.into_iter().map(|view| (provider.clone(), view)))
+                }
+                Err(error) => errors.push(format!("{provider}: {error}")),
+            }
+            match items {
+                Ok(items) => actions.extend(items.into_iter().map(|view| (provider.clone(), view))),
+                Err(error) => errors.push(format!("{provider}: {error}")),
+            }
         }
+        let error = errors.join("\n");
+        self.menu_panel.sync_integration_settings(
+            &views,
+            &actions,
+            (!error.is_empty()).then_some(error.as_str()),
+        );
         self.reanchor_menu_panel();
     }
 
@@ -13386,37 +14437,63 @@ impl Ui {
         value: bool,
     ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
         let (store, extensions, selection) = {
-            let state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+            let state = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?;
             state.update_mutation_allowed()?;
             if self.update_frozen.is_some() {
                 return Err("application update is preparing".into());
             }
-            (state.profile_store().cloned().ok_or("profile store is not available")?,
-             state.lifecycle_extensions().to_vec(), state.observation_mode())
+            (
+                state
+                    .profile_store()
+                    .cloned()
+                    .ok_or("profile store is not available")?,
+                state.lifecycle_extensions().to_vec(),
+                state.observation_mode(),
+            )
         };
         if let Some(prepared) = control::prepare_registered_lifecycle(
-            &store, &extensions, &selection, provider, key, value,
+            &store,
+            &extensions,
+            &selection,
+            provider,
+            key,
+            value,
         )? {
             self.commit_prepared_owner_patch(prepared)
-                .map_err(|error| format!("{} (committed={}): {}", error.code, error.committed, error.detail))?;
+                .map_err(|error| {
+                    format!(
+                        "{} (committed={}): {}",
+                        error.code, error.committed, error.detail
+                    )
+                })?;
         }
         let settings = crate::lifecycle::read_settings(store.config_dir())?;
-        self.shared.lock().map_err(|_| "native state lock is poisoned")?
+        self.shared
+            .lock()
+            .map_err(|_| "native state lock is poisoned")?
             .set_lifecycle_settings(settings);
         control::lifecycle_values(&store, &extensions, &self.prefs.observation_host())
     }
 
     fn apply_integration_setting(&mut self, provider: &str, key: &str, value: bool) {
-        if let Err(error) = self.apply_registered_lifecycle_setting(Some(provider), key, value) {
-            self.queue_bubble_appearance_error(Message::ObservationSaveFailed, &error);
+        match self.apply_registered_lifecycle_setting(Some(provider), key, value) {
+            Err(error) => self.menu_panel.set_connection_operation_error(&format!(
+                "{}: {error}",
+                text(self.locale, Message::ObservationSaveFailed)
+            )),
+            Ok(_) => self.menu_panel.clear_connection_operation_error(),
         }
         self.sync_observation_panel();
         self.refresh();
     }
 
-    fn select_menu_tab(&mut self, index: usize) {
-        self.menu_panel.select_tab(index);
+    fn select_menu_tab(&mut self, tab: SettingsTab) {
+        self.menu_panel.select_tab(tab);
         self.reanchor_menu_panel();
+        self.sync_observation_panel();
     }
 
     fn save_lifecycle_setting(&mut self, key: LifecycleSetting) {
@@ -13424,7 +14501,8 @@ impl Ui {
         let setting = match key {
             LifecycleSetting::AutoStart => "auto_start",
         };
-        let result = self.apply_registered_lifecycle_setting(None, setting, value)
+        let result = self
+            .apply_registered_lifecycle_setting(None, setting, value)
             .and_then(|_| crate::lifecycle::read_settings(&self.lifecycle_paths.config_dir));
         match result {
             Ok(settings) => self.menu_panel.lifecycle_saved(settings),
@@ -13446,6 +14524,229 @@ impl Ui {
             }
         }
         self.sync_character_menu_frame();
+    }
+
+    fn settings_reset_preflight(&self) -> Result<(UpdateContext, u64), String> {
+        if self.settings_reset_handoff.is_some()
+            || self.restart_handoff.is_some()
+            || !self.menu_panel.reset_settings_enabled()
+            || !self.update_setting_admitted()
+            || self.migration.busy
+            || self.last_scene.shutdown
+        {
+            return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
+        }
+        let blockers = self.restart_blockers_snapshot();
+        if !blockers.is_empty() {
+            return Err(blockers.join("; "));
+        }
+        let state = self
+            .shared
+            .lock()
+            .map_err(|_| "native state lock is poisoned")?;
+        if state.scene().shutdown {
+            return Err("application is shutting down".into());
+        }
+        let context = state
+            .update_context()
+            .cloned()
+            .ok_or("running profile is unavailable")?;
+        let generation =
+            desktop_pet_update_coordinator::protocol::stop_generation(&context.state_dir)?;
+        Ok((context, generation))
+    }
+
+    fn reset_app_settings(&mut self, context: UpdateContext, expected_stop_generation: u64) {
+        let result = (|| -> Result<(), String> {
+            let (current, generation) = self.settings_reset_preflight()?;
+            if current != context || generation != expected_stop_generation {
+                return Err(
+                    "running profile or Stop generation changed during confirmation".into(),
+                );
+            }
+            let blockers = self.restart_blockers_snapshot();
+            let observation = context.observation_mode()?;
+            let operation_id = format!("settings-reset-{}", context.instance_id);
+            {
+                let mut state = self
+                    .shared
+                    .lock()
+                    .map_err(|_| "native state lock is poisoned")?;
+                if state.update_context() != Some(&context) {
+                    return Err("running profile changed during confirmation".into());
+                }
+                state.hold_recovery_prepare(&operation_id, &context)?;
+            }
+            self.settings_reset_handoff = Some((context.clone(), operation_id.clone(), None));
+            if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
+                if self.release_local_shutdown_handoff(&context, &operation_id) {
+                    self.settings_reset_handoff = None;
+                } else {
+                    self.freeze_update_controls(&operation_id);
+                }
+                return Err(error);
+            }
+            self.freeze_update_controls(&operation_id);
+            self.menu_panel.set_reset_settings_busy(true);
+            match spawn_settings_reset_worker(
+                &self.lifecycle_paths,
+                &observation,
+                &context.instance_id,
+                expected_stop_generation,
+            ) {
+                Ok(receiver) => {
+                    self.settings_reset_handoff = Some((context, operation_id, Some(receiver)));
+                    self.menu_panel.set_settings_recovery_status(text(
+                        self.locale,
+                        Message::ResetAppSettingsStarted,
+                    ));
+                }
+                Err(error) => {
+                    if self.release_local_shutdown_handoff(&context, &operation_id) {
+                        self.settings_reset_handoff = None;
+                        self.menu_panel.set_reset_settings_busy(false);
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.settings_reset_error(&error);
+        }
+    }
+
+    fn settings_reset_error(&mut self, error: &str) {
+        self.menu_panel.set_settings_recovery_status(error);
+        self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, error);
+    }
+
+    fn poll_settings_reset(&mut self) {
+        let Some((context, operation_id, Some(receiver))) = self.settings_reset_handoff.as_ref()
+        else {
+            return;
+        };
+        let (outcome, proved_exit) = match receiver.try_recv() {
+            Ok(outcome) => (outcome, true),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => (
+                Err("settings recovery worker disconnected; shutdown outcome is unknown and inputs remain locked".into()), false,
+            ),
+        };
+        let context = context.clone();
+        let operation_id = operation_id.clone();
+        self.settings_reset_handoff = Some((context.clone(), operation_id.clone(), None));
+        if proved_exit && self.release_local_shutdown_handoff(&context, &operation_id) {
+            self.settings_reset_handoff = None;
+            self.menu_panel.set_reset_settings_busy(false);
+        }
+        let detail = outcome.err().unwrap_or_else(|| {
+            "settings recovery worker exited unexpectedly while the source UI is still running"
+                .into()
+        });
+        self.settings_reset_error(&detail);
+    }
+
+    fn restart_app(&mut self) {
+        let result = (|| -> Result<(), String> {
+            if self.restart_handoff.is_some()
+                || self.settings_reset_handoff.is_some()
+                || !self.update_setting_admitted()
+                || self.migration.busy
+                || self.last_scene.shutdown
+            {
+                return Err("application update, migration or shutdown handoff is pending".into());
+            }
+            let blockers = self.restart_blockers_snapshot();
+            if !blockers.is_empty() {
+                return Err(blockers.join("; "));
+            }
+            let (context, observation, generation) = {
+                let mut state = self
+                    .shared
+                    .lock()
+                    .map_err(|_| "native state lock is poisoned")?;
+                state.update_mutation_allowed()?;
+                if state.scene().shutdown {
+                    return Err("application is shutting down".into());
+                }
+                let context = state
+                    .update_context()
+                    .cloned()
+                    .ok_or("running profile is unavailable")?;
+                let observation = state.observation_mode();
+                let generation =
+                    desktop_pet_update_coordinator::protocol::stop_generation(&context.state_dir)?;
+                let operation_id = format!("restart-{}", context.instance_id);
+                state.hold_recovery_prepare(&operation_id, &context)?;
+                (context, observation, generation)
+            };
+            let operation_id = format!("restart-{}", context.instance_id);
+            self.restart_handoff = Some((context.clone(), operation_id.clone(), None));
+            let accepted = (|| {
+                self.checkpoint_update_shutdown(&blockers)?;
+                self.freeze_update_controls(&operation_id);
+                spawn_restart_worker(
+                    &self.lifecycle_paths,
+                    &observation,
+                    &context.instance_id,
+                    generation,
+                )
+            })();
+            match accepted {
+                Ok(receiver) => {
+                    self.restart_handoff = Some((context, operation_id, Some(receiver)))
+                }
+                Err(error) => {
+                    if self.release_local_shutdown_handoff(&context, &operation_id) {
+                        self.restart_handoff = None;
+                    } else if self.update_frozen.is_none() {
+                        self.freeze_update_controls(&operation_id);
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.restart_error(&error);
+        }
+    }
+
+    fn restart_error(&self, error: &str) {
+        let summary = match self.locale {
+            UiLocale::Ko => "앱을 재시작할 수 없습니다.",
+            UiLocale::En => "The app could not restart.",
+            UiLocale::Ja => "アプリを再起動できませんでした。",
+            UiLocale::ZhHans => "无法重新启动应用。",
+        };
+        self.queue_bubble_appearance_error(
+            Message::MenuRestartApp,
+            &format!("{summary}\n\n{error}"),
+        );
+    }
+
+    fn poll_restart(&mut self) {
+        let Some((context, operation_id, Some(receiver))) = self.restart_handoff.as_ref() else {
+            return;
+        };
+        let (outcome, proved_exit) = match receiver.try_recv() {
+            Ok(outcome) => (outcome, true),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => (
+                Err("restart worker disconnected; shutdown outcome is unknown and inputs remain locked".into()), false,
+            ),
+        };
+        let context = context.clone();
+        let operation_id = operation_id.clone();
+        self.restart_handoff = Some((context.clone(), operation_id.clone(), None));
+        if proved_exit && self.release_local_shutdown_handoff(&context, &operation_id) {
+            self.restart_handoff = None;
+        }
+        let detail = outcome.err().unwrap_or_else(|| {
+            "restart worker exited unexpectedly while the source UI is still running".into()
+        });
+        self.restart_error(&detail);
     }
 
     fn quit(&mut self) {
@@ -13504,35 +14805,6 @@ fn confirm_remove(mtm: MainThreadMarker, locale: UiLocale, id: &str) -> bool {
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Remove)));
     alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
     alert.runModal() == NSAlertFirstButtonReturn
-}
-fn show_bubble_appearance_error(
-    mtm: MainThreadMarker,
-    locale: UiLocale,
-    title: Message,
-    detail: &str,
-) {
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(text(locale, title)));
-    alert.setInformativeText(&NSString::from_str(detail));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
-    let _ = alert.runModal();
-}
-
-fn show_language_save_failure(mtm: MainThreadMarker, locale: UiLocale, error: &str) {
-    let alert = NSAlert::new(mtm);
-    let title = NSString::from_str(text(locale, Message::LanguageSaveFailed));
-    alert.setMessageText(&title);
-    let detail = language_save_failure(locale, error);
-    alert.setInformativeText(&NSString::from_str(&detail));
-    alert.addButtonWithTitle(&NSString::from_str(text(locale, Message::Cancel)));
-    let window = alert.window();
-    if let Some(content) = window.contentView() {
-        set_accessibility_label(
-            &content,
-            text(locale, Message::LanguageSaveFailedAccessibility),
-        );
-    }
-    let _ = alert.runModal();
 }
 
 impl Drop for Ui {
@@ -14382,22 +15654,28 @@ mod tests {
         let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let entered = Arc::new(std::sync::Barrier::new(MAX_LIFECYCLE_PENDING + 1));
         let release = Arc::new(std::sync::Barrier::new(MAX_LIFECYCLE_PENDING + 1));
-        let workers: Vec<_> = (0..MAX_LIFECYCLE_PENDING).map(|_| {
-            let pending = pending.clone();
-            let entered = entered.clone();
-            let release = release.clone();
-            std::thread::spawn(move || {
-                reserve_lifecycle_slot(&pending).unwrap();
-                entered.wait();
-                release.wait();
-                pending.fetch_sub(1, Ordering::AcqRel);
+        let workers: Vec<_> = (0..MAX_LIFECYCLE_PENDING)
+            .map(|_| {
+                let pending = pending.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    reserve_lifecycle_slot(&pending).unwrap();
+                    entered.wait();
+                    release.wait();
+                    pending.fetch_sub(1, Ordering::AcqRel);
+                })
             })
-        }).collect();
+            .collect();
         entered.wait();
-        assert!(reserve_lifecycle_slot(&pending).unwrap_err().contains("busy"));
+        assert!(reserve_lifecycle_slot(&pending)
+            .unwrap_err()
+            .contains("busy"));
         assert_eq!(pending.load(Ordering::Acquire), MAX_LIFECYCLE_PENDING);
         release.wait();
-        for worker in workers { worker.join().unwrap(); }
+        for worker in workers {
+            worker.join().unwrap();
+        }
         reserve_lifecycle_slot(&pending).unwrap();
         assert_eq!(pending.load(Ordering::Acquire), 1);
     }
@@ -14413,9 +15691,13 @@ mod tests {
         let deferred = UI.with(|ui| {
             let _borrow = ui.borrow_mut();
             run_bridge(DeferredBridge::Lifecycle {
-                provider: None, key: "auto_start".into(), value: false,
-                request: request.clone(), sender,
-            }).expect("a borrowed UI must retain the request")
+                provider: None,
+                key: "auto_start".into(),
+                value: false,
+                request: request.clone(),
+                sender,
+            })
+            .expect("a borrowed UI must retain the request")
         });
         assert_eq!(request.state.load(Ordering::Acquire), 0);
         assert!(request.cancel().contains("no setting was saved"));
@@ -14455,9 +15737,71 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         LIFECYCLE_PENDING.fetch_add(1, Ordering::AcqRel);
         assert!(run_bridge(DeferredBridge::Lifecycle {
-            provider: None, key: "auto_start".into(), value: false, request, sender,
-        }).is_none());
-        assert_eq!(receiver.recv().unwrap().unwrap_err(), "native UI is unavailable");
+            provider: None,
+            key: "auto_start".into(),
+            value: false,
+            request,
+            sender,
+        })
+        .is_none());
+        assert_eq!(
+            receiver.recv().unwrap().unwrap_err(),
+            "native UI is unavailable"
+        );
+    }
+
+    #[test]
+    fn update_overlay_priority_clears_relocation_summary_without_changing_details() {
+        use crate::update_card::UpdateCardModel;
+        use desktop_pet_update_coordinator::CheckStatus;
+        let original = UpdateCardModel {
+            auto_check: true,
+            receive_beta_updates: false,
+            busy: false,
+            check_enabled: true,
+            recovery_enabled: false,
+            settings_locked: false,
+            status: CheckStatus::Checking,
+            status_text: "Checking".into(),
+            running_version: "1.0".into(),
+            source: "source".into(),
+            detail: "RAW_DETAIL".into(),
+            history: "history".into(),
+            diagnostics: "RAW_DIAGNOSTICS".into(),
+            last_checked: None,
+            action: None,
+            primary_action: None,
+            release: None,
+            download_url: None,
+            migration_available: false,
+            migration_visible: false,
+            migration_title: String::new(),
+            relocation_available: false,
+            relocation_title: String::new(),
+            relocation_detail: "RAW_RELOCATION".into(),
+            relocation_summary: "Ready".into(),
+        };
+        for index in 0..5 {
+            let mut model = original.clone();
+            clear_overridden_relocation_summary(
+                &mut model,
+                index == 0,
+                index == 1,
+                index == 2,
+                index == 3,
+                index == 4,
+            );
+            assert!(model.relocation_summary.is_empty());
+            assert_eq!(model.status_text, original.status_text);
+            assert_eq!(model.detail, original.detail);
+            assert_eq!(model.relocation_detail, original.relocation_detail);
+            assert_eq!(model.diagnostics, original.diagnostics);
+        }
+        let mut completed = original;
+        completed.retain_completed_migration("completed-operation", UiLocale::En);
+        clear_overridden_relocation_summary(&mut completed, false, false, false, false, false);
+        assert_eq!(completed.relocation_summary, "Ready");
+        assert!(completed.history.contains("completed-operation"));
     }
 
     fn migration_ui_plan() -> desktop_pet_update_coordinator::migration::MigrationPlan {
@@ -14508,6 +15852,7 @@ mod tests {
                 image: ExecutableIdentity { path: target_bundle.join("Contents/MacOS/desktop-pet"), sha256: "c".repeat(64) },
                 origin: InstallOrigin::Standalone { bundle: target_bundle },
                 staged_bundle: root.join("stage/DesktopPet.app"),
+                previous_installation: None,
             },
             target_manager_program: None,
             legacy_aliases: Vec::new(),
@@ -14516,6 +15861,10 @@ mod tests {
             adopt_as_default: false,
             retirement_consent: true,
             tern_reconnect_required: false,
+            tern_delivery: None,
+            tern_deliveries: Vec::new(),
+            tern_delivery_problem: None,
+            source_ancestry: Vec::new(),
         }
     }
 
@@ -14538,9 +15887,15 @@ mod tests {
             default_adopted: false,
             native_ready: true,
             target_committed: true,
+            target_profiles: Vec::new(),
+            stopped_target_profiles: Vec::new(),
+            restored_profiles: Vec::new(),
             manager: None,
             target_manager: None,
+            target_image: None,
             reconnected_profiles: Vec::new(),
+            integration_status: Vec::new(),
+            integration_delivery_error: None,
             retirement_attempt: 1,
             error: None,
         }
@@ -14686,6 +16041,41 @@ mod tests {
             )
             .is_none());
         assert_eq!(state.record, Some(completed));
+    }
+
+    #[test]
+    fn integrating_and_partial_commit_failures_never_offer_another_approval_or_resume() {
+        use desktop_pet_update_coordinator::migration::MigrationPhase;
+        let plan = migration_ui_plan();
+        for phase in [
+            MigrationPhase::NativeReady,
+            MigrationPhase::Integrating,
+            MigrationPhase::AwaitingReconnect,
+            MigrationPhase::ManagerUnknown,
+            MigrationPhase::Complete,
+        ] {
+            let mut record = migration_ui_record(&plan, phase);
+            record.retirement_attempt = 0;
+            let state = MigrationUiState {
+                plan: Some(plan.clone()),
+                record: Some(record),
+                ..MigrationUiState::default()
+            };
+            assert!(!state.review_allowed());
+        }
+        let mut record = migration_ui_record(&plan, MigrationPhase::RetirementFailed);
+        record.retirement_attempt = 0;
+        let mut state = MigrationUiState {
+            plan: Some(plan),
+            record: Some(record),
+            ..MigrationUiState::default()
+        };
+        assert!(!state.review_allowed());
+        state.record.as_mut().unwrap().retirement_attempt = 1;
+        state.record.as_mut().unwrap().target_committed = false;
+        assert!(!state.review_allowed());
+        state.record.as_mut().unwrap().target_committed = true;
+        assert!(state.review_allowed());
     }
 
     fn routing_event(timestamp: f64, source: PointerSource) -> EventIdentity {
@@ -17372,6 +18762,127 @@ mod tests {
     }
 
     #[test]
+    fn expanded_surplus_fills_cards_viewport_without_separating_toolbar() {
+        let spacing = ExpandedSpacing {
+            inset: BUBBLE_VERTICAL_INSET,
+            gap: BUBBLE_CONTENT_GAP,
+        };
+        for (body, expected_cards) in [(389.0, 283.0), (544.0, 438.0)] {
+            let slots = expanded_heights(body, 283.0, 40.0, 145.0, true, spacing);
+            assert!(close(slots.cards, expected_cards));
+            assert!(close(slots.message, 40.0));
+            let cards_bottom = spacing.inset + BUBBLE_CONTROL_HEIGHT + spacing.gap;
+            let content_top = body - spacing.inset;
+            let message_top = expanded_message_top(
+                content_top - STATUS_ROW_HEIGHT,
+                content_top,
+                true,
+                true,
+                spacing,
+            );
+            assert!(close(
+                message_top - slots.message - (cards_bottom + slots.cards),
+                4.0,
+            ));
+        }
+
+        for reply_height in [
+            0.0,
+            COMPOSER_READONLY_HEIGHT,
+            INPUT_ORIGIN_Y + 30.0 + BOTTOM_INSET,
+            INPUT_ORIGIN_Y + 50.0 + BOTTOM_INSET,
+        ] {
+            let minimum = minimum_selectable_height() + reply_height;
+            for show_status in [false, true] {
+                for message in [0.0, 18.0, 210.5] {
+                    for cards in [minimum - 25.0, minimum, minimum + 200.25] {
+                        let floor = expanded_height_budget(
+                            cards,
+                            minimum,
+                            show_status,
+                            message > 0.0,
+                            spacing,
+                        );
+                        let natural = floor
+                            - cards.min(minimum)
+                            - if message > 0.0 {
+                                BUBBLE_LINE_HEIGHT
+                            } else {
+                                0.0
+                            }
+                            + cards
+                            + message;
+                        for body in [0.0, floor - 1.0, floor, natural, natural + 155.0] {
+                            let live_spacing =
+                                expanded_spacing(body, cards, minimum, show_status, message > 0.0);
+                            let chrome = expanded_height_budget(
+                                cards,
+                                minimum,
+                                show_status,
+                                message > 0.0,
+                                live_spacing,
+                            ) - cards.min(minimum)
+                                - if message > 0.0 {
+                                    BUBBLE_LINE_HEIGHT
+                                } else {
+                                    0.0
+                                };
+                            let remaining = (body - chrome).max(0.0);
+                            let slots = expanded_heights(
+                                body,
+                                cards,
+                                message,
+                                minimum,
+                                show_status,
+                                live_spacing,
+                            );
+                            assert!(slots.cards.is_finite() && slots.message.is_finite());
+                            assert!(slots.cards >= 0.0);
+                            assert!(slots.message >= 0.0 && slots.message <= message + 1e-9);
+                            assert!(close(slots.cards + slots.message, remaining));
+                            let cards_floor = cards.min(minimum).min(remaining);
+                            assert!(slots.cards + 1e-9 >= cards_floor);
+                            if remaining <= cards.min(minimum) {
+                                assert!(close(slots.cards, remaining));
+                                assert!(close(slots.message, 0.0));
+                            } else if message > 0.0 {
+                                assert!(
+                                    slots.message + 1e-9
+                                        >= message
+                                            .min(BUBBLE_LINE_HEIGHT)
+                                            .min(remaining - cards_floor)
+                                );
+                            }
+                            if cards + message <= remaining + 1e-9 {
+                                assert!(slots.cards + 1e-9 >= cards);
+                                assert!(close(slots.message, message));
+                            }
+                            if body >= chrome && message > 0.0 {
+                                let cards_bottom =
+                                    live_spacing.inset + BUBBLE_CONTROL_HEIGHT + live_spacing.gap;
+                                let content_top = body - live_spacing.inset;
+                                let status_bottom =
+                                    content_top - if show_status { STATUS_ROW_HEIGHT } else { 0.0 };
+                                let message_top = expanded_message_top(
+                                    status_bottom,
+                                    content_top,
+                                    show_status,
+                                    true,
+                                    live_spacing,
+                                );
+                                assert!(close(
+                                    message_top - slots.message - (cards_bottom + slots.cards),
+                                    live_spacing.gap,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn expanded_natural_heights_share_one_screen_budget() {
         let minimum = minimum_selectable_height();
         for show_status in [false, true] {
@@ -17439,10 +18950,9 @@ mod tests {
             530.0
         );
         assert!(expanded_auto_height(230.0, 206.0, 300.0, 400.0, minimum, true) <= 206.0);
-        // A saved manual request bypasses the automatic 530pt ceiling; allocation
-        // also leaves surplus blank rather than stretching either document.
+        // A saved manual request bypasses the automatic 530pt ceiling.
         let manual = expanded_heights(850.0, 300.0, 400.0, minimum, true, spacing);
-        assert!(close(manual.cards, 300.0));
+        assert!(close(manual.cards, 384.0));
         assert!(close(manual.message, 400.0));
     }
 
@@ -17461,5 +18971,783 @@ mod tests {
         let cancel = AtomicBool::new(false);
         assert!(wait_for_main_result(receiver, &cancel, Duration::ZERO).is_err());
         assert!(cancel.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_recovery_ui_regressions() {
+    let mtm = MainThreadMarker::new()
+        .expect("update recovery AppKit regression must execute on the process main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    assert!(
+        NSScreen::mainScreen(mtm).is_some(),
+        "update recovery AppKit regression requires a real Window Server/display service"
+    );
+    recovery_ui_regressions::run(mtm);
+    println!("production Ui recovery/reset/restart/detail-only AppKit regressions passed on the main thread");
+}
+
+#[cfg(test)]
+mod recovery_ui_regressions {
+    use super::*;
+    use desktop_pet_contracts::{ObservationSelection, ProfileStore};
+    use desktop_pet_update_coordinator::{executable_identity, InstallOrigin};
+    use objc2::runtime::Sel;
+    use objc2_app_kit::NSControl;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Debug)]
+    struct LaunchRequest {
+        reset: bool,
+        paths: Paths,
+        observation: ObservationSelection,
+        instance: String,
+        generation: u64,
+    }
+    struct LaunchHarness {
+        calls: Vec<LaunchRequest>,
+        next: Option<Result<mpsc::Receiver<Result<(), String>>, String>>,
+    }
+    thread_local! {
+        static LAUNCH: RefCell<Option<LaunchHarness>> = const { RefCell::new(None) };
+        static MODAL: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    // The only worker seam is the launch boundary, after production local
+    // admission, checkpointing and input freeze. Worker authentication/Stop/
+    // launch is separately exercised against the packaged signed app.
+    pub(super) fn intercept_launch(
+        reset: bool,
+        paths: &Paths,
+        observation: &ObservationSelection,
+        instance: &str,
+        generation: u64,
+    ) -> Option<Result<mpsc::Receiver<Result<(), String>>, String>> {
+        LAUNCH.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let harness = slot.as_mut()?;
+            harness.calls.push(LaunchRequest {
+                reset,
+                paths: paths.clone(),
+                observation: observation.clone(),
+                instance: instance.to_owned(),
+                generation,
+            });
+            Some(
+                harness
+                    .next
+                    .take()
+                    .unwrap_or_else(|| Err("duplicate test worker launch".into())),
+            )
+        })
+    }
+
+    fn arm_launch() -> mpsc::Sender<Result<(), String>> {
+        let (sender, receiver) = mpsc::channel();
+        LAUNCH.with(|slot| {
+            *slot.borrow_mut() = Some(LaunchHarness {
+                calls: Vec::new(),
+                next: Some(Ok(receiver)),
+            })
+        });
+        sender
+    }
+
+    fn calls() -> Vec<LaunchRequest> {
+        LAUNCH.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("launch seam is not armed")
+                .calls
+                .clone()
+        })
+    }
+
+    pub(super) fn schedule_modal_action() {
+        if !MODAL.with(|slot| slot.borrow().is_some()) {
+            return;
+        }
+        let modes = NSArray::from_slice(&[unsafe { NSModalPanelRunLoopMode }]);
+        let block = RcBlock::new(|| {
+            let action = MODAL.with(|slot| slot.borrow_mut().take());
+            if let Some(action) = action {
+                let mtm = MainThreadMarker::new().unwrap();
+                assert!(
+                    NSApplication::sharedApplication(mtm)
+                        .modalWindow()
+                        .is_some(),
+                    "reset test callback did not run inside the actual native modal loop"
+                );
+                action();
+            }
+        });
+        unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+    }
+
+    fn modal_reply(response: isize, action: impl FnOnce() + 'static) {
+        MODAL.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                action();
+                let mtm = MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).stopModalWithCode(response);
+            }))
+        });
+    }
+
+    fn settle() {
+        for _ in 0..4 {
+            NSRunLoop::mainRunLoop().runMode_beforeDate(
+                unsafe { NSDefaultRunLoopMode },
+                &NSDate::dateWithTimeIntervalSinceNow(0.005),
+            );
+        }
+    }
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        paths: Paths,
+        shared: Arc<Mutex<AppState>>,
+        packs: Arc<PackService>,
+        context: UpdateContext,
+    }
+    impl Fixture {
+        fn new(mtm: MainThreadMarker) -> Self {
+            assert!(UI.with(|slot| slot.borrow().is_none()));
+            UI_USER_STOP_RECORDED.store(false, Ordering::Release);
+            let root = tempfile::Builder::new()
+                .prefix("pet-recovery-ui-")
+                .tempdir_in("/private/tmp")
+                .expect("cannot create isolated AppKit profile");
+            let root_path = root.path().canonicalize().unwrap();
+            assert!(root_path.starts_with("/private/tmp"));
+            let paths = Paths::resolve(
+                Some(&root_path.join("config")),
+                Some(&root_path.join("state")),
+            )
+            .unwrap();
+            let profile = ProfileStore::acquire(&paths.config_dir, &paths.state_dir)
+                .unwrap()
+                .with_preferences_validator(Preferences::validate_committed_object);
+            let mut prefs = Preferences::load_for_daemon(&paths.config_dir).unwrap();
+            prefs.set_integration_extensions(profile.clone(), Vec::new());
+            let mut candidate = prefs.candidate();
+            candidate.set_auto_update_check(false);
+            prefs.save_candidate(candidate, &paths.config_dir).unwrap();
+            let mut state = AppState::new();
+            state.set_lifecycle_extensions(Vec::new(), profile);
+            state
+                .set_observation_selection(ObservationSelection::Auto)
+                .unwrap();
+            state.set_preferences(&prefs);
+            let automation = crate::automation::new_automation(
+                PresentationTarget::from_scene(&state.scene()),
+                None,
+            )
+            .unwrap();
+            let instance_id = lock_automation(&automation).instance().to_owned();
+            let executable = crate::bundle::executable().unwrap();
+            let context = UpdateContext {
+                running: executable_identity(&executable).unwrap(),
+                executable,
+                version: desktop_pet_update_coordinator::identity::VERSION.into(),
+                instance_id,
+                config_dir: paths.config_dir.clone(),
+                state_dir: paths.state_dir.clone(),
+                #[cfg(desktop_pet_legacy)]
+                host_plugin_config_dir: None,
+                #[cfg(desktop_pet_legacy)]
+                herdr_socket: root_path.join("herdr.sock"),
+                // This executable is not an installed signed app. No fixture
+                // claims updater identity or creates an account-global reservation.
+                running_origin: Some(Box::new(InstallOrigin::Unknown {
+                    reason: "uninstalled AppKit regression executable".into(),
+                })),
+                assets_override: None,
+                environment: BTreeMap::new(),
+                locale: "en".into(),
+            };
+            state.set_update_context(context.clone()).unwrap();
+            let context = state.update_context().unwrap().clone();
+            state.set_automation(automation);
+            state.set_ui_ready();
+            let shared = Arc::new(Mutex::new(state));
+            let assets = crate::cli::resolve_assets(None)
+                .expect("production prepared character assets are required for AppKit regression");
+            let packs = PackService::new(paths.config_dir.clone(), assets.clone(), None);
+            packs.start().unwrap();
+            let selection = choose_startup_selection(&packs, &assets, mtm).unwrap();
+            let reference = selection.reference.clone();
+            let mut ui = Ui::new(
+                shared.clone(),
+                packs.clone(),
+                selection.prepared,
+                prefs,
+                selection.override_active,
+                paths.clone(),
+                mtm,
+            )
+            .unwrap();
+            packs.set_active(reference, selection.override_active, selection.error);
+            ui.sync_menu_panel_state();
+            UI.with(|slot| *slot.borrow_mut() = Some(ui));
+            let fixture = Self {
+                _root: root,
+                paths,
+                shared,
+                packs,
+                context,
+            };
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                settle();
+                with_ui_internal(|ui| {
+                    ui.update_tick();
+                    ui.refresh_character_menu();
+                });
+                if with_ui_read(|ui| {
+                    ui.update_setting_admitted() && ui.restart_blockers_snapshot().is_empty()
+                })
+                .unwrap_or(false)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "production Ui never reached idle admission: {:?}",
+                    with_ui_read(|ui| (
+                        ui.app_update.model(ui.locale).detail,
+                        ui.restart_blockers_snapshot()
+                    ))
+                );
+            }
+            fixture
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            MODAL.with(|slot| {
+                slot.borrow_mut().take();
+            });
+            LAUNCH.with(|slot| {
+                slot.borrow_mut().take();
+            });
+            let ui = UI.with(|slot| slot.borrow_mut().take());
+            if let Some(mut ui) = ui {
+                ui.shutdown();
+                drop(ui);
+            }
+            self.packs.shutdown();
+            settle();
+        }
+    }
+
+    fn find_control(view: &NSView, action: Sel) -> Option<Retained<NSControl>> {
+        if let Some(control) = view.downcast_ref::<NSControl>() {
+            if control.action() == Some(action) {
+                return Some(control.retain());
+            }
+        }
+        view.subviews()
+            .iter()
+            .find_map(|child| find_control(&child, action))
+    }
+    fn card_control(ui: &Ui, action: Sel) -> Retained<NSControl> {
+        [
+            ui.menu_panel.window().contentView().unwrap(),
+            ui.menu_panel.detail_window().contentView().unwrap(),
+        ]
+        .iter()
+        .find_map(|view| find_control(view, action))
+        .expect("actual update card control is missing")
+    }
+
+    fn card_capabilities(mtm: MainThreadMarker) {
+        let _fixture = Fixture::new(mtm);
+        let models = crate::app_update::recovery_ui_regression_models(UiLocale::En);
+        let actions = [
+            sel!(recoverAppUpdate:),
+            sel!(startAppUpdateRecovery:),
+            sel!(recoverStoppedOriginalAppUpdate:),
+            sel!(showAppUpdateRecoveryProgress:),
+        ];
+        with_ui_internal(|ui| {
+            for (model, action) in models.iter().take(4).zip(actions) {
+                ui.menu_panel.refresh_app_update(model);
+                assert!(card_control(ui, action).isEnabled());
+                if action != sel!(showAppUpdateRecoveryProgress:) {
+                    assert!(
+                        model.busy && model.recovery_enabled,
+                        "authenticated unresolved history must remain busy but executable"
+                    );
+                } else {
+                    assert!(!model.recovery_enabled);
+                }
+            }
+            ui.menu_panel.refresh_app_update(&models[4]);
+            assert!(card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+            assert!(!card_control(ui, sel!(toggleUpdateAutoCheck:)).isEnabled());
+            assert!(!card_control(ui, sel!(toggleUpdateBeta:)).isEnabled());
+            assert!(models[4].settings_locked && models[4].primary_action.is_none());
+            for original in &models {
+                let mut migrating = original.clone();
+                overlay_update_capabilities(&mut migrating, true, true, false);
+                ui.menu_panel.refresh_app_update(&migrating);
+                assert!(!card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+                assert!(!migrating.recovery_enabled && migrating.primary_action.is_none());
+                let mut frozen = original.clone();
+                overlay_update_capabilities(&mut frozen, false, false, true);
+                ui.menu_panel.refresh_app_update(&frozen);
+                assert!(!card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+                if matches!(
+                    original.primary_action,
+                    Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress)
+                ) {
+                    assert_eq!(frozen.primary_action, original.primary_action);
+                    assert_eq!(frozen.recovery_enabled, original.recovery_enabled);
+                } else {
+                    assert!(!frozen.recovery_enabled && frozen.primary_action.is_none());
+                }
+            }
+        });
+    }
+
+    fn modal_and_revalidation(mtm: MainThreadMarker) {
+        {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let generation =
+                desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir)
+                    .unwrap();
+            modal_reply(NSAlertFirstButtonReturn, || {});
+            confirm_settings_reset_start();
+            assert!(calls().is_empty());
+            assert!(fixture
+                .shared
+                .lock()
+                .unwrap()
+                .update_mutation_allowed()
+                .is_ok());
+            assert!(with_ui_read(|ui| ui.update_frozen.is_none()).unwrap());
+            assert_eq!(
+                desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir)
+                    .unwrap(),
+                generation
+            );
+            let retried = Arc::new(AtomicBool::new(false));
+            let observed = retried.clone();
+            modal_reply(NSAlertFirstButtonReturn, move || {
+                observed.store(true, Ordering::Release);
+            });
+            UI.with(|slot| {
+                let _borrow = slot.borrow_mut();
+                confirm_settings_reset_start();
+                assert!(!retried.load(Ordering::Acquire));
+            });
+            settle();
+            assert!(
+                retried.load(Ordering::Acquire),
+                "real RefCell contention lost the reset request"
+            );
+            assert!(calls().is_empty());
+        }
+        // Every approval must recheck the live context, Stop fence, draft/IME
+        // state and migration after the real modal loop has released its borrow.
+        for change in 0..5 {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let shared = fixture.shared.clone();
+            let state_dir = fixture.paths.state_dir.clone();
+            modal_reply(NSAlertSecondButtonReturn, move || match change {
+                0 => {
+                    let mut state = shared.lock().unwrap();
+                    let mut changed = state.update_context().unwrap().clone();
+                    changed.instance_id.push_str("-changed");
+                    state.set_update_context(changed).unwrap();
+                }
+                1 => {
+                    desktop_pet_update_coordinator::protocol::record_user_stop(&state_dir).unwrap();
+                }
+                2 => with_ui_mut(|ui| {
+                    ui.composer_view
+                        .setString(&NSString::from_str("new unsent draft"))
+                }),
+                3 => with_ui_mut(|ui| {
+                    let marked = NSString::from_str("조합");
+                    let _: () = unsafe {
+                        msg_send![&*ui.composer_view,
+                        setMarkedText: &*marked, selectedRange: NSRange::new(1, 0),
+                        replacementRange: NSRange::new(0, 0)]
+                    };
+                    assert!(ui.composer_marked());
+                }),
+                _ => with_ui_internal(|ui| ui.migration.busy = true),
+            });
+            confirm_settings_reset_start();
+            assert!(
+                calls().is_empty(),
+                "approval accepted stale reset state {change}"
+            );
+            assert!(with_ui_read(
+                |ui| ui.settings_reset_handoff.is_none() && ui.update_frozen.is_none()
+            )
+            .unwrap());
+        }
+        {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let observed = stopped.clone();
+            MODAL.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    with_ui_recovery_action(move |ui| {
+                        // Acquiring this mutable Ui inside runModal is the regression:
+                        // the old selector held the outer RefCell borrow throughout.
+                        observed.store(true, Ordering::Release);
+                        ui.quit();
+                    });
+                }))
+            });
+            confirm_settings_reset_start();
+            assert!(
+                stopped.load(Ordering::Acquire),
+                "ordinary shutdown callback was blocked by the reset modal"
+            );
+            assert!(fixture.shared.lock().unwrap().scene().shutdown);
+            assert!(NSApplication::sharedApplication(mtm)
+                .modalWindow()
+                .is_none());
+            assert!(calls().is_empty());
+        }
+        assert!(UI.with(|slot| slot.borrow().is_none()));
+        confirm_settings_reset_start(); // An empty slot must terminate, not reschedule.
+        settle();
+    }
+
+    fn assert_native_input_locked(view: &NSTextView, ax: bool) {
+        let before = (view.string().to_string(), view.selectedRanges());
+        let marked_before: bool = unsafe { msg_send![view, hasMarkedText] };
+        let class = view.class().name().to_string_lossy();
+        let assert_unchanged = |stage: &str| {
+            let marked_after: bool = unsafe { msg_send![view, hasMarkedText] };
+            assert_eq!(
+                view.string().to_string(),
+                before.0,
+                "fenced native text changed in {class} after {stage}"
+            );
+            assert_eq!(
+                view.selectedRanges(),
+                before.1,
+                "fenced native selection changed in {class} after {stage}"
+            );
+            assert_eq!(
+                marked_after, marked_before,
+                "fenced native marked-text state changed in {class} after {stage}"
+            );
+        };
+        let value = NSString::from_str("blocked native mutation");
+        let range = view.selectedRange();
+        let _: () = unsafe { msg_send![view, insertText: &*value, replacementRange: range] };
+        assert_unchanged("native insertion");
+        let _: () = unsafe {
+            msg_send![view, setMarkedText: &*value,
+            selectedRange: NSRange::new(1, 0), replacementRange: range]
+        };
+        assert_unchanged("native marked text");
+        if ax {
+            let _: () = unsafe { msg_send![view, setAccessibilityValue: &*value] };
+            assert_unchanged("AX value");
+            let _: () = unsafe { msg_send![view, setAccessibilitySelectedText: &*value] };
+            assert_unchanged("AX selected text");
+            let _: () =
+                unsafe { msg_send![view, setAccessibilitySelectedTextRange: NSRange::new(0, 0)] };
+            assert_unchanged("AX selected text range");
+        }
+    }
+
+    fn protected_handoffs(mtm: MainThreadMarker) {
+        // Exercise both callers through their real admission/hold/checkpoint/
+        // freeze sequence. Unknown delivery and denied release never thaw.
+        for reset in [false, true] {
+            for terminal in 0..4 {
+                let fixture = Fixture::new(mtm);
+                let sender = arm_launch();
+                let palette = UI.with(|slot| {
+                    slot.borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .menu_panel
+                        .regression_color_editor()
+                });
+                palette.setSelectedRange(NSRange::new(1, 2));
+                let generation = desktop_pet_update_coordinator::protocol::stop_generation(
+                    &fixture.paths.state_dir,
+                )
+                .unwrap();
+                with_ui_update_action({
+                    let context = fixture.context.clone();
+                    move |ui| {
+                        if reset {
+                            ui.reset_app_settings(context, generation);
+                        } else {
+                            ui.restart_app();
+                        }
+                    }
+                });
+                let launched = calls();
+                assert_eq!(
+                    launched.len(),
+                    1,
+                    "protected handoff did not reach the worker boundary"
+                );
+                assert_eq!(launched[0].reset, reset);
+                assert_eq!(launched[0].instance, fixture.context.instance_id);
+                assert_eq!(launched[0].paths.config_dir, fixture.paths.config_dir);
+                assert_eq!(launched[0].paths.state_dir, fixture.paths.state_dir);
+                assert_eq!(launched[0].observation, ObservationSelection::Auto);
+                assert_eq!(launched[0].generation, generation);
+                assert!(fixture
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .update_mutation_allowed()
+                    .is_err());
+                with_ui_internal(|ui| {
+                    assert!(ui.update_frozen.is_some());
+                    assert!(!ui.composer_view.isEditable());
+                    assert_native_input_locked(&ui.composer_view, true);
+                    assert_native_input_locked(&palette, true);
+                    ui.dialogue_editor.show();
+                    assert!(ui
+                        .shared
+                        .lock()
+                        .unwrap()
+                        .apply_control("passthrough")
+                        .is_err());
+                });
+                let dialogue = with_ui_read(|ui| ui.dialogue_editor.regression_input())
+                    .expect("current production Ui disappeared during protected handoff");
+                assert_native_input_locked(&dialogue, true);
+                let mut ingress_ran = false;
+                with_ui_mut(|_| ingress_ran = true);
+                assert!(
+                    !ingress_ran,
+                    "UI mutation ingress was open during shutdown handoff"
+                );
+                match terminal {
+                    0 => {
+                        sender
+                            .send(Err("proved pre-Stop worker failure".into()))
+                            .unwrap();
+                    }
+                    1 => {
+                        drop(sender);
+                    }
+                    2 => {
+                        fixture.shared.lock().unwrap().request_shutdown();
+                        sender
+                            .send(Err("worker exited after external shutdown".into()))
+                            .unwrap();
+                    }
+                    _ => {
+                        let mut foreign = fixture.context.clone();
+                        foreign.instance_id.push_str("-foreign");
+                        let mut replacement = AppState::new();
+                        replacement.set_update_context(foreign).unwrap();
+                        replacement.set_ui_ready();
+                        *fixture.shared.lock().unwrap() = replacement;
+                        sender
+                            .send(Err("proved exit observed by a foreign source".into()))
+                            .unwrap();
+                    }
+                }
+                with_ui_internal(|ui| {
+                    if reset {
+                        ui.poll_settings_reset();
+                    } else {
+                        ui.poll_restart();
+                    }
+                    if terminal == 0 {
+                        assert!(ui.update_frozen.is_none());
+                        assert!(ui.shared.lock().unwrap().update_mutation_allowed().is_ok());
+                        assert!(ui.composer_view.isEditable());
+                        let inserted = NSString::from_str("input reopens on exact terminal proof");
+                        let _: () = unsafe {
+                            msg_send![&*ui.composer_view, insertText: &*inserted,
+                            replacementRange: NSRange::new(0, 0)]
+                        };
+                        assert_eq!(ui.composer_view.string().to_string(), inserted.to_string());
+                    } else {
+                        assert!(ui.update_frozen.is_some());
+                        let retained = if reset {
+                            &ui.settings_reset_handoff
+                        } else {
+                            &ui.restart_handoff
+                        };
+                        assert!(retained
+                            .as_ref()
+                            .is_some_and(|(context, _, receiver)| context == &fixture.context
+                                && receiver.is_none()));
+                        assert_native_input_locked(&ui.composer_view, true);
+                        if reset {
+                            ui.poll_settings_reset();
+                        } else {
+                            ui.poll_restart();
+                        }
+                        assert!(ui.update_frozen.is_some());
+                    }
+                });
+            }
+        }
+        // Reporter construction can fail synchronously before a child exists.
+        // That path must also release only the exact still-live source.
+        for reset in [false, true] {
+            let fixture = Fixture::new(mtm);
+            LAUNCH.with(|slot| {
+                *slot.borrow_mut() = Some(LaunchHarness {
+                    calls: Vec::new(),
+                    next: Some(Err("reporter thread unavailable".into())),
+                })
+            });
+            let generation =
+                desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir)
+                    .unwrap();
+            with_ui_update_action(move |ui| {
+                if reset {
+                    let context = ui.shared.lock().unwrap().update_context().unwrap().clone();
+                    ui.reset_app_settings(context, generation);
+                } else {
+                    ui.restart_app();
+                }
+            });
+            assert_eq!(calls().len(), 1);
+            assert!(fixture
+                .shared
+                .lock()
+                .unwrap()
+                .update_mutation_allowed()
+                .is_ok());
+            assert!(with_ui_read(|ui| ui.update_frozen.is_none()).unwrap());
+        }
+    }
+
+    fn detail_only_synchronization(mtm: MainThreadMarker) {
+        let fixture = Fixture::new(mtm);
+        let (editor, passthrough, alpha, scale, scroll) = UI.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let ui = slot.as_mut().unwrap();
+            let editor = ui.menu_panel.regression_color_editor();
+            ui.menu_panel.hide();
+            let (passthrough, alpha, scale, scroll) =
+                ui.menu_panel.regression_appearance_controls();
+            (editor, passthrough, alpha, scale, scroll)
+        });
+        assert!(with_ui_read(
+            |ui| !ui.menu_panel.is_visible() && ui.menu_panel.appearance_detail_visible()
+        )
+        .unwrap());
+        editor.setString(&NSString::from_str("#123456"));
+        editor.setSelectedRange(NSRange::new(2, 3));
+        let marked = NSString::from_str("가");
+        let _: () = unsafe {
+            msg_send![&*editor, setMarkedText: &*marked,
+            selectedRange: NSRange::new(1, 0), replacementRange: NSRange::new(3, 0)]
+        };
+        let marked_before: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_before);
+        let draft = (
+            editor.string().to_string(),
+            editor.selectedRanges(),
+            scroll.contentView().bounds().origin,
+        );
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .apply_control("passthrough")
+            .unwrap();
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .apply_control("alpha_passthrough")
+            .unwrap();
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .apply_control("scale_up")
+            .unwrap();
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .apply_control("bubble_left")
+            .unwrap();
+        with_ui_internal(|ui| {
+            ui.refresh();
+            ui.refresh_character_menu();
+        });
+        settle();
+        assert_eq!(passthrough.state(), NSControlStateValueOn);
+        assert_eq!(alpha.state(), NSControlStateValueOn);
+        assert_eq!(
+            scale.stringValue().to_string(),
+            format!("{:.2}×", fixture.shared.lock().unwrap().scene().scale)
+        );
+        assert!(with_ui_read(|ui| ui
+            .menu_panel
+            .regression_selected_placement(crate::bubble::BubblePlacement::Left,))
+        .unwrap());
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        let marked_after: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_after);
+        assert_eq!(scroll.contentView().bounds().origin, draft.2);
+        // The supported switch action consumes the same synchronized domain
+        // value, so its very next click must invert, not repeat, external state.
+        let _: () = unsafe { msg_send![&*passthrough, performClick: None::<&AnyObject>] };
+        settle();
+        with_ui_internal(|ui| {
+            ui.refresh();
+            ui.refresh_character_menu();
+        });
+        assert!(!fixture.shared.lock().unwrap().scene().passthrough);
+        assert_eq!(passthrough.state(), objc2_app_kit::NSControlStateValueOff);
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        let marked_after_click: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_after_click);
+        // A rejected domain action must also roll the native switch back using
+        // the same full synchronization, even with only this detail visible.
+        fixture
+            .shared
+            .lock()
+            .unwrap()
+            .hold_recovery_prepare("detail-rollback", &fixture.context)
+            .unwrap();
+        let _: () = unsafe { msg_send![&*passthrough, performClick: None::<&AnyObject>] };
+        settle();
+        with_ui_internal(|ui| {
+            ui.refresh();
+            ui.refresh_character_menu();
+        });
+        assert!(!fixture.shared.lock().unwrap().scene().passthrough);
+        assert_eq!(passthrough.state(), objc2_app_kit::NSControlStateValueOff);
+        assert!(fixture
+            .shared
+            .lock()
+            .unwrap()
+            .release_recovery_prepare("detail-rollback", &fixture.context));
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        assert_eq!(scroll.contentView().bounds().origin, draft.2);
+    }
+
+    pub(super) fn run(mtm: MainThreadMarker) {
+        card_capabilities(mtm);
+        modal_and_revalidation(mtm);
+        protected_handoffs(mtm);
+        detail_only_synchronization(mtm);
     }
 }
