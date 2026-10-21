@@ -223,6 +223,24 @@ define_class!(
     struct SettingsFieldEditor;
     unsafe impl NSObjectProtocol for SettingsFieldEditor {}
     impl SettingsFieldEditor {
+        #[unsafe(method(setAccessibilityValue:))]
+        fn set_accessibility_value(&self, value: Option<&AnyObject>) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilityValue: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedText:))]
+        fn set_accessibility_selected_text(&self, value: Option<&NSString>) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedText: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedTextRange:))]
+        fn set_accessibility_selected_text_range(&self, range: NSRange) {
+            if !self.ivars().get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedTextRange: range] };
+            }
+        }
         #[unsafe(method(isEditable))]
         fn is_editable(&self) -> bool {
             !self.ivars().get() && unsafe { msg_send![super(self), isEditable] }
@@ -3254,6 +3272,35 @@ impl MenuPanel {
             }
             self.restore_frozen_controls();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regression_color_editor(&mut self) -> Retained<NSTextView> {
+        let window = self.prepare_detail(SettingsDetailPage::Appearance)
+            .expect("Appearance detail could not open");
+        window.makeKeyAndOrderFront(None);
+        assert!(window.makeFirstResponder(Some(&*self.bubble_color_fields[0])));
+        self.bubble_field_editor(0).and_then(|editor| editor.downcast_ref::<NSTextView>())
+            .expect("real Settings color field editor is unavailable").retain()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regression_appearance_controls(
+        &self,
+    ) -> (Retained<NSSwitch>, Retained<NSSwitch>, Retained<NSTextField>, Retained<NSScrollView>) {
+        (
+            self.full_passthrough_switch.retain(),
+            self.alpha_passthrough_switch.retain(),
+            self.scale_readout.retain(),
+            self.detail_scroll.retain(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regression_selected_placement(&self, placement: BubblePlacement) -> bool {
+        self.placement_buttons.iter().enumerate().all(|(index, button)| {
+            (button.state() == NSControlStateValueOn) == (index == placement_index(placement))
+        })
     }
 
     pub(crate) fn bubble_restart_draft(&self, saved: BubbleAppearance) -> bool {

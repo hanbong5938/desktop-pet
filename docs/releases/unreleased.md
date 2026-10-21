@@ -1,5 +1,52 @@
 # Desktop Pet Unreleased (current authority and historical source evidence)
 
+## Source-only recovery admission and protected local restart corrections
+
+Eight beta.2–beta.5 review findings are corrected without a version change or publication:
+
+- The service now supplies independent Check/recovery capabilities. An unresolved failed operation can enable its exact authenticated recovery action despite the card's busy presentation; reconciled failure can enable Check while policy switches remain locked. Migration, relocation, active work, journal uncertainty, stale identity and unreleased handoffs remain fenced.
+- Legacy recovery sends one ordinary Stop to the authenticated original peer, verifies its exact shutdown ACK and requires generation `g + 1`. It no longer invokes public CLI Stop, whose client and server can advance twice. Lost/invalid ACKs never trigger retry, helper handoff or startup.
+- NoSpawn recovery recognizes an already-approved fresh Original before requiring a stopped installation. Both Original and Candidate readiness require fresh complete markers and the exact durable startup origin. Recognition preserves Failed / installed=false / applied=false, never replays the manager, and preserves live reservations after a later Stop.
+- Reset confirmation no longer holds the UI RefCell across the native modal loop. Approval revalidates exact context, captured Stop generation and current edit/migration/shutdown blockers; cancellation acquires no handoff.
+- UI Restart uses the private exact-source worker, not public CLI restart. Reset/restart freeze input before returning from admission, remove inherited startup authorization, authenticate one bound Stop and fence startup at its exact successor generation. Native/AX composer, palette and dialogue ingress remain locked. Reporter threads own child creation/reaping; uncertain wait/disconnect or rejected exact release retain the handoff instead of thawing.
+- Appearance-only detail visibility now runs the existing full settings synchronization, including external passthrough changes and rejected-action rollback, without overwriting active drafts, composition or selection.
+
+Final workspace gates passed for both distributions. Legacy requires the repository-pinned `DESKTOP_PET_HERDR_MIGRATION_REV=6d2ac0446f6ecb84f179e21fac3c5b02e07dc8e8`; distribution-only fixture assumptions and a wording-only error assertion were corrected without relaxing production authority.
+
+| Gate | Neutral | legacy-0.3.16 |
+| --- | --- | --- |
+| Core unit tests | 710 passed, 1 ignored | 704 passed, 1 ignored |
+| Coordinator library | 274 passed | 223 passed |
+| Coordinator executable | 58 passed | 59 passed |
+| Contracts library/model/profile tests | 17 passed | 17 passed |
+| Main-thread composer and production recovery UI executables | Passed | Passed |
+
+The `update_recovery_ui` executable constructs production `Ui`, prepared assets/pack service and real cards/editors on the AppKit main thread. It exercised service-produced recovery capabilities, nested-modal ordinary shutdown, cancellation/stale-approval/contention, delayed reset/restart completion, locked native/IME/AX/control ingress, exact-source release versus foreign/shutdown/disconnect retention, and detail-only external state synchronization with draft/selection preservation. Launch interception exists only after real admission/hold/checkpoint/freeze in this test executable; it is not worker-authentication proof.
+
+Neutral optimized build with debuginfo and packaging passed through the existing identity/revision/resource/signature checks. The isolated bundle is `/private/tmp/desktop-pet-recovery-fixes-stage/DesktopPet.app`, version `0.4.17-beta.5`, compiled revision `07aa2ba709ff9f5b4d2f83848d3b04dd3f42e92a` with the uncommitted corrections. It has an ad-hoc local signature, not official signing/notarization.
+
+Actual native button `performClick:` and modal approval were invoked under the debugger in a private canonical profile, not substituted with private-command calls. Every successor below proved the same config/state, Auto selection, absent explicit asset override and native UI/control readiness:
+
+| Signed-bundle scenario | Source PID / instance | Successor PID / instance | Stop generation |
+| --- | --- | --- | --- |
+| UI Reset all settings → approved native modal | 70616 / `9d15cf4f22e809f32f34921cbd587dd9` | 71860 / `e50520f6d8725e2099b33f1addf4c420` | 0 → 1 |
+| UI Restart App after reset | 71860 / `e50520f6d8725e2099b33f1addf4c420` | 71993 / `740231f50c68b028efc7ed995f8cad54` | 1 → 2 |
+| Separate restart-internal with stale inherited manual authorization | 72080 / `a7d7da0a12fc49ba23d4ce2ecf4ca698` | 72107 / `d997854a06074cee9d81419a6ad22539` | 0 → 1 |
+
+Reset retained an exact pre-reset preference backup, restored defaults, and preserved all 41 imported-pack file hashes plus lifecycle/routing bytes. Wrong source instance and wrong generation each exited 1 before Stop, leaving source PID/instance, configuration hashes and generation unchanged.
+
+Debugger/OS barriers exercised additional ordinary Stop before the bound send, after verified ACK while the source still reported shutdown, and after the replacement daemon was recorded pending but before any control socket/readiness. All workers exited 1, no successor became ready and final running=false; no retry, kill or new baseline manufactured success. The readiness case waited for the existing startup deadline before terminal failure, rather than claiming immediate worker exit.
+
+| Stop boundary | Source / pending PID | Observed generation | Final reservation |
+| --- | --- | --- | --- |
+| Immediately before bound send | 72513 | 2 → 4 | None |
+| After ACK, before exit wait | 72864 | 0 → 1 → 3 | None |
+| Replacement pending, before control readiness | 73262 / 73279 | 0 → 1 → 2 | None |
+
+All five smoke profiles were ordinarily stopped; profile-scoped app/helper processes ended and only their detached failure-alert processes were closed afterward. No installed user/mini app or profile, Tern process, release tag/asset or version was changed.
+
+Limits: `[blocked: isolated account unavailable]` for genuine coordinator NoSpawn crash-boundary and retained legacy-helper/ACK-loss transactions. Isolated temp-global protocol/peer regressions passed, but do not certify those signed end-to-end transactions. Aqua was locked: local native actions and state/selection assertions are not physical keyboard/IME/focus/VoiceOver certification; the cached window bitmap had rendering artifacts and is not clean visual acceptance.
+
 ## Source-only compact settings and backed-up reset
 
 Detail windows now fit measured topic content instead of inheriting a large shared minimum height. Each topic retains its intentional user size and reading position; long logs remain screen-capped and scrollable. App Recovery is a seventh detail topic. Completed/applied history now permits automatic-check and beta-policy changes only after exact-context proof that the helper lease and installation/profile scopes are free; unknown/active ownership remains protected, and history is not erased.

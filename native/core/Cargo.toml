@@ -30,3 +30,8 @@ tempfile = "=3.23.0"
 name = "composer_layout"
 path = "../tests/composer_layout.rs"
 harness = false
+
+[[test]]
+name = "update_recovery_ui"
+path = "src/lib.rs"
+harness = false

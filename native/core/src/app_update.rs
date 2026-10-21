@@ -1093,8 +1093,10 @@ impl AppUpdateService {
         }
     }
 
-    fn begin_check(&mut self) -> Option<(u64, u64, UpdateContext)> {
-        if self.migration_blocked
+    /// Check admission is independent of policy-setting admission.
+    pub(super) fn check_admitted(&self) -> bool {
+        !(self.migration_blocked
+            || self.relocation_busy
             || self.check_busy
             || self.recovery_unresolved()
             || self.launching.is_some()
@@ -1122,8 +1124,11 @@ impl AppUpdateService {
                     .standalone_operation
                     .as_ref()
                     .is_some_and(|record| record.result.terminal()))
-            || self.journal_error.is_some()
-        {
+            || self.journal_error.is_some())
+    }
+
+    fn begin_check(&mut self) -> Option<(u64, u64, UpdateContext)> {
+        if !self.check_admitted() {
             return None;
         }
         let Some(context) = self.context.clone() else {
@@ -1256,6 +1261,44 @@ impl AppUpdateService {
             .map(|_| UpdateCardPrimaryAction::Recover)
     }
 
+    /// Cleanup may own retained preparation; only a matching authenticated
+    /// projection permits execution. Unknown outcomes permit rediscovery only.
+    pub(super) fn recovery_admitted(&self, action: UpdateCardPrimaryAction) -> bool {
+        if self.context.is_none()
+            || self.migration_blocked
+            || self.relocation_busy
+            || self.check_busy
+            || self.launching.is_some()
+            || self.journal_error.is_some()
+            || self.standalone_operation.is_some()
+            || self.recovery_running.is_some()
+            || self
+                .recovery_handoff
+                .as_ref()
+                .is_some_and(|(_, _, _, released)| !released)
+        {
+            return false;
+        }
+        if let Some(projection) = self.current_recovery() {
+            return matches!(
+                (action, &projection.disposition),
+                (UpdateCardPrimaryAction::Recover, RecoveryDisposition::Recover)
+                    | (UpdateCardPrimaryAction::RecoverStart, RecoveryDisposition::Start)
+                    | (
+                        UpdateCardPrimaryAction::RecoverStoppedOriginal,
+                        RecoveryDisposition::RecoverStoppedOriginal
+                    )
+            );
+        }
+        action == UpdateCardPrimaryAction::Recover
+            && self.operation.as_ref().is_some_and(|record| {
+                terminal_phase(record.phase)
+                    && record.phase != OperationPhase::Completed
+                    && self.observed_operation_id.as_deref()
+                        == Some(record.operation_id.as_str())
+            })
+    }
+
     fn observe_recovery(&mut self) {
         if self.recovery_observing.is_some() || self.standalone_operation.is_some() {
             return;
@@ -1293,24 +1336,15 @@ impl AppUpdateService {
     }
 
     pub(super) fn recovery_stop_plan(&self) -> Option<UpdatePlan> {
-        if self.recovery_running.is_some()
-            || self
-                .recovery_handoff
-                .as_ref()
-                .is_some_and(|(_, _, _, released)| !released)
-        {
+        if !self.recovery_admitted(UpdateCardPrimaryAction::RecoverStoppedOriginal) {
             return None;
         }
         self.current_recovery()
-            .filter(|projection| {
-                projection.disposition == RecoveryDisposition::RecoverStoppedOriginal
-            })
             .map(|projection| projection.plan.clone())
     }
 
     pub(super) fn recover_stopped_original(&mut self) -> Option<(UpdateContext, String, u64)> {
-        self.recovery_stop_plan()?;
-        if self.recovery_running.is_some() || self.check_busy || self.launching.is_some() {
+        if !self.recovery_admitted(UpdateCardPrimaryAction::RecoverStoppedOriginal) {
             return None;
         }
         self.begin_recovery(false, true);
@@ -1349,14 +1383,14 @@ impl AppUpdateService {
     }
 
     fn begin_recovery(&mut self, start: bool, stop_original: bool) {
-        if self.recovery_running.is_some()
-            || self.check_busy
-            || self.launching.is_some()
-            || self
-                .recovery_handoff
-                .as_ref()
-                .is_some_and(|(_, _, _, released)| !released)
-        {
+        let action = if stop_original {
+            UpdateCardPrimaryAction::RecoverStoppedOriginal
+        } else if start {
+            UpdateCardPrimaryAction::RecoverStart
+        } else {
+            UpdateCardPrimaryAction::Recover
+        };
+        if !self.recovery_admitted(action) {
             return;
         }
         let Some(projection) = self.current_recovery().cloned() else {
@@ -1364,20 +1398,7 @@ impl AppUpdateService {
             self.revision = self.revision.wrapping_add(1);
             return;
         };
-        if start && projection.disposition != RecoveryDisposition::Start {
-            return;
-        }
-        if stop_original != (projection.disposition == RecoveryDisposition::RecoverStoppedOriginal)
-        {
-            return;
-        }
-        if let RecoveryDisposition::Live(_) = projection.disposition {
-            self.show_recovery_progress();
-            return;
-        }
-        if projection.disposition == RecoveryDisposition::Reconciled {
-            return;
-        }
+        // Admission matched this exact projection and requested disposition.
         self.recovery_request = self.recovery_request.wrapping_add(1);
         let request = self.recovery_request;
         let context = projection.context.clone();
@@ -2559,6 +2580,8 @@ impl AppUpdateService {
         UpdateCardModel {
             auto_check: self.auto_check,
             receive_beta_updates: self.policy == UpdatePolicy::StableAndBeta,
+            check_enabled: self.context.is_some() && self.check_admitted(),
+            recovery_enabled: primary_action.is_some_and(|action| self.recovery_admitted(action)),
             busy: self.migration_blocked
                 || self.relocation_busy
                 // Completed history is not live work, even while admission still
@@ -4108,6 +4131,20 @@ fn await_ownership_ack(
     Ok(())
 }
 
+/// Service-produced snapshots in Recover, Start, StoppedOriginal, Live, then
+/// Reconciled order. Models own their data; no service or reservation is retained.
+#[cfg(test)]
+pub(crate) fn recovery_ui_regression_models(locale: UiLocale) -> [UpdateCardModel; 5] {
+    [
+        RecoveryDisposition::Recover,
+        RecoveryDisposition::Start,
+        RecoveryDisposition::RecoverStoppedOriginal,
+        RecoveryDisposition::Live(123),
+        RecoveryDisposition::Reconciled,
+    ]
+    .map(|disposition| tests::recovery_service(disposition).model(locale))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4117,7 +4154,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    fn recovery_service(disposition: RecoveryDisposition) -> AppUpdateService {
+    pub(super) fn recovery_service(disposition: RecoveryDisposition) -> AppUpdateService {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         let plan = local_check().plan.unwrap();
         let mut record = failed_record('a');
@@ -4140,6 +4177,227 @@ mod tests {
             disposition,
         });
         service
+    }
+
+    #[test]
+    fn recovery_capability_matches_only_the_exact_execution_disposition() {
+        use UpdateCardPrimaryAction::{Recover, RecoverStart, RecoverStoppedOriginal};
+        for (disposition, expected) in [
+            (RecoveryDisposition::Recover, Some(Recover)),
+            (RecoveryDisposition::Start, Some(RecoverStart)),
+            (
+                RecoveryDisposition::RecoverStoppedOriginal,
+                Some(RecoverStoppedOriginal),
+            ),
+            (RecoveryDisposition::Live(123), None),
+            (RecoveryDisposition::Reconciled, None),
+        ] {
+            let mut service = recovery_service(disposition);
+            let model = service.model(UiLocale::En);
+            for action in [Recover, RecoverStart, RecoverStoppedOriginal] {
+                assert_eq!(service.recovery_admitted(action), Some(action) == expected);
+                if Some(action) != expected {
+                    match action {
+                        Recover => service.recover(false),
+                        RecoverStart => service.recover(true),
+                        RecoverStoppedOriginal => {
+                            assert!(service.recover_stopped_original().is_none());
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(service.recovery_running.is_none());
+                    assert!(service.recovery_observing.is_none());
+                    assert_eq!(service.recovery_request, 0);
+                }
+            }
+            assert_eq!(model.recovery_enabled, expected.is_some());
+            assert_eq!(
+                service.recovery_stop_plan().is_some(),
+                expected == Some(RecoverStoppedOriginal)
+            );
+            if disposition == RecoveryDisposition::Live(123) {
+                assert_eq!(
+                    model.primary_action,
+                    Some(UpdateCardPrimaryAction::ShowProgress)
+                );
+                assert!(model.busy);
+            }
+            assert!(!service.recovery_admitted(UpdateCardPrimaryAction::ShowProgress));
+            if let Some(action) = expected {
+                assert!(model.busy);
+                assert_eq!(model.primary_action, Some(action));
+                assert!(!model.check_enabled);
+            } else {
+                // Recovery execution never doubles as progress activation.
+                service.recover(false);
+                service.recover(true);
+                assert!(service.recover_stopped_original().is_none());
+                assert!(service.recovery_running.is_none());
+                assert_eq!(service.recovery_request, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_execution_and_model_share_all_scope_guards() {
+        let blockers: &[(&str, fn(&mut AppUpdateService))] = &[
+            ("missing context", |s| s.context = None),
+            ("migration", |s| s.migration_blocked = true),
+            ("relocation", |s| s.relocation_busy = true),
+            ("checking", |s| s.check_busy = true),
+            ("launching", |s| s.launching = Some("a".repeat(32))),
+            ("journal error", |s| s.journal_error = Some("unreadable".into())),
+            ("standalone operation", |s| {
+                s.standalone_operation = Some(standalone_observation(InstallStatus::Running))
+            }),
+            ("duplicate recovery", |s| {
+                s.recovery_running = Some((
+                    s.context.clone().unwrap(),
+                    s.operation.as_ref().unwrap().operation_id.clone(),
+                    7,
+                    Some(123),
+                ))
+            }),
+            ("unreleased handoff", |s| {
+                s.recovery_handoff = Some((
+                    s.context.clone().unwrap(),
+                    s.operation.as_ref().unwrap().operation_id.clone(),
+                    7,
+                    false,
+                ))
+            }),
+            ("stale observed ID", |s| s.observed_operation_id = Some("f".repeat(32))),
+        ];
+        for (name, block) in blockers {
+            for disposition in [
+                RecoveryDisposition::Recover,
+                RecoveryDisposition::Start,
+                RecoveryDisposition::RecoverStoppedOriginal,
+            ] {
+                let mut service = recovery_service(disposition);
+                block(&mut service);
+                for action in [
+                    UpdateCardPrimaryAction::Recover,
+                    UpdateCardPrimaryAction::RecoverStart,
+                    UpdateCardPrimaryAction::RecoverStoppedOriginal,
+                ] {
+                    assert!(!service.recovery_admitted(action), "{name}: {action:?}");
+                }
+                assert!(!service.model(UiLocale::En).recovery_enabled, "{name}");
+                if matches!(*name, "duplicate recovery" | "unreleased handoff") {
+                    assert_eq!(
+                        service.model(UiLocale::En).primary_action,
+                        Some(UpdateCardPrimaryAction::ShowProgress)
+                    );
+                }
+                assert!(service.recovery_stop_plan().is_none(), "{name}");
+                let running = service.recovery_running.clone();
+                let request = service.recovery_request;
+                let revision = service.revision;
+                service.recover(false);
+                service.recover(true);
+                assert!(service.recover_stopped_original().is_none(), "{name}");
+                assert_eq!(service.recovery_running, running, "{name}");
+                assert_eq!(service.recovery_request, request, "{name}");
+                assert_eq!(service.revision, revision, "{name}");
+                assert!(service.recovery_observing.is_none(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn stale_projection_can_only_request_read_only_rediscovery() {
+        for stale_context in [false, true] {
+            let mut service = recovery_service(RecoveryDisposition::Start);
+            let projection = service.recovery.as_mut().unwrap();
+            if stale_context {
+                projection.context.instance_id = "foreign-source".into();
+            } else {
+                projection.record.detail.push_str("; stale");
+            }
+            assert!(service.current_recovery().is_none());
+            assert!(service.recovery_admitted(UpdateCardPrimaryAction::Recover));
+            assert!(!service.recovery_admitted(UpdateCardPrimaryAction::RecoverStart));
+            assert!(!service.recovery_admitted(UpdateCardPrimaryAction::RecoverStoppedOriginal));
+            service.recover(true);
+            assert!(service.recover_stopped_original().is_none());
+            assert_eq!(service.recovery_request, 0);
+            service.recover(false);
+            assert!(service.recovery_running.is_none());
+            let (context, id, _, record) = service.recovery_observing.as_ref().unwrap();
+            assert_eq!(Some(context), service.context.as_ref());
+            assert_eq!(Some(id), service.observed_operation_id.as_ref());
+            assert_eq!(Some(record), service.operation.as_ref());
+        }
+    }
+
+    #[test]
+    fn projectionless_recovery_never_authorizes_start_or_unscoped_rediscovery() {
+        let mut service = recovery_service(RecoveryDisposition::Recover);
+        service.recovery = None;
+        assert!(service.recovery_admitted(UpdateCardPrimaryAction::Recover));
+        assert!(service.model(UiLocale::En).recovery_enabled);
+        assert!(!service.recovery_admitted(UpdateCardPrimaryAction::RecoverStart));
+        assert!(!service.recovery_admitted(UpdateCardPrimaryAction::RecoverStoppedOriginal));
+        let revision = service.revision;
+        service.recover(false);
+        assert!(service.recovery_running.is_none());
+        assert!(service.recovery_observing.is_some());
+        assert_eq!(service.revision, revision.wrapping_add(1));
+        let blockers: &[fn(&mut AppUpdateService)] = &[
+            |s| s.operation = None,
+            |s| s.operation.as_mut().unwrap().phase = OperationPhase::Completed,
+            |s| s.operation.as_mut().unwrap().phase = OperationPhase::Preparing,
+            |s| s.observed_operation_id = None,
+            |s| s.observed_operation_id = Some("f".repeat(32)),
+            |s| s.standalone_operation = Some(standalone_observation(InstallStatus::Failed)),
+            |s| s.context = None,
+            |s| s.journal_error = Some("unreadable".into()),
+        ];
+        for block in blockers {
+            let mut service = recovery_service(RecoveryDisposition::Recover);
+            service.recovery = None;
+            block(&mut service);
+            assert!(!service.recovery_admitted(UpdateCardPrimaryAction::Recover));
+            service.recover(false);
+            assert!(service.recovery_running.is_none());
+            assert!(service.recovery_observing.is_none());
+            assert_eq!(service.recovery_request, 0);
+        }
+    }
+
+    #[test]
+    fn retained_preparation_does_not_block_its_own_cleanup_or_unlock_installation() {
+        let mut service = recovery_service(RecoveryDisposition::Recover);
+        let plan = service.recovery.as_ref().unwrap().plan.clone();
+        service.prepared_plan = Some(plan.clone());
+        service.launch_plan = Some(plan);
+        assert!(service.recovery_admitted(UpdateCardPrimaryAction::Recover));
+        assert!(service.model(UiLocale::En).recovery_enabled);
+        assert!(!service.settings_admitted());
+        assert!(!service.check_admitted());
+        assert!(service.plan().is_none());
+        service.recovery.as_mut().unwrap().disposition = RecoveryDisposition::Reconciled;
+        assert!(!service.check_admitted());
+        assert!(service.begin_check().is_none());
+        assert!(service.prepared_plan.is_some());
+        assert!(service.launch_plan.is_some());
+        assert!(!service.settings_admitted());
+        assert!(service.plan().is_none());
+    }
+
+    #[test]
+    fn released_handoff_allows_exact_recovery_without_treating_history_as_live_work() {
+        let mut service = recovery_service(RecoveryDisposition::RecoverStoppedOriginal);
+        service.recovery_handoff = Some((
+            service.context.clone().unwrap(),
+            service.operation.as_ref().unwrap().operation_id.clone(),
+            7,
+            true,
+        ));
+        assert!(service.recovery_admitted(UpdateCardPrimaryAction::RecoverStoppedOriginal));
+        assert!(service.recovery_stop_plan().is_some());
+        assert!(service.model(UiLocale::En).recovery_enabled);
     }
 
     #[test]
@@ -4430,6 +4688,8 @@ mod tests {
         let history = service.model(UiLocale::En).history;
         assert!(service.begin_check().is_none());
         assert!(service.model(UiLocale::En).busy);
+        assert!(!service.model(UiLocale::En).check_enabled);
+        assert!(service.model(UiLocale::En).recovery_enabled);
         assert_eq!(
             service.model(UiLocale::En).primary_action,
             Some(UpdateCardPrimaryAction::Recover)
@@ -4440,8 +4700,36 @@ mod tests {
         assert_eq!(model.history, history);
         assert!(!model.busy);
         assert!(model.primary_action.is_none());
+        assert!(!model.recovery_enabled);
+        assert!(model.check_enabled);
+        assert!(model.settings_locked);
         assert!(service.begin_check().is_some());
+        assert!(!service.model(UiLocale::En).check_enabled);
+        assert!(!service.model(UiLocale::En).recovery_enabled);
         assert!(service.plan().is_none());
+    }
+
+    #[test]
+    fn check_capability_preserves_context_error_and_relocation_fencing() {
+        let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
+        assert!(service.check_admitted());
+        assert!(!service.model(UiLocale::En).check_enabled);
+        assert!(service.begin_check().is_none());
+        assert_eq!(
+            service.problem.as_deref(),
+            Some("Running app update context is unavailable")
+        );
+        service.context = Some(local_check().plan.unwrap().context);
+        assert!(service.model(UiLocale::En).check_enabled);
+        service.relocation_busy = true;
+        assert!(!service.check_admitted());
+        assert!(!service.model(UiLocale::En).check_enabled);
+        assert!(service.begin_check().is_none());
+        service.relocation_busy = false;
+        service.migration_blocked = true;
+        assert!(!service.check_admitted());
+        assert!(!service.model(UiLocale::En).check_enabled);
+        assert!(service.begin_check().is_none());
     }
 
     #[test]
@@ -4936,7 +5224,10 @@ mod tests {
                     Some(SettledOperationProof::StandaloneInstall(record.clone())),
                 );
                 assert!(service.standalone_operation.is_none());
-                assert!(service.model(UiLocale::En).relocation_available);
+                assert_eq!(
+                    service.model(UiLocale::En).relocation_available,
+                    !desktop_pet_update_coordinator::identity::LEGACY,
+                );
                 assert_eq!(
                     standalone_install::read_relocation_offer(
                         &request.context.state_dir,
@@ -6024,7 +6315,7 @@ mod tests {
     #[test]
     fn historical_completed_journal_allows_fresh_check_without_recovery() {
         use desktop_pet_update_coordinator::protocol::{
-            reserve_install, write_operation, write_private_bytes, write_private_new,
+            latest_operation, reserve_install, write_operation, write_private_bytes, write_private_new,
         };
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
@@ -7593,7 +7884,10 @@ mod tests {
             Some(&cancelled)
         );
         assert!(service.settings_admitted());
-        assert!(service.model(UiLocale::En).relocation_available);
+        assert_eq!(
+            service.model(UiLocale::En).relocation_available,
+            !desktop_pet_update_coordinator::identity::LEGACY,
+        );
     }
 
     #[test]

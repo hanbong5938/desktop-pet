@@ -3335,9 +3335,15 @@ pub fn conflicting_active_profiles(
     origin: &InstallOrigin,
     state_dir: &Path,
 ) -> Result<Vec<ActiveProfile>, String> {
-    let global = global_updates()?;
-    let _gate = lock_gates(&global)?;
-    Ok(active_for_origin(&global, origin)?
+    conflicting_active_profiles_at(&global_updates()?, origin, state_dir)
+}
+fn conflicting_active_profiles_at(
+    global: &Path,
+    origin: &InstallOrigin,
+    state_dir: &Path,
+) -> Result<Vec<ActiveProfile>, String> {
+    let _gate = lock_gates(global)?;
+    Ok(active_for_origin(global, origin)?
         .into_iter()
         .filter(|e| e.state_dir != state_dir && live(e.pid))
         .collect())
@@ -5953,6 +5959,200 @@ mod tests {
         assert!(recovered.authorize_start_for(&origin).is_err());
         recovered.release().unwrap();
         start_allowed_at(&global, &origin, &state, None, None).unwrap();
+    }
+
+    #[test]
+    fn approved_original_partial_release_recovers_fresh_markers_without_restarting_instance() {
+        for removed_markers in 0..=2 {
+            let (_dir, global, state, original) = fixture();
+            let id = "0123456789abcdef0123456789abcdef";
+            let reservation = reserve_install_at(&global, &original, None, &state, id).unwrap();
+            let generation = reservation.stop_generation;
+            let token = reservation.authorize_start_for(&original).unwrap();
+            let instance = "previously-approved-original";
+            register_active_at(
+                &global,
+                &original,
+                &state,
+                std::process::id(),
+                instance,
+                Some(generation),
+                Some(&token),
+            )
+            .unwrap();
+            let key = installation_key(&original).unwrap();
+            let active_before = fs::read(active_path(&global, &key)).unwrap();
+            let failed = OperationRecord {
+                version: UPDATER_PROTOCOL,
+                operation_id: id.into(),
+                phase: OperationPhase::Failed,
+                execution_fence: ExecutionFence::NoSpawn,
+                detail: "No manager ran; approved original restoration".into(),
+                installed: false,
+                applied: false,
+                candidate: None,
+            };
+            write_operation(&state, &failed).unwrap();
+            drop(reservation);
+            let markers = [profile_marker(&state).unwrap(), marker_path(&global, &key)];
+            for path in markers.iter().take(removed_markers) {
+                fs::remove_file(path).unwrap();
+                sync_parent(path).unwrap();
+            }
+            let before_repair =
+                reservation_snapshot_at(&global, &original, None, &state, id).unwrap().unwrap();
+            assert_eq!(before_repair.startup_origin.as_ref(), Some(&original));
+            assert_eq!(before_repair.markers_complete, removed_markers == 0);
+            let recovered = recover_reservation_at(&global, &original, None, &state, id).unwrap();
+            // Recovery has repaired markers since the earlier observation.
+            // A readiness consumer must read this new snapshot, not reuse it.
+            let fresh =
+                reservation_snapshot_at(&global, &original, None, &state, id).unwrap().unwrap();
+            assert!(fresh.markers_complete);
+            assert_eq!(fresh.startup_origin.as_ref(), Some(&original));
+            assert_eq!(before_repair.markers_complete, removed_markers == 0);
+            assert_eq!(recovered.stop_generation, generation);
+            assert!(!recovered.user_stop_requested().unwrap());
+            assert_eq!(recovered.issued_start_token_for(&original).unwrap().as_deref(), Some(token.as_str()));
+            assert!(recovered.authorize_start_for(&original).is_err());
+            start_allowed_at(&global, &original, &state, Some(generation), Some(&token)).unwrap();
+            assert_eq!(fs::read(active_path(&global, &key)).unwrap(), active_before);
+            let running = active(&global, &key).unwrap();
+            assert_eq!(running.len(), 1);
+            assert_eq!(running[0].pid, std::process::id());
+            assert_eq!(running[0].instance_id, instance);
+            assert!(live(running[0].pid));
+            assert_eq!(read_operation(&state, id).unwrap(), Some(failed.clone()));
+            recovered.release().unwrap();
+            for _ in 0..2 {
+                assert_eq!(reservation_snapshot_at(&global, &original, None, &state, id).unwrap(), None);
+                assert_eq!(read_operation(&state, id).unwrap(), Some(failed.clone()));
+                assert_eq!(fs::read(active_path(&global, &key)).unwrap(), active_before);
+                assert_eq!(test_scope::stop_generation_at(&global, &state).unwrap(), generation);
+            }
+        }
+    }
+
+    #[test]
+    fn late_stop_during_original_recovery_preserves_live_instance_and_reservation() {
+        for partial_release in [false, true] {
+            let (_dir, global, state, original) = fixture();
+            let id = "0123456789abcdef0123456789abcdef";
+            let reservation = reserve_install_at(&global, &original, None, &state, id).unwrap();
+            let generation = reservation.stop_generation;
+            let token = reservation.authorize_start_for(&original).unwrap();
+            register_active_at(
+                &global,
+                &original,
+                &state,
+                std::process::id(),
+                "live-restored-original",
+                Some(generation),
+                Some(&token),
+            )
+            .unwrap();
+            drop(reservation);
+            if partial_release {
+                let path = profile_marker(&state).unwrap();
+                fs::remove_file(&path).unwrap();
+                sync_parent(&path).unwrap();
+            }
+            assert_eq!(record_user_stop_at(&global, &state).unwrap(), generation + 1);
+            let recovered = recover_reservation_at(&global, &original, None, &state, id).unwrap();
+            assert!(recovered.user_stop_requested().unwrap());
+            assert!(recovered.issued_start_token_for(&original).is_err());
+            assert!(recovered.authorize_start_for(&original).is_err());
+            assert!(start_allowed_at(&global, &original, &state, Some(generation), Some(&token)).is_err());
+            let fresh = reservation_snapshot_at(&global, &original, None, &state, id).unwrap().unwrap();
+            assert!(fresh.markers_complete);
+            assert_eq!(fresh.startup_origin, Some(original.clone()));
+            let running = active_for_origin(&global, &original).unwrap();
+            assert_eq!(running.len(), 1);
+            assert_eq!(running[0].pid, std::process::id());
+            assert_eq!(running[0].instance_id, "live-restored-original");
+            assert!(live(running[0].pid));
+            // A caller observing this live source must not release its scope
+            // merely because Stop has revoked all further startup authority.
+            drop(recovered);
+            assert!(reservation_exists_at(&global, &original, None, &state, id).unwrap());
+            assert_eq!(test_scope::stop_generation_at(&global, &state).unwrap(), generation + 1);
+        }
+    }
+
+    #[test]
+    fn original_recovery_rejects_unpaired_startup_selection_without_repairing_evidence() {
+        for missing_origin in [false, true] {
+            let (_dir, global, state, original) = fixture();
+            let id = "0123456789abcdef0123456789abcdef";
+            let reservation = reserve_install_at(&global, &original, None, &state, id).unwrap();
+            reservation.authorize_start_for(&original).unwrap();
+            drop(reservation);
+            let mut entries = scopes(&global).unwrap();
+            if missing_origin {
+                entries[0].startup_origin = None;
+            } else {
+                entries[0].startup_token = None;
+            }
+            write_scopes(&global, &entries).unwrap();
+            let index = fs::read(scopes_path(&global)).unwrap();
+            let profile = fs::read(profile_marker(&state).unwrap()).unwrap();
+            assert!(reservation_snapshot_at(&global, &original, None, &state, id).is_err());
+            assert!(recover_reservation_at(&global, &original, None, &state, id).is_err());
+            assert_eq!(fs::read(scopes_path(&global)).unwrap(), index);
+            assert_eq!(fs::read(profile_marker(&state).unwrap()).unwrap(), profile);
+        }
+    }
+
+    #[test]
+    fn ready_original_reservation_does_not_hide_foreign_live_profile_evidence() {
+        let (_dir, global, state, original) = fixture();
+        let id = "0123456789abcdef0123456789abcdef";
+        let reservation = reserve_install_at(&global, &original, None, &state, id).unwrap();
+        let token = reservation.authorize_start_for(&original).unwrap();
+        register_active_at(
+            &global,
+            &original,
+            &state,
+            std::process::id(),
+            "approved-original",
+            Some(reservation.stop_generation),
+            Some(&token),
+        )
+        .unwrap();
+        let other = state.parent().unwrap().join("foreign-profile");
+        check_dir(&other, true).unwrap();
+        assert!(register_active_at(
+            &global,
+            &original,
+            &other,
+            std::process::id(),
+            "foreign-instance",
+            Some(reservation.stop_generation),
+            Some(&token),
+        )
+        .is_err());
+        let key = installation_key(&original).unwrap();
+        let path = active_path(&global, &key);
+        let mut entries = active(&global, &key).unwrap();
+        // Conflicting live evidence may predate discovery or come from an old
+        // process. A valid local startup selection must not mask it.
+        entries.push(ActiveProfile {
+            state_dir: other.clone(),
+            pid: std::process::id(),
+            instance_id: "foreign-instance".into(),
+        });
+        let bytes = serde_json::to_vec(&entries).unwrap();
+        write_private_bytes(&path, &bytes, 0o600).unwrap();
+        let conflicts = conflicting_active_profiles_at(&global, &original, &state).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].state_dir, other);
+        assert_eq!(conflicts[0].instance_id, "foreign-instance");
+        assert!(live(conflicts[0].pid));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        drop(reservation);
+        let snapshot = reservation_snapshot_at(&global, &original, None, &state, id).unwrap().unwrap();
+        assert!(snapshot.markers_complete);
+        assert_eq!(snapshot.startup_origin, Some(original));
     }
 
     #[test]

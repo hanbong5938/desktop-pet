@@ -740,6 +740,32 @@ define_class!(
         fn undo_manager(&self) -> Option<Retained<NSUndoManager>> {
             self.ivars().borrow().as_ref().map(|state| state.undo.retain())
         }
+        // Native AX setters can edit storage without shouldChangeText or
+        // didChangeText. Fence their ingress, not a later model notification.
+        #[unsafe(method(setAccessibilityValue:))]
+        fn set_accessibility_value(&self, value: Option<&AnyObject>) {
+            if !self.update_frozen() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilityValue: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedText:))]
+        fn set_accessibility_selected_text(&self, value: Option<&NSString>) {
+            if !self.update_frozen() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedText: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedTextRange:))]
+        fn set_accessibility_selected_text_range(&self, range: NSRange) {
+            if !self.update_frozen() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedTextRange: range] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedTextRanges:))]
+        fn set_accessibility_selected_text_ranges(&self, ranges: Option<&NSArray<NSValue>>) {
+            if !self.update_frozen() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedTextRanges: ranges] };
+            }
+        }
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) {
             let _: () = unsafe { msg_send![super(self), didChangeText] };
@@ -843,6 +869,7 @@ define_class!(
         }
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            if self.update_frozen() { return; }
             // Some window dispatch paths bypass performKeyEquivalent:.
             if !self.handle_edit_shortcut(event) {
                 let _: () = unsafe { msg_send![super(self), keyDown: event] };
@@ -923,7 +950,9 @@ impl EditorTextView {
                 true
             }
             (b'a', flags) if flags == NSEventModifierFlags::Command => {
-                unsafe { self.selectAll(None) };
+                if !self.update_frozen() {
+                    unsafe { self.selectAll(None) };
+                }
                 true
             }
             (b'c', flags) if flags == NSEventModifierFlags::Command => {
@@ -1968,6 +1997,13 @@ impl DialogueEditor {
             feedback.frozen_value = None;
         }
     }
+    #[cfg(test)]
+    pub(crate) fn regression_input(&self) -> Retained<NSTextView> {
+        assert!(self.input.ivars().borrow().as_ref().is_some_and(|feedback| feedback.update_frozen),
+            "current production dialogue editor is not frozen");
+        self.input.retain().into_super()
+    }
+
     pub(crate) fn mutation_baseline(&self) -> Option<DialogueDraftBaseline> {
         self.model.borrow().mutation_baseline()
     }

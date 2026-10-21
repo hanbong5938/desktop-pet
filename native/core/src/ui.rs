@@ -124,6 +124,25 @@ enum SettingsDetailIntent {
     ChooseMenuBarIcon,
 }
 
+fn overlay_update_capabilities(
+    model: &mut crate::update_card::UpdateCardModel,
+    check_admitted: bool,
+    migration_busy: bool,
+    frozen: bool,
+) {
+    model.check_enabled &= check_admitted && !migration_busy;
+    if migration_busy {
+        model.primary_action = None;
+        model.recovery_enabled = false;
+    } else if frozen && !matches!(
+        model.primary_action,
+        Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress)
+    ) {
+        model.primary_action = None;
+        model.recovery_enabled = false;
+    }
+}
+
 fn clear_overridden_relocation_summary(
     model: &mut crate::update_card::UpdateCardModel,
     legacy_incomplete: bool,
@@ -726,6 +745,7 @@ struct BubbleViewIvars {
 #[derive(Debug)]
 struct ComposerViewIvars {
     normalizing: Cell<bool>,
+    update_frozen: Cell<bool>,
 }
 
 define_class!(
@@ -737,6 +757,38 @@ define_class!(
     unsafe impl NSObjectProtocol for ComposerView {}
 
     impl ComposerView {
+        #[unsafe(method(shouldChangeTextInRange:replacementString:))]
+        fn should_change_text(&self, range: NSRange, replacement: Option<&NSString>) -> bool {
+            if self.ivars().update_frozen.get() {
+                false
+            } else {
+                unsafe { msg_send![super(self), shouldChangeTextInRange: range, replacementString: replacement] }
+            }
+        }
+        #[unsafe(method(setAccessibilityValue:))]
+        fn set_accessibility_value(&self, value: Option<&AnyObject>) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilityValue: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedText:))]
+        fn set_accessibility_selected_text(&self, value: Option<&NSString>) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedText: value] };
+            }
+        }
+        #[unsafe(method(setAccessibilitySelectedTextRange:))]
+        fn set_accessibility_selected_text_range(&self, range: NSRange) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), setAccessibilitySelectedTextRange: range] };
+            }
+        }
+        #[unsafe(method(insertText:))]
+        fn insert_text(&self, value: &AnyObject) {
+            if !self.ivars().update_frozen.get() {
+                let _: () = unsafe { msg_send![super(self), insertText: value] };
+            }
+        }
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) {
             let _: () = unsafe { msg_send![super(self), didChangeText] };
@@ -762,6 +814,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            if self.ivars().update_frozen.get() { return; }
             // Some window dispatch paths bypass performKeyEquivalent:.
             if self.handle_edit_shortcut(event) {
                 return;
@@ -783,6 +836,7 @@ define_class!(
         }
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), unmarkText] };
             self.normalize_committed_text();
             wake();
@@ -790,6 +844,7 @@ define_class!(
 
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text_replacement_range(&self, text: &AnyObject, range: NSRange) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), insertText: text, replacementRange: range] };
             self.normalize_committed_text();
             wake();
@@ -802,6 +857,7 @@ define_class!(
             selected: NSRange,
             replacement: NSRange,
         ) {
+            if self.ivars().update_frozen.get() { return; }
             let was_normalizing = self.ivars().normalizing.replace(true);
             let _: () = unsafe {
                 msg_send![super(self), setMarkedText: text, selectedRange: selected, replacementRange: replacement]
@@ -813,6 +869,7 @@ define_class!(
 
         #[unsafe(method(cancelOperation:))]
         fn cancel_operation(&self, sender: Option<&AnyObject>) {
+            if self.ivars().update_frozen.get() { return; }
             if !self.discard_composition() {
                 with_ui_mut(|ui| ui.fold_reply());
             }
@@ -820,12 +877,14 @@ define_class!(
 
         #[unsafe(method(paste:))]
         fn paste(&self, sender: Option<&AnyObject>) {
+            if self.ivars().update_frozen.get() { return; }
             let _: () = unsafe { msg_send![super(self), paste: sender] };
             self.normalize_committed_text();
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if self.ivars().update_frozen.get() { return; }
             if let Some(window) = self.window() {
                 let _ = window.makeFirstResponder(Some(self));
             }
@@ -858,6 +917,9 @@ impl ComposerView {
         let Ok(key) = u8::try_from(key.characterAtIndex(0)) else {
             return false;
         };
+        if self.ivars().update_frozen.get() {
+            return matches!(key.to_ascii_lowercase(), b'a' | b'c' | b'x' | b'v');
+        }
         match key.to_ascii_lowercase() {
             b'a' => unsafe { self.selectAll(None) },
             b'c' => unsafe { self.copy(None) },
@@ -927,6 +989,7 @@ impl ComposerView {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ComposerViewIvars {
             normalizing: Cell::new(false),
+            update_frozen: Cell::new(false),
         });
         unsafe {
             msg_send![super(this), initWithFrame: NSRect::new(
@@ -1547,8 +1610,9 @@ struct Ui {
     app_update: AppUpdateService,
     painted_app_update: Option<(u64, UiLocale, bool)>,
     update_frozen: Option<String>,
-    legacy_recovery_handoff: Option<(UpdateContext, String, u64)>,
-    settings_reset_handoff: Option<(UpdateContext, String, mpsc::Receiver<Result<(), String>>)>,
+    legacy_recovery_handoff: Option<(UpdateContext, String, Option<u64>)>,
+    settings_reset_handoff: Option<(UpdateContext, String, Option<mpsc::Receiver<Result<(), String>>>)>,
+    restart_handoff: Option<(UpdateContext, String, Option<mpsc::Receiver<Result<(), String>>>)>,
     update_consent: Option<(String, Retained<NSAlert>)>,
     migration: MigrationUiState,
     migration_plan_receiver: Option<
@@ -2858,9 +2922,7 @@ define_class!(
 
         #[unsafe(method(resetAppSettings:))]
         fn reset_app_settings(&self, _sender: Option<&AnyObject>) {
-            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
-            let block = RcBlock::new(|| with_ui_update_action(|ui| ui.reset_app_settings()));
-            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+            schedule_settings_reset_confirmation();
         }
 
         #[unsafe(method(restartApp:))]
@@ -5273,6 +5335,66 @@ fn install_alert_cancel_monitor(
         })
 }
 
+fn schedule_settings_reset_confirmation() {
+    let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+    let block = RcBlock::new(confirm_settings_reset_start);
+    unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+}
+
+fn confirm_settings_reset_start() {
+    // Distinguish an empty UI slot from real RefCell contention: only the
+    // latter owns a still-live request which must be retried in default mode.
+    let preflight = UI.with(|cell| match cell.try_borrow() {
+        Ok(slot) => Ok(slot.as_ref().map(|ui| {
+            ui.settings_reset_preflight().map(|(context, generation)| {
+                (ui.mtm, ui.locale, context, generation)
+            })
+        })),
+        Err(_) => Err(()),
+    });
+    let snapshot = match preflight {
+        Err(()) => { schedule_settings_reset_confirmation(); return; }
+        Ok(None) => return,
+        Ok(Some(Err(error))) => {
+            with_ui_recovery_action(move |ui| ui.settings_reset_error(&error));
+            return;
+        }
+        Ok(Some(Ok(snapshot))) => snapshot,
+    };
+    let (mtm, locale, context, generation) = snapshot;
+    // No UI or state borrow crosses AppKit's nested modal loop. Stop can abort
+    // it, and approval re-enters through the retained action's fresh guards.
+    if confirm_settings_reset(mtm, locale, &context.config_dir, &context.state_dir) {
+        with_ui_update_action(move |ui| ui.reset_app_settings(context, generation));
+    }
+}
+
+fn spawn_restart_worker(
+    paths: &Paths,
+    observation: &desktop_pet_contracts::ObservationSelection,
+    instance: &str,
+    generation: u64,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    #[cfg(test)]
+    if let Some(result) = recovery_ui_regressions::intercept_launch(false, paths, observation, instance, generation) {
+        return result;
+    }
+    crate::cli::spawn_restart(paths, observation, instance, generation)
+}
+
+fn spawn_settings_reset_worker(
+    paths: &Paths,
+    observation: &desktop_pet_contracts::ObservationSelection,
+    instance: &str,
+    generation: u64,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    #[cfg(test)]
+    if let Some(result) = recovery_ui_regressions::intercept_launch(true, paths, observation, instance, generation) {
+        return result;
+    }
+    crate::cli::spawn_settings_reset(paths, observation, instance, generation)
+}
+
 fn confirm_settings_reset(
     mtm: MainThreadMarker,
     locale: UiLocale,
@@ -5306,6 +5428,8 @@ fn confirm_settings_reset(
     let Some(monitor) = install_alert_cancel_monitor(mtm, &alert, &cancel, true) else {
         return false;
     };
+    #[cfg(test)]
+    recovery_ui_regressions::schedule_modal_action();
     let response = alert.runModal();
     drop(monitor);
     response == NSAlertSecondButtonReturn
@@ -6418,6 +6542,7 @@ impl Ui {
             update_frozen: None,
             legacy_recovery_handoff: None,
             settings_reset_handoff: None,
+            restart_handoff: None,
             update_consent: None,
             migration: MigrationUiState {
                 busy: migration_plan.is_some(),
@@ -7484,7 +7609,7 @@ impl Ui {
         let height_changed = self
             .menu_panel
             .set_character_content_height(self.character_menu.natural_height());
-        if self.menu_panel.is_visible() && !self.last_scene.shutdown {
+        if self.menu_panel.settings_surface_visible() && !self.last_scene.shutdown {
             self.sync_menu_panel_state();
         }
         let active_key = self
@@ -8013,6 +8138,9 @@ impl Ui {
     }
 
     fn sync_composer(&mut self) {
+        if self.update_frozen.is_some() {
+            return;
+        }
         if self.resize_frozen && !self.resize_staging {
             self.defer_bubble_content();
             return;
@@ -9079,6 +9207,7 @@ impl Ui {
                 model.retain_completed_migration(&plan.operation_id, self.locale);
             } else {
                 model.primary_action = None;
+                model.recovery_enabled = false;
                 model.migration_visible = true;
                 model.action = None;
                 model.download_url = None;
@@ -9246,6 +9375,7 @@ impl Ui {
         }
         if let Some(error) = &self.migration.launch_error {
             model.primary_action = None;
+            model.recovery_enabled = false;
             model.busy = false;
             model.status = desktop_pet_update_coordinator::CheckStatus::Failed;
             model.status_text = text(self.locale, Message::AppUpdateOutcomeUnknown).to_owned();
@@ -9254,7 +9384,6 @@ impl Ui {
         }
         if self.migration.busy {
             model.busy = true;
-            model.primary_action = None;
             model.migration_available = false;
             if self.migration.automatic_preparing {
                 model.status = desktop_pet_update_coordinator::CheckStatus::Checking;
@@ -9262,14 +9391,9 @@ impl Ui {
                 model.detail = model.status_text.clone();
             }
         }
-        if self.update_frozen.is_some()
-            && !matches!(
-                model.primary_action,
-                Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress)
-            )
-        {
-            model.primary_action = None;
-        }
+        overlay_update_capabilities(
+            &mut model, self.update_check_admitted(), self.migration.busy, self.update_frozen.is_some(),
+        );
         clear_overridden_relocation_summary(
             &mut model,
             self.migration.plan.is_some()
@@ -9584,6 +9708,7 @@ impl Ui {
         }
         self.poll_legacy_recovery_handoff();
         self.poll_settings_reset();
+        self.poll_restart();
         self.refresh_app_update();
     }
 
@@ -9829,6 +9954,7 @@ impl Ui {
     fn freeze_update_controls(&mut self, operation_id: &str) {
         self.update_composer_editable = Some(self.composer_view.isEditable());
         self.update_composer_send_enabled = Some(self.composer_send.isEnabled());
+        self.composer_view.ivars().update_frozen.set(true);
         self.composer_view.setEditable(false);
         self.composer_send.setEnabled(false);
         self.menu_panel.set_update_frozen(true);
@@ -9871,6 +9997,7 @@ impl Ui {
         }
         self.update_frozen = None;
         self.clear_update_consent();
+        self.composer_view.ivars().update_frozen.set(false);
         self.composer_view
             .setEditable(self.update_composer_editable.take().unwrap_or(true));
         self.composer_send
@@ -9882,6 +10009,11 @@ impl Ui {
         // refresh recomputes the intended passthrough/hit-testing policy;
         // do not briefly enable click ingress for an intentionally passive pet.
         self.refresh();
+    }
+
+    fn update_check_admitted(&self) -> bool {
+        self.update_frozen.is_none()
+            && self.shared.lock().is_ok_and(|state| state.update_mutation_allowed().is_ok())
     }
 
     fn update_setting_admitted(&self) -> bool {
@@ -9948,12 +10080,7 @@ impl Ui {
     }
 
     fn check_app_update(&mut self) {
-        if self.update_frozen.is_none()
-            && self
-                .shared
-                .lock()
-                .is_ok_and(|state| state.update_mutation_allowed().is_ok())
-        {
+        if self.update_check_admitted() {
             self.app_update.check_now();
         }
         self.refresh_app_update();
@@ -10005,14 +10132,17 @@ impl Ui {
         // well as widgets, without borrowing a reservation or updater token.
         // Hold it before checkpointing and before any external consent can open.
         if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
-            self.release_legacy_recovery_handoff(&context, &operation_id);
+            if !self.release_local_shutdown_handoff(&context, &operation_id) {
+                self.freeze_update_controls(&operation_id);
+                self.legacy_recovery_handoff = Some((context, operation_id, None));
+            }
             return Err(error);
         }
         self.freeze_update_controls(&operation_id);
         Ok((context, operation_id))
     }
 
-    fn release_legacy_recovery_handoff(
+    fn release_local_shutdown_handoff(
         &mut self,
         context: &UpdateContext,
         operation_id: &str,
@@ -10028,7 +10158,7 @@ impl Ui {
     }
 
     fn poll_legacy_recovery_handoff(&mut self) {
-        let Some((context, operation_id, request)) = self.legacy_recovery_handoff.as_ref() else {
+        let Some((context, operation_id, Some(request))) = self.legacy_recovery_handoff.as_ref() else {
             return;
         };
         if self
@@ -10044,7 +10174,7 @@ impl Ui {
             .legacy_recovery_handoff
             .take()
             .expect("matched recovery handoff");
-        if !self.release_legacy_recovery_handoff(&context, &operation_id) {
+        if !self.release_local_shutdown_handoff(&context, &operation_id) {
             // A changed source, claimed Stop, or unknown outcome must not reopen
             // mutation ingress. Keep the exact scope for subsequent safe proof.
             self.legacy_recovery_handoff = Some((context, operation_id, request));
@@ -10069,11 +10199,13 @@ impl Ui {
         // separate visible UI must obtain consent before stopping the original;
         // this app never issues Stop or restarts either executable.
         if let Some(scope) = self.app_update.recover_stopped_original() {
-            self.legacy_recovery_handoff = Some(scope);
+            self.legacy_recovery_handoff = Some((scope.0, scope.1, Some(scope.2)));
         } else {
             // None means admission rejected before a coordinator worker was
             // accepted. Only this exact locally held original may be released.
-            self.release_legacy_recovery_handoff(&context, &operation_id);
+            if !self.release_local_shutdown_handoff(&context, &operation_id) {
+                self.legacy_recovery_handoff = Some((context, operation_id, None));
+            }
         }
         self.refresh_app_update();
     }
@@ -14262,144 +14394,168 @@ impl Ui {
         self.sync_character_menu_frame();
     }
 
-    fn reset_app_settings(&mut self) {
+    fn settings_reset_preflight(&self) -> Result<(UpdateContext, u64), String> {
+        if self.settings_reset_handoff.is_some() || self.restart_handoff.is_some()
+            || !self.menu_panel.reset_settings_enabled() || !self.update_setting_admitted()
+            || self.migration.busy || self.last_scene.shutdown
+        {
+            return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
+        }
+        let blockers = self.restart_blockers_snapshot();
+        if !blockers.is_empty() { return Err(blockers.join("; ")); }
+        let state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+        if state.scene().shutdown { return Err("application is shutting down".into()); }
+        let context = state.update_context().cloned().ok_or("running profile is unavailable")?;
+        let generation = desktop_pet_update_coordinator::protocol::stop_generation(&context.state_dir)?;
+        Ok((context, generation))
+    }
+
+    fn reset_app_settings(&mut self, context: UpdateContext, expected_stop_generation: u64) {
         let result = (|| -> Result<(), String> {
-            if self.settings_reset_handoff.is_some()
-                || !self.menu_panel.reset_settings_enabled()
-                || !self.update_setting_admitted()
-                || self.migration.busy
-            {
-                return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
+            let (current, generation) = self.settings_reset_preflight()?;
+            if current != context || generation != expected_stop_generation {
+                return Err("running profile or Stop generation changed during confirmation".into());
             }
             let blockers = self.restart_blockers_snapshot();
-            if !blockers.is_empty() {
-                return Err(blockers.join("; "));
-            }
-            let context = self
-                .shared
-                .lock()
-                .map_err(|_| "native state lock is poisoned")?
-                .update_context()
-                .cloned()
-                .ok_or("running profile is unavailable")?;
-            if !confirm_settings_reset(
-                self.mtm,
-                self.locale,
-                &context.config_dir,
-                &context.state_dir,
-            ) {
-                return Ok(());
-            }
-            if !self.update_setting_admitted() || self.migration.busy {
-                return Err(text(self.locale, Message::AppUpdateBlockedHelp).into());
-            }
-            let blockers = self.restart_blockers_snapshot();
-            if !blockers.is_empty() {
-                return Err(blockers.join("; "));
-            }
             let observation = context.observation_mode()?;
             let operation_id = format!("settings-reset-{}", context.instance_id);
             {
-                let mut state = self
-                    .shared
-                    .lock()
-                    .map_err(|_| "native state lock is poisoned")?;
+                let mut state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
                 if state.update_context() != Some(&context) {
                     return Err("running profile changed during confirmation".into());
                 }
                 state.hold_recovery_prepare(&operation_id, &context)?;
             }
+            self.settings_reset_handoff = Some((context.clone(), operation_id.clone(), None));
             if let Err(error) = self.checkpoint_update_shutdown(&blockers) {
-                self.release_legacy_recovery_handoff(&context, &operation_id);
+                if self.release_local_shutdown_handoff(&context, &operation_id) {
+                    self.settings_reset_handoff = None;
+                } else {
+                    self.freeze_update_controls(&operation_id);
+                }
                 return Err(error);
             }
             self.freeze_update_controls(&operation_id);
             self.menu_panel.set_reset_settings_busy(true);
-            match crate::cli::spawn_settings_reset(
-                &self.lifecycle_paths,
-                &observation,
-                &context.instance_id,
+            match spawn_settings_reset_worker(
+                &self.lifecycle_paths, &observation, &context.instance_id, expected_stop_generation,
             ) {
                 Ok(receiver) => {
-                    self.settings_reset_handoff = Some((context, operation_id, receiver));
-                    self.menu_panel.set_settings_recovery_status(text(
-                        self.locale,
-                        Message::ResetAppSettingsStarted,
-                    ));
+                    self.settings_reset_handoff = Some((context, operation_id, Some(receiver)));
+                    self.menu_panel.set_settings_recovery_status(text(self.locale, Message::ResetAppSettingsStarted));
                 }
                 Err(error) => {
-                    self.release_legacy_recovery_handoff(&context, &operation_id);
+                    if self.release_local_shutdown_handoff(&context, &operation_id) {
+                        self.settings_reset_handoff = None;
+                        self.menu_panel.set_reset_settings_busy(false);
+                    }
                     return Err(error);
                 }
             }
             Ok(())
         })();
-        if let Err(error) = result {
-            self.menu_panel.set_reset_settings_busy(false);
-            self.menu_panel.set_settings_recovery_status(&error);
-            self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, &error);
-        }
+        if let Err(error) = result { self.settings_reset_error(&error); }
+    }
+
+    fn settings_reset_error(&mut self, error: &str) {
+        self.menu_panel.set_settings_recovery_status(error);
+        self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, error);
     }
 
     fn poll_settings_reset(&mut self) {
-        let outcome = match self.settings_reset_handoff.as_ref() {
-            Some((_, _, receiver)) => match receiver.try_recv() {
-                Ok(outcome) => Some(outcome),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
-                    "settings recovery worker disconnected before shutdown".into(),
-                )),
-            },
-            None => None,
+        let Some((context, operation_id, Some(receiver))) = self.settings_reset_handoff.as_ref() else { return; };
+        let (outcome, proved_exit) = match receiver.try_recv() {
+            Ok(outcome) => (outcome, true),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => (
+                Err("settings recovery worker disconnected; shutdown outcome is unknown and inputs remain locked".into()), false,
+            ),
         };
-        let Some(outcome) = outcome else {
-            return;
-        };
-        let Some((context, operation_id, _)) = self.settings_reset_handoff.take() else {
-            return;
-        };
-        let detail = outcome.err().unwrap_or_else(|| {
-            "settings recovery exited while the original instance is still running".into()
-        });
-        if self.release_legacy_recovery_handoff(&context, &operation_id) {
+        let context = context.clone();
+        let operation_id = operation_id.clone();
+        self.settings_reset_handoff = Some((context.clone(), operation_id.clone(), None));
+        if proved_exit && self.release_local_shutdown_handoff(&context, &operation_id) {
+            self.settings_reset_handoff = None;
             self.menu_panel.set_reset_settings_busy(false);
         }
-        self.menu_panel.set_settings_recovery_status(&detail);
-        self.queue_bubble_appearance_error(Message::ResetAppSettingsFailed, &detail);
+        let detail = outcome.err().unwrap_or_else(|| {
+            "settings recovery worker exited unexpectedly while the source UI is still running".into()
+        });
+        self.settings_reset_error(&detail);
     }
 
     fn restart_app(&mut self) {
         let result = (|| -> Result<(), String> {
-            if !self.update_setting_admitted() || self.migration.busy {
-                return Err("application update, migration or manager work is pending".into());
+            if self.restart_handoff.is_some() || self.settings_reset_handoff.is_some()
+                || !self.update_setting_admitted() || self.migration.busy || self.last_scene.shutdown
+            {
+                return Err("application update, migration or shutdown handoff is pending".into());
             }
             let blockers = self.restart_blockers_snapshot();
-            if !blockers.is_empty() {
-                return Err(blockers.join("; "));
-            }
-            let state = self
-                .shared
-                .lock()
-                .map_err(|_| "native state lock is poisoned")?;
-            state.update_mutation_allowed()?;
-            // The live selection can differ from both the saved preference
-            // and inherited startup environment.
-            crate::cli::spawn_restart(&self.lifecycle_paths, &state.observation_mode())
-        })();
-        if let Err(error) = result {
-            let summary = match self.locale {
-                UiLocale::Ko => "앱을 재시작할 수 없습니다. 현재 앱은 계속 실행됩니다.",
-                UiLocale::En => "The app could not restart. The current app remains open.",
-                UiLocale::Ja => "アプリを再起動できませんでした。現在のアプリは開いたままです。",
-                UiLocale::ZhHans => "无法重新启动应用。当前应用将保持运行。",
+            if !blockers.is_empty() { return Err(blockers.join("; ")); }
+            let (context, observation, generation) = {
+                let mut state = self.shared.lock().map_err(|_| "native state lock is poisoned")?;
+                state.update_mutation_allowed()?;
+                if state.scene().shutdown { return Err("application is shutting down".into()); }
+                let context = state.update_context().cloned().ok_or("running profile is unavailable")?;
+                let observation = state.observation_mode();
+                let generation = desktop_pet_update_coordinator::protocol::stop_generation(&context.state_dir)?;
+                let operation_id = format!("restart-{}", context.instance_id);
+                state.hold_recovery_prepare(&operation_id, &context)?;
+                (context, observation, generation)
             };
-            self.queue_bubble_appearance_error(
-                Message::MenuRestartApp,
-                &format!("{summary}\n\n{error}"),
-            );
+            let operation_id = format!("restart-{}", context.instance_id);
+            self.restart_handoff = Some((context.clone(), operation_id.clone(), None));
+            let accepted = (|| {
+                self.checkpoint_update_shutdown(&blockers)?;
+                self.freeze_update_controls(&operation_id);
+                spawn_restart_worker(&self.lifecycle_paths, &observation, &context.instance_id, generation)
+            })();
+            match accepted {
+                Ok(receiver) => self.restart_handoff = Some((context, operation_id, Some(receiver))),
+                Err(error) => {
+                    if self.release_local_shutdown_handoff(&context, &operation_id) {
+                        self.restart_handoff = None;
+                    } else if self.update_frozen.is_none() {
+                        self.freeze_update_controls(&operation_id);
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result { self.restart_error(&error); }
+    }
+
+    fn restart_error(&self, error: &str) {
+        let summary = match self.locale {
+            UiLocale::Ko => "앱을 재시작할 수 없습니다.",
+            UiLocale::En => "The app could not restart.",
+            UiLocale::Ja => "アプリを再起動できませんでした。",
+            UiLocale::ZhHans => "无法重新启动应用。",
+        };
+        self.queue_bubble_appearance_error(Message::MenuRestartApp, &format!("{summary}\n\n{error}"));
+    }
+
+    fn poll_restart(&mut self) {
+        let Some((context, operation_id, Some(receiver))) = self.restart_handoff.as_ref() else { return; };
+        let (outcome, proved_exit) = match receiver.try_recv() {
+            Ok(outcome) => (outcome, true),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => (
+                Err("restart worker disconnected; shutdown outcome is unknown and inputs remain locked".into()), false,
+            ),
+        };
+        let context = context.clone();
+        let operation_id = operation_id.clone();
+        self.restart_handoff = Some((context.clone(), operation_id.clone(), None));
+        if proved_exit && self.release_local_shutdown_handoff(&context, &operation_id) {
+            self.restart_handoff = None;
         }
-        // Only the detached CLI owns stop/start. In particular, do not invoke
-        // Quit, record a user stop here, or tear down before spawn succeeds.
+        let detail = outcome.err().unwrap_or_else(|| {
+            "restart worker exited unexpectedly while the source UI is still running".into()
+        });
+        self.restart_error(&detail);
     }
 
     fn quit(&mut self) {
@@ -15310,6 +15466,8 @@ mod tests {
             auto_check: true,
             receive_beta_updates: false,
             busy: false,
+            check_enabled: true,
+            recovery_enabled: false,
             settings_locked: false,
             status: CheckStatus::Checking,
             status_text: "Checking".into(),
@@ -18521,5 +18679,535 @@ mod tests {
         let cancel = AtomicBool::new(false);
         assert!(wait_for_main_result(receiver, &cancel, Duration::ZERO).is_err());
         assert!(cancel.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_recovery_ui_regressions() {
+    let mtm = MainThreadMarker::new()
+        .expect("update recovery AppKit regression must execute on the process main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    assert!(NSScreen::mainScreen(mtm).is_some(),
+        "update recovery AppKit regression requires a real Window Server/display service");
+    recovery_ui_regressions::run(mtm);
+    println!("production Ui recovery/reset/restart/detail-only AppKit regressions passed on the main thread");
+}
+
+#[cfg(test)]
+mod recovery_ui_regressions {
+    use super::*;
+    use desktop_pet_contracts::{ObservationSelection, ProfileStore};
+    use desktop_pet_update_coordinator::{executable_identity, InstallOrigin};
+    use objc2::runtime::Sel;
+    use objc2_app_kit::NSControl;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Debug)]
+    struct LaunchRequest {
+        reset: bool,
+        paths: Paths,
+        observation: ObservationSelection,
+        instance: String,
+        generation: u64,
+    }
+    struct LaunchHarness {
+        calls: Vec<LaunchRequest>,
+        next: Option<Result<mpsc::Receiver<Result<(), String>>, String>>,
+    }
+    thread_local! {
+        static LAUNCH: RefCell<Option<LaunchHarness>> = const { RefCell::new(None) };
+        static MODAL: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    // The only worker seam is the launch boundary, after production local
+    // admission, checkpointing and input freeze. Worker authentication/Stop/
+    // launch is separately exercised against the packaged signed app.
+    pub(super) fn intercept_launch(
+        reset: bool,
+        paths: &Paths,
+        observation: &ObservationSelection,
+        instance: &str,
+        generation: u64,
+    ) -> Option<Result<mpsc::Receiver<Result<(), String>>, String>> {
+        LAUNCH.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let harness = slot.as_mut()?;
+            harness.calls.push(LaunchRequest {
+                reset, paths: paths.clone(), observation: observation.clone(),
+                instance: instance.to_owned(), generation,
+            });
+            Some(harness.next.take().unwrap_or_else(|| Err("duplicate test worker launch".into())))
+        })
+    }
+
+    fn arm_launch() -> mpsc::Sender<Result<(), String>> {
+        let (sender, receiver) = mpsc::channel();
+        LAUNCH.with(|slot| *slot.borrow_mut() = Some(LaunchHarness {
+            calls: Vec::new(), next: Some(Ok(receiver)),
+        }));
+        sender
+    }
+
+    fn calls() -> Vec<LaunchRequest> {
+        LAUNCH.with(|slot| slot.borrow().as_ref().expect("launch seam is not armed").calls.clone())
+    }
+
+    pub(super) fn schedule_modal_action() {
+        if !MODAL.with(|slot| slot.borrow().is_some()) { return; }
+        let modes = NSArray::from_slice(&[unsafe { NSModalPanelRunLoopMode }]);
+        let block = RcBlock::new(|| {
+            let action = MODAL.with(|slot| slot.borrow_mut().take());
+            if let Some(action) = action {
+                let mtm = MainThreadMarker::new().unwrap();
+                assert!(NSApplication::sharedApplication(mtm).modalWindow().is_some(),
+                    "reset test callback did not run inside the actual native modal loop");
+                action();
+            }
+        });
+        unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+    }
+
+    fn modal_reply(response: isize, action: impl FnOnce() + 'static) {
+        MODAL.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            action();
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).stopModalWithCode(response);
+        })));
+    }
+
+    fn settle() {
+        for _ in 0..4 {
+            NSRunLoop::mainRunLoop().runMode_beforeDate(
+                unsafe { NSDefaultRunLoopMode }, &NSDate::dateWithTimeIntervalSinceNow(0.005),
+            );
+        }
+    }
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        paths: Paths,
+        shared: Arc<Mutex<AppState>>,
+        packs: Arc<PackService>,
+        context: UpdateContext,
+    }
+    impl Fixture {
+        fn new(mtm: MainThreadMarker) -> Self {
+            assert!(UI.with(|slot| slot.borrow().is_none()));
+            UI_USER_STOP_RECORDED.store(false, Ordering::Release);
+            let root = tempfile::Builder::new().prefix("pet-recovery-ui-")
+                .tempdir_in("/private/tmp").expect("cannot create isolated AppKit profile");
+            let root_path = root.path().canonicalize().unwrap();
+            assert!(root_path.starts_with("/private/tmp"));
+            let paths = Paths::resolve(
+                Some(&root_path.join("config")), Some(&root_path.join("state")),
+            ).unwrap();
+            let profile = ProfileStore::acquire(&paths.config_dir, &paths.state_dir).unwrap()
+                .with_preferences_validator(Preferences::validate_committed_object);
+            let mut prefs = Preferences::load_for_daemon(&paths.config_dir).unwrap();
+            prefs.set_integration_extensions(profile.clone(), Vec::new());
+            let mut candidate = prefs.candidate();
+            candidate.set_auto_update_check(false);
+            prefs.save_candidate(candidate, &paths.config_dir).unwrap();
+            let mut state = AppState::new();
+            state.set_lifecycle_extensions(Vec::new(), profile);
+            state.set_observation_selection(ObservationSelection::Auto).unwrap();
+            state.set_preferences(&prefs);
+            let automation = crate::automation::new_automation(
+                PresentationTarget::from_scene(&state.scene()), None,
+            ).unwrap();
+            let instance_id = lock_automation(&automation).instance().to_owned();
+            let executable = crate::bundle::executable().unwrap();
+            let context = UpdateContext {
+                running: executable_identity(&executable).unwrap(),
+                executable, version: desktop_pet_update_coordinator::identity::VERSION.into(),
+                instance_id, config_dir: paths.config_dir.clone(), state_dir: paths.state_dir.clone(),
+                #[cfg(desktop_pet_legacy)]
+                host_plugin_config_dir: None,
+                #[cfg(desktop_pet_legacy)]
+                herdr_socket: root_path.join("herdr.sock"),
+                // This executable is not an installed signed app. No fixture
+                // claims updater identity or creates an account-global reservation.
+                running_origin: Some(Box::new(InstallOrigin::Unknown {
+                    reason: "uninstalled AppKit regression executable".into(),
+                })),
+                assets_override: None, environment: BTreeMap::new(), locale: "en".into(),
+            };
+            state.set_update_context(context.clone()).unwrap();
+            let context = state.update_context().unwrap().clone();
+            state.set_automation(automation);
+            state.set_ui_ready();
+            let shared = Arc::new(Mutex::new(state));
+            let assets = crate::cli::resolve_assets(None)
+                .expect("production prepared character assets are required for AppKit regression");
+            let packs = PackService::new(paths.config_dir.clone(), assets.clone(), None);
+            packs.start().unwrap();
+            let selection = choose_startup_selection(&packs, &assets, mtm).unwrap();
+            let reference = selection.reference.clone();
+            let mut ui = Ui::new(
+                shared.clone(), packs.clone(), selection.prepared, prefs,
+                selection.override_active, paths.clone(), mtm,
+            ).unwrap();
+            packs.set_active(reference, selection.override_active, selection.error);
+            ui.sync_menu_panel_state();
+            UI.with(|slot| *slot.borrow_mut() = Some(ui));
+            let fixture = Self { _root: root, paths, shared, packs, context };
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                settle();
+                with_ui_internal(|ui| { ui.update_tick(); ui.refresh_character_menu(); });
+                if with_ui_read(|ui| ui.update_setting_admitted()
+                    && ui.restart_blockers_snapshot().is_empty()).unwrap_or(false) { break; }
+                assert!(Instant::now() < deadline, "production Ui never reached idle admission: {:?}",
+                    with_ui_read(|ui| (ui.app_update.model(ui.locale).detail, ui.restart_blockers_snapshot())));
+            }
+            fixture
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            MODAL.with(|slot| { slot.borrow_mut().take(); });
+            LAUNCH.with(|slot| { slot.borrow_mut().take(); });
+            let ui = UI.with(|slot| slot.borrow_mut().take());
+            if let Some(mut ui) = ui {
+                ui.shutdown();
+                drop(ui);
+            }
+            self.packs.shutdown();
+            settle();
+        }
+    }
+
+    fn find_control(view: &NSView, action: Sel) -> Option<Retained<NSControl>> {
+        if let Some(control) = view.downcast_ref::<NSControl>() {
+            if control.action() == Some(action) { return Some(control.retain()); }
+        }
+        view.subviews().iter().find_map(|child| find_control(&child, action))
+    }
+    fn card_control(ui: &Ui, action: Sel) -> Retained<NSControl> {
+        [
+            ui.menu_panel.window().contentView().unwrap(),
+            ui.menu_panel.detail_window().contentView().unwrap(),
+        ].iter().find_map(|view| find_control(view, action))
+            .expect("actual update card control is missing")
+    }
+
+    fn card_capabilities(mtm: MainThreadMarker) {
+        let _fixture = Fixture::new(mtm);
+        let models = crate::app_update::recovery_ui_regression_models(UiLocale::En);
+        let actions = [
+            sel!(recoverAppUpdate:), sel!(startAppUpdateRecovery:),
+            sel!(recoverStoppedOriginalAppUpdate:), sel!(showAppUpdateRecoveryProgress:),
+        ];
+        with_ui_internal(|ui| {
+            for (model, action) in models.iter().take(4).zip(actions) {
+                ui.menu_panel.refresh_app_update(model);
+                assert!(card_control(ui, action).isEnabled());
+                if action != sel!(showAppUpdateRecoveryProgress:) {
+                    assert!(model.busy && model.recovery_enabled,
+                        "authenticated unresolved history must remain busy but executable");
+                } else {
+                    assert!(!model.recovery_enabled);
+                }
+            }
+            ui.menu_panel.refresh_app_update(&models[4]);
+            assert!(card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+            assert!(!card_control(ui, sel!(toggleUpdateAutoCheck:)).isEnabled());
+            assert!(!card_control(ui, sel!(toggleUpdateBeta:)).isEnabled());
+            assert!(models[4].settings_locked && models[4].primary_action.is_none());
+            for original in &models {
+                let mut migrating = original.clone();
+                overlay_update_capabilities(&mut migrating, true, true, false);
+                ui.menu_panel.refresh_app_update(&migrating);
+                assert!(!card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+                assert!(!migrating.recovery_enabled && migrating.primary_action.is_none());
+                let mut frozen = original.clone();
+                overlay_update_capabilities(&mut frozen, false, false, true);
+                ui.menu_panel.refresh_app_update(&frozen);
+                assert!(!card_control(ui, sel!(checkAppUpdate:)).isEnabled());
+                if matches!(original.primary_action,
+                    Some(UpdateCardPrimaryAction::Recover | UpdateCardPrimaryAction::ShowProgress))
+                {
+                    assert_eq!(frozen.primary_action, original.primary_action);
+                    assert_eq!(frozen.recovery_enabled, original.recovery_enabled);
+                } else {
+                    assert!(!frozen.recovery_enabled && frozen.primary_action.is_none());
+                }
+            }
+        });
+    }
+
+    fn modal_and_revalidation(mtm: MainThreadMarker) {
+        {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let generation = desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir).unwrap();
+            modal_reply(NSAlertFirstButtonReturn, || {});
+            confirm_settings_reset_start();
+            assert!(calls().is_empty());
+            assert!(fixture.shared.lock().unwrap().update_mutation_allowed().is_ok());
+            assert!(with_ui_read(|ui| ui.update_frozen.is_none()).unwrap());
+            assert_eq!(desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir).unwrap(), generation);
+            let retried = Arc::new(AtomicBool::new(false));
+            let observed = retried.clone();
+            modal_reply(NSAlertFirstButtonReturn, move || { observed.store(true, Ordering::Release); });
+            UI.with(|slot| {
+                let _borrow = slot.borrow_mut();
+                confirm_settings_reset_start();
+                assert!(!retried.load(Ordering::Acquire));
+            });
+            settle();
+            assert!(retried.load(Ordering::Acquire), "real RefCell contention lost the reset request");
+            assert!(calls().is_empty());
+        }
+        // Every approval must recheck the live context, Stop fence, draft/IME
+        // state and migration after the real modal loop has released its borrow.
+        for change in 0..5 {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let shared = fixture.shared.clone();
+            let state_dir = fixture.paths.state_dir.clone();
+            modal_reply(NSAlertSecondButtonReturn, move || match change {
+                0 => {
+                    let mut state = shared.lock().unwrap();
+                    let mut changed = state.update_context().unwrap().clone();
+                    changed.instance_id.push_str("-changed");
+                    state.set_update_context(changed).unwrap();
+                }
+                1 => { desktop_pet_update_coordinator::protocol::record_user_stop(&state_dir).unwrap(); }
+                2 => with_ui_mut(|ui| ui.composer_view.setString(&NSString::from_str("new unsent draft"))),
+                3 => with_ui_mut(|ui| {
+                    let marked = NSString::from_str("조합");
+                    let _: () = unsafe { msg_send![&*ui.composer_view,
+                        setMarkedText: &*marked, selectedRange: NSRange::new(1, 0),
+                        replacementRange: NSRange::new(0, 0)] };
+                    assert!(ui.composer_marked());
+                }),
+                _ => with_ui_internal(|ui| ui.migration.busy = true),
+            });
+            confirm_settings_reset_start();
+            assert!(calls().is_empty(), "approval accepted stale reset state {change}");
+            assert!(with_ui_read(|ui| ui.settings_reset_handoff.is_none() && ui.update_frozen.is_none()).unwrap());
+        }
+        {
+            let fixture = Fixture::new(mtm);
+            let _sender = arm_launch();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let observed = stopped.clone();
+            MODAL.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+                with_ui_recovery_action(move |ui| {
+                    // Acquiring this mutable Ui inside runModal is the regression:
+                    // the old selector held the outer RefCell borrow throughout.
+                    observed.store(true, Ordering::Release);
+                    ui.quit();
+                });
+            })));
+            confirm_settings_reset_start();
+            assert!(stopped.load(Ordering::Acquire), "ordinary shutdown callback was blocked by the reset modal");
+            assert!(fixture.shared.lock().unwrap().scene().shutdown);
+            assert!(NSApplication::sharedApplication(mtm).modalWindow().is_none());
+            assert!(calls().is_empty());
+        }
+        assert!(UI.with(|slot| slot.borrow().is_none()));
+        confirm_settings_reset_start(); // An empty slot must terminate, not reschedule.
+        settle();
+    }
+
+    fn assert_native_input_locked(view: &NSTextView, ax: bool) {
+        let before = (view.string().to_string(), view.selectedRanges());
+        let marked_before: bool = unsafe { msg_send![view, hasMarkedText] };
+        let class = view.class().name().to_string_lossy();
+        let assert_unchanged = |stage: &str| {
+            let marked_after: bool = unsafe { msg_send![view, hasMarkedText] };
+            assert_eq!(view.string().to_string(), before.0,
+                "fenced native text changed in {class} after {stage}");
+            assert_eq!(view.selectedRanges(), before.1,
+                "fenced native selection changed in {class} after {stage}");
+            assert_eq!(marked_after, marked_before,
+                "fenced native marked-text state changed in {class} after {stage}");
+        };
+        let value = NSString::from_str("blocked native mutation");
+        let range = view.selectedRange();
+        let _: () = unsafe { msg_send![view, insertText: &*value, replacementRange: range] };
+        assert_unchanged("native insertion");
+        let _: () = unsafe { msg_send![view, setMarkedText: &*value,
+            selectedRange: NSRange::new(1, 0), replacementRange: range] };
+        assert_unchanged("native marked text");
+        if ax {
+            let _: () = unsafe { msg_send![view, setAccessibilityValue: &*value] };
+            assert_unchanged("AX value");
+            let _: () = unsafe { msg_send![view, setAccessibilitySelectedText: &*value] };
+            assert_unchanged("AX selected text");
+            let _: () = unsafe { msg_send![view, setAccessibilitySelectedTextRange: NSRange::new(0, 0)] };
+            assert_unchanged("AX selected text range");
+        }
+    }
+
+    fn protected_handoffs(mtm: MainThreadMarker) {
+        // Exercise both callers through their real admission/hold/checkpoint/
+        // freeze sequence. Unknown delivery and denied release never thaw.
+        for reset in [false, true] {
+            for terminal in 0..4 {
+                let fixture = Fixture::new(mtm);
+                let sender = arm_launch();
+                let palette = UI.with(|slot| {
+                    slot.borrow_mut().as_mut().unwrap().menu_panel.regression_color_editor()
+                });
+                palette.setSelectedRange(NSRange::new(1, 2));
+                let generation = desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir).unwrap();
+                with_ui_update_action({
+                    let context = fixture.context.clone();
+                    move |ui| {
+                        if reset { ui.reset_app_settings(context, generation); } else { ui.restart_app(); }
+                    }
+                });
+                let launched = calls();
+                assert_eq!(launched.len(), 1, "protected handoff did not reach the worker boundary");
+                assert_eq!(launched[0].reset, reset);
+                assert_eq!(launched[0].instance, fixture.context.instance_id);
+                assert_eq!(launched[0].paths.config_dir, fixture.paths.config_dir);
+                assert_eq!(launched[0].paths.state_dir, fixture.paths.state_dir);
+                assert_eq!(launched[0].observation, ObservationSelection::Auto);
+                assert_eq!(launched[0].generation, generation);
+                assert!(fixture.shared.lock().unwrap().update_mutation_allowed().is_err());
+                with_ui_internal(|ui| {
+                    assert!(ui.update_frozen.is_some());
+                    assert!(!ui.composer_view.isEditable());
+                    assert_native_input_locked(&ui.composer_view, true);
+                    assert_native_input_locked(&palette, true);
+                    ui.dialogue_editor.show();
+                    assert!(ui.shared.lock().unwrap().apply_control("passthrough").is_err());
+                });
+                let dialogue = with_ui_read(|ui| ui.dialogue_editor.regression_input())
+                    .expect("current production Ui disappeared during protected handoff");
+                assert_native_input_locked(&dialogue, true);
+                let mut ingress_ran = false;
+                with_ui_mut(|_| ingress_ran = true);
+                assert!(!ingress_ran, "UI mutation ingress was open during shutdown handoff");
+                match terminal {
+                    0 => { sender.send(Err("proved pre-Stop worker failure".into())).unwrap(); }
+                    1 => { drop(sender); }
+                    2 => {
+                        fixture.shared.lock().unwrap().request_shutdown();
+                        sender.send(Err("worker exited after external shutdown".into())).unwrap();
+                    }
+                    _ => {
+                        let mut foreign = fixture.context.clone();
+                        foreign.instance_id.push_str("-foreign");
+                        let mut replacement = AppState::new();
+                        replacement.set_update_context(foreign).unwrap();
+                        replacement.set_ui_ready();
+                        *fixture.shared.lock().unwrap() = replacement;
+                        sender.send(Err("proved exit observed by a foreign source".into())).unwrap();
+                    }
+                }
+                with_ui_internal(|ui| {
+                    if reset { ui.poll_settings_reset(); } else { ui.poll_restart(); }
+                    if terminal == 0 {
+                        assert!(ui.update_frozen.is_none());
+                        assert!(ui.shared.lock().unwrap().update_mutation_allowed().is_ok());
+                        assert!(ui.composer_view.isEditable());
+                        let inserted = NSString::from_str("input reopens on exact terminal proof");
+                        let _: () = unsafe { msg_send![&*ui.composer_view, insertText: &*inserted,
+                            replacementRange: NSRange::new(0, 0)] };
+                        assert_eq!(ui.composer_view.string().to_string(), inserted.to_string());
+                    } else {
+                        assert!(ui.update_frozen.is_some());
+                        let retained = if reset { &ui.settings_reset_handoff } else { &ui.restart_handoff };
+                        assert!(retained.as_ref().is_some_and(|(context, _, receiver)|
+                            context == &fixture.context && receiver.is_none()));
+                        assert_native_input_locked(&ui.composer_view, true);
+                        if reset { ui.poll_settings_reset(); } else { ui.poll_restart(); }
+                        assert!(ui.update_frozen.is_some());
+                    }
+                });
+            }
+        }
+        // Reporter construction can fail synchronously before a child exists.
+        // That path must also release only the exact still-live source.
+        for reset in [false, true] {
+            let fixture = Fixture::new(mtm);
+            LAUNCH.with(|slot| *slot.borrow_mut() = Some(LaunchHarness {
+                calls: Vec::new(), next: Some(Err("reporter thread unavailable".into())),
+            }));
+            let generation = desktop_pet_update_coordinator::protocol::stop_generation(&fixture.paths.state_dir).unwrap();
+            with_ui_update_action(move |ui| {
+                if reset {
+                    let context = ui.shared.lock().unwrap().update_context().unwrap().clone();
+                    ui.reset_app_settings(context, generation);
+                } else { ui.restart_app(); }
+            });
+            assert_eq!(calls().len(), 1);
+            assert!(fixture.shared.lock().unwrap().update_mutation_allowed().is_ok());
+            assert!(with_ui_read(|ui| ui.update_frozen.is_none()).unwrap());
+        }
+    }
+
+    fn detail_only_synchronization(mtm: MainThreadMarker) {
+        let fixture = Fixture::new(mtm);
+        let (editor, passthrough, alpha, scale, scroll) = UI.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let ui = slot.as_mut().unwrap();
+            let editor = ui.menu_panel.regression_color_editor();
+            ui.menu_panel.hide();
+            let (passthrough, alpha, scale, scroll) = ui.menu_panel.regression_appearance_controls();
+            (editor, passthrough, alpha, scale, scroll)
+        });
+        assert!(with_ui_read(|ui| !ui.menu_panel.is_visible() && ui.menu_panel.appearance_detail_visible()).unwrap());
+        editor.setString(&NSString::from_str("#123456"));
+        editor.setSelectedRange(NSRange::new(2, 3));
+        let marked = NSString::from_str("가");
+        let _: () = unsafe { msg_send![&*editor, setMarkedText: &*marked,
+            selectedRange: NSRange::new(1, 0), replacementRange: NSRange::new(3, 0)] };
+        let marked_before: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_before);
+        let draft = (editor.string().to_string(), editor.selectedRanges(), scroll.contentView().bounds().origin);
+        fixture.shared.lock().unwrap().apply_control("passthrough").unwrap();
+        fixture.shared.lock().unwrap().apply_control("alpha_passthrough").unwrap();
+        fixture.shared.lock().unwrap().apply_control("scale_up").unwrap();
+        fixture.shared.lock().unwrap().apply_control("bubble_left").unwrap();
+        with_ui_internal(|ui| { ui.refresh(); ui.refresh_character_menu(); });
+        settle();
+        assert_eq!(passthrough.state(), NSControlStateValueOn);
+        assert_eq!(alpha.state(), NSControlStateValueOn);
+        assert_eq!(scale.stringValue().to_string(), format!("{:.2}×", fixture.shared.lock().unwrap().scene().scale));
+        assert!(with_ui_read(|ui| ui.menu_panel.regression_selected_placement(
+            crate::bubble::BubblePlacement::Left,
+        )).unwrap());
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        let marked_after: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_after);
+        assert_eq!(scroll.contentView().bounds().origin, draft.2);
+        // The supported switch action consumes the same synchronized domain
+        // value, so its very next click must invert, not repeat, external state.
+        let _: () = unsafe { msg_send![&*passthrough, performClick: None::<&AnyObject>] };
+        settle();
+        with_ui_internal(|ui| { ui.refresh(); ui.refresh_character_menu(); });
+        assert!(!fixture.shared.lock().unwrap().scene().passthrough);
+        assert_eq!(passthrough.state(), objc2_app_kit::NSControlStateValueOff);
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        let marked_after_click: bool = unsafe { msg_send![&*editor, hasMarkedText] };
+        assert!(marked_after_click);
+        // A rejected domain action must also roll the native switch back using
+        // the same full synchronization, even with only this detail visible.
+        fixture.shared.lock().unwrap().hold_recovery_prepare("detail-rollback", &fixture.context).unwrap();
+        let _: () = unsafe { msg_send![&*passthrough, performClick: None::<&AnyObject>] };
+        settle();
+        with_ui_internal(|ui| { ui.refresh(); ui.refresh_character_menu(); });
+        assert!(!fixture.shared.lock().unwrap().scene().passthrough);
+        assert_eq!(passthrough.state(), objc2_app_kit::NSControlStateValueOff);
+        assert!(fixture.shared.lock().unwrap().release_recovery_prepare("detail-rollback", &fixture.context));
+        assert_eq!(editor.string().to_string(), draft.0);
+        assert_eq!(editor.selectedRanges(), draft.1);
+        assert_eq!(scroll.contentView().bounds().origin, draft.2);
+    }
+
+    pub(super) fn run(mtm: MainThreadMarker) {
+        card_capabilities(mtm);
+        modal_and_revalidation(mtm);
+        protected_handoffs(mtm);
+        detail_only_synchronization(mtm);
     }
 }

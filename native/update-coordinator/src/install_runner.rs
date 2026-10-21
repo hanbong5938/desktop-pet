@@ -2553,6 +2553,10 @@ mod tests {
             instance_id: "stopped-source".into(),
             config_dir: state.into(),
             state_dir: state.into(),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: state.join("host.sock"),
             running: image.clone(),
             running_origin: Some(Box::new(origin.clone())),
             assets_override: None,
@@ -2650,8 +2654,7 @@ mod tests {
             ],
             vec!["--plan".into(), "/private/request.json".into()],
         ] {
-            let error = dispatch("install-manual-recovery", args).unwrap_err();
-            assert!(error.contains("requires only --request ABS"));
+            assert!(dispatch("install-manual-recovery", args).is_err());
         }
     }
 

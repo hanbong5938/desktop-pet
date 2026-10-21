@@ -56,6 +56,11 @@ mod ui;
 mod update_card;
 mod worktree_confirmation;
 
+#[cfg(test)]
+fn main() {
+    ui::run_recovery_ui_regressions();
+}
+
 use desktop_pet_contracts::{
     Integration, IntegrationExtensions, ObservationSelection, ProfileStore,
 };

@@ -201,6 +201,66 @@ struct Status {
     assets_override: Option<PathBuf>,
 }
 
+#[derive(Deserialize)]
+struct OrdinaryStopReply {
+    version: u64,
+    command: String,
+    ok: bool,
+    shutdown: bool,
+    instance_id: String,
+    pid: u32,
+    executable_path: PathBuf,
+    running_sha256: String,
+    config_dir: PathBuf,
+    state_dir: PathBuf,
+    error: Option<String>,
+}
+
+fn verify_ordinary_stop_reply(source: &Status, reply: &OrdinaryStopReply) -> Result<(), String> {
+    if reply.version != NATIVE_STATUS_PROTOCOL
+        || reply.command != "stop"
+        || !reply.ok
+        || !reply.shutdown
+        || reply.pid != source.pid
+        || reply.instance_id != source.instance_id
+        || reply.executable_path != source.executable_path
+        || reply.running_sha256 != source.running_sha256
+        || reply.config_dir != source.config_dir
+        || reply.state_dir != source.state_dir
+    {
+        return Err(format!(
+            "ordinary Stop protocol/shutdown/source identity differs: {}",
+            reply.error.as_deref().unwrap_or("no source error supplied"),
+        ));
+    }
+    Ok(())
+}
+
+// Only the server records the Stop. The request is one-shot: even a missing
+// acknowledgement after a generation advance grants no recovery authority.
+fn ordinary_stop_once(
+    source: &Status,
+    source_generation: u64,
+    mut read_generation: impl FnMut() -> Result<u64, String>,
+    send: impl FnOnce() -> Result<OrdinaryStopReply, String>,
+) -> Result<u64, String> {
+    let next = source_generation
+        .checked_add(1)
+        .ok_or("Stop generation exhausted")?;
+    if read_generation()? != source_generation {
+        return Err("another Stop superseded recovery before the bound request".into());
+    }
+    send()
+        .and_then(|reply| verify_ordinary_stop_reply(source, &reply))
+        .map_err(|error| format!(
+            "Stop acknowledgement could not be verified; no retry or recovery handoff was performed: {error}"
+        ))?;
+    if read_generation()? != next {
+        return Err("Stop generation changed beyond this coordinator's approved Stop".into());
+    }
+    Ok(next)
+}
+
 #[cfg(desktop_pet_legacy)]
 fn deserialize_legacy_selection<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -484,7 +544,9 @@ fn no_spawn_original_disk_unchanged(plan: &UpdatePlan) -> Result<(), String> {
 fn socket(plan: &UpdatePlan) -> PathBuf {
     plan.context.state_dir.join("control.sock")
 }
-fn status(plan: &UpdatePlan) -> Result<Status, String> {
+fn observed_status(
+    plan: &UpdatePlan,
+) -> Result<(Status, coordinator::native_runtime::NativePeer), String> {
     let (reply, peer): (Status, _) = coordinator::native_runtime::exchange_observed(
         &socket(plan),
         &serde_json::json!({"version":NATIVE_STATUS_PROTOCOL,"command":"status"}),
@@ -497,7 +559,10 @@ fn status(plan: &UpdatePlan) -> Result<Status, String> {
     {
         return Err("native status command/protocol/kernel peer identity differs".into());
     }
-    Ok(reply)
+    Ok((reply, peer))
+}
+fn status(plan: &UpdatePlan) -> Result<Status, String> {
+    observed_status(plan).map(|(reply, _)| reply)
 }
 fn same_endpoint(actual: &Path, captured: &Path) -> bool {
     if !actual.is_absolute() || !captured.is_absolute() {
@@ -1451,8 +1516,31 @@ fn new_ready(
     pinned_image: Option<&ExecutableIdentity>,
     reply: &Status,
 ) -> Result<bool, String> {
+    if !new_ready_status_matches(plan, installed, purpose, reply)?
+        || process_path(reply.pid)?.as_deref() != Some(installed.image.path.as_path())
+        || !startup_quiescent(&plan.context.config_dir)?
+    {
+        return Ok(false);
+    }
+    // Purpose is explicit: a reproducible Local rebuild can have original bytes.
+    let current = match purpose {
+        StartupPurpose::Candidate => candidate(plan)?,
+        StartupPurpose::Original => coordinator::restored_original(plan)?,
+    };
+    // recover_reservation may have repaired partial release markers since the
+    // caller's first observation. Both purposes need the fresh durable pair.
+    let scope = snapshot(plan)?;
+    ready_pair_matches(plan, installed, &current, purpose, pinned_image, scope.as_ref())
+}
+
+fn new_ready_status_matches(
+    plan: &UpdatePlan,
+    installed: &VerifiedInstallation,
+    purpose: StartupPurpose,
+    reply: &Status,
+) -> Result<bool, String> {
     let image = &installed.image;
-    if !(reply.ok
+    Ok(reply.ok
         && reply.running
         && !reply.shutdown
         && reply.ready
@@ -1467,27 +1555,22 @@ fn new_ready(
         && same_endpoint(&status_endpoint(reply), &context_endpoint(plan))
         && status_contract_matches(reply, &expected_start_version(plan, purpose)?)
         && reply.assets_override == plan.context.assets_override
-        && status_mode_matches(plan, reply)?
-        && process_path(reply.pid)?.as_deref() == Some(image.path.as_path())
-        && startup_quiescent(&plan.context.config_dir)?)
-    {
-        return Ok(false);
-    }
-    // Purpose is explicit: a reproducible Local rebuild can have original bytes.
-    let current = match purpose {
-        StartupPurpose::Candidate => candidate(plan)?,
-        StartupPurpose::Original => coordinator::restored_original(plan)?,
-    };
-    let scope = snapshot(plan)?;
-    pin_state(pinned_image, scope.as_ref(), &current, purpose, plan)?;
-    if purpose == StartupPurpose::Candidate
-        && !scope.as_ref().is_some_and(|scope| {
+        && status_mode_matches(plan, reply)?)
+}
+
+fn ready_pair_matches(
+    plan: &UpdatePlan,
+    installed: &VerifiedInstallation,
+    current: &VerifiedInstallation,
+    purpose: StartupPurpose,
+    pinned_image: Option<&ExecutableIdentity>,
+    scope: Option<&protocol::ReservationSnapshot>,
+) -> Result<bool, String> {
+    pin_state(pinned_image, scope, current, purpose, plan)?;
+    Ok(current == installed
+        && scope.is_some_and(|scope| {
             scope.markers_complete && scope.startup_origin.as_ref() == Some(&installed.origin)
-        })
-    {
-        return Ok(false);
-    }
-    Ok(current == *installed)
+        }))
 }
 fn wait_new(
     scope: &mut NativeAdmission,
@@ -2694,23 +2777,6 @@ fn legacy_recheck(
     reject_other_active_profiles(plan)
 }
 
-fn legacy_cli(plan: &UpdatePlan, executable: &Path, command: &str) -> Command {
-    let mut cli = Command::new(executable);
-    cli.arg(command)
-        .arg("--config-dir")
-        .arg(&plan.context.config_dir)
-        .arg("--state-dir")
-        .arg(&plan.context.state_dir)
-        .env_clear()
-        .envs(&plan.context.environment)
-        .env_remove(identity::UPDATER_TOKEN_ENV)
-        .env_remove(identity::UPDATER_GENERATION_ENV)
-        .env_remove(MANUAL_START_GENERATION_ENV)
-        .current_dir(&plan.context.state_dir)
-        .stdin(Stdio::null());
-    cli
-}
-
 fn legacy_recover_command(plan: &UpdatePlan, helper: &ExecutableIdentity) -> Command {
     let mut command = Command::new(&helper.path);
     command
@@ -2856,33 +2922,28 @@ fn legacy_recovery_handoff(
         {
             return Err("signed coordinator or original source changed during consent".into());
         }
-        if !exact_ready_original(plan, &owner, &status(plan)?) {
+        let (live, peer) = observed_status(plan)?;
+        if !exact_ready_original(plan, &owner, &live) {
             return Err("original identity changed while awaiting Stop consent".into());
         }
         reject_other_install_processes(&scope, plan, Some(owner.original_pid))?;
-        let generation = owner
-            .stop_generation
-            .checked_add(1)
-            .ok_or("Stop generation exhausted")?;
         panel.show(
             Phase::Stopping,
             Some("Stopping only the captured original app; no installer or restart"),
         );
-        // Ordinary source CLI Stop records exactly one UserStop generation.
-        // This deliberately does not resurrect an updater control token.
-        legacy_child(
-            legacy_cli(plan, &original.image.path, "stop"),
-            panel,
-            true,
+        let generation = ordinary_stop_once(
+            &live,
+            owner.stop_generation,
+            || protocol::stop_generation(&plan.context.state_dir),
             || {
-                let current = protocol::stop_generation(&plan.context.state_dir)?;
-                if current != owner.stop_generation && current != generation {
-                    return Err("another Stop superseded recovery".into());
-                }
-                Ok(())
+                coordinator::native_runtime::exchange_observed_peer(
+                    &socket(plan),
+                    &peer,
+                    &serde_json::json!({"version": NATIVE_STATUS_PROTOCOL, "command": "stop"}),
+                    Duration::from_secs(2),
+                )
             },
         )?;
-        legacy_generation(plan, generation)?;
         wait_stop(plan, owner.original_pid, panel)?;
         legacy_recheck(plan, &owner, generation)?;
         reject_other_install_processes(&scope, plan, None)?;
@@ -3382,11 +3443,6 @@ fn recover_locked(
                 manager_failed = manager.exit_code != Some(0);
             }
             if no_spawn && !matches!(plan.action, coordinator::UpdateAction::ApplyInstalled) {
-                if !stopped(&plan, owner.original_pid)? {
-                    return Err("old daemon did not finish shutdown; no manager was run".into());
-                }
-                reject_other_install_processes(scope, &plan, None)?;
-                reject_other_active_profiles(&plan)?;
                 let original = coordinator::restored_original(&plan)?;
                 selected_origin(
                     durable_scope.as_ref(),
@@ -3394,6 +3450,35 @@ fn recover_locked(
                     StartupPurpose::Original,
                     &plan,
                 )?;
+                if let Ok(reply) = status(&plan) {
+                    if !new_ready(
+                        &plan,
+                        &original,
+                        StartupPurpose::Original,
+                        durable.candidate.as_ref(),
+                        &reply,
+                    )? {
+                        return Err("live daemon is not the durably approved ready original; reservation retained".into());
+                    }
+                    reject_other_install_processes(scope, &plan, Some(reply.pid))?;
+                    reject_other_active_profiles(&plan)?;
+                    if reservation.user_stop_requested()? {
+                        return Err("user stop pending while restored original is running; reservation retained until shutdown".into());
+                    }
+                    record.installed = false;
+                    record.applied = false;
+                    transition(&plan, &mut record, OperationPhase::Failed, "No manager ran; previously approved original is already ready; NOT updated")?;
+                    if reservation.user_stop_requested()? {
+                        return Err("user stopped restored original before reconciliation release; reservation retained".into());
+                    }
+                    reservation.release()?;
+                    return Ok(());
+                }
+                if !stopped(&plan, owner.original_pid)? {
+                    return Err("old daemon did not finish shutdown; no manager was run".into());
+                }
+                reject_other_install_processes(scope, &plan, None)?;
+                reject_other_active_profiles(&plan)?;
                 if reservation.user_stop_requested()? {
                     transition(&plan, &mut record, OperationPhase::UserStopped, "User stopped the original daemon before any manager ran; no automatic restart")?;
                 } else if presentation == RecoveryPresentation::NativeUi {
@@ -3432,6 +3517,9 @@ fn recover_locked(
                         return Err("user stopped original image during recovery".into());
                     }
                     transition(&plan, &mut record, OperationPhase::Failed, "No manager ran; separately approved original is ready on captured profile, NOT updated")?;
+                    if reservation.user_stop_requested()? {
+                        return Err("user stopped original image before recovery release".into());
+                    }
                 } else {
                     transition(&plan, &mut record, OperationPhase::Failed, "No installation manager ran; unchanged original app is stopped. Start it manually if desired")?;
                 }
@@ -3915,6 +4003,239 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    fn ordinary_stop_reply(source: &Status) -> serde_json::Value {
+        serde_json::json!({
+            "version": NATIVE_STATUS_PROTOCOL,
+            "command": "stop",
+            "ok": true,
+            "shutdown": true,
+            "instance_id": source.instance_id,
+            "pid": source.pid,
+            "executable_path": source.executable_path,
+            "running_sha256": source.running_sha256,
+            "config_dir": source.config_dir,
+            "state_dir": source.state_dir,
+            "ready": false,
+            "additional_ordinary_protocol_field": true,
+        })
+    }
+
+    #[test]
+    fn ordinary_stop_ack_requires_exact_protocol_shutdown_identity_and_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let source = live_status(&plan(root.path()));
+        let valid = ordinary_stop_reply(&source);
+        let reply: OrdinaryStopReply = serde_json::from_value(valid.clone()).unwrap();
+        assert!(verify_ordinary_stop_reply(&source, &reply).is_ok());
+        for (field, value) in [
+            ("version", serde_json::json!(2)),
+            ("command", serde_json::json!("status")),
+            ("ok", serde_json::json!(false)),
+            ("shutdown", serde_json::json!(false)),
+            ("pid", serde_json::json!(source.pid + 1)),
+            ("instance_id", serde_json::json!("another-instance")),
+            ("executable_path", serde_json::json!(root.path().join("other-image"))),
+            ("running_sha256", serde_json::json!("f".repeat(64))),
+            ("config_dir", serde_json::json!(root.path().join("other-config"))),
+            ("state_dir", serde_json::json!(root.path().join("other-state"))),
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = value;
+            let reply = serde_json::from_value(changed).unwrap();
+            assert!(verify_ordinary_stop_reply(&source, &reply).is_err(), "{field}");
+            let calls = std::cell::Cell::new(0);
+            let handoff = std::cell::Cell::new(false);
+            let error = ordinary_stop_once(
+                &source,
+                7,
+                || Ok(7),
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(reply)
+                },
+            )
+            .map(|_| handoff.set(true))
+            .unwrap_err();
+            assert!(error.contains("Stop acknowledgement could not be verified"));
+            assert_eq!(calls.get(), 1);
+            assert!(!handoff.get());
+        }
+    }
+
+    #[test]
+    fn ordinary_stop_generation_overflow_or_preexisting_stop_sends_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = live_status(&plan(root.path()));
+        for (approved, current) in [(u64::MAX, u64::MAX), (7, 8), (7, 9)] {
+            let sends = std::cell::Cell::new(0);
+            assert!(ordinary_stop_once(
+                &source,
+                approved,
+                || Ok(current),
+                || {
+                    sends.set(sends.get() + 1);
+                    Ok(serde_json::from_value(ordinary_stop_reply(&source)).unwrap())
+                },
+            )
+            .is_err());
+            assert_eq!(sends.get(), 0);
+        }
+    }
+
+    #[test]
+    fn ordinary_stop_accepts_only_exact_single_generation_advance() {
+        let root = tempfile::tempdir().unwrap();
+        let source = live_status(&plan(root.path()));
+        for after in [7, 8, 9] {
+            let generation = std::cell::Cell::new(7);
+            let sends = std::cell::Cell::new(0);
+            let result = ordinary_stop_once(
+                &source,
+                7,
+                || Ok(generation.get()),
+                || {
+                    sends.set(sends.get() + 1);
+                    generation.set(after);
+                    Ok(serde_json::from_value(ordinary_stop_reply(&source)).unwrap())
+                },
+            );
+            assert_eq!(result.is_ok(), after == 8);
+            assert_eq!(sends.get(), 1);
+        }
+    }
+
+    #[test]
+    fn ordinary_stop_unknown_ack_never_retries_or_hands_off_even_after_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let source = live_status(&plan(root.path()));
+        for cause in [
+            "incomplete control reply",
+            "control exchange deadline exceeded",
+            "invalid Stop JSON",
+            "control peer incarnation/main image changed after reply",
+        ] {
+            let generation = std::cell::Cell::new(7);
+            let sends = std::cell::Cell::new(0);
+            let handoffs = std::cell::Cell::new(0);
+            let error = ordinary_stop_once(
+                &source,
+                7,
+                || Ok(generation.get()),
+                || {
+                    sends.set(sends.get() + 1);
+                    generation.set(8);
+                    Err(cause.into())
+                },
+            )
+            .map(|_| handoffs.set(handoffs.get() + 1))
+            .unwrap_err();
+            assert!(error.contains(cause));
+            assert!(error.contains("no retry or recovery handoff was performed"));
+            assert_eq!(generation.get(), 8);
+            assert_eq!(sends.get(), 1);
+            assert_eq!(handoffs.get(), 0);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn ordinary_stop_bound_peer_records_once_and_lost_or_malformed_ack_cannot_handoff() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        for acknowledgement in ["verified", "lost", "malformed"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut plan = plan(root.path());
+            plan.running.path = process_path(std::process::id()).unwrap().unwrap();
+            plan.context.executable = plan.running.path.clone();
+            plan.context.running = plan.running.clone();
+            let source = live_status(&plan);
+            let mut status_reply = ordinary_stop_reply(&source);
+            status_reply["command"] = serde_json::json!("status");
+            status_reply["running"] = serde_json::json!(true);
+            status_reply["shutdown"] = serde_json::json!(false);
+            status_reply["ready"] = serde_json::json!(true);
+            status_reply["ui_ready"] = serde_json::json!(true);
+            status_reply["control_ready"] = serde_json::json!(true);
+            status_reply["app_version"] = serde_json::json!(source.app_version);
+            status_reply["updater_protocol"] = serde_json::json!(source.updater_protocol);
+            status_reply["observation_capability"] = serde_json::json!(source.observation_capability);
+            status_reply["integration_api"] = serde_json::json!(source.integration_api);
+            #[cfg(desktop_pet_legacy)]
+            {
+                status_reply["herdr_socket"] = serde_json::json!(source.herdr_socket);
+            }
+            let stop_reply = ordinary_stop_reply(&source);
+            let listener = std::os::unix::net::UnixListener::bind(socket(&plan)).unwrap();
+            fs::set_permissions(socket(&plan), fs::Permissions::from_mode(0o600)).unwrap();
+            let generation = Arc::new(AtomicU64::new(7));
+            let stops = Arc::new(AtomicUsize::new(0));
+            let server_generation = Arc::clone(&generation);
+            let server_stops = Arc::clone(&stops);
+            let server = thread::spawn(move || {
+                for command in ["status", "stop"] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let mut request = Vec::new();
+                    std::io::BufRead::read_until(
+                        &mut std::io::BufReader::new(&mut stream),
+                        b'\n',
+                        &mut request,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&request).unwrap(),
+                        serde_json::json!({"version": NATIVE_STATUS_PROTOCOL, "command": command}),
+                    );
+                    let reply = if command == "status" {
+                        &status_reply
+                    } else {
+                        server_stops.fetch_add(1, Ordering::SeqCst);
+                        server_generation.fetch_add(1, Ordering::SeqCst);
+                        if acknowledgement == "lost" {
+                            continue;
+                        }
+                        if acknowledgement == "malformed" {
+                            stream.write_all(b"{invalid Stop acknowledgement}\n").unwrap();
+                            continue;
+                        }
+                        &stop_reply
+                    };
+                    let mut bytes = serde_json::to_vec(reply).unwrap();
+                    bytes.push(b'\n');
+                    stream.write_all(&bytes).unwrap();
+                }
+                listener.set_nonblocking(true).unwrap();
+                listener
+            });
+            let (observed, peer) = observed_status(&plan).unwrap();
+            let handoffs = std::cell::Cell::new(0);
+            let result = ordinary_stop_once(
+                &observed,
+                7,
+                || Ok(generation.load(Ordering::SeqCst)),
+                || coordinator::native_runtime::exchange_observed_peer(
+                    &socket(&plan),
+                    &peer,
+                    &serde_json::json!({"version": NATIVE_STATUS_PROTOCOL, "command": "stop"}),
+                    Duration::from_secs(2),
+                ),
+            )
+            .map(|generation| {
+                handoffs.set(handoffs.get() + 1);
+                generation
+            });
+            assert_eq!(result.is_ok(), acknowledgement == "verified");
+            if let Err(error) = result {
+                assert!(error.contains("no retry or recovery handoff was performed"));
+            }
+            assert_eq!(generation.load(Ordering::SeqCst), 8);
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+            assert_eq!(handoffs.get(), if acknowledgement == "verified" { 1 } else { 0 });
+            let listener = server.join().unwrap();
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        }
+    }
+
     #[test]
     fn legacy_stop_refuses_unknown_manager_and_changed_original_record() {
         let root = tempfile::tempdir().unwrap();
@@ -3944,6 +4265,24 @@ mod tests {
         state.applied = false;
         state.phase = OperationPhase::UserStopped;
         assert!(!legacy_stop_eligible(&state));
+    }
+
+    #[test]
+    fn no_spawn_recovery_rejects_every_conflicting_manager_or_replacement_artifact() {
+        for suffix in ["manager.json", "manager.stdout", "manager.stderr", "replacement.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let plan = plan(root.path());
+            let mut record = record(&plan);
+            record.phase = OperationPhase::Failed;
+            let path = protocol::private_updates(&plan.context.state_dir)
+                .unwrap()
+                .join(format!("{}.{}", plan.operation_id, suffix));
+            protocol::write_private_new(&path, b"unaccounted execution evidence", 0o600).unwrap();
+            assert!(!manager_artifacts_absent(&plan).unwrap(), "{suffix}");
+            assert!(!no_spawn_proved(&record, None, false), "{suffix}");
+            assert!(legacy_manager_quiet(&plan, &record).is_err(), "{suffix}");
+            assert_eq!(fs::read(&path).unwrap(), b"unaccounted execution evidence");
+        }
     }
 
     #[test]
@@ -4524,6 +4863,136 @@ mod tests {
         assert!(
             selected_origin(Some(&selected), &original, StartupPurpose::Original, &plan).is_err()
         );
+    }
+
+    #[test]
+    fn new_original_and_candidate_readiness_require_exact_complete_startup_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(root.path());
+        let installed = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        let exact = protocol::ReservationSnapshot {
+            startup_origin: Some(installed.origin.clone()),
+            markers_complete: true,
+        };
+        let unselected = protocol::ReservationSnapshot {
+            startup_origin: None,
+            markers_complete: true,
+        };
+        let partial = protocol::ReservationSnapshot {
+            startup_origin: Some(installed.origin.clone()),
+            markers_complete: false,
+        };
+        let foreign = protocol::ReservationSnapshot {
+            startup_origin: Some(InstallOrigin::Source {
+                root: root.path().join("different-checkout"),
+            }),
+            markers_complete: true,
+        };
+        for purpose in [StartupPurpose::Original, StartupPurpose::Candidate] {
+            let ready = |current: &VerifiedInstallation, scope| {
+                ready_pair_matches(
+                    &plan,
+                    &installed,
+                    current,
+                    purpose,
+                    Some(&installed.image),
+                    scope,
+                )
+                .unwrap_or(false)
+            };
+            assert!(ready(&installed, Some(&exact)));
+            for scope in [None, Some(&unselected), Some(&partial), Some(&foreign)] {
+                assert!(!ready(&installed, scope));
+            }
+            let mut changed = installed.clone();
+            changed.image.sha256 = "f".repeat(64);
+            assert!(!ready(&changed, Some(&exact)));
+            changed = installed.clone();
+            changed.image.path = root.path().join("different-image");
+            assert!(!ready(&changed, Some(&exact)));
+            changed = installed.clone();
+            changed.origin = foreign.startup_origin.clone().unwrap();
+            assert!(!ready(&changed, Some(&exact)));
+        }
+        // Approval-free cleanup of the captured original is intentionally a
+        // different path from recognition of a newly started instance.
+        assert!(selected_origin(Some(&unselected), &installed, StartupPurpose::Original, &plan).is_ok());
+        assert!(ready_pair_matches(
+            &plan,
+            &installed,
+            &installed,
+            StartupPurpose::Original,
+            None,
+            Some(&exact),
+        )
+        .unwrap());
+        assert!(!ready_pair_matches(
+            &plan,
+            &installed,
+            &installed,
+            StartupPurpose::Original,
+            None,
+            Some(&unselected),
+        )
+        .unwrap());
+        assert!(ready_pair_matches(
+            &plan,
+            &installed,
+            &installed,
+            StartupPurpose::Candidate,
+            None,
+            Some(&exact),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn new_original_readiness_rejects_wrong_live_identity_profile_selection_and_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(root.path());
+        let original = VerifiedInstallation {
+            image: plan.running.clone(),
+            origin: plan.origin.clone(),
+        };
+        let mut live = live_status(&plan);
+        live.instance_id = "previously-approved-new-original".into();
+        assert!(new_ready_status_matches(&plan, &original, StartupPurpose::Original, &live).unwrap());
+        for field in [
+            "ok", "running", "shutdown", "ready", "ui_ready", "control_ready", "pid",
+            "instance_id", "running_sha256", "executable_path", "config_dir", "state_dir",
+            "app_version", "updater_protocol", "observation_capability", "integration_api",
+            "assets_override", "observation_mode",
+        ] {
+            let mut changed = live.clone();
+            match field {
+                "ok" => changed.ok = false,
+                "running" => changed.running = false,
+                "shutdown" => changed.shutdown = true,
+                "ready" => changed.ready = false,
+                "ui_ready" => changed.ui_ready = false,
+                "control_ready" => changed.control_ready = false,
+                "pid" => changed.pid = 0,
+                "instance_id" => changed.instance_id = plan.context.instance_id.clone(),
+                "running_sha256" => changed.running_sha256 = "f".repeat(64),
+                "executable_path" => changed.executable_path = root.path().join("wrong-image"),
+                "config_dir" => changed.config_dir = root.path().join("wrong-config"),
+                "state_dir" => changed.state_dir = root.path().join("wrong-state"),
+                "app_version" => changed.app_version = "0.0.0".into(),
+                "updater_protocol" => changed.updater_protocol += 1,
+                "observation_capability" => changed.observation_capability += 1,
+                "integration_api" => changed.integration_api += 1,
+                "assets_override" => changed.assets_override = Some(root.path().join("other-assets")),
+                "observation_mode" => changed.observation_mode = Some(ObservationSelection::Provider("tern".into())),
+                _ => unreachable!(),
+            }
+            assert!(
+                !new_ready_status_matches(&plan, &original, StartupPurpose::Original, &changed).unwrap(),
+                "{field}",
+            );
+        }
     }
 
     #[test]

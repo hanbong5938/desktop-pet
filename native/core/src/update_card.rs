@@ -76,6 +76,10 @@ pub(crate) struct UpdateCardModel {
     pub(crate) receive_beta_updates: bool,
     pub(crate) busy: bool,
     pub(crate) settings_locked: bool,
+    // Execution capabilities come from the service, independently of policy
+    // locking and unresolved history's busy presentation.
+    pub(crate) check_enabled: bool,
+    pub(crate) recovery_enabled: bool,
     // Tint only; status_text carries the precise localized operation/check outcome.
     pub(crate) status: CheckStatus,
     pub(crate) status_text: String,
@@ -371,7 +375,6 @@ impl AppUpdateCard {
         );
         self.check.setTitle(&NSString::from_str(check_title));
         accessibility(&self.check, check_title);
-        self.check.setEnabled(!model.busy);
         let (symbol, tint) = match model.status {
             CheckStatus::Current | CheckStatus::Installed | CheckStatus::Applied => {
                 ("✓", NSColor::systemGreenColor())
@@ -546,7 +549,7 @@ impl AppUpdateCard {
                 UpdateCardPrimaryAction::Recover
                 | UpdateCardPrimaryAction::RecoverStart
                 | UpdateCardPrimaryAction::RecoverStoppedOriginal,
-            ) => !model.busy,
+            ) => model.recovery_enabled,
             Some(UpdateCardPrimaryAction::Update) => {
                 !model.busy && !model.settings_locked && model.action.is_some()
             }
@@ -558,8 +561,7 @@ impl AppUpdateCard {
             }
             None => false,
         });
-        self.check
-            .setEnabled(!model.busy && !model.settings_locked && !recovery);
+        self.check.setEnabled(model.check_enabled);
         self.download
             .setHidden(model.download_url.is_none() || recovery);
         self.download

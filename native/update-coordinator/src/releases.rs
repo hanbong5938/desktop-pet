@@ -861,18 +861,16 @@ mod tests {
         };
         let candidates = parse(vec![beta.clone(), newer_stable.clone(), stable.clone()]);
         assert_eq!(candidates.len(), 3);
-        let direct = select_candidate(&candidates, "0.4.12", UpdatePolicy::StableAndBeta)
-            .unwrap()
-            .unwrap();
-        assert_eq!(direct.version, "0.4.13");
+        let direct = select_candidate(&candidates, "0.4.12", UpdatePolicy::StableAndBeta);
         let beta_only = parse(vec![beta.clone()]);
-        assert_eq!(
-            select_candidate(&beta_only, "0.4.12", UpdatePolicy::StableAndBeta)
-                .unwrap()
-                .unwrap()
-                .version,
-            "0.4.13-beta.1"
-        );
+        let beta_direct = select_candidate(&beta_only, "0.4.12", UpdatePolicy::StableAndBeta);
+        if crate::identity::LEGACY {
+            assert!(direct.is_err());
+            assert!(beta_direct.is_err());
+        } else {
+            assert_eq!(direct.unwrap().unwrap().version, "0.4.13");
+            assert_eq!(beta_direct.unwrap().unwrap().version, "0.4.13-beta.1");
+        }
         let target = select_neutral_migration_candidate(candidates).unwrap();
         assert_eq!(target.version, "0.4.12");
         assert_eq!(target.channel, ReleaseChannel::Stable);
