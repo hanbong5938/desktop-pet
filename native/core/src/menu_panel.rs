@@ -3372,17 +3372,24 @@ impl MenuPanel {
             .setFrame(rect(14.0, 8.0, (width - 28.0).max(1.0), 20.0));
         self.language_popup
             .setFrame(rect(14.0, 32.0, (width - 28.0).max(1.0), 28.0));
-        let mut y = 88.0;
+        self.detail_openers[2].setFrame(rect(8.0, 88.0, width, 28.0));
+        let mut y = 124.0;
         let height = self.lifecycle_card.height(width);
         self.lifecycle_card.layout(rect(8.0, y, width, height));
         y += height + 8.0;
         let height = self.update_card.height(width);
         self.update_card.layout(rect(8.0, y, width, height));
         y += height + 8.0;
-        for index in [2, 3, 5] {
-            self.detail_openers[index].setFrame(rect(8.0, y, width, 28.0));
-            y += 36.0;
+        let link_width = ((width - 8.0) * 0.5).max(1.0);
+        for (column, index) in [3, 5].into_iter().enumerate() {
+            self.detail_openers[index].setFrame(rect(
+                8.0 + column as f64 * (link_width + 8.0),
+                y,
+                link_width,
+                28.0,
+            ));
         }
+        y += 36.0;
         y + 8.0
     }
 

@@ -2,7 +2,7 @@ use crate::i18n::{text, Message, UiLocale};
 use crate::ui::MenuTarget;
 use desktop_pet_update_coordinator::{CheckStatus, ReleaseCandidate, UpdateAction};
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBezelStyle, NSBezierPath, NSButton, NSButtonType, NSColor, NSControlSize,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSLineBreakMode, NSSwitch, NSTextField,
@@ -13,11 +13,14 @@ use objc2_foundation::{
     NSSize, NSString, NSTimeZone,
 };
 
+const UPDATE_HEADER_HEIGHT: f64 = 24.0;
+
 // SAFETY: AppKit owns this decorative view and all calls are on the main thread.
 define_class!(
     #[unsafe(super = NSView)]
     #[thread_kind = MainThreadOnly]
     #[name = "OMPetAppUpdateCardView"]
+    #[ivars = f64]
     struct CardView;
     unsafe impl NSObjectProtocol for CardView {}
     impl CardView {
@@ -26,13 +29,18 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let bounds = self.bounds();
+            let frame = self.bounds();
+            let top = *self.ivars();
+            let bounds = NSRect::new(
+                NSPoint::new(0.0, top),
+                NSSize::new(frame.size.width, (frame.size.height - top).max(0.0)),
+            );
             NSColor::colorWithSRGBRed_green_blue_alpha(0.161, 0.161, 0.176, 1.0).setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bounds, 10.0, 10.0).fill();
             NSColor::colorWithSRGBRed_green_blue_alpha(0.28, 0.28, 0.32, 0.5).setStroke();
             let border = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                 NSRect::new(
-                    NSPoint::new(0.5, 0.5),
+                    NSPoint::new(0.5, top + 0.5),
                     NSSize::new((bounds.size.width - 1.0).max(1.0), (bounds.size.height - 1.0).max(1.0)),
                 ),
                 9.5,
@@ -45,8 +53,8 @@ define_class!(
 );
 
 impl CardView {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(top: f64, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(top);
         unsafe { msg_send![super(this), initWithFrame: NSRect::default()] }
     }
 }
@@ -139,9 +147,9 @@ fn basic_status(model: &UpdateCardModel) -> &str {
 
 impl AppUpdateCard {
     pub(crate) fn new(locale: UiLocale, target: &MenuTarget, mtm: MainThreadMarker) -> Self {
-        let view = CardView::new(mtm);
-        let settings_view = CardView::new(mtm);
-        let details_view = CardView::new(mtm);
+        let view = CardView::new(UPDATE_HEADER_HEIGHT, mtm);
+        let settings_view = CardView::new(0.0, mtm);
+        let details_view = CardView::new(0.0, mtm);
         for root in [&view, &settings_view, &details_view] {
             unsafe {
                 let _: () = msg_send![&**root, setAccessibilityElement: false];
@@ -180,6 +188,17 @@ impl AppUpdateCard {
         let history = diagnostic_label(10.0, mtm);
         let diagnostics = diagnostic_label(10.0, mtm);
         let last_checked = diagnostic_label(10.0, mtm);
+        for field in [
+            &source,
+            &release,
+            &detail,
+            &relocation_detail,
+            &history,
+            &diagnostics,
+            &last_checked,
+        ] {
+            field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(10.5, 0.0)));
+        }
         let check = button(target, sel!(checkAppUpdate:), mtm);
         let apply = button(target, sel!(applyAppUpdate:), mtm);
         let download = button(target, sel!(downloadAppUpdate:), mtm);
@@ -507,26 +526,22 @@ impl AppUpdateCard {
 
     fn layout_contents(&self, width: f64, apply: bool) -> f64 {
         let full = (width - 28.0).max(1.0);
-        let mut y = 12.0;
-        place(&self.heading, 14.0, full, 19.0, &mut y, apply);
-        y += 5.0;
+        if apply {
+            self.status_icon.setFrame(rect(2.0, 0.0, 18.0, 18.0));
+            self.heading
+                .setFrame(rect(24.0, 0.0, (width - 24.0).max(1.0), 19.0));
+        }
+        let mut y = UPDATE_HEADER_HEIGHT + 8.0;
         if !self.running.isHidden() {
             place(&self.running, 14.0, full, 14.0, &mut y, apply);
-            y += 5.0;
+            y += 2.0;
         }
-        let status_width = (full - 25.0).max(1.0);
-        let status_height = measured(&self.status, status_width).max(20.0);
-        if apply {
-            self.status_icon.setFrame(rect(14.0, y, 19.0, 20.0));
-            self.status
-                .setFrame(rect(38.0, y, status_width, status_height));
-        }
-        y += status_height;
+        place(&self.status, 14.0, full, 18.0, &mut y, apply);
         if !self.beta_summary.isHidden() {
-            y += 4.0;
+            y += 2.0;
             place(&self.beta_summary, 14.0, full, 14.0, &mut y, apply);
         }
-        y += 8.0;
+        y += 5.0;
         let mut x = 14.0;
         let mut row_y = y;
         for button in [&self.check, &self.apply, &self.download, &self.migration] {
@@ -543,7 +558,7 @@ impl AppUpdateCard {
             }
             x += button_width + 8.0;
         }
-        row_y + 39.0
+        row_y + 33.0
     }
 
     fn layout_settings_contents(&self, width: f64, apply: bool) -> f64 {
@@ -554,21 +569,27 @@ impl AppUpdateCard {
             (&self.auto_label, &self.auto_help, &self.auto_switch),
             (&self.beta_label, &self.beta_help, &self.beta_switch),
         ] {
-            let height = measured(label, beside_switch).max(30.0);
+            let label_height = measured(label, beside_switch);
+            let height = label_height.max(22.0);
             if apply {
-                label.setFrame(rect(14.0, y, beside_switch, height));
-                switch.setFrame(rect((width - 58.0).max(0.0), y, 46.0, 30.0));
+                label.setFrame(rect(
+                    14.0,
+                    y + (height - label_height) * 0.5,
+                    beside_switch,
+                    label_height,
+                ));
+                switch.setFrame(rect((width - 58.0).max(0.0), y - 4.0, 46.0, 30.0));
             }
-            y += height + 3.0;
+            y += height + 2.0;
             place(help, 14.0, full, 14.0, &mut y, apply);
-            y += 10.0;
+            y += 6.0;
         }
         y + 4.0
     }
 
     fn layout_details_contents(&self, width: f64, apply: bool) -> f64 {
         let full = (width - 28.0).max(1.0);
-        let mut y = 12.0;
+        let mut y = 8.0;
         for field in [
             &self.source,
             &self.release,
@@ -582,7 +603,7 @@ impl AppUpdateCard {
                 continue;
             }
             place(field, 14.0, full, 14.0, &mut y, apply);
-            y += 8.0;
+            y += 2.0;
         }
         y + 6.0
     }
