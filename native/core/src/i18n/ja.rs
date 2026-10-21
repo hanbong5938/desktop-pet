@@ -83,6 +83,7 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::ContextHideBubble => "吹き出しを隠す",
         Message::MenuBarMenuTitle => desktop_pet_update_coordinator::identity::DISPLAY_NAME,
         Message::RecoverCharacterInteraction => "キャラクターの表示と操作を復旧",
+        Message::MenuRestartApp => "アプリを再起動",
         Message::MenuQuit => "終了",
         Message::LifecycleHeading => "アプリの起動",
         Message::LifecycleAutoStart => "連携からの自動起動を許可",

@@ -2830,6 +2830,15 @@ define_class!(
             show_character_diagnostics();
         }
 
+        #[unsafe(method(restartApp:))]
+        fn restart_app(&self, _sender: Option<&AnyObject>) {
+            // Leave button/menu tracking before taking the same draft/IME
+            // snapshot used by update preparation.
+            let modes = NSArray::from_slice(&[unsafe { NSDefaultRunLoopMode }]);
+            let block = RcBlock::new(|| with_ui_update_action(|ui| ui.restart_app()));
+            unsafe { NSRunLoop::mainRunLoop().performInModes_block(&modes, &block) };
+        }
+
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
@@ -13920,6 +13929,40 @@ impl Ui {
             }
         }
         self.sync_character_menu_frame();
+    }
+
+    fn restart_app(&mut self) {
+        let result = (|| -> Result<(), String> {
+            if !self.update_setting_admitted() || self.migration.busy {
+                return Err("application update, migration or manager work is pending".into());
+            }
+            let blockers = self.restart_blockers_snapshot();
+            if !blockers.is_empty() {
+                return Err(blockers.join("; "));
+            }
+            let state = self
+                .shared
+                .lock()
+                .map_err(|_| "native state lock is poisoned")?;
+            state.update_mutation_allowed()?;
+            // The live selection can differ from both the saved preference
+            // and inherited startup environment.
+            crate::cli::spawn_restart(&self.lifecycle_paths, &state.observation_mode())
+        })();
+        if let Err(error) = result {
+            let summary = match self.locale {
+                UiLocale::Ko => "앱을 재시작할 수 없습니다. 현재 앱은 계속 실행됩니다.",
+                UiLocale::En => "The app could not restart. The current app remains open.",
+                UiLocale::Ja => "アプリを再起動できませんでした。現在のアプリは開いたままです。",
+                UiLocale::ZhHans => "无法重新启动应用。当前应用将保持运行。",
+            };
+            self.queue_bubble_appearance_error(
+                Message::MenuRestartApp,
+                &format!("{summary}\n\n{error}"),
+            );
+        }
+        // Only the detached CLI owns stop/start. In particular, do not invoke
+        // Quit, record a user stop here, or tear down before spawn succeeds.
     }
 
     fn quit(&mut self) {

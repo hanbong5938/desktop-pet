@@ -772,6 +772,7 @@ pub(crate) struct MenuPanel {
     presentation_error: Option<String>,
     status_text: String,
     reset: Retained<NSButton>,
+    restart: Retained<NSButton>,
     quit: Retained<NSButton>,
     selected_tab: SettingsTab,
     tab_offsets: Cell<[f64; 3]>,
@@ -1576,14 +1577,23 @@ impl MenuPanel {
             sel!(resetPosition:),
             mtm,
         );
+        let restart = make_action_button(
+            text(locale, Message::MenuRestartApp),
+            target,
+            sel!(restartApp:),
+            mtm,
+        );
         let quit = make_action_button(text(locale, Message::MenuQuit), target, sel!(quit:), mtm);
         reset.setKeyEquivalent(&NSString::from_str(""));
+        restart.setKeyEquivalent(&NSString::from_str(""));
         quit.setKeyEquivalent(&NSString::from_str(""));
         set_accessibility_label(&*reset, text(locale, Message::ResetPosition));
+        set_accessibility_label(&*restart, text(locale, Message::MenuRestartApp));
         set_accessibility_label(&*quit, text(locale, Message::MenuQuit));
         root.addSubview(&status);
         character_tab.addSubview(&reset);
         root.addSubview(&footer_details);
+        root.addSubview(&restart);
         root.addSubview(&quit);
 
         let mut panel = Self {
@@ -1707,6 +1717,7 @@ impl MenuPanel {
             locale,
             status,
             reset,
+            restart,
             quit,
             selected_tab: SettingsTab::Appearance,
             tab_offsets: Cell::new([0.0; 3]),
@@ -2849,6 +2860,8 @@ impl MenuPanel {
         self.localize_connection();
         self.reset
             .setTitle(&NSString::from_str(text(locale, Message::ResetPosition)));
+        self.restart
+            .setTitle(&NSString::from_str(text(locale, Message::MenuRestartApp)));
         self.quit
             .setTitle(&NSString::from_str(text(locale, Message::MenuQuit)));
         set_accessibility_label(&*self.scale_down, text(locale, Message::ScaleDown));
@@ -2874,6 +2887,7 @@ impl MenuPanel {
             text(locale, Message::MenuAlphaPassthrough),
         );
         set_accessibility_label(&*self.reset, text(locale, Message::ResetPosition));
+        set_accessibility_label(&*self.restart, text(locale, Message::MenuRestartApp));
         set_accessibility_label(&*self.quit, text(locale, Message::MenuQuit));
         set_tooltip(&self.quit, text(locale, Message::LifecycleQuitHelp));
         let _: () = unsafe {
@@ -3175,6 +3189,7 @@ impl MenuPanel {
             .max(SCROLL_TOP + 8.0);
         let button_h = 28.0;
         let quit_w = 48.0;
+        let restart_w = 112.0;
         let details_w = if self.presentation_error.is_some() {
             70.0
         } else {
@@ -3182,15 +3197,20 @@ impl MenuPanel {
         };
         let right_margin = 14.0;
         let quit_x = width - right_margin - quit_w;
-        let status_w = (quit_x - details_w - 28.0).max(1.0);
+        let restart_x = quit_x - 8.0 - restart_w;
+        let status_w = (restart_x - details_w - 28.0).max(1.0);
 
         self.status.setFrame(NSRect::new(
             NSPoint::new(16.0, footer_y),
             NSSize::new(status_w, 32.0),
         ));
         self.footer_details.setFrame(NSRect::new(
-            NSPoint::new(quit_x - details_w - 8.0, footer_y + 2.0),
+            NSPoint::new(restart_x - details_w - 8.0, footer_y + 2.0),
             NSSize::new(details_w, button_h),
+        ));
+        self.restart.setFrame(NSRect::new(
+            NSPoint::new(restart_x, footer_y + 2.0),
+            NSSize::new(restart_w, button_h),
         ));
         self.quit.setFrame(NSRect::new(
             NSPoint::new(quit_x, footer_y + 2.0),

@@ -83,6 +83,7 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::ContextHideBubble => "隐藏气泡窗口",
         Message::MenuBarMenuTitle => desktop_pet_update_coordinator::identity::DISPLAY_NAME,
         Message::RecoverCharacterInteraction => "显示角色并恢复交互",
+        Message::MenuRestartApp => "重启应用",
         Message::MenuQuit => "退出",
         Message::LifecycleHeading => "应用启动",
         Message::LifecycleAutoStart => "允许集成自动启动",

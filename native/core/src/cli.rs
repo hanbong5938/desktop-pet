@@ -35,7 +35,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,10 @@ pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(
 );
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Retain parsed integration options without configuring extensions again when
+// Settings launches the existing restart command.
+static DAEMON_RESTART_OPTIONS: OnceLock<Vec<OsString>> = OnceLock::new();
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const LOG_MODE: u32 = 0o600;
 const MAX_SOURCE_PATH_BYTES: usize = 4096;
@@ -668,6 +672,18 @@ pub(crate) fn run(composition: Arc<Composition>) -> Result<(), String> {
             Err(env::VarError::NotPresent) => false,
             _ => return Err("invalid DESKTOP_PET_AUTOMATIC_START".into()),
         };
+        let mut restart_options = cli.extension_options;
+        if assets_override {
+            restart_options.push("--assets".into());
+            restart_options.push(
+                assets
+                    .as_ref()
+                    .ok_or("daemon assets unavailable")?
+                    .as_os_str()
+                    .to_owned(),
+            );
+        }
+        let _ = DAEMON_RESTART_OPTIONS.set(restart_options);
         return daemon::run(DaemonConfig {
             paths,
             assets: assets.ok_or("daemon assets unavailable")?,
@@ -1842,6 +1858,55 @@ fn spawn_daemon(
         .spawn()
         .map(|child| child.id())
         .map_err(|error| format!("cannot start detached desktop-pet daemon: {error}"))
+}
+
+pub(crate) fn spawn_restart(
+    paths: &Paths,
+    observation_mode: &ObservationSelection,
+) -> Result<(), String> {
+    let options = DAEMON_RESTART_OPTIONS
+        .get()
+        .ok_or("running daemon restart options are unavailable")?;
+    let executable = bundle::executable()
+        .map_err(|error| format!("cannot resolve running executable: {error}"))?;
+    let mut command = Command::new(executable);
+    command
+        .arg("restart")
+        .arg("--config-dir")
+        .arg(&paths.config_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .arg("--host")
+        .arg(observation_mode.as_str())
+        .args(options)
+        .env("DESKTOP_PET_CONFIG_DIR", &paths.config_dir)
+        .env("DESKTOP_PET_STATE_DIR", &paths.state_dir)
+        .env(OBSERVATION_SELECTION_ENV, observation_mode.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Retain integration context, not a completed startup handshake or updater
+    // authorization: restart's stop advances the user-stop generation.
+    command
+        .env_remove("DESKTOP_PET_STARTUP_TOKEN")
+        .env_remove("DESKTOP_PET_UPDATER_GENERATION")
+        .env_remove("DESKTOP_PET_UPDATER_TOKEN");
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot start detached restart command: {error}"))?;
+    // The command owns stop/start. Never wait for it on AppKit's main thread.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn print_response(response: &ControlResponse) -> Result<(), String> {

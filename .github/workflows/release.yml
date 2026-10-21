@@ -3,7 +3,7 @@ name: Release Desktop Pet
 on:
   push:
     tags:
-      - "v0.4.17-beta.2"
+      - "v0.4.17-beta.3"
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.17-beta.2'
+    if: github.repository == 'hanbong5938/desktop-pet' && github.ref == 'refs/tags/v0.4.17-beta.3'
     runs-on: macos-15
     permissions:
       contents: write
@@ -54,7 +54,7 @@ jobs:
           version="${tag#v}"
           # This approved self-contained installer is pinned, never a mutable
           # latest script or a host manifest-derived app version.
-          [[ "$tag" == v0.4.17-beta.2 && "$version" == 0.4.17-beta.2 ]]
+          [[ "$tag" == v0.4.17-beta.3 && "$version" == 0.4.17-beta.3 ]]
           # Never overwrite an existing published or draft release/asset set.
           releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp)"
           [[ "$(printf '%s' "$releases" | jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)] | length')" == 0 ]]
