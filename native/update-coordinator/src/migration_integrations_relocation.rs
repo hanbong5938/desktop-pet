@@ -2668,7 +2668,7 @@ mod tests {
             ("LICENSE.txt", b"license".as_slice()),
             (
                 "plugin.toml",
-                b"id = \"tern-desktop-pet\"\nwindow = \"window.luau\"\nversion = \"0.2.2-beta.1\"\n"
+                b"id = \"tern-desktop-pet\"\nwindow = \"window.luau\"\nversion = \"0.2.2-beta.2\"\n"
                     .as_slice(),
             ),
             (

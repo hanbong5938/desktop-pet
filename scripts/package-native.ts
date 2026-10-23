@@ -36,8 +36,8 @@ try {
 const packageVersion = typeof packageJson.version === "string"
   ? packageJson.version
   : fail("package version must be a semantic version");
-if (packageVersion !== "0.4.17-beta.6") {
-  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.17-beta.6 core revision");
+if (packageVersion !== "0.4.17-beta.8") {
+  fail("the authorized neutral and legacy-0.3.16 distributions must use the same approved 0.4.17-beta.8 core revision");
 }
 await validateProductMetadata(root, packageVersion);
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("native packaging requires macOS arm64");
@@ -144,7 +144,7 @@ async function stageTernConsumer(): Promise<void> {
   };
   const names = ["LICENSE.txt", "plugin.toml", "window.luau"];
   if (!pin || pin.version !== 1 || pin.repository !== "hanbong5938/tern-desktop-pet" ||
-      !/^[a-f0-9]{40}$/.test(pin.revision) || pin.plugin_version !== "0.2.2-beta.1" ||
+      !/^[a-f0-9]{40}$/.test(pin.revision) || pin.plugin_version !== "0.2.2-beta.2" ||
       !pin.files || Object.keys(pin.files).sort().join("\n") !== names.join("\n")) {
     fail("invalid immutable Tern consumer packaging authority");
   }

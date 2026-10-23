@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet"
-version = "0.4.17-beta.7"
+version = "0.4.17-beta.8"
 dependencies = [
  "desktop-pet-contracts",
  "desktop-pet-core",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-core"
-version = "0.4.17-beta.7"
+version = "0.4.17-beta.8"
 dependencies = [
  "block2",
  "desktop-pet-contracts",
@@ -137,7 +137,7 @@ dependencies = [
 [[package]]
 name = "desktop-pet-tern"
 version = "0.1.0"
-source = "git+https://github.com/hanbong5938/tern-desktop-pet?rev=f05355ade8d31131e6f9ba34e76542bc54e8ce97#f05355ade8d31131e6f9ba34e76542bc54e8ce97"
+source = "git+https://github.com/hanbong5938/tern-desktop-pet?rev=bd0916b62117569a846aacf9c641d74d23799eb7#bd0916b62117569a846aacf9c641d74d23799eb7"
 dependencies = [
  "desktop-pet-contracts",
  "libc",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-pet-update-coordinator"
-version = "0.4.17-beta.7"
+version = "0.4.17-beta.8"
 dependencies = [
  "block2",
  "desktop-pet-contracts",

@@ -75,7 +75,7 @@ fn package_identity(package: &Path) -> Result<(String, String), String> {
             .any(|line| line.trim() == "window = \"window.luau\"")
         || !manifest
             .lines()
-            .any(|line| line.trim() == "version = \"0.2.2-beta.1\"")
+            .any(|line| line.trim() == "version = \"0.2.2-beta.2\"")
     {
         return Err("signed Tern package does not name the configured integration".into());
     }
@@ -2710,7 +2710,7 @@ mod tests {
             .join("Contents/Resources/integrations/tern-desktop-pet");
         ensure_private_directory(&package).unwrap();
         for (name, bytes) in [
-            ("plugin.toml", b"schema = 1\nid = \"tern-desktop-pet\"\nversion = \"0.2.2-beta.1\"\nwindow = \"window.luau\"\n".to_vec()),
+            ("plugin.toml", b"schema = 1\nid = \"tern-desktop-pet\"\nversion = \"0.2.2-beta.2\"\nwindow = \"window.luau\"\n".to_vec()),
             ("window.luau", b"-- fixture consumer\n".to_vec()),
             ("LICENSE.txt", b"fixture license\n".to_vec()),
             ("revision", format!("{}\n", "a".repeat(40)).into_bytes()),

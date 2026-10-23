@@ -1,6 +1,6 @@
 [package]
 name = "desktop-pet"
-version = "0.4.17-beta.7"
+version = "0.4.17-beta.8"
 edition = "2021"
 publish = false
 
@@ -11,10 +11,10 @@ tern = ["dep:desktop-pet-tern"]
 test-support = ["herdr", "desktop-pet-core/test-support", "desktop-pet-herdr/test-support"]
 
 [dependencies]
-desktop-pet-core = { path = "../core", version = "0.4.17-beta.7" }
-desktop-pet-update-coordinator = { path = "../update-coordinator", version = "0.4.17-beta.7" }
+desktop-pet-core = { path = "../core", version = "0.4.17-beta.8" }
+desktop-pet-update-coordinator = { path = "../update-coordinator", version = "0.4.17-beta.8" }
 desktop-pet-herdr = { git = "https://github.com/hanbong5938/herdr-desktop-pet", rev = "0b9e24b2f6498311229a328ad144a4ab41b7505b", version = "0.1.0", optional = true }
-desktop-pet-tern = { git = "https://github.com/hanbong5938/tern-desktop-pet", rev = "f05355ade8d31131e6f9ba34e76542bc54e8ce97", version = "0.1.0", optional = true }
+desktop-pet-tern = { git = "https://github.com/hanbong5938/tern-desktop-pet", rev = "bd0916b62117569a846aacf9c641d74d23799eb7", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 desktop-pet-contracts = { path = "../contracts", version = "0.1.0" }

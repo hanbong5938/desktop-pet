@@ -1,10 +1,10 @@
 {
   "version": 1,
   "repository": "hanbong5938/tern-desktop-pet",
-  "revision": "f05355ade8d31131e6f9ba34e76542bc54e8ce97",
-  "plugin_version": "0.2.2-beta.1",
+  "revision": "bd0916b62117569a846aacf9c641d74d23799eb7",
+  "plugin_version": "0.2.2-beta.2",
   "files": {
-    "plugin.toml": "273a0e2dd8e74fc5408b10e3565a0f4338656dfff597ca5a2a44d90d784945db",
+    "plugin.toml": "17b743eb33a20d7e67eaadcfe99d08d804f0a9e09f7a5ad94bc3d82d996fcd87",
     "window.luau": "8b182d19e778c8561992c562134f84c58574f9800d44e393ba577bcb5636597c",
     "LICENSE.txt": "0e90813b39b1b9b83a2d9fc69a44714e028a6ae02bc61f3cb8b35cb516869336"
   }
