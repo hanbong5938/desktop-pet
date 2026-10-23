@@ -1569,6 +1569,9 @@ pub enum ReplacementLayout {
         retained: PathBuf,
         source_sidecar: Vec<u8>,
         source_sidecar_sha256: String,
+        /// Omitted on historical stable-only layouts; exact beta operator opt-in otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        beta_confirmation: Option<String>,
     },
 }
 
@@ -2148,6 +2151,7 @@ pub(crate) fn validate_replacement_layout(intent: &ReplacementIntent) -> Result<
         retained,
         source_sidecar,
         source_sidecar_sha256,
+        ..
     } = &intent.layout
     else {
         return Ok(());
@@ -2191,21 +2195,23 @@ pub(crate) fn validate_relocation_intent_for_plan(
     plan: &crate::standalone_install::StandaloneInstallPlan,
 ) -> Result<(), String> {
     plan.validate()?;
-    let (expected_source, same_closure) = match &plan.purpose {
+    let (expected_source, same_closure, expected_beta_confirmation) = match &plan.purpose {
         crate::standalone_install::StandaloneInstallPurpose::PrivateRelocation {
             source_closure_sha256,
             ..
-        } => (source_closure_sha256, true),
+        } => (source_closure_sha256, true, None),
         crate::standalone_install::StandaloneInstallPurpose::ManualRecovery {
             source_closure_sha256,
+            beta_confirmation,
             ..
-        } => (source_closure_sha256, false),
+        } => (source_closure_sha256, false, beta_confirmation.as_deref()),
         _ => return Err("upgrade approval does not authorize a relocation layout".into()),
     };
     let ReplacementLayout::Relocate {
         source,
         source_sidecar,
         source_sidecar_sha256,
+        beta_confirmation,
         ..
     } = &intent.layout
     else {
@@ -2218,6 +2224,7 @@ pub(crate) fn validate_relocation_intent_for_plan(
         || source != physical_install_root(plan.origin())?
         || intent.candidate_file.sha256 != plan.candidate_image.sha256
         || intent.candidate_version != plan.candidate_version
+        || beta_confirmation.as_deref() != expected_beta_confirmation
         || source_sidecar_sha256 != expected_source
         || digest_bytes(source_sidecar) != *expected_source
         || (same_closure && source_sidecar != &intent.candidate_sidecar)
@@ -2232,7 +2239,12 @@ pub(crate) fn validate_relocation_intent_for_plan(
 // strictly newer stopped-source recovery. Its caller still authenticates purpose,
 // source state, consent, and official release evidence against the immutable plan.
 fn validate_relocation_closure_versions(intent: &ReplacementIntent) -> Result<(), String> {
-    let ReplacementLayout::Relocate { source_sidecar, .. } = &intent.layout else {
+    let ReplacementLayout::Relocate {
+        source_sidecar,
+        beta_confirmation,
+        ..
+    } = &intent.layout
+    else {
         return Err("replacement has no relocation closure snapshots".into());
     };
     let original = intent
@@ -2240,7 +2252,17 @@ fn validate_relocation_closure_versions(intent: &ReplacementIntent) -> Result<()
         .as_ref()
         .ok_or("relocation has no original owner")?;
     let previous = installed_version(&original.app_version)?;
-    let candidate = stable_version(&intent.candidate_version)?;
+    let candidate = match beta_confirmation.as_deref() {
+        None => stable_version(&intent.candidate_version)?,
+        Some(crate::standalone_install::MANUAL_BETA_RECOVERY_CONFIRMATION) => {
+            let candidate = installed_version(&intent.candidate_version)?;
+            if candidate.pre.is_empty() {
+                return Err("beta recovery layout requires an official beta candidate".into());
+            }
+            candidate
+        }
+        Some(_) => return Err("invalid beta recovery layout confirmation".into()),
+    };
     let same_closure = source_sidecar == &intent.candidate_sidecar
         && original.image.sha256 == intent.candidate_file.sha256;
     if (same_closure && previous == candidate && previous.pre.is_empty())
@@ -2252,7 +2274,7 @@ fn validate_relocation_closure_versions(intent: &ReplacementIntent) -> Result<()
         return Ok(());
     }
     Err(
-        "relocation requires the same stable closure or a strictly newer distinct stable recovery"
+        "relocation requires the same stable closure or an explicitly approved strictly newer distinct recovery"
             .into(),
     )
 }
@@ -2354,6 +2376,7 @@ fn recover_relocation(
         retained,
         source_sidecar,
         source_sidecar_sha256,
+        ..
     } = &intent.layout
     else {
         return Err("missing relocation layout".into());
@@ -2573,6 +2596,13 @@ fn replace_relocation(
             retained: retained.clone(),
             source_sidecar_sha256: digest_bytes(&source_sidecar),
             source_sidecar,
+            beta_confirmation: match &plan.purpose {
+                crate::standalone_install::StandaloneInstallPurpose::ManualRecovery {
+                    beta_confirmation,
+                    ..
+                } => beta_confirmation.clone(),
+                _ => None,
+            },
         },
         origin: target_origin.clone(),
         original: Some(plan.original.clone()),
@@ -4219,6 +4249,14 @@ mod replacement_boundary_tests {
         with_locator: bool,
         manual_recovery: bool,
     ) -> (tempfile::TempDir, ReplacementIntent, PathBuf) {
+        relocation_fixture_for_channel(with_locator, manual_recovery, false)
+    }
+
+    fn relocation_fixture_for_channel(
+        with_locator: bool,
+        manual_recovery: bool,
+        beta: bool,
+    ) -> (tempfile::TempDir, ReplacementIntent, PathBuf) {
         let (temporary, mut intent) = fixture();
         let source = intent.target.clone();
         let target_parent = source.parent().unwrap().join("private");
@@ -4248,13 +4286,15 @@ mod replacement_boundary_tests {
         } else {
             "0.4.14".into()
         };
-        intent.candidate_version = "0.4.14".into();
+        intent.candidate_version = if beta { "0.4.14-beta.1" } else { "0.4.14" }.into();
         intent.original_sidecar_sha256 = None;
         intent.layout = ReplacementLayout::Relocate {
             source,
             retained,
             source_sidecar_sha256: digest_bytes(&source_sidecar),
             source_sidecar,
+            beta_confirmation: beta
+                .then(|| crate::standalone_install::MANUAL_BETA_RECOVERY_CONFIRMATION.into()),
         };
         intent.origin = InstallOrigin::Standalone {
             bundle: target.clone(),
@@ -4326,16 +4366,26 @@ mod replacement_boundary_tests {
 
     #[test]
     fn manual_recovery_preserves_distinct_closures_at_every_disk_failure_boundary() {
+        assert_manual_recovery_disk_boundaries(false);
+    }
+
+    #[test]
+    fn beta_manual_recovery_preserves_distinct_closures_at_every_disk_failure_boundary() {
+        assert_manual_recovery_disk_boundaries(true);
+    }
+
+    fn assert_manual_recovery_disk_boundaries(beta: bool) {
         for with_locator in [false, true] {
             for boundary in 0..10 {
                 let (_temporary, intent, path) =
-                    relocation_fixture_with_closures(with_locator, true);
+                    relocation_fixture_for_channel(with_locator, true, beta);
                 validate_relocation_closure_versions(&intent).unwrap();
                 let ReplacementLayout::Relocate {
                     source,
                     retained,
                     source_sidecar,
                     source_sidecar_sha256,
+                    ..
                 } = &intent.layout
                 else {
                     unreachable!();
@@ -4350,7 +4400,10 @@ mod replacement_boundary_tests {
                     intent.original.as_ref().unwrap().app_version,
                     "0.4.13-beta.7"
                 );
-                assert_eq!(intent.candidate_version, "0.4.14");
+                assert_eq!(
+                    intent.candidate_version,
+                    if beta { "0.4.14-beta.1" } else { "0.4.14" }
+                );
                 advance_relocation_boundary(&intent, &path, boundary);
                 reconcile_relocation(&path, &intent).unwrap();
                 let committed = boundary >= 5;
@@ -4432,6 +4485,43 @@ mod replacement_boundary_tests {
         assert!(validate_relocation_closure_versions(&changed).is_err());
         let (_temporary, same_closure, _) = relocation_fixture();
         validate_relocation_closure_versions(&same_closure).unwrap();
+    }
+
+    #[test]
+    fn beta_recovery_layout_requires_explicit_marker_and_strictly_newer_official_beta() {
+        let (_temporary, intent, _) = relocation_fixture_for_channel(true, true, true);
+        validate_relocation_closure_versions(&intent).unwrap();
+        let historical: ReplacementIntent =
+            serde_json::from_slice(&serde_json::to_vec(&intent).unwrap()).unwrap();
+        validate_relocation_closure_versions(&historical).unwrap();
+        for marker in [None, Some("forged".into())] {
+            let mut wrong = intent.clone();
+            let ReplacementLayout::Relocate {
+                beta_confirmation, ..
+            } = &mut wrong.layout
+            else {
+                unreachable!()
+            };
+            *beta_confirmation = marker;
+            assert!(validate_relocation_closure_versions(&wrong).is_err());
+        }
+        for version in [
+            "0.4.13-beta.6",
+            "0.4.13-beta.7",
+            "0.4.14",
+            "0.4.14-rc.1",
+            "0.4.14-beta.1+local",
+        ] {
+            let mut wrong = intent.clone();
+            wrong.candidate_version = version.into();
+            assert!(
+                validate_relocation_closure_versions(&wrong).is_err(),
+                "{version}"
+            );
+        }
+        let (_temporary, stable, _) = relocation_fixture_with_closures(true, true);
+        let encoded = serde_json::to_value(&stable).unwrap();
+        assert!(encoded["layout"].get("beta_confirmation").is_none());
     }
 
     #[test]

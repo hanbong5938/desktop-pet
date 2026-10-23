@@ -78,6 +78,8 @@ Apple Silicon Mac、macOS 13 或更新版本。源码构建需 Rust/Cargo、Bun�
 
 经批准的操作员恢复请使用 [v0.4.16 或更新版本](releases/v0.4.16.md)。它包含 SDK 内部默认 pack 验证认证及隔离 helper 的可信 HOME 修正，不会放行任意 pack 命令或其他配置目录。不要为了消除阻塞而停止 Tern 或绕过安装保护。
 
+**明确批准的测试版恢复（v0.4.17-beta.9）：** 已停止源的操作员恢复也支持另行同意的版本2请求，目标必须是更新的官方测试版。确认字符串为 `replace_original_app_preserve_profile_allow_beta`，原版本1仍只允许稳定版。该事务验证签名及校验和，将历史所有者迁移到 canonical private owner，并非覆盖正在运行的应用。它不打开原生确认窗口，也不授予自动启动权限。保留原配置和证据，验证预约已释放后另行 Start，再确认真实 Tern 重连。自动接收测试版的设置保持不变。参阅 [CLI 契约](cli.md)及[发布说明](releases/v0.4.17-beta.9.md)。
+
 保留已认证的原 config/state、角色、设置及用户资料。既有 Tern SDK 在 native 事务结算后仅更改保存的 executable，native 不覆盖 KV。不要猜测默认值、合并 profile，或用 Configure/Connect、Tern 重启、plugin reload 隐藏失败。签名原件及事务证据保留在 private retention。
 
 **先保存 Pet 未保存编辑。** 操作员恢复需要原件及 profile 备份，并明确批准只正常停止 Pet、之后另行 Start。停止源安装不伪造 Stop ACK、updater parent 或重启 token。后续用户 Stop 或 scope 变化禁止自动重启。已结算 Stable parent 的同版本 native 迁移是另一条批准路径。

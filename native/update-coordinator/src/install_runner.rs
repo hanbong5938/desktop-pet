@@ -191,6 +191,7 @@ fn read_launch(state: &Path, id: &str) -> Result<Launch, String> {
         target,
         release,
         previous_context,
+        beta_confirmation,
         source_closure_sha256,
         ..
     } = &launch.purpose
@@ -201,6 +202,8 @@ fn read_launch(state: &Path, id: &str) -> Result<Launch, String> {
         if request.context != *previous_context
             || request.release != *release
             || request.candidate_bundle != launch.request.staged_app
+            || beta_confirmation.as_deref()
+                != (request.version == 2).then_some(request.confirmation.as_str())
             || previous_context.running != launch.original.image
             || previous_context.executable != launch.original.executable
             || previous_context.version != launch.original.app_version
@@ -692,6 +695,7 @@ pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
                 target,
                 release: operator.release,
                 previous_context: operator.context,
+                beta_confirmation: (operator.version == 2).then_some(operator.confirmation),
                 source_closure_sha256: digest(evidence.sidecar.as_bytes()),
                 tern,
             },
@@ -757,6 +761,23 @@ pub fn relocate(request_path: &Path) -> Result<Outcome, String> {
 pub fn relocate_manual(request_path: &Path) -> Result<Outcome, String> {
     relocate_request(request_path, true)
 }
+fn relocation_request_locale(
+    captured: &coordinator::UpdateContext,
+    requested: coordinator::UpdateContext,
+) -> Result<String, String> {
+    // Kernel-authenticated capture has no UI locale. Normalize presentation only,
+    // then use full equality so no current or future authority field is omitted.
+    let locale = requested.locale;
+    let normalized = coordinator::UpdateContext {
+        locale: captured.locale.clone(),
+        ..requested
+    };
+    if *captured != normalized {
+        return Err("relocation request differs from authenticated running context".into());
+    }
+    Ok(locale)
+}
+
 fn relocate_request(request_path: &Path, manual: bool) -> Result<Outcome, String> {
     let request: coordinator::standalone_relocation::RelocationRequest =
         serde_json::from_slice(&coordinator::owned_private_file(request_path, 16384)?)
@@ -851,9 +872,7 @@ fn relocate_request(request_path: &Path, manual: bool) -> Result<Outcome, String
     persist_new(&root.join("request.json"), &install_request)?;
     persist_new(&root.join("relocation-request.json"), &request)?;
     let instance = native_runtime::capture_instance(&original.origin, &request.parent.profile)?;
-    if instance.context != request.context {
-        return Err("relocation request differs from authenticated running context".into());
-    }
+    let locale = relocation_request_locale(&instance.context, request.context)?;
     let launch = Launch {
         version: 1,
         operation_id: id.clone(),
@@ -868,7 +887,7 @@ fn relocate_request(request_path: &Path, manual: bool) -> Result<Outcome, String
             source_closure_sha256: request.parent.source_closure_sha256.clone(),
             tern,
         },
-        locale: request.context.locale.clone(),
+        locale,
         source: approved_source(&request.parent.profile, Some(&instance)),
     };
     persist_new(&root.join("launch.json"), &launch)?;
@@ -2531,7 +2550,75 @@ fn parse_scope(args: &[OsString]) -> Result<(PathBuf, String), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn relocation_locale_does_not_change_authenticated_context_authority() {
+        let image = ExecutableIdentity {
+            path: "/account/Applications/DesktopPet.app/Contents/MacOS/desktop-pet".into(),
+            sha256: "a".repeat(64),
+        };
+        let captured = coordinator::UpdateContext {
+            executable: image.path.clone(),
+            version: "0.4.16".into(),
+            instance_id: "running-instance".into(),
+            config_dir: "/account/profile/config".into(),
+            state_dir: "/account/profile/state".into(),
+            running: image,
+            running_origin: Some(Box::new(InstallOrigin::Standalone {
+                bundle: "/account/Applications/DesktopPet.app".into(),
+            })),
+            assets_override: None,
+            environment: [("HOME".into(), "/account".into())].into(),
+            locale: "en".into(),
+            #[cfg(desktop_pet_legacy)]
+            host_plugin_config_dir: None,
+            #[cfg(desktop_pet_legacy)]
+            herdr_socket: "/account/profile/state/control.sock".into(),
+        };
+        for locale in ["en", "ko"] {
+            let mut requested = captured.clone();
+            requested.locale = locale.into();
+            assert_eq!(
+                relocation_request_locale(&captured, requested).unwrap(),
+                locale
+            );
+        }
+        let changes: &[fn(&mut coordinator::UpdateContext)] = &[
+            |context| context.executable = "/other/desktop-pet".into(),
+            |context| context.version = "0.4.17".into(),
+            |context| context.instance_id = "different-instance".into(),
+            |context| context.config_dir = "/other/config".into(),
+            |context| context.state_dir = "/other/state".into(),
+            |context| context.running.path = "/other/desktop-pet".into(),
+            |context| context.running.sha256 = "b".repeat(64),
+            |context| context.running_origin = None,
+            |context| context.assets_override = Some("/other/assets".into()),
+            |context| {
+                context.environment.insert("HOME".into(), "/other".into());
+            },
+            |context| {
+                context
+                    .environment
+                    .insert(coordinator::identity::OBSERVATION_ENV.into(), "auto".into());
+            },
+            #[cfg(desktop_pet_legacy)]
+            |context| context.host_plugin_config_dir = Some("/other/host".into()),
+            #[cfg(desktop_pet_legacy)]
+            |context| context.herdr_socket = "/other/control.sock".into(),
+        ];
+        for change in changes {
+            let mut requested = captured.clone();
+            requested.locale = "ko".into();
+            change(&mut requested);
+            assert!(relocation_request_locale(&captured, requested).is_err());
+        }
+        assert_eq!(captured.locale, "en");
+    }
+
     fn manual_plan_fixture(state: &Path) -> Plan {
+        manual_plan_fixture_for_channel(state, false)
+    }
+
+    fn manual_plan_fixture_for_channel(state: &Path, beta: bool) -> Plan {
         let id = "9".repeat(32);
         let historical = installation::os_home()
             .unwrap()
@@ -2563,12 +2650,17 @@ mod tests {
             environment: Default::default(),
             locale: "ko".into(),
         };
-        let tag = "v0.4.14";
-        let asset_name = "DesktopPet-v0.4.14-macos-arm64.tar.gz";
+        let version = if beta { "0.4.14-beta.1" } else { "0.4.14" };
+        let tag = format!("v{version}");
+        let asset_name = format!("DesktopPet-v{version}-macos-arm64.tar.gz");
         let release = coordinator::ReleaseCandidate {
-            version: "0.4.14".into(),
-            channel: coordinator::ReleaseChannel::Stable,
-            tag: tag.into(),
+            version: version.into(),
+            channel: if beta {
+                coordinator::ReleaseChannel::Beta
+            } else {
+                coordinator::ReleaseChannel::Stable
+            },
+            tag: tag.clone(),
             release_id: 123,
             archive_url: format!(
                 "{}{tag}/{asset_name}",
@@ -2604,6 +2696,7 @@ mod tests {
                 },
                 release: release.clone(),
                 previous_context: context.clone(),
+                beta_confirmation: beta.then(|| journal::MANUAL_BETA_RECOVERY_CONFIRMATION.into()),
                 source_closure_sha256: digest(b"source signed closure"),
                 tern: None,
             },
@@ -2631,11 +2724,15 @@ mod tests {
         persist_new(
             &journal::manual_operator_request_path(state, &plan.operation_id).unwrap(),
             &journal::StandaloneManualRecoveryRequest {
-                version: 1,
+                version: if beta { 2 } else { 1 },
                 context,
                 candidate_bundle: plan.candidate_bundle.clone(),
                 release,
-                confirmation: "replace_original_app_preserve_profile".into(),
+                confirmation: if beta {
+                    journal::MANUAL_BETA_RECOVERY_CONFIRMATION.into()
+                } else {
+                    "replace_original_app_preserve_profile".into()
+                },
             },
         )
         .unwrap();
@@ -2660,10 +2757,19 @@ mod tests {
 
     #[test]
     fn manual_consent_cannot_be_native_and_changed_generation_has_no_stop_or_start() {
+        assert_manual_consent_and_generation(false);
+    }
+
+    #[test]
+    fn beta_manual_consent_cannot_gain_native_restart_or_survive_lost_generation() {
+        assert_manual_consent_and_generation(true);
+    }
+
+    fn assert_manual_consent_and_generation(beta: bool) {
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         protocol::private_updates(temp.path()).unwrap();
-        let mut plan = manual_plan_fixture(temp.path());
+        let mut plan = manual_plan_fixture_for_channel(temp.path(), beta);
         assert!(save_consent(&plan).is_err());
         assert!(verify_consent(&plan).is_err());
         let request_path =
@@ -2672,6 +2778,9 @@ mod tests {
         assert!(journal::read_operator_consent(&plan, &request_path)
             .unwrap()
             .is_some());
+        assert!(manual_authority(&plan)
+            .unwrap_err()
+            .contains("reservation is absent"));
         // Even authentic SSH consent cannot survive an intervening user Stop.
         protocol::write_private_bytes(
             &protocol::private_updates(temp.path())
@@ -2751,10 +2860,19 @@ mod tests {
 
     #[test]
     fn manual_plan_reentry_is_bound_to_launch_purpose_source_and_generation() {
+        assert_manual_plan_reentry(false);
+    }
+
+    #[test]
+    fn beta_manual_reentry_rejects_changed_helper_opt_in_profile_and_generation() {
+        assert_manual_plan_reentry(true);
+    }
+
+    fn assert_manual_plan_reentry(beta: bool) {
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         protocol::private_updates(temp.path()).unwrap();
-        let plan = manual_plan_fixture(temp.path());
+        let plan = manual_plan_fixture_for_channel(temp.path(), beta);
         let launch = Launch {
             version: 1,
             operation_id: plan.operation_id.clone(),
@@ -2788,7 +2906,7 @@ mod tests {
             result: None,
         };
         validate_plan_launch(&plan, &launch, &admission).unwrap();
-        for field in 0..5 {
+        for field in 0..8 {
             let mut changed = plan.clone();
             match field {
                 0 => changed.purpose = StandaloneInstallPurpose::Upgrade,
@@ -2802,7 +2920,18 @@ mod tests {
                         },
                     }
                 }
-                _ => changed.original.image.sha256 = "f".repeat(64),
+                4 => changed.original.image.sha256 = "f".repeat(64),
+                5 => changed.helper_image.sha256 = "f".repeat(64),
+                6 => changed.helper_image.path = temp.path().join("foreign-helper"),
+                _ => {
+                    let StandaloneInstallPurpose::ManualRecovery {
+                        beta_confirmation, ..
+                    } = &mut changed.purpose
+                    else {
+                        unreachable!()
+                    };
+                    *beta_confirmation = Some("forged".into());
+                }
             }
             assert!(validate_plan_launch(&changed, &launch, &admission).is_err());
         }

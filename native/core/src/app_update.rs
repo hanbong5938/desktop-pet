@@ -4,6 +4,7 @@
 //! The successor bridge continues the authenticated original update approval.
 //! No independent migration consent is required after that bounded approval.
 //! Completed history admits policy changes after scoped settlement, without a network check.
+//! Exact completed-history clearance supersedes older asynchronous recovery observations.
 //! A fresh settled check is still required before retiring history for new update work.
 //! Old ledgers remain owned by their exact retained helper. Explicit original
 //! Stop consent runs only in today's authenticated bundled coordinator, after
@@ -129,6 +130,8 @@ pub(super) enum SettledOperationProof {
 // Policy admission is independent of network discovery and does not retire a
 // journal or authorize another update. Only a worker may prove exact completed
 // history has no helper lease or installation/profile reservation remaining.
+// Installed-only history additionally requires the coordinator to authenticate
+// this later ordinary fenced Start; it never changes the journal's applied bit.
 pub(super) struct CompletedHistoryProof {
     context: UpdateContext,
     observation: OperationObservation,
@@ -566,6 +569,10 @@ impl AppUpdateService {
                     .arg("--request")
                     .arg(path)
                     .env_clear()
+                    .env(
+                        "HOME",
+                        desktop_pet_update_coordinator::installation::os_home()?,
+                    )
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .spawn()
@@ -1303,7 +1310,10 @@ impl AppUpdateService {
     }
 
     fn observe_recovery(&mut self) {
-        if self.recovery_observing.is_some() || self.standalone_operation.is_some() {
+        if self.recovery_observing.is_some()
+            || self.standalone_operation.is_some()
+            || self.completed_history_admitted()
+        {
             return;
         }
         let (Some(context), Some(record)) = (self.context.clone(), self.operation.as_ref()) else {
@@ -1991,7 +2001,7 @@ impl AppUpdateService {
                 self.revision = self.revision.wrapping_add(1);
             }
         }
-        match result {
+        let reconciled = match result {
             Ok(Some(OperationObservation::StandaloneInstall(record))) => {
                 if self.journal_in_flight.as_deref() == Some(operation_id) {
                     self.journal_in_flight = None;
@@ -2016,7 +2026,21 @@ impl AppUpdateService {
             ),
             Ok(None) => self.update_journal(operation_id, Ok(None), None),
             Err(error) => self.update_journal(operation_id, Err(error), None),
+        };
+        if self.completed_history_admitted() {
+            // The journal worker independently proved this exact completed
+            // observation settled. A concurrent recovery observer may have
+            // mistaken that worker's operation lease for a live helper. Its
+            // earlier projection/error is superseded, not new Start authority.
+            let had_projection = self.recovery.take().is_some();
+            let had_error = self.recovery_error.take().is_some();
+            let had_observer = self.recovery_observing.take().is_some();
+            if had_projection || had_error || had_observer {
+                self.recovery_request = self.recovery_request.wrapping_add(1);
+                self.revision = self.revision.wrapping_add(1);
+            }
         }
+        reconciled
     }
 
     pub(super) fn latest_journal(&mut self, result: Result<Option<OperationObservation>, String>) {
@@ -2062,6 +2086,16 @@ impl AppUpdateService {
                 && !record.result.terminal()
         }) {
             return;
+        }
+        // A standalone journal has no normal-update recovery action. Retire
+        // callbacks/errors for the superseded normal operation, not its history
+        // or any independently held execution/preparation gate.
+        let had_projection = self.recovery.take().is_some();
+        let had_error = self.recovery_error.take().is_some();
+        let had_observer = self.recovery_observing.take().is_some();
+        if had_projection || had_error || had_observer {
+            self.recovery_request = self.recovery_request.wrapping_add(1);
+            self.revision = self.revision.wrapping_add(1);
         }
         if record.result.terminal() {
             self.previous_standalone_outcome = Some(record.clone());
@@ -2292,7 +2326,10 @@ impl AppUpdateService {
                 Message::AppUpdateOutcomeUnknown,
                 Message::AppUpdateJournalHelp,
             )
-        } else if let Some(record) = self.standalone_operation.as_ref() {
+        } else if let Some(record) = self.standalone_operation.as_ref().filter(|record| {
+            !(record.result.status == InstallStatus::InstalledStopped
+                && self.completed_history_admitted())
+        }) {
             if !record.result.terminal() {
                 (
                     CheckStatus::Checking,
@@ -2404,6 +2441,8 @@ impl AppUpdateService {
             }
         } else if self.recovery_error.is_some() {
             detail_message = Message::AppUpdateRecoveryBlocked;
+        } else if self.completed_history_admitted() {
+            detail_message = Message::AppUpdateRecoveryComplete;
         } else if self.recovery_observing.is_some() && self.operation.is_some() {
             detail_message = Message::AppUpdateRecoveryChecking;
         }
@@ -3899,13 +3938,21 @@ fn completed_history_proof(
             record.phase == OperationPhase::Completed && record.installed && record.applied
         }
         OperationObservation::StandaloneInstall(record) => {
-            record.result.status == InstallStatus::Applied
+            record.phase == standalone_install::StandaloneInstallPhase::Completed
                 && record.result.installed
-                && record.result.applied
+                && match record.result.status {
+                    InstallStatus::Applied => record.result.applied,
+                    InstallStatus::InstalledStopped => {
+                        !record.result.applied
+                            && record.result.restart
+                                == standalone_install::InstallRestart::NotRequested
+                    }
+                    _ => false,
+                }
         }
     };
     if !completed {
-        return Err("operation is not completed applied history".into());
+        return Err("operation is not completed installed history".into());
     }
     let origin = context
         .running_origin
@@ -5389,6 +5436,123 @@ mod tests {
     }
 
     #[test]
+    fn installed_stopped_history_after_independent_start_is_not_updater_application_authority() {
+        let mut service = recovery_service(RecoveryDisposition::Recover);
+        let mut prior = service.operation.clone().unwrap();
+        prior.phase = OperationPhase::Completed;
+        prior.execution_fence = ExecutionFence::ManagerExited;
+        prior.installed = true;
+        prior.applied = true;
+        service.operation = Some(prior.clone());
+        service.previous_outcome = Some(prior.clone());
+        let mut context = service.context.clone().unwrap();
+        context.version = "0.4.17-beta.9".into();
+        context.instance_id.push_str("-ordinary-start");
+        context.running.sha256 = "9".repeat(64);
+        service.context = Some(context.clone());
+        service.recovery_error =
+            Some("older completed operation recovery observation failed".into());
+        service.recovery_observing = Some((
+            context.clone(),
+            prior.operation_id.clone(),
+            1,
+            prior.clone(),
+        ));
+        let mut installed = standalone_observation(InstallStatus::InstalledStopped);
+        installed.phase = standalone_install::StandaloneInstallPhase::Completed;
+        installed.result.installed = true;
+        let observation = OperationObservation::StandaloneInstall(installed.clone());
+        service.latest_journal(Ok(Some(observation.clone())));
+        assert!(service.operation.is_none());
+        assert_eq!(service.previous_outcome.as_ref(), Some(&prior));
+        assert!(service.recovery_error.is_none());
+        assert!(service.recovery_observing.is_none());
+        assert!(service.current_recovery().is_none());
+        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Installed);
+        assert!(!service.settings_admitted());
+
+        let mut foreign = context.clone();
+        foreign.instance_id.push_str("-foreign");
+        service.journal(
+            &installed.operation_id,
+            Ok(Some(observation.clone())),
+            None,
+            Some(CompletedHistoryProof {
+                context: foreign,
+                observation: observation.clone(),
+            }),
+        );
+        assert!(!service.completed_history_admitted());
+        assert!(!service.settings_admitted());
+
+        // The production worker constructs this only after
+        // verify_standalone_settlement authenticates replacement evidence,
+        // the current ordinary Start fence, profile, generation and free scopes.
+        service.journal(
+            &installed.operation_id,
+            Ok(Some(observation.clone())),
+            None,
+            Some(CompletedHistoryProof {
+                context: context.clone(),
+                observation,
+            }),
+        );
+        assert!(service.completed_history_admitted());
+        assert!(service.settings_admitted());
+        assert_eq!(service.standalone_operation.as_ref(), Some(&installed));
+        assert!(
+            !service
+                .standalone_operation
+                .as_ref()
+                .unwrap()
+                .result
+                .applied
+        );
+        assert!(service.prepared_plan.is_none());
+        assert!(service.plan().is_none());
+        for locale in [UiLocale::En, UiLocale::Ko] {
+            let model = service.model(locale);
+            assert_eq!(model.status, CheckStatus::NotChecked);
+            assert_eq!(model.running_version, context.version);
+            assert_eq!(
+                model.detail,
+                text(locale, Message::AppUpdateRecoveryComplete)
+            );
+            assert!(model.history.contains("InstalledStopped"));
+            assert!(model.primary_action.is_none());
+            assert!(!model.recovery_enabled);
+        }
+        let history = service.model(UiLocale::En).history;
+        let (request, generation, _) = service.begin_check().unwrap();
+        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Checking);
+        let mut snapshot = local_check_for_context(context);
+        snapshot.status = CheckStatus::Current;
+        snapshot.plan = None;
+        service.checked_event(request, generation, Ok(snapshot.clone()), None);
+        assert!(service.standalone_operation.is_some());
+        assert!(service.plan().is_none());
+        service.checked(
+            Ok(snapshot),
+            Some(SettledOperationProof::StandaloneInstall(installed.clone())),
+        );
+        assert!(service.standalone_operation.is_none());
+        assert_eq!(
+            service.previous_standalone_outcome.as_ref(),
+            Some(&installed)
+        );
+        assert!(
+            !service
+                .previous_standalone_outcome
+                .as_ref()
+                .unwrap()
+                .result
+                .applied
+        );
+        assert_eq!(service.model(UiLocale::En).status, CheckStatus::Current);
+        assert_eq!(service.model(UiLocale::En).history, history);
+    }
+
+    #[test]
     fn standalone_observation_is_not_normal_preparation_or_restart_authority() {
         let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableOnly, None);
         service.context = Some(local_check().plan.unwrap().context);
@@ -6784,6 +6948,123 @@ mod tests {
         assert_eq!(newer_service.operation.as_ref(), Some(&newer));
         assert!(!newer_service.settings_admitted());
         assert!(newer_service.retired_operation_id.is_none());
+    }
+
+    #[test]
+    fn completed_history_clearance_supersedes_racing_recovery_failure_in_both_event_orders() {
+        use desktop_pet_update_coordinator::protocol::{write_operation, write_private_new};
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let state_dir = temporary.path().join("state");
+        fs::create_dir(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temporary.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let mut prior_plan = local_check().plan.unwrap();
+        prior_plan.context.state_dir = state_dir.clone();
+        prior_plan.origin = InstallOrigin::Source { root };
+        prior_plan.context.running_origin = Some(Box::new(prior_plan.origin.clone()));
+        let mut completed = failed_record('f');
+        completed.operation_id = prior_plan.operation_id.clone();
+        completed.phase = OperationPhase::Completed;
+        completed.execution_fence = ExecutionFence::ManagerExited;
+        completed.installed = true;
+        completed.applied = true;
+        completed.candidate = Some(prior_plan.running.clone());
+        let updates = private_updates(&state_dir).unwrap();
+        write_private_new(
+            &updates.join(format!("{}.plan.json", completed.operation_id)),
+            &serde_json::to_vec(&prior_plan).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        write_operation(&state_dir, &completed).unwrap();
+        let mut context = prior_plan.context.clone();
+        context.instance_id.push_str("-successor");
+        context.version = "0.4.17-beta.8".into();
+        context.running.sha256 = "9".repeat(64);
+        let observation = OperationObservation::Update(completed.clone());
+
+        for failure_first in [true, false] {
+            // The journal admission worker holds this same operation lease
+            // while proving settlement. Recovery must not confuse that reader
+            // with a retained helper and leave its older failure on the card.
+            let lease = lock_operation(&state_dir, &completed.operation_id).unwrap();
+            let result = recovery_projection(&context, &completed.operation_id, None);
+            assert!(result.is_err());
+            assert!(completed_history_proof(&context, &observation).is_err());
+            drop(lease);
+            assert_eq!(
+                recovery_projection(&context, &completed.operation_id, None)
+                    .unwrap()
+                    .disposition,
+                RecoveryDisposition::Reconciled
+            );
+            let proof = completed_history_proof(&context, &observation).unwrap();
+            let mut service = AppUpdateService::new(None, false, UpdatePolicy::StableAndBeta, None);
+            service.context = Some(context.clone());
+            // Install the pending observation before startup discovery so the
+            // deterministic event ordering needs no timing or background I/O.
+            service.recovery_request = 1;
+            service.recovery_observing = Some((
+                context.clone(),
+                completed.operation_id.clone(),
+                1,
+                completed.clone(),
+            ));
+            service.latest_journal(Ok(Some(observation.clone())));
+            let history = service.model(UiLocale::En).history;
+            let event = RecoveryEvent::Observed {
+                context: context.clone(),
+                operation_id: completed.operation_id.clone(),
+                request: 1,
+                result,
+            };
+            let mut event = Some(event);
+            if failure_first {
+                service.recovery_event(event.take().unwrap());
+                assert!(service.recovery_error.is_some());
+                assert!(!service.check_admitted());
+            }
+            service.journal(
+                &completed.operation_id,
+                Ok(Some(observation.clone())),
+                None,
+                Some(proof),
+            );
+            if let Some(event) = event {
+                service.recovery_event(event);
+            }
+            service.recovery_event(RecoveryEvent::Focused {
+                context: context.clone(),
+                operation_id: completed.operation_id.clone(),
+                request: 1,
+                record: completed.clone(),
+                result: Err("late recovery focus failure".into()),
+            });
+            service.observe_recovery();
+            assert!(service.recovery_error.is_none());
+            assert!(service.recovery_observing.is_none());
+            assert!(service.current_recovery().is_none());
+            assert!(service.completed_history_admitted());
+            assert!(service.check_admitted());
+            assert!(service.settings_admitted());
+            assert_eq!(service.operation.as_ref(), Some(&completed));
+            assert!(service.snapshot.is_none());
+            assert!(service.plan().is_none());
+            for locale in [UiLocale::En, UiLocale::Ko] {
+                let model = service.model(locale);
+                assert_eq!(
+                    model.detail,
+                    text(locale, Message::AppUpdateRecoveryComplete)
+                );
+                assert!(model.primary_action.is_none());
+                assert!(!model.recovery_enabled);
+            }
+            assert_eq!(service.model(UiLocale::En).history, history);
+        }
     }
 
     #[test]

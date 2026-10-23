@@ -1619,7 +1619,7 @@ fn update_status_payload(
     };
     let plan = desktop_pet_update_coordinator::read_plan(state_dir, &record.operation_id);
     let helper = state_dir
-        .join("updates")
+        .join(identity::UPDATES_DIRECTORY)
         .join(format!("helper-{}", record.operation_id));
     let staged = fs::symlink_metadata(&helper).ok().is_some_and(|metadata| {
         metadata.is_file()
@@ -4103,6 +4103,61 @@ mod tests {
         assert!(status["plan_error"].is_string());
         assert!(status["helper_status_command"].is_null());
         assert!(update_status_payload(&root, Some("fedcba9876543210fedcba9876543210")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offline_update_status_finds_private_helper_in_product_namespace() {
+        use desktop_pet_update_coordinator::protocol::{
+            write_operation, ExecutionFence, OperationPhase, OperationRecord, UPDATER_PROTOCOL,
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "pet-update-status-helper-{}-{nonce}",
+            std::process::id()
+        ));
+        lifecycle::validate_directory(&root, true).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        write_operation(
+            &root,
+            &OperationRecord {
+                version: UPDATER_PROTOCOL,
+                operation_id: id.into(),
+                phase: OperationPhase::Completed,
+                execution_fence: ExecutionFence::ManagerExited,
+                detail: "retained completed helper".into(),
+                installed: true,
+                applied: true,
+                candidate: None,
+            },
+        )
+        .unwrap();
+        let helper = root
+            .join(identity::UPDATES_DIRECTORY)
+            .join(format!("helper-{id}"));
+        fs::write(&helper, b"retained helper").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        for operation in [None, Some(id)] {
+            let status = update_status_payload(&root, operation).unwrap();
+            assert_eq!(status["staged_helper_present_private"], true);
+            assert_eq!(status["staged_helper_signature_verified"], false);
+            assert_eq!(
+                status["helper_status_command"],
+                serde_json::json!([helper, "status", "--state-dir", root, "--operation-id", id])
+            );
+            assert_eq!(
+                status["helper_recover_command"],
+                serde_json::json!([helper, "recover", "--state-dir", root, "--operation-id", id])
+            );
+        }
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = update_status_payload(&root, Some(id)).unwrap();
+        assert_eq!(status["staged_helper_present_private"], false);
+        assert!(status["helper_status_command"].is_null());
+        assert!(status["helper_recover_command"].is_null());
         fs::remove_dir_all(root).unwrap();
     }
 

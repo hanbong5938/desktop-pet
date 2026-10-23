@@ -590,6 +590,7 @@ fn validate_relocation_disk_evidence(
         retained,
         source_sidecar,
         source_sidecar_sha256,
+        ..
     } = &intent.layout
     else {
         return Err("relocation has no source retirement layout".into());
@@ -1962,6 +1963,7 @@ mod tests {
                 retained: work.join("original/DesktopPet.app"),
                 source_sidecar: sidecar.clone(),
                 source_sidecar_sha256: closure.clone(),
+                beta_confirmation: None,
             },
             origin: target.clone(),
             original: Some(original),
@@ -2009,7 +2011,11 @@ mod tests {
         );
         crate::ReleaseCandidate {
             version: version.into(),
-            channel: crate::ReleaseChannel::Stable,
+            channel: if version.contains("-beta.") {
+                crate::ReleaseChannel::Beta
+            } else {
+                crate::ReleaseChannel::Stable
+            },
             tag: format!("v{version}"),
             release_id: 1,
             asset_name: asset,
@@ -2933,6 +2939,10 @@ mod tests {
         );
     }
     fn manual_base(root: &Path) -> Base {
+        manual_base_for_release(root, "0.4.14")
+    }
+
+    fn manual_base_for_release(root: &Path, version: &str) -> Base {
         let mut base = base(root);
         let mut previous_context = original_context(&base.plan).unwrap().clone();
         base.plan.original.app_version = "0.4.13-beta.7".into();
@@ -2944,7 +2954,7 @@ mod tests {
         .unwrap();
         previous_context.assets_override =
             Some(base.plan.profile.config_dir.join("preserved-assets"));
-        base.plan.candidate_version = "0.4.14".into();
+        base.plan.candidate_version = version.into();
         base.plan.candidate_bundle = standalone_install::manual_operator_request_path(
             &base.plan.profile.state_dir,
             &base.plan.operation_id,
@@ -2956,8 +2966,11 @@ mod tests {
         base.plan.candidate_image = image(&base.plan.candidate_bundle, 'b');
         base.plan.purpose = StandaloneInstallPurpose::ManualRecovery {
             target: base.plan.installed_origin().clone(),
-            release: release("0.4.14"),
+            release: release(version),
             previous_context,
+            beta_confirmation: version
+                .contains("-beta.")
+                .then(|| standalone_install::MANUAL_BETA_RECOVERY_CONFIRMATION.into()),
             source_closure_sha256: match &base.intent.layout {
                 ReplacementLayout::Relocate {
                     source_sidecar_sha256,
@@ -2975,6 +2988,14 @@ mod tests {
         base.intent.candidate_file.sha256 = base.plan.candidate_image.sha256.clone();
         base.intent.candidate_sidecar = b"independently-signed-official-closure-b".to_vec();
         base.intent.candidate_sidecar_sha256 = digest(&base.intent.candidate_sidecar);
+        if let ReplacementLayout::Relocate {
+            beta_confirmation, ..
+        } = &mut base.intent.layout
+        {
+            *beta_confirmation = version
+                .contains("-beta.")
+                .then(|| standalone_install::MANUAL_BETA_RECOVERY_CONFIRMATION.into());
+        }
         base.plan.validate().unwrap();
         base
     }
@@ -2992,17 +3013,20 @@ mod tests {
         let StandaloneInstallPurpose::ManualRecovery {
             release,
             previous_context,
+            beta_confirmation,
             ..
         } = &base.plan.purpose
         else {
             unreachable!()
         };
         let request = standalone_install::StandaloneManualRecoveryRequest {
-            version: 1,
+            version: if beta_confirmation.is_some() { 2 } else { 1 },
             context: previous_context.clone(),
             candidate_bundle: base.plan.candidate_bundle.clone(),
             release: release.clone(),
-            confirmation: "replace_original_app_preserve_profile".into(),
+            confirmation: beta_confirmation
+                .clone()
+                .unwrap_or_else(|| "replace_original_app_preserve_profile".into()),
         };
         let request_path = standalone_install::manual_operator_request_path(
             &base.plan.profile.state_dir,
@@ -3017,6 +3041,96 @@ mod tests {
         )
         .unwrap();
         request_path
+    }
+
+    #[test]
+    fn beta_manual_settlement_keeps_operator_authority_and_existing_sdk_wire() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manual_base_for_release(root.path(), "0.4.14-beta.1");
+        let request = publish_manual_request(&base);
+        let decoded =
+            standalone_install::read_plan(&base.plan.profile.state_dir, &base.plan.operation_id)
+                .unwrap();
+        assert_eq!(decoded, base.plan);
+        let plan_sha256 = digest(
+            &owned_private_file(
+                &standalone_install::plan_path(
+                    &base.plan.profile.state_dir,
+                    &base.plan.operation_id,
+                )
+                .unwrap(),
+                MAX_PLAN,
+            )
+            .unwrap(),
+        );
+        assert!(validate_base_consent(&decoded, &plan_sha256).is_err());
+        standalone_install::write_operator_consent(&decoded, &request).unwrap();
+        validate_base_consent(&decoded, &plan_sha256).unwrap();
+        let result = installed_result(&base);
+        result.validate(&decoded).unwrap();
+        assert!(base_result_ready(&decoded, &result));
+        assert!(!result.result.applied);
+        assert_eq!(
+            result.result.restart,
+            standalone_install::InstallRestart::NotRequested
+        );
+        let intent_sha256 = digest(&serde_json::to_vec(&base.intent).unwrap());
+        let receipt = Commit {
+            version: 1,
+            operation_id: decoded.operation_id.clone(),
+            intent_sha256: intent_sha256.clone(),
+        };
+        validate_relocation_disk_evidence(
+            &decoded,
+            &result,
+            &receipt,
+            &base.intent,
+            &intent_sha256,
+        )
+        .unwrap();
+        for marker in [None, Some("forged".into())] {
+            let mut wrong_intent = base.intent.clone();
+            let ReplacementLayout::Relocate {
+                beta_confirmation, ..
+            } = &mut wrong_intent.layout
+            else {
+                unreachable!()
+            };
+            *beta_confirmation = marker;
+            assert!(
+                installation::validate_relocation_intent_for_plan(&wrong_intent, &decoded).is_err()
+            );
+        }
+        let current = image(&base.intent.target, 'b');
+        for tuple in [&base.approval.original, &base.approval.target] {
+            route_tuple(&base, tuple).unwrap();
+            let path = challenge_path(&base, &current, "manual-beta-C-instance", tuple).unwrap();
+            let handover =
+                publish_challenge(&path, challenge(&base, tuple, "manual-beta-C-instance"))
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(handover)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                6
+            );
+        }
+        for window in ["beta-window-A", "beta-window-B"] {
+            let receipt = window_receipt(&base, window);
+            assert!(receipt_matches_binding(&receipt, &binding(&receipt)));
+        }
+        let mut wrong = decoded;
+        let StandaloneInstallPurpose::ManualRecovery {
+            beta_confirmation, ..
+        } = &mut wrong.purpose
+        else {
+            unreachable!()
+        };
+        *beta_confirmation = None;
+        assert!(wrong.validate().is_err());
+        assert!(validate_base_consent(&wrong, &plan_sha256).is_err());
     }
 
     #[test]
