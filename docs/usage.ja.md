@@ -80,6 +80,8 @@ Apple Silicon Mac、macOS 13 以降。ソース構築には Rust/Cargo、Bun、N
 
 **明示的なベータ復旧（v0.4.17-beta.9）：** 停止済みソースの運用者復旧は、別途同意したバージョン2の要求で、より新しい公式ベータも扱えます。確認文字列は `replace_original_app_preserve_profile_allow_beta` で、従来のバージョン1は安定版専用です。署名・チェックサムを検証し、旧所有者から canonical private owner へ移すトランザクションであり、稼働中アプリの上書きではありません。ネイティブ確認窓は使わず、自動起動権限も与えません。元の profile と証拠を保持し、予約解放を検証してから別途 Start し、実際の Tern 再接続を確認します。自動ベータ受信設定は変更しません。[CLI 契約](cli.md)と[リリースノート](releases/v0.4.17-beta.9.md)を参照してください。
 
+**専用位置のベータ置換（v0.4.17-beta.11）：** 既に canonical owner にある停止済みアプリは、`replace_canonical_app_preserve_profile_allow_beta` で明示承認したバージョン3の要求を使います。同じ所有者・profile、署名済み原本と不変履歴を保つ原子的交換であり、移動や Tern 経路の変更は行いません。新イメージの導入済み記録を残し、別途承認した通常の Start を行います。旧イメージとの履歴不一致を単純導入、ファイルコピー、記録削除で隠さないでください。[リリースノート](releases/v0.4.17-beta.11.md)。
+
 認証した元の config/state、キャラクター、設定、ユーザーデータを保持します。既存 Tern SDK が native 処理の確定後に保存済み executable だけを変更し、native は KV を上書きしません。既定値の推測、profile 結合、Configure/Connect、Tern 再起動、plugin reload で失敗を隠さないでください。署名済み原本と証拠は private retention に保持します。
 
 **Pet の未保存編集を先に保存してください。** 運用者復旧は原本・profile の backup と、Pet だけの正常停止、その後の別途 Start への明示承認が必要です。停止済みソースの導入は Stop ACK、updater parent、再起動 token を捏造しません。後のユーザー Stop や scope 変更は自動再起動を禁止します。確定済み Stable parent の同一バージョン native 移動とは別の承認です。

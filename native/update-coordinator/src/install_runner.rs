@@ -203,7 +203,7 @@ fn read_launch(state: &Path, id: &str) -> Result<Launch, String> {
             || request.release != *release
             || request.candidate_bundle != launch.request.staged_app
             || beta_confirmation.as_deref()
-                != (request.version == 2).then_some(request.confirmation.as_str())
+                != (request.version >= 2).then_some(request.confirmation.as_str())
             || previous_context.running != launch.original.image
             || previous_context.executable != launch.original.executable
             || previous_context.version != launch.original.app_version
@@ -615,7 +615,10 @@ pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
         bundle: installation::standalone_bundle()?,
     };
     let mut scope = NativeInstallScope::capture(&source, &profile)?;
-    scope.reserve_target_scope(&target)?;
+    let relocation = original.origin != target;
+    if relocation {
+        scope.reserve_target_scope(&target)?;
+    }
     scope.admit(None)?;
     installation::validate_release_evidence(
         &operator.release,
@@ -626,7 +629,11 @@ pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
         &operator.candidate_bundle,
     )?;
     let evidence = original_evidence(&original)?;
-    let tern = coordinator::migration::capture_relocation_tern(&operator.context, &target)?;
+    let tern = if relocation {
+        coordinator::migration::capture_relocation_tern(&operator.context, &target)?
+    } else {
+        None
+    };
     if protocol::stop_generation(&profile.state_dir)? != generation
         || !native_runtime::profile_quiescent(&profile)?
     {
@@ -634,12 +641,19 @@ pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
     }
     scope.admit(None)?;
     let id = random_id()?;
-    if protocol::reservation_snapshot(&original.origin, Some(&target), &profile.state_dir, &id)?
-        .is_some()
+    if protocol::reservation_snapshot(
+        &original.origin,
+        relocation.then_some(&target),
+        &profile.state_dir,
+        &id,
+    )?
+    .is_some()
     {
         return Err("manual recovery scope is already reserved".into());
     }
-    installation::preflight_standalone_relocation_source(&original, &profile)?;
+    if relocation {
+        installation::preflight_standalone_relocation_source(&original, &profile)?;
+    }
     let updates = protocol::private_updates(&profile.state_dir)?;
     let root = operation_dir(&profile.state_dir, &id)?;
     fs::DirBuilder::new()
@@ -695,7 +709,7 @@ pub fn manual_recovery(request_path: &Path) -> Result<Outcome, String> {
                 target,
                 release: operator.release,
                 previous_context: operator.context,
-                beta_confirmation: (operator.version == 2).then_some(operator.confirmation),
+                beta_confirmation: (operator.version >= 2).then_some(operator.confirmation),
                 source_closure_sha256: digest(evidence.sidecar.as_bytes()),
                 tern,
             },
@@ -987,11 +1001,12 @@ fn admission_disposition(
 }
 impl Launch {
     fn purpose_target(&self) -> Option<&InstallOrigin> {
-        match &self.purpose {
+        let target = match &self.purpose {
             StandaloneInstallPurpose::Upgrade => None,
             StandaloneInstallPurpose::PrivateRelocation { target, .. }
             | StandaloneInstallPurpose::ManualRecovery { target, .. } => Some(target),
-        }
+        };
+        target.filter(|target| *target != &self.original.origin)
     }
 }
 
@@ -1516,12 +1531,16 @@ fn run_child_owned(state: &Path, id: &str) -> Result<(), String> {
     } = &launch.purpose
     {
         coordinator::validate_candidate_for_context(&candidate.image.path, previous_context)?;
-        scope.reserve_target_scope(target)?;
+        if target != &launch.original.origin {
+            scope.reserve_target_scope(target)?;
+        }
         scope.admit(None)?;
         if protocol::stop_generation(state)? != admission.original_stop_generation {
             return Err("manual recovery Stop generation changed before admission".into());
         }
-        installation::preflight_standalone_relocation_source(&launch.original, &profile)?;
+        if target != &launch.original.origin {
+            installation::preflight_standalone_relocation_source(&launch.original, &profile)?;
+        }
     }
     scope.admit(instance.as_ref())?;
     let mut reservation =
@@ -1802,8 +1821,10 @@ fn execute_manual_owned(
     let attempt = (|| {
         manual_authority(plan)?;
         plan.validate_for_execution()?;
-        installation::preflight_standalone_relocation(plan)?;
-        coordinator::migration::verify_relocation_tern_unchanged(plan)?;
+        if plan.reservation_target().is_some() {
+            installation::preflight_standalone_relocation(plan)?;
+            coordinator::migration::verify_relocation_tern_unchanged(plan)?;
+        }
         unchanged_original(plan)?;
         native_runtime::wait_install_source_stopped(plan, Duration::from_secs(45), || {
             manual_authority(plan)
@@ -1891,7 +1912,9 @@ fn reconcile_manual_disk(
         let original =
             installation::validate_staged_app(coordinator::physical_install_root(plan.origin())?)?;
         let mut scope = NativeInstallScope::capture(&original, &plan.profile)?;
-        scope.reserve_target_scope(plan.installed_origin())?;
+        if let Some(target) = plan.reservation_target() {
+            scope.reserve_target_scope(target)?;
+        }
         scope.admit(None)?;
         result.installed = false;
         result.installation = None;
@@ -2615,19 +2638,25 @@ mod tests {
     }
 
     fn manual_plan_fixture(state: &Path) -> Plan {
-        manual_plan_fixture_for_channel(state, false)
+        manual_plan_fixture_for_request(state, 1)
     }
 
-    fn manual_plan_fixture_for_channel(state: &Path, beta: bool) -> Plan {
+    fn manual_plan_fixture_for_request(state: &Path, request_version: u32) -> Plan {
+        let beta = request_version >= 2;
+        let canonical = request_version == 3;
         let id = "9".repeat(32);
-        let historical = installation::os_home()
-            .unwrap()
-            .join("Applications/DesktopPet.app");
+        let bundle = if canonical {
+            installation::standalone_bundle().unwrap()
+        } else {
+            installation::os_home()
+                .unwrap()
+                .join("Applications/DesktopPet.app")
+        };
         let origin = InstallOrigin::Standalone {
-            bundle: historical.clone(),
+            bundle: bundle.clone(),
         };
         let image = ExecutableIdentity {
-            path: historical.join("Contents/MacOS/desktop-pet"),
+            path: bundle.join("Contents/MacOS/desktop-pet"),
             sha256: "a".repeat(64),
         };
         let profile = ProfilePaths {
@@ -2696,7 +2725,11 @@ mod tests {
                 },
                 release: release.clone(),
                 previous_context: context.clone(),
-                beta_confirmation: beta.then(|| journal::MANUAL_BETA_RECOVERY_CONFIRMATION.into()),
+                beta_confirmation: if canonical {
+                    Some(journal::CANONICAL_BETA_RECOVERY_CONFIRMATION.into())
+                } else {
+                    beta.then(|| journal::MANUAL_BETA_RECOVERY_CONFIRMATION.into())
+                },
                 source_closure_sha256: digest(b"source signed closure"),
                 tern: None,
             },
@@ -2724,11 +2757,13 @@ mod tests {
         persist_new(
             &journal::manual_operator_request_path(state, &plan.operation_id).unwrap(),
             &journal::StandaloneManualRecoveryRequest {
-                version: if beta { 2 } else { 1 },
+                version: request_version,
                 context,
                 candidate_bundle: plan.candidate_bundle.clone(),
                 release,
-                confirmation: if beta {
+                confirmation: if canonical {
+                    journal::CANONICAL_BETA_RECOVERY_CONFIRMATION.into()
+                } else if beta {
                     journal::MANUAL_BETA_RECOVERY_CONFIRMATION.into()
                 } else {
                     "replace_original_app_preserve_profile".into()
@@ -2757,19 +2792,24 @@ mod tests {
 
     #[test]
     fn manual_consent_cannot_be_native_and_changed_generation_has_no_stop_or_start() {
-        assert_manual_consent_and_generation(false);
+        assert_manual_consent_and_generation(1);
     }
 
     #[test]
     fn beta_manual_consent_cannot_gain_native_restart_or_survive_lost_generation() {
-        assert_manual_consent_and_generation(true);
+        assert_manual_consent_and_generation(2);
     }
 
-    fn assert_manual_consent_and_generation(beta: bool) {
+    #[test]
+    fn canonical_operator_approval_cannot_gain_start_or_survive_changed_generation() {
+        assert_manual_consent_and_generation(3);
+    }
+
+    fn assert_manual_consent_and_generation(request_version: u32) {
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         protocol::private_updates(temp.path()).unwrap();
-        let mut plan = manual_plan_fixture_for_channel(temp.path(), beta);
+        let mut plan = manual_plan_fixture_for_request(temp.path(), request_version);
         assert!(save_consent(&plan).is_err());
         assert!(verify_consent(&plan).is_err());
         let request_path =
@@ -2860,19 +2900,24 @@ mod tests {
 
     #[test]
     fn manual_plan_reentry_is_bound_to_launch_purpose_source_and_generation() {
-        assert_manual_plan_reentry(false);
+        assert_manual_plan_reentry(1);
     }
 
     #[test]
     fn beta_manual_reentry_rejects_changed_helper_opt_in_profile_and_generation() {
-        assert_manual_plan_reentry(true);
+        assert_manual_plan_reentry(2);
     }
 
-    fn assert_manual_plan_reentry(beta: bool) {
+    #[test]
+    fn canonical_operator_reentry_is_bound_to_exact_request_profile_helper_and_generation() {
+        assert_manual_plan_reentry(3);
+    }
+
+    fn assert_manual_plan_reentry(request_version: u32) {
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         protocol::private_updates(temp.path()).unwrap();
-        let plan = manual_plan_fixture_for_channel(temp.path(), beta);
+        let plan = manual_plan_fixture_for_request(temp.path(), request_version);
         let launch = Launch {
             version: 1,
             operation_id: plan.operation_id.clone(),
@@ -2906,6 +2951,8 @@ mod tests {
             result: None,
         };
         validate_plan_launch(&plan, &launch, &admission).unwrap();
+        assert_eq!(launch.purpose_target(), plan.reservation_target());
+        assert_eq!(launch.purpose_target().is_none(), request_version == 3);
         for field in 0..8 {
             let mut changed = plan.clone();
             match field {

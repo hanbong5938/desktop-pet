@@ -80,6 +80,8 @@ impl StandaloneInstallPurpose {
 
 pub const MANUAL_BETA_RECOVERY_CONFIRMATION: &str =
     "replace_original_app_preserve_profile_allow_beta";
+pub const CANONICAL_BETA_RECOVERY_CONFIRMATION: &str =
+    "replace_canonical_app_preserve_profile_allow_beta";
 
 fn manual_recovery_release_allowed(
     release: &ReleaseCandidate,
@@ -87,7 +89,9 @@ fn manual_recovery_release_allowed(
 ) -> bool {
     match beta_confirmation {
         None => release.channel == ReleaseChannel::Stable,
-        Some(MANUAL_BETA_RECOVERY_CONFIRMATION) => release.channel == ReleaseChannel::Beta,
+        Some(MANUAL_BETA_RECOVERY_CONFIRMATION | CANONICAL_BETA_RECOVERY_CONFIRMATION) => {
+            release.channel == ReleaseChannel::Beta
+        }
         Some(_) => false,
     }
 }
@@ -113,21 +117,25 @@ impl StandaloneManualRecoveryRequest {
         let beta_confirmation = match (self.version, self.confirmation.as_str()) {
             (1, "replace_original_app_preserve_profile") => None,
             (2, MANUAL_BETA_RECOVERY_CONFIRMATION) => Some(self.confirmation.as_str()),
+            (3, CANONICAL_BETA_RECOVERY_CONFIRMATION) => Some(self.confirmation.as_str()),
             _ => {
                 return Err(
                     "invalid manual recovery operator request version or confirmation".into(),
                 )
             }
         };
+        let source_bundle = if self.version == 3 {
+            &private
+        } else {
+            &historical
+        };
         if !manual_recovery_release_allowed(&self.release, beta_confirmation)
             || candidate.cmp_precedence(&source) != std::cmp::Ordering::Greater
             || !crate::UpdatePolicy::StableAndBeta.allows_version(&self.context.version)?
-            || self.context.executable != historical.join("Contents/MacOS/desktop-pet")
+            || self.context.executable != source_bundle.join("Contents/MacOS/desktop-pet")
             || self.context.running.path != self.context.executable
-            || self.context.running_origin.as_deref()
-                != Some(&InstallOrigin::Standalone {
-                    bundle: historical.clone(),
-                })
+            || !matches!(self.context.running_origin.as_deref(),
+                Some(InstallOrigin::Standalone { bundle }) if bundle == source_bundle)
             || self.context.instance_id.is_empty()
             || self.context.instance_id.len() > 128
         {
@@ -162,7 +170,7 @@ impl StandaloneManualRecoveryRequest {
             || &self.release != release
             || self.candidate_bundle != plan.candidate_bundle
             || beta_confirmation.as_deref()
-                != (self.version == 2).then_some(self.confirmation.as_str())
+                != (self.version >= 2).then_some(self.confirmation.as_str())
         {
             return Err("manual recovery request differs from the immutable approval".into());
         }
@@ -348,11 +356,12 @@ impl StandaloneInstallPlan {
         self.reservation_target().unwrap_or_else(|| self.origin())
     }
     pub fn reservation_target(&self) -> Option<&InstallOrigin> {
-        match &self.purpose {
+        let target = match &self.purpose {
             StandaloneInstallPurpose::Upgrade => None,
             StandaloneInstallPurpose::PrivateRelocation { target, .. }
             | StandaloneInstallPurpose::ManualRecovery { target, .. } => Some(target),
-        }
+        };
+        target.filter(|target| *target != self.origin())
     }
     pub fn running(&self) -> Option<(&StandaloneOriginalInstance, &UpdateContext)> {
         match &self.source {
@@ -498,7 +507,10 @@ impl StandaloneInstallPlan {
                 validate_sha256(source_closure_sha256)?;
                 release.validate_neutral()?;
                 let [private, historical] = crate::installation::standalone_bundles()?;
-                if !matches!(self.origin(), InstallOrigin::Standalone { bundle } if bundle == &historical)
+                let canonical =
+                    beta_confirmation.as_deref() == Some(CANONICAL_BETA_RECOVERY_CONFIRMATION);
+                let source = if canonical { &private } else { &historical };
+                if !matches!(self.origin(), InstallOrigin::Standalone { bundle } if bundle == source)
                     || !matches!(target, InstallOrigin::Standalone { bundle } if bundle == &private)
                     || !matches!(self.source, InstallSource::Stopped { .. })
                     || !manual_recovery_release_allowed(release, beta_confirmation.as_deref())
@@ -509,6 +521,7 @@ impl StandaloneInstallPlan {
                     || self.original.protocol != 4
                     || self.original.observation_mode != 2
                     || self.original.integration_api != 1
+                    || canonical && tern.is_some()
                 {
                     return Err("invalid manual recovery source, target, or release".into());
                 }
@@ -1889,6 +1902,87 @@ pub(crate) mod tests {
             .validate_for_execution()
             .unwrap_err()
             .contains("compiled"));
+    }
+
+    #[test]
+    fn canonical_beta_recovery_requires_distinct_v3_same_owner_approval() {
+        let mut plan = manual_plan_for_release(profile(), "0.4.14-beta.1");
+        let canonical = plan.installed_origin().clone();
+        plan.original.executable = crate::physical_install_root(&canonical)
+            .unwrap()
+            .join("Contents/MacOS/desktop-pet");
+        plan.original.image.path = plan.original.executable.clone();
+        plan.original.origin = canonical;
+        if let StandaloneInstallPurpose::ManualRecovery {
+            previous_context,
+            beta_confirmation,
+            ..
+        } = &mut plan.purpose
+        {
+            previous_context.executable = plan.original.executable.clone();
+            previous_context.running = plan.original.image.clone();
+            previous_context.running_origin = Some(Box::new(plan.original.origin.clone()));
+            *beta_confirmation = Some(CANONICAL_BETA_RECOVERY_CONFIRMATION.into());
+        }
+        plan.validate().unwrap();
+        assert_eq!(plan.origin(), plan.installed_origin());
+        assert!(plan.reservation_target().is_none());
+        let mut request = manual_request(&plan);
+        request.version = 3;
+        request.validate_for_plan(&plan).unwrap();
+        for (version, confirmation) in [
+            (1, "replace_original_app_preserve_profile"),
+            (2, MANUAL_BETA_RECOVERY_CONFIRMATION),
+            (2, CANONICAL_BETA_RECOVERY_CONFIRMATION),
+            (3, MANUAL_BETA_RECOVERY_CONFIRMATION),
+            (4, CANONICAL_BETA_RECOVERY_CONFIRMATION),
+        ] {
+            let mut wrong = request.clone();
+            wrong.version = version;
+            wrong.confirmation = confirmation.into();
+            assert!(wrong.validate_for_plan(&plan).is_err());
+        }
+        let historical = manual_plan_for_release(profile(), "0.4.14-beta.1");
+        let mut historical_as_v3 = manual_request(&historical);
+        historical_as_v3.version = 3;
+        historical_as_v3.confirmation = CANONICAL_BETA_RECOVERY_CONFIRMATION.into();
+        assert!(historical_as_v3.validate().is_err());
+        for confirmation in [None, Some(MANUAL_BETA_RECOVERY_CONFIRMATION.into())] {
+            let mut wrong = plan.clone();
+            if let StandaloneInstallPurpose::ManualRecovery {
+                beta_confirmation, ..
+            } = &mut wrong.purpose
+            {
+                *beta_confirmation = confirmation;
+            }
+            assert!(wrong.validate().is_err());
+        }
+        let mut foreign_profile = request.clone();
+        foreign_profile.context.state_dir = "/private/other-profile".into();
+        assert!(foreign_profile.validate_for_plan(&plan).is_err());
+        let mut not_newer = request.clone();
+        not_newer.context.version = request.release.version.clone();
+        assert!(not_newer.validate().is_err());
+        let mut stable = request;
+        stable.release = manual_request(&manual_plan(profile())).release;
+        assert!(stable.validate().is_err());
+        let saved = serde_json::to_vec(&plan).unwrap();
+        let historical: StandaloneInstallPlan = serde_json::from_slice(&saved).unwrap();
+        historical.validate().unwrap();
+        let mut stopped = record(&historical, true);
+        assert!(stopped.validate(&historical).is_err());
+        stopped.result.status = InstallStatus::InstalledStopped;
+        stopped.result.applied = false;
+        stopped.result.restart = InstallRestart::NotRequested;
+        stopped.validate(&historical).unwrap();
+        for phase in [
+            StandaloneInstallPhase::StopIntent,
+            StandaloneInstallPhase::StopAcknowledged,
+            StandaloneInstallPhase::Starting,
+        ] {
+            stopped.phase = phase;
+            assert!(stopped.validate(&historical).is_err());
+        }
     }
 
     #[test]
