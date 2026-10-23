@@ -1,6 +1,6 @@
 {
   "name": "desktop-pet",
-  "version": "0.4.17-beta.9",
+  "version": "0.4.17-beta.10",
   "private": true,
   "type": "module",
   "description": "Native desktop character companion",

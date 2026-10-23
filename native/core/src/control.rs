@@ -37,6 +37,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod extension_http;
+
 pub(crate) const PROTOCOL_VERSION: u64 = 1;
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_FRAME_BYTES: usize = 512 * 1024 + 4096;
@@ -790,6 +792,7 @@ pub struct ControlServer {
     inner: Arc<ControlInner>,
     listener: Option<UnixListener>,
     accept_thread: Option<JoinHandle<()>>,
+    extension_http: Option<extension_http::ExtensionHttp>,
     started: bool,
     stopped: bool,
 }
@@ -818,10 +821,22 @@ impl ControlServer {
             clients: Mutex::new(Vec::new()),
             active_clients: Mutex::new(0),
         });
+        let extension_http = if inner.extensions.is_empty() {
+            None
+        } else {
+            match extension_http::ExtensionHttp::bind(&inner) {
+                Ok(bridge) => Some(bridge),
+                Err(error) => {
+                    let _ = remove_owned_socket(&inner.paths.control_socket);
+                    return Err(error);
+                }
+            }
+        };
         Ok(Self {
             inner,
             listener: Some(listener),
             accept_thread: None,
+            extension_http,
             started: false,
             stopped: false,
         })
@@ -835,13 +850,24 @@ impl ControlServer {
             .listener
             .take()
             .ok_or_else(|| "local control listener is unavailable".to_owned())?;
+        // Publish extension discovery before any control readiness can be served.
+        if let Some(bridge) = self.extension_http.as_mut() {
+            if let Err(error) = bridge.start(Arc::clone(&self.inner)) {
+                self.shutdown();
+                return Err(error);
+            }
+        }
         let inner = Arc::clone(&self.inner);
-        self.accept_thread = Some(
-            thread::Builder::new()
-                .name("desktop-pet-control".to_owned())
-                .spawn(move || accept_loop(listener, inner))
-                .map_err(|error| format!("cannot start local control listener: {error}"))?,
-        );
+        match thread::Builder::new()
+            .name("desktop-pet-control".to_owned())
+            .spawn(move || accept_loop(listener, inner))
+        {
+            Ok(handle) => self.accept_thread = Some(handle),
+            Err(error) => {
+                self.shutdown();
+                return Err(format!("cannot start local control listener: {error}"));
+            }
+        }
         self.started = true;
         Ok(())
     }
@@ -852,6 +878,10 @@ impl ControlServer {
         }
         self.stopped = true;
         self.inner.stopping.store(true, Ordering::Release);
+        self.listener.take();
+        if let Some(bridge) = self.extension_http.as_mut() {
+            bridge.shutdown();
+        }
         wake_listener(&self.inner.paths.control_socket);
         if let Some(thread) = self.accept_thread.take() {
             let _ = thread.join();
@@ -1401,6 +1431,34 @@ fn dispatch_migration(
     }
 }
 
+fn dispatch_extension(
+    inner: &ControlInner,
+    extension: &dyn ControlExtension,
+    frame: &[u8],
+    wire_bytes: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, String> {
+    if inner.stopping.load(Ordering::Acquire) {
+        return Err("desktop pet is stopping".into());
+    }
+    socket::remaining(deadline).map_err(|error| error.to_string())?;
+    if wire_bytes > extension.max_request_bytes() {
+        return Err("extension request exceeds frame bounds".into());
+    }
+    // Both transport readers reject recursive duplicate keys before selecting a kind.
+    let preferences =
+        crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
+    let bytes = extension.handle_frame(frame, &preferences)?;
+    if bytes.len() > extension.max_response_bytes()
+        || bytes.last() != Some(&b'\n')
+        || bytes[..bytes.len() - 1].contains(&b'\n')
+    {
+        return Err("extension response exceeds frame bounds".into());
+    }
+    reject_duplicate_json_keys(&bytes)?;
+    Ok(bytes)
+}
+
 fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
     let deadline = Instant::now() + CLIENT_TIMEOUT;
     let limit = inner
@@ -1605,23 +1663,9 @@ fn handle_client(mut stream: UnixStream, inner: Arc<ControlInner>) {
         if wire_bytes > extension.max_request_bytes() || !verify_peer_uid(&stream) {
             return;
         }
-        let preferences =
-            crate::preference_access::LivePreferences::new(inner.shared.clone(), deadline);
-        match extension.handle_frame(&frame, &preferences) {
-            Ok(bytes)
-                if bytes.len() <= extension.max_response_bytes()
-                    && bytes.last() == Some(&b'\n')
-                    && !bytes[..bytes.len() - 1].contains(&b'\n') =>
-            {
+        match dispatch_extension(&inner, extension.as_ref(), &frame, wire_bytes, deadline) {
+            Ok(bytes) => {
                 let _ = write_frame(&mut stream, &bytes, deadline);
-            }
-            Ok(_) => {
-                let response = ControlResponse::error(
-                    extension.kind(),
-                    &inner,
-                    "extension response exceeds frame bounds",
-                );
-                let _ = write_response(&mut stream, &response, deadline);
             }
             Err(error) => {
                 let response = ControlResponse::error(extension.kind(), &inner, error);
