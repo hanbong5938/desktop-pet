@@ -73,9 +73,14 @@ fn package_identity(package: &Path) -> Result<(String, String), String> {
         || !manifest
             .lines()
             .any(|line| line.trim() == "window = \"window.luau\"")
-        || !manifest
-            .lines()
-            .any(|line| line.trim() == "version = \"0.2.2-beta.2\"")
+        || !manifest.lines().any(|line| {
+            // Retained beta.2 evidence stays readable; delivery authority
+            // still requires the exact captured digest and revision.
+            matches!(
+                line.trim(),
+                "version = \"0.2.2-beta.2\"" | "version = \"0.2.2-beta.3\""
+            )
+        })
     {
         return Err("signed Tern package does not name the configured integration".into());
     }
@@ -2710,7 +2715,7 @@ mod tests {
             .join("Contents/Resources/integrations/tern-desktop-pet");
         ensure_private_directory(&package).unwrap();
         for (name, bytes) in [
-            ("plugin.toml", b"schema = 1\nid = \"tern-desktop-pet\"\nversion = \"0.2.2-beta.2\"\nwindow = \"window.luau\"\n".to_vec()),
+            ("plugin.toml", b"schema = 1\nid = \"tern-desktop-pet\"\nversion = \"0.2.2-beta.3\"\nwindow = \"window.luau\"\n".to_vec()),
             ("window.luau", b"-- fixture consumer\n".to_vec()),
             ("LICENSE.txt", b"fixture license\n".to_vec()),
             ("revision", format!("{}\n", "a".repeat(40)).into_bytes()),
@@ -2727,6 +2732,30 @@ mod tests {
             daemon_socket: None,
         });
         (temp, plan)
+    }
+
+    #[test]
+    fn current_and_retained_consumer_versions_preserve_distinct_package_identity() {
+        let (_temp, plan) = delivery_fixture();
+        let delivery = plan.tern_delivery.as_ref().unwrap();
+        let manifest_path = delivery.package.join("plugin.toml");
+        let current = fs::read_to_string(&manifest_path).unwrap();
+        protocol::write_private_bytes(
+            &manifest_path,
+            current.replace("0.2.2-beta.3", "0.2.2-beta.2").as_bytes(),
+            0o600,
+        )
+        .unwrap();
+        let (retained_digest, retained_revision) = package_identity(&delivery.package).unwrap();
+        assert_ne!(retained_digest, delivery.package_sha256);
+        assert_eq!(retained_revision, delivery.revision);
+        protocol::write_private_bytes(
+            &manifest_path,
+            current.replace("0.2.2-beta.3", "0.2.2-beta.4").as_bytes(),
+            0o600,
+        )
+        .unwrap();
+        assert!(package_identity(&delivery.package).is_err());
     }
 
     #[test]
