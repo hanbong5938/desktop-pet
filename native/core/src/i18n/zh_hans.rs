@@ -337,6 +337,8 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::Unknown => "未知",
         Message::Offline => "离线",
         Message::NoSessions => "没有会话",
+        Message::SessionNoConnection => "未连接 · 请检查连接设置",
+        Message::SessionDisconnected => "连接已断开 · 请检查连接设置",
         Message::NoMatches => "没有匹配项",
         Message::UnnamedSession => "未命名会话",
         Message::UnnamedTab => "未命名标签页",

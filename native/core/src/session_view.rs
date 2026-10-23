@@ -3462,6 +3462,52 @@ mod tests {
         assert!(store.mark_offline("socket", 1));
         assert_eq!(store.revision(), disconnected_revision);
     }
+
+    #[test]
+    fn empty_list_distinguishes_connection_loss_from_empty_inventory_and_filtering() {
+        use crate::i18n::session_empty;
+
+        let mut store = SessionStore::new();
+        let label = |store: &SessionStore, filter| {
+            let snapshot = store.snapshot(&SessionListOptions::with_filter(filter), None);
+            session_empty(UiLocale::En, snapshot.status_summary, snapshot.matched)
+        };
+        assert_eq!(
+            label(&store, SessionFilter::All),
+            text(UiLocale::En, Message::SessionNoConnection)
+        );
+        assert!(store.begin_source(&descriptor("socket"), 1));
+        assert_eq!(
+            label(&store, SessionFilter::All),
+            text(UiLocale::En, Message::SessionDisconnected)
+        );
+        assert!(store.replace_source("socket", 1, std::iter::empty::<&AgentRecord>()));
+        assert_eq!(
+            label(&store, SessionFilter::All),
+            text(UiLocale::En, Message::NoSessions)
+        );
+        assert!(store.mark_offline("socket", 1));
+        assert_eq!(
+            label(&store, SessionFilter::All),
+            text(UiLocale::En, Message::SessionDisconnected)
+        );
+        assert!(store.replace_source(
+            "socket",
+            1,
+            [&record("terminal", "pane", AgentStatus::Idle)]
+        ));
+        assert!(store.mark_offline("socket", 1));
+        assert_eq!(
+            label(&store, SessionFilter::Working),
+            text(UiLocale::En, Message::NoMatches)
+        );
+        assert_eq!(label(&store, SessionFilter::All), "");
+        assert!(store.remove_source("socket", 1));
+        assert_eq!(
+            label(&store, SessionFilter::All),
+            text(UiLocale::En, Message::SessionNoConnection)
+        );
+    }
     #[test]
     fn admission_queries_preserve_rows_ids_and_exhausted_capacity() {
         let mut store = SessionStore::new();

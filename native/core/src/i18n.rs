@@ -628,6 +628,8 @@ pub(crate) enum Message {
     Unknown,
     Offline,
     NoSessions,
+    SessionNoConnection,
+    SessionDisconnected,
     NoMatches,
     UnnamedSession,
     UnnamedTab,
@@ -1061,6 +1063,8 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::Unknown => "알 수 없음",
             Message::Offline => "오프라인",
             Message::NoSessions => "세션 없음",
+            Message::SessionNoConnection => "연결 없음 · 연결 설정을 확인하세요",
+            Message::SessionDisconnected => "연결 끊김 · 연결 설정을 확인하세요",
             Message::NoMatches => "결과 없음",
             Message::UnnamedSession => "이름 없는 세션",
             Message::UnnamedTab => "이름 없는 탭",
@@ -1473,6 +1477,8 @@ pub(crate) const fn text(locale: UiLocale, message: Message) -> &'static str {
             Message::Unknown => "Unknown",
             Message::Offline => "Offline",
             Message::NoSessions => "No sessions",
+            Message::SessionNoConnection => "No connection · check connection settings",
+            Message::SessionDisconnected => "Disconnected · check connection settings",
             Message::NoMatches => "No matching items",
             Message::UnnamedSession => "Unnamed session",
             Message::UnnamedTab => "Unnamed tab",
@@ -1735,9 +1741,20 @@ pub(crate) fn session_list_summary(locale: UiLocale, matched: usize, omitted: us
     }
 }
 
-pub(crate) fn session_empty(locale: UiLocale, total: usize, matched: usize) -> &'static str {
-    if total == 0 {
-        text(locale, Message::NoSessions)
+pub(crate) fn session_empty(
+    locale: UiLocale,
+    summary: SessionStatusSummary,
+    matched: usize,
+) -> &'static str {
+    if summary.total == 0 {
+        text(
+            locale,
+            match summary.status {
+                DisplayStatus::NoSessions => Message::SessionNoConnection,
+                DisplayStatus::Offline => Message::SessionDisconnected,
+                _ => Message::NoSessions,
+            },
+        )
     } else if matched == 0 {
         text(locale, Message::NoMatches)
     } else {

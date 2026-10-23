@@ -337,6 +337,8 @@ pub(super) const fn text(message: Message) -> &'static str {
         Message::Unknown => "不明",
         Message::Offline => "オフライン",
         Message::NoSessions => "セッションなし",
+        Message::SessionNoConnection => "接続なし · 接続設定を確認してください",
+        Message::SessionDisconnected => "接続切断 · 接続設定を確認してください",
         Message::NoMatches => "該当なし",
         Message::UnnamedSession => "名前のないセッション",
         Message::UnnamedTab => "名前のないタブ",

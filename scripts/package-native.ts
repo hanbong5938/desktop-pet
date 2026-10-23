@@ -144,7 +144,7 @@ async function stageTernConsumer(): Promise<void> {
   };
   const names = ["LICENSE.txt", "plugin.toml", "window.luau"];
   if (!pin || pin.version !== 1 || pin.repository !== "hanbong5938/tern-desktop-pet" ||
-      !/^[a-f0-9]{40}$/.test(pin.revision) || pin.plugin_version !== "0.2.1" ||
+      !/^[a-f0-9]{40}$/.test(pin.revision) || pin.plugin_version !== "0.2.2-beta.1" ||
       !pin.files || Object.keys(pin.files).sort().join("\n") !== names.join("\n")) {
     fail("invalid immutable Tern consumer packaging authority");
   }

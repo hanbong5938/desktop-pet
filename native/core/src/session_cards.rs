@@ -1537,7 +1537,7 @@ impl SessionCardsInner {
         self.summary.setToolTip(Some(&summary));
         set_accessibility_label(&self.summary, &summary);
 
-        let empty_text = session_empty(self.locale, snapshot.total, snapshot.matched);
+        let empty_text = session_empty(self.locale, snapshot.status_summary, snapshot.matched);
         self.empty.setStringValue(&NSString::from_str(empty_text));
         self.empty.setHidden(visible_rows);
     }
@@ -1798,7 +1798,7 @@ impl SessionCards {
             summary.setToolTip(Some(&summary_text));
             set_accessibility_label(&summary, &summary_text);
 
-            let empty = label(session_empty(locale, 0, 0), 11.0, mtm);
+            let empty = label("", 11.0, mtm);
             empty.setAlignment(NSTextAlignment::Center);
             empty.setTextColor(Some(&palette_color(palette.muted, 1.0)));
             empty.setHidden(true);
